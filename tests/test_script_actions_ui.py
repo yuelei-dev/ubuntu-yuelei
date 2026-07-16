@@ -22,9 +22,9 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("new Blob(['\\ufeff'+scriptText(exportScenes)+extra]", self.html)
         self.assertIn("a.download=filename", self.html)
 
-    def test_breakdown_one_click_video_uses_session_storage_not_long_query(self):
-        self.assertIn("sessionStorage.setItem('hq_script_to_talking',fullScript)", self.html)
-        self.assertIn("location.href='video.html?function=talking'", self.html)
+    def test_one_click_video_calls_script_to_video_api(self):
+        self.assertIn("fetch('/api/gen/script_to_video'", self.html)
+        self.assertIn("resetOneClick", self.html)
 
     def test_history_loads_copy_assets_and_restores_scenes(self):
         self.assertIn("'/api/gen/assets?limit=60&kind=copy'", self.html)
