@@ -632,18 +632,66 @@
   }
   if(historyBtn&&historySection) historyBtn.onclick=function(){historySection.scrollIntoView({behavior:'smooth',block:'start'});};
 
-  // ============ 一键成片：拼接全部口播 → 跳转 video.html 数字人口播模式 ============
+  // ============ 一键成片：调后端 API 直接生成数字人口播视频 ============
   var oneClickBtn=document.getElementById('scOneClickVideo');
-  if(oneClickBtn){ oneClickBtn.onclick=function(e){
+  if(oneClickBtn){ var oneClickOrig=oneClickBtn.innerHTML; oneClickBtn.onclick=function(e){
     e.preventDefault();
     var scenesForHandoff=lastScenes.length?lastScenes:(lastBreakdown?lastBreakdown.scenes||[]:readScenesFromDom());
     if(!scenesForHandoff.length){ location.href='video.html'; return; }
-    var fullScript=scenesForHandoff.map(function(s){ return s.line||''; }).filter(Boolean).join('\n\n');
-    if(!fullScript){ location.href='video.html'; return; }
-    try{ sessionStorage.setItem('hq_script_to_talking',fullScript); }catch(_e){}
-    if(window.HQ&&window.HQ.toast) HQ.toast('已带入全部 '+scenesForHandoff.length+' 个分镜口播，选择形象后即可生成');
-    location.href='video.html?function=talking';
-  }; }
+    var hasLines=scenesForHandoff.some(function(s){ return (s.line||'').trim(); });
+    if(!hasLines){ if(window.HQ&&window.HQ.toast) HQ.toast('脚本中没有口播文案'); return; }
+    oneClickBtn.disabled=true; oneClickBtn.style.opacity='.6'; oneClickBtn.textContent='提交中…';
+    scenes.innerHTML='<div style="padding:34px;text-align:center;color:#e7b24c;font-size:13px;">🎬 正在启动一键成片…</div>';
+    if(meta) meta.innerHTML='';
+    // 清除拆解增强区
+    var bdMeta=document.getElementById('bdResultMeta'), bdRhythm=document.getElementById('bdRhythm'),
+        bdLogic=document.getElementById('bdLogic'), bdTemplate=document.getElementById('bdTemplate');
+    if(bdMeta) bdMeta.style.display='none'; if(bdRhythm) bdRhythm.style.display='none';
+    if(bdLogic) bdLogic.style.display='none'; if(bdTemplate) bdTemplate.style.display='none';
+    var pollCount=0;
+    fetch('/api/gen/script_to_video',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify({scenes:scenesForHandoff})})
+      .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
+      .then(function(x){
+        if(x.s===401){ resetOneClick(); if(window.HQ) HQ.login(); return; }
+        if(x.s===402){ resetOneClick(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">点数不足（需要 '+ (x.d.cost||20) +' 点）· <a href="recharge.html" style="color:#e7b24c">去充值</a></div>'; return; }
+        if(!x.d.job_id){ resetOneClick(); var msg=(x.d&&x.d.detail)||'未知错误';
+          // 形象缺失给引导
+          if(msg.indexOf('形象')>=0||msg.indexOf('人物')>=0) msg+='<br><a href="video.html" style="color:#60a5fa;">→ 去视频页创建形象</a>';
+          scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">提交失败：'+msg+'</div>'; return; }
+        var iv=setInterval(function(){
+          pollCount++;
+          fetch('/api/gen/job/'+x.d.job_id,{headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.json();}).then(function(d){
+            if(d.status==='done'){
+              clearInterval(iv); resetOneClick();
+              var vurl=(d.result&&d.result.video_url)||'', iurl=(d.result&&d.result.image_url)||'';
+              var costInfo=x.d.cost!=null?' · 消耗 '+x.d.cost+' 点':'';
+              scenes.innerHTML='<div style="padding:24px;text-align:center;">'
+                +'<div style="font-size:40px;margin-bottom:10px;">✅</div>'
+                +'<div style="font-size:15px;font-weight:700;color:#eaf1fa;margin-bottom:8px;">一键成片完成！</div>'
+                +'<div style="font-size:12px;color:#94a4bb;margin-bottom:14px;">'+scenesForHandoff.length+' 个分镜已合成视频'+costInfo+'</div>'
+                +(vurl?'<div style="margin-bottom:12px;"><video src="'+esc(vurl)+'" controls style="max-width:100%;max-height:260px;border-radius:10px;"></video></div>':'')
+                +'<div style="display:flex;gap:9px;justify-content:center;">'
+                +'<a href="assets.html" class="sc-btn" style="color:#e7b24c;">📁 查看资产库</a>'
+                +'<a href="video.html" class="sc-btn">📹 去视频页</a></div></div>';
+              if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
+              loadHistory();
+            } else if(d.status==='error'||d.status==='failed'){
+              clearInterval(iv); resetOneClick();
+              scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">成片失败：'+(d.error||'')+' · 已退点</div>';
+            } else {
+              var elapsed=pollCount*3;
+              var progressMsg=elapsed<30?'正在生成口播音频…':(elapsed<90?'正在生成数字人视频…（约 1-3 分钟）':'视频生成中…已等待 '+Math.floor(elapsed/60)+' 分 '+(elapsed%60)+' 秒');
+              if(scenes.textContent.indexOf('生成中')<0 && scenes.textContent.indexOf('口播')<0 && scenes.textContent.indexOf('视频生成')<0 && scenes.textContent.indexOf('等待')<0){
+                scenes.innerHTML='<div style="padding:34px;text-align:center;color:#e7b24c;font-size:13px;">🎬 '+progressMsg+'</div>';
+              }
+            }
+            if(pollCount>120){ clearInterval(iv); resetOneClick(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">成片超时（6分钟），请稍后在视频页查看</div>'; }
+          }).catch(function(){});
+        },3000);
+      }).catch(function(){ resetOneClick(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">网络错误，请重试</div>'; });
+  };
+  function resetOneClick(){ if(!oneClickBtn) return; oneClickBtn.disabled=false; oneClickBtn.style.opacity='1'; oneClickBtn.innerHTML=oneClickOrig; }
+  }
   loadHistory();
 })();
 </script>
