@@ -294,6 +294,13 @@
 
         <div>
           <div id="textMode">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <span style="font-size:12px;font-weight:700;color:#eaf1fa;">📺 模板库</span>
+              <span id="talkingTemplateCatLabel" style="font-size:11px;color:#94a4bb;">美容护肤</span>
+              <div style="flex:1;"></div>
+              <button id="browseTemplatesBtn" style="padding:5px 14px;font-size:11.5px;font-weight:600;color:#e7b24c;background:rgba(231,178,76,.08);border:1px solid rgba(231,178,76,.2);border-radius:8px;cursor:pointer;font-family:inherit;">浏览全部模板 ›</button>
+            </div>
+            <div id="talkingTemplates" class="motion-preset-grid" style="margin-bottom:10px;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));max-height:220px;overflow-y:auto;padding-right:3px;"></div>
             <div class="row" style="margin-bottom:10px;">
               <span class="label">口播文案</span>
               <button id="clearScript" style="border:0;background:transparent;color:#94a4bb;cursor:pointer;font-family:inherit;">清空</button>
@@ -747,6 +754,75 @@
     {name:'产品展示',   text:CINE_IDENTITY+'手持产品面向镜头介绍，纯色背景，柔和布光，特写与中景切换，广告片质感'},
     {name:'多人同框',   text:CINE_IDENTITY+'两人并肩站立面向镜头交谈，互动自然，室内暖光，纪录片质感'}
   ];
+  // ============ 数字人口播模板库 ============
+  // 每个模板卡片内嵌一个 mini 布局预览：上方标题条 → 中间数字人圆形 → 下方字幕条
+  var TALKING_TEMPLATES=[
+    {name:'美容院引流', text:'姐妹们好呀～仙颜美容本月科技焕肤体验官招募正式开启！首批 20 个名额，0 元体验德国进口冷光嫩肤，做完当天毛孔细腻、肤色透亮肉眼可见。私信回复「焕肤」抢先预约，到店再送一次小气泡深层清洁。', tags:'美容·30s', cat:'美容', subtitle:true, substyle:'white',  subpos:'bottom'},
+    {name:'护肤痛点', text:'姐妹们，脸又干又暗沉真的不能再拖了！以前我也是糊十层没效果，直到试了这瓶夏日焕新精华。质地清爽不黏腻，上脸三秒就吸收，油皮干皮都能闭眼入。这两周我已经回购了，评论区告诉我你是什么肤质，我帮你搭配。', tags:'护肤·25s', cat:'美容', subtitle:true, substyle:'bar',    subpos:'bottom'},
+    {name:'产品卖点', text:'就这一瓶，顶你桌上五瓶。补水、提亮、紧致、控油，它全占了。德国进口冷光技术提取，分子小到只有普通精华的 1/3，所以上脸三秒就吸收。现在新客体验立减 100，点下方预约到店再送小气泡清洁。', tags:'护肤·22s', cat:'美容', subtitle:true, substyle:'variety',subpos:'lower'},
+    {name:'知识科普', text:'90% 的姐妹都不知道，洗完脸的前 30 秒涂精华是最好的。因为这个时候毛孔还是打开的，吸收率是平常的三倍。但前提是——你的精华分子要够小。很多人花大价钱买精华，结果全浪费在这上面了。下期教你三招辨别精华好坏。', tags:'护肤·28s', cat:'美容', subtitle:true, substyle:'white',  subpos:'bottom'},
+    {name:'美甲快闪', text:'做完这款猫眼美甲，闺蜜以为我花了 500。你看这个光泽度，灯光下一转闪闪发光，实际只要 98。最近店里这款排满了，想做的手快点私信我预约，前 10 个还送手部护理。', tags:'美甲·15s', cat:'美容', subtitle:true, substyle:'variety',subpos:'center'},
+    {name:'素人改造', text:'这位小姐姐进店之前自己在家折腾了半年，皮肤越来越差。来我们这做了一个月冷光嫩肤，你看对比图，毛孔细了、肤色亮了、整个人的状态都不一样了。她说后悔没早点来。想体验的姐妹私信「改造」我给你安排。', tags:'美容·25s', cat:'美容', subtitle:true, substyle:'bar',    subpos:'bottom'},
+    {name:'新店开业', text:'终于终于！我们第三家分店要开了！就在万象城三楼，这个月 18 号正式营业。开业当天全场 6 折，前 50 名进店送价值 299 的护肤礼包。现在私信「万象城」提前锁定名额，别到时候排队排到楼下。', tags:'美容·22s', cat:'美容', subtitle:true, substyle:'white',  subpos:'bottom'},
+    {name:'60s深度', text:'很多姐妹问我为什么同一个产品我用了效果好你用了没感觉，今天我一次性说清楚。第一，用量不对——精华不是越省越好，两泵是基准，干到秋冬加到三泵。第二，顺序错了——先水后精华再乳液，有人洗完脸直接涂精华等于白费。第三，手法有讲究——别搓，用按压，搓会破坏分子结构。掌握这三点，你再回去试，保证不一样。', tags:'护肤·60s', cat:'美容', subtitle:true, substyle:'bar',    subpos:'bottom'},
+    // ---- 餐饮美食 ----
+    {name:'新店开业·餐饮', text:'终于等到这一天！我们的第二家店在万达三楼正式开业了！开业前三天全场 6.8 折，前 50 桌送招牌菜一份。我们家这个牛油锅底真的是熬了 8 个小时，你闻一下这个香味隔着屏幕都能飘过来。赶紧点下方定位过来，晚了真的要排队排到电梯口。', tags:'餐饮·25s', cat:'餐饮', subtitle:true, substyle:'variety',subpos:'bottom'},
+    {name:'单品安利', text:'就这一道菜，撑起了我们店一半的回头客。你看这个色泽，端上来的时候还在滋滋冒油，第一口下去那个满足感真的没法形容。关键是我们用的食材每天凌晨四点去市场挑的，绝对不卖隔夜的东西。今天刷到这个视频的私信我，送你一份隐藏菜单。', tags:'餐饮·20s', cat:'餐饮', subtitle:true, substyle:'bar', subpos:'bottom'},
+    {name:'爆款小吃', text:'这个小吃我们一天卖 300 份，阿姨从早上六点做到晚上九点手都没停过。外面裹的那层酥皮是独家配方，咬一口能听到咔嚓声。最牛的是什么？放凉了都还是脆的。想吃的话评论区打「想吃」，我抽 10 个人免费送一份试吃装。', tags:'餐饮·18s', cat:'餐饮', subtitle:true, substyle:'white', subpos:'bottom'},
+    // ---- 服装穿搭 ----
+    {name:'穿搭对比', text:'同一件白衬衫，为什么别人穿是高级感你穿是卖保险的？问题就在这三个细节。第一，袖子一定要卷两折露出手腕，第二，下摆除非是正式场合否则别塞太紧，第三，解开最上面两颗扣子。你看，是不是整个人完全不一样了？关注我，每天一个变美小技巧。', tags:'穿搭·28s', cat:'穿搭', subtitle:true, substyle:'white', subpos:'bottom'},
+    {name:'新品推荐', text:'这件新款我真的忍了很久才说，因为库存一共就 200 件。你看这个版型，侧面开叉的设计巨显腿长，把肚子上那个小肉肉全遮住了。三个颜色里我最推荐这个雾霾蓝，配什么都好看。链接放评论区了，手慢无。', tags:'穿搭·18s', cat:'穿搭', subtitle:true, substyle:'variety',subpos:'center'},
+    {name:'面料科普', text:'很多人买了几千块的衣服，结果洗一次就废了。今天教你看衣服的水洗标，这三行最关键。第一行看面料成分，聚酯纤维超过 70% 就别买了不透气。第二行看洗涤方式，有个方框里面一个圆圈画叉的，绝对不能干洗。学会的点个赞，以后买衣服再也不踩坑。', tags:'穿搭·30s', cat:'穿搭', subtitle:true, substyle:'bar', subpos:'bottom'},
+    // ---- 知识干货 ----
+    {name:'颠覆认知', text:'有一个真相可能会颠覆你几十年的习惯——手机充电永远不要充到 100%。电池的寿命是用「循环次数」来算的，每次从 100% 用到 0% 就是一个完整循环。但如果你保持在 20% 到 80% 之间，一个完整循环可以被拆成 5 次小充。我用了三年的手机，电池健康度还在 97%，就是靠这个习惯。', tags:'知识·35s', cat:'知识', subtitle:true, substyle:'white', subpos:'bottom'},
+    {name:'行业揭秘', text:'做了十年婚礼策划，告诉你婚庆公司绝对不会说的三个秘密。第一，套餐里写的鲜花布置，其实是绢花混鲜花，七三开。第二，6888 的套餐和 9888 的套餐，摄影师很可能是同一个人。第三，最贵的不是最好的，最适合你的场地才是。准备结婚的收藏起来，能帮你省至少五千。', tags:'知识·30s', cat:'知识', subtitle:true, substyle:'bar', subpos:'bottom'},
+    {name:'读书分享', text:'这本书我反复读了三遍，每一次都有新的收获。它说的是一个很简单但绝大多数人做不到的道理——我们焦虑不是因为事情太多，而是因为我们总想把所有事情都做到完美。作者说，完成比完美重要 100 倍。你今天先做一件一直拖着的小事，做完回来评论区告诉我感觉怎么样。', tags:'知识·28s', cat:'知识', subtitle:true, substyle:'white', subpos:'bottom'}
+  ];
+  var TALKING_TEMPLATE_CATS=['美容','餐饮','穿搭','知识'];
+  var talkingTemplateCat='全部';
+  function buildTalkingTemplates(){
+    var box=$('talkingTemplates');
+    if(!box) return;
+    box.innerHTML='';
+    var colors=['#e7b24c','#f4708a','#2dd4bf','#60a5fa','#c084fc','#f59e0b','#4ade80','#e879f9'];
+    TALKING_TEMPLATES.forEach(function(t,i){
+      var b=document.createElement('button');
+      b.type='button';
+      b.className='talking-template-card';
+      b.style.cssText='position:relative;min-width:130px;padding:0;border:1px solid rgba(148,164,187,.14);border-radius:13px;background:rgba(7,11,19,.34);overflow:hidden;cursor:pointer;text-align:left;font-family:inherit;color:#eaf1fa;transition:.16s';
+      // mini 布局预览
+      var c=colors[i%colors.length];
+      b.innerHTML='<div style="height:88px;background:rgba(9,13,22,.92);display:flex;flex-direction:column;padding:6px 7px;gap:0;">'
+        +'<div style="height:16px;background:'+c+';opacity:.7;border-radius:3px;"></div>'           // 标题条
+        +'<div style="flex:1;display:flex;align-items:center;justify-content:center;">'
+        +'<div style="width:32px;height:32px;border-radius:50%;border:2px solid '+c+';opacity:.55;"></div>'  // 数字人圆
+        +'</div>'
+        +'<div style="height:10px;background:rgba(255,255,255,.12);border-radius:2px;"></div>'              // 字幕条
+        +'</div>'
+        +'<div style="padding:9px 10px;"><b style="font-size:12.5px;display:block;">'+esc(t.name)+'</b>'
+        +'<span style="font-size:10.5px;color:#5c6b82;">'+esc(t.tags||'')+'</span></div>';
+      b.onmouseenter=function(){ this.style.borderColor='rgba(231,178,76,.34)'; this.style.transform='translateY(-1px)'; };
+      b.onmouseleave=function(){ this.style.borderColor='rgba(148,164,187,.14)'; this.style.transform=''; };
+      b.onclick=function(){
+        var ta=$('scriptText');
+        if(ta){ ta.value=t.text; ta.dispatchEvent(new Event('input')); ta.focus(); }
+        // 自动设置字幕样式
+        if(t.subtitle!==undefined){
+          var btn=document.querySelector('[data-subtitle="'+(t.subtitle?'on':'off')+'"]');
+          if(btn) btn.click();
+        }
+        if(t.substyle){
+          var btn=document.querySelector('[data-substyle="'+t.substyle+'"]');
+          if(btn) btn.click();
+        }
+        if(t.subpos){
+          var btn=document.querySelector('[data-subpos="'+t.subpos+'"]');
+          if(btn) btn.click();
+        }
+      };
+      box.appendChild(b);
+    });
+  }
   var selectedGrokRatio='16:9', selectedGrokDuration=10, selectedGrokResolution='720p', selectedGrokModel='grok-imagine-video';
   var grokOperation='generate', grokEditVideoData='', grokEditDuration=0;
   // 换装的第一个上传框在两条线路收的东西不同：线路一收换装视频，线路二收人物照片。
@@ -1920,6 +1996,7 @@
     if($('bgmPanel')) $('bgmPanel').classList.toggle('hidden',videoFunction!=='talking');
     document.querySelectorAll('[data-function]').forEach(function(b){b.classList.toggle('on',b.dataset.function===videoFunction);});
     $('talkingPanel').classList.toggle('hidden',videoFunction!=='talking');
+    if(videoFunction==='talking') buildTalkingTemplates();
     if($('cinematicPanel')) $('cinematicPanel').classList.toggle('hidden',videoFunction!=='cinematic');
     if($('tryonPanel')) $('tryonPanel').classList.toggle('hidden',videoFunction!=='tryon');
     if($('grokPanel')) $('grokPanel').classList.toggle('hidden',videoFunction!=='grok');
@@ -2176,6 +2253,7 @@
 
   // ===== 电影化身：控件绑定 =====
   renderCineTemplates();
+  buildTalkingTemplates();
   (function bindCine(){
     var ta=$('cinePrompt');
     if(ta) ta.addEventListener('input',function(){
@@ -2792,9 +2870,117 @@
   applyAssetPrefill();
   applyInspirationPrefill();
   loadVoices();
-  loadVideoHistory();
-  resumeTrackedVideoTask();
-})();
+		loadVideoHistory();
+		resumeTrackedVideoTask();
+		
+		// ============ 模板库浏览 ============
+		$('browseTemplatesBtn').onclick=function(){
+		  var m=$('tplBrowseModal'); if(m) m.style.display='flex'; renderBrowseGrid('全部');
+		};
+		$('tplBrowseModal').onclick=function(e){ if(e.target===this) this.style.display='none'; };
+		$('tplBrowseClose').onclick=function(){ $('tplBrowseModal').style.display='none'; };
+		
+		function renderBrowseGrid(filter){
+		  filter=filter||'全部';
+		  var grid=$('tplBrowseGrid');
+		  if(!grid) return;
+		  var filtered=filter==='全部'?TALKING_TEMPLATES:TALKING_TEMPLATES.filter(function(t){ return t.cat===filter; });
+		  var colors=['#e7b24c','#f4708a','#2dd4bf','#60a5fa','#c084fc','#f59e0b','#4ade80','#e879f9'];
+		  grid.innerHTML='';
+		  filtered.forEach(function(t,i){
+		    var c=colors[i%colors.length];
+		    var b=document.createElement('button');
+		    b.type='button';
+		    b.style.cssText='position:relative;padding:0;border:1px solid rgba(148,164,187,.14);border-radius:13px;background:rgba(7,11,19,.34);overflow:hidden;cursor:pointer;text-align:left;font-family:inherit;color:#eaf1fa;transition:.16s';
+		    b.innerHTML='<div style="height:120px;background:rgba(9,13,22,.92);display:flex;flex-direction:column;padding:7px 9px;gap:0;">'
+		      +'<div style="height:18px;background:'+c+';opacity:.7;border-radius:3px;"></div>'
+		      +'<div style="flex:1;display:flex;align-items:center;justify-content:center;">'
+		      +'<div style="width:40px;height:40px;border-radius:50%;border:2px solid '+c+';opacity:.55;"></div>'
+		      +'</div>'
+		      +'<div style="height:12px;background:rgba(255,255,255,.12);border-radius:2px;"></div>'
+		      +'</div>'
+		      +'<div style="padding:10px 12px;"><b style="font-size:13px;display:block;">'+esc(t.name)+'</b>'
+		      +'<span style="font-size:11px;color:#5c6b82;">'+esc(t.tags||'')+'</span></div>';
+		    b.onclick=function(){
+		      applyTemplate(t); $('tplBrowseModal').style.display='none';
+		    };
+		    grid.appendChild(b);
+		  });
+		  var catRow=$('tplBrowseCats');
+		  if(catRow){
+		    var btns='<button class="tpl-cat-btn'+(filter==='全部'?' on':'')+'" onclick="renderBrowseGrid(\'全部\')">全部 ('+TALKING_TEMPLATES.length+')</button>';
+		    TALKING_TEMPLATE_CATS.forEach(function(c){
+		      var cnt=TALKING_TEMPLATES.filter(function(t){return t.cat===c;}).length;
+		      btns+='<button class="tpl-cat-btn'+(filter===c?' on':'')+'" onclick="renderBrowseGrid(\''+c+'\')">'+c+' ('+cnt+')</button>';
+		    });
+		    catRow.innerHTML=btns;
+		  }
+		}
+		
+		function applyTemplate(t){
+		  var ta=$('scriptText');
+		  if(ta){ ta.value=t.text; ta.dispatchEvent(new Event('input')); ta.focus(); }
+		  if(t.subtitle!==undefined){
+		    var btn=document.querySelector('[data-subtitle="'+(t.subtitle?'on':'off')+'"]');
+		    if(btn) btn.click();
+		  }
+		  if(t.substyle){
+		    var btn=document.querySelector('[data-substyle="'+t.substyle+'"]');
+		    if(btn) btn.click();
+		  }
+		  if(t.subpos){
+		    var btn=document.querySelector('[data-subpos="'+t.subpos+'"]');
+		    if(btn) btn.click();
+		  }
+		  toast('已应用模板: '+t.name);
+		}
+		
+		buildTalkingTemplates=function(){
+		  var box=$('talkingTemplates');
+		  if(!box) return;
+		  var showing=TALKING_TEMPLATES.filter(function(t){ return t.cat==='美容'; });
+		  var colors=['#e7b24c','#f4708a','#2dd4bf','#60a5fa','#c084fc','#f59e0b','#4ade80','#e879f9'];
+		  box.innerHTML='';
+		  showing.forEach(function(t,i){
+		    var b=document.createElement('button');
+		    b.type='button';
+		    b.style.cssText='position:relative;min-width:140px;padding:0;border:1px solid rgba(148,164,187,.14);border-radius:13px;background:rgba(7,11,19,.34);overflow:hidden;cursor:pointer;text-align:left;font-family:inherit;color:#eaf1fa;transition:.16s';
+		    var c=colors[i%colors.length];
+		    b.innerHTML='<div style="height:88px;background:rgba(9,13,22,.92);display:flex;flex-direction:column;padding:6px 7px;gap:0;">'
+		      +'<div style="height:16px;background:'+c+';opacity:.7;border-radius:3px;"></div>'
+		      +'<div style="flex:1;display:flex;align-items:center;justify-content:center;">'
+		      +'<div style="width:32px;height:32px;border-radius:50%;border:2px solid '+c+';opacity:.55;"></div>'
+		      +'</div>'
+		      +'<div style="height:10px;background:rgba(255,255,255,.12);border-radius:2px;"></div>'
+		      +'</div>'
+		      +'<div style="padding:9px 10px;"><b style="font-size:12.5px;display:block;">'+esc(t.name)+'</b>'
+		      +'<span style="font-size:10.5px;color:#5c6b82;">'+esc(t.tags||'')+'</span></div>';
+		    b.onmouseenter=function(){ this.style.borderColor='rgba(231,178,76,.34)'; this.style.transform='translateY(-1px)'; };
+		    b.onmouseleave=function(){ this.style.borderColor='rgba(148,164,187,.14)'; this.style.transform=''; };
+		    b.onclick=function(){ applyTemplate(t); };
+		    box.appendChild(b);
+		  });
+		};
+	})();
 </script>
+
+<!-- 模板库浏览弹窗 -->
+<div id="tplBrowseModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;align-items:center;justify-content:center;">
+<div style="background:#111827;border:1px solid rgba(148,164,187,.2);border-radius:18px;padding:24px;width:760px;max-height:85vh;display:flex;flex-direction:column;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <b style="font-size:17px;">&#x1F4FA; 模板库</b>
+    <button id="tplBrowseClose" style="background:transparent;border:none;color:#94a4bb;font-size:22px;cursor:pointer;">&times;</button>
+  </div>
+  <div id="tplBrowseCats" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;"></div>
+  <div id="tplBrowseGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;overflow-y:auto;flex:1;padding-right:4px;"></div>
+</div>
+</div>
+
+<style>
+.tpl-cat-btn{padding:6px 14px;font-size:12px;font-weight:600;border:1px solid rgba(148,164,187,.16);border-radius:20px;background:rgba(148,164,187,.04);color:#94a4bb;cursor:pointer;font-family:inherit;transition:.15s;}
+.tpl-cat-btn:hover{border-color:rgba(231,178,76,.3);color:#eaf1fa;}
+.tpl-cat-btn.on{background:rgba(231,178,76,.14);border-color:rgba(231,178,76,.4);color:#e7b24c;}
+#tplBrowseGrid::-webkit-scrollbar{width:6px;}#tplBrowseGrid::-webkit-scrollbar-thumb{background:rgba(148,164,187,.24);border-radius:99px;}
+</style>
 </body>
 </html>
