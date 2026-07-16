@@ -19,7 +19,7 @@ class ScriptActionsUiTests(unittest.TestCase):
 
     def test_export_builds_utf8_text_download(self):
         self.assertIn('id="scExport"', self.html)
-        self.assertIn("new Blob(['\\ufeff'+scriptText(exportScenes)]", self.html)
+        self.assertIn("new Blob(['\\ufeff'+scriptText(exportScenes)+extra]", self.html)
         self.assertIn("a.download=filename", self.html)
 
     def test_history_loads_copy_assets_and_restores_scenes(self):
