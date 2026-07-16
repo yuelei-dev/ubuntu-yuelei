@@ -996,7 +996,7 @@ def run_job(job_id):
     kind = r["kind"]; payload = json.loads(r["payload"] or "{}")
     username = r["username"]; cost = r["cost"]
     mode = str(payload.get("mode") or "").lower()
-    is_talking = (kind == "video")   # 口播=video(text/audio)
+    is_talking = (kind in {"video", "script_to_video"})   # 口播=video(text/audio) + 一键成片
     is_image = (kind == "image")
     stop_heartbeat = None
     is_breakdown = (kind == "breakdown")
@@ -1038,7 +1038,7 @@ def run_job(job_id):
             audio_domain, _, video_domain = _domains()
             if kind == "audio":
                 audio_domain.record_audio_asset(job_id, username, result)
-            if kind in {"video", "tryon", "xiaole_video", "cinematic"}:
+            if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"}:
                 video_domain.record_video_asset(job_id, username, result)
             assets_store.record_asset(job_id, username, kind, result)  # 只有 copy 会入统一 assets 表；其余 kind 内部忽略
         except Exception:
