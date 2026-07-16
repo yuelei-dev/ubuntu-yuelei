@@ -2772,15 +2772,23 @@
   function applyInspirationPrefill(){
     try{
       var q=new URLSearchParams(location.search);
-      var pp=q.get('prompt'); if(!pp) return;
       var func=q.get('function');
       if(func==='talking'){
+        var talkingPrefill=q.get('prompt')||'';
+        if(!talkingPrefill){
+          try{
+            talkingPrefill=sessionStorage.getItem('hq_script_to_talking')||'';
+            if(talkingPrefill) sessionStorage.removeItem('hq_script_to_talking');
+          }catch(_e){}
+        }
+        if(!talkingPrefill) return;
         updateFunction('talking');
-        var ta=$('scriptText');
-        if(ta){ ta.value=pp; ta.dispatchEvent(new Event('input')); ta.focus(); }
+        var taTalking=$('scriptText');
+        if(taTalking){ taTalking.value=talkingPrefill; taTalking.dispatchEvent(new Event('input')); taTalking.focus(); }
         if(typeof toast==='function') toast('已带入编导脚本，选择形象后即可生成');
         return;
       }
+      var pp=q.get('prompt'); if(!pp) return;
       var ch=(q.get('channel')||'grok').trim();
       if(ch!=='grok' && ch!=='micro') ch='grok';
       updateFunction(ch);
