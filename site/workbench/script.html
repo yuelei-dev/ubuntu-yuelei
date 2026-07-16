@@ -603,19 +603,28 @@
 
   function historyCard(item){
     var m=item.meta||{}, list=Array.isArray(m.scenes)?m.scenes:[];
+    var isBreakdown=!!m.source_platform;
     var btn=document.createElement('button'); btn.type='button'; btn.className='sc-history-item';
     var title=document.createElement('div'); title.className='sc-history-title'; title.textContent=item.title||'（无标题）'; title.title=item.title||'';
     var info=document.createElement('div'); info.className='sc-history-meta';
-    info.textContent=[m.style||'分镜脚本',m.dur||'',list.length+'个分镜'].filter(Boolean).join(' · ');
+    var platformLabel={douyin:'抖音',xiaohongshu:'小红书'};
+    info.textContent=isBreakdown
+      ? ['🔍 拆解',platformLabel[m.source_platform]||m.source_platform||'',(m.duration||'')+'s',list.length+'个分镜'].filter(Boolean).join(' · ')
+      : [m.style||'分镜脚本',m.dur||'',list.length+'个分镜'].filter(Boolean).join(' · ');
     var when=document.createElement('div'); when.className='sc-history-time';
     when.textContent=item.created_at?new Date(Number(item.created_at)*1000).toLocaleString('zh-CN',{hour12:false}):'';
     btn.appendChild(title); btn.appendChild(info); btn.appendChild(when);
     btn.onclick=function(){
       var heading=item.title||'历史脚本';
-      if(topic) topic.value=heading;
-      setPicked('segStyle','.sc-opt',m.style); setPicked('segDur','.sc-opt',m.dur); setPicked('platRow','.sc-chip',m.platform);
-      switchMode('write');
-      render({scenes:list},heading,m.style||'口播',m.dur||'');
+      if(isBreakdown){
+        switchMode('breakdown');
+        renderBreakdown(m);
+      }else{
+        if(topic) topic.value=heading;
+        setPicked('segStyle','.sc-opt',m.style); setPicked('segDur','.sc-opt',m.dur); setPicked('platRow','.sc-chip',m.platform);
+        switchMode('write');
+        render({scenes:list},heading,m.style||'口播',m.dur||'');
+      }
       if(historyState) historyState.textContent='已载入：'+heading;
       scenes.scrollIntoView({behavior:'smooth',block:'start'});
     };
@@ -624,13 +633,16 @@
   function loadHistory(){
     if(!historyList) return;
     if(historyState) historyState.textContent='正在加载…';
-    fetch('/api/gen/assets?limit=60&kind=copy',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}})
-      .then(function(r){if(r.status===401){if(window.HQ) HQ.login();throw new Error('未登录');}if(!r.ok)throw new Error('加载失败');return r.json();})
-      .then(function(d){
-        var items=(d.items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;}).slice(0,12);
-        historyList.innerHTML=''; items.forEach(function(item){historyList.appendChild(historyCard(item));});
-        if(historyState) historyState.textContent=items.length?('共 '+items.length+' 条'):'暂无历史脚本';
-      }).catch(function(e){if(historyState&&(!e||e.message!=='未登录')) historyState.textContent='加载失败，请稍后重试';});
+    Promise.all([
+      fetch('/api/gen/assets?limit=60&kind=copy',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.ok?r.json():{items:[]};}),
+      fetch('/api/gen/assets?limit=60&kind=breakdown',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.ok?r.json():{items:[]};})
+    ]).then(function(results){
+      var copyItems=(results[0].items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;});
+      var bdItems=(results[1].items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;});
+      var all=copyItems.concat(bdItems).sort(function(a,b){return (b.created_at||0)-(a.created_at||0);}).slice(0,12);
+      historyList.innerHTML=''; all.forEach(function(item){historyList.appendChild(historyCard(item));});
+      if(historyState) historyState.textContent=all.length?('共 '+all.length+' 条'):'暂无历史脚本';
+    }).catch(function(e){if(historyState) historyState.textContent='加载失败，请稍后重试';});
   }
   if(historyBtn&&historySection) historyBtn.onclick=function(){historySection.scrollIntoView({behavior:'smooth',block:'start'});};
 
