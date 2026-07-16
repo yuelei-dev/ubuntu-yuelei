@@ -587,10 +587,10 @@
   if(exportBtn){ var exportOrig=exportBtn.innerHTML; exportBtn.onclick=function(){
     var exportScenes=lastScenes.length?lastScenes:(lastBreakdown?lastBreakdown.scenes||[]:readScenesFromDom());
     if(!exportScenes.length){ exportBtn.textContent='暂无可导出脚本'; setTimeout(function(){exportBtn.innerHTML=exportOrig;},1500); return; }
-    var txt=scriptText(exportScenes);
-    if(lastBreakdown&&lastBreakdown.viral_logic) txt+='\n\n---\n爆款逻辑：'+(lastBreakdown.viral_logic||'');
-    if(lastBreakdown&&lastBreakdown.template) txt+='\n可复用模板：'+(lastBreakdown.template||'');
-    var blob=new Blob(['\ufeff'+txt],{type:'text/plain;charset=utf-8'});
+    var extra='';
+    if(lastBreakdown&&lastBreakdown.viral_logic) extra+='\n\n---\n爆款逻辑：'+(lastBreakdown.viral_logic||'');
+    if(lastBreakdown&&lastBreakdown.template) extra+='\n可复用模板：'+(lastBreakdown.template||'');
+    var blob=new Blob(['\ufeff'+scriptText(exportScenes)+extra],{type:'text/plain;charset=utf-8'});
     var url=URL.createObjectURL(blob), a=document.createElement('a');
     var filename=((topic.value||(lastBreakdown?lastBreakdown.source_title:'')||'黄雀分镜脚本').trim().replace(/[\\/:*?"<>|]+/g,'-').slice(0,48)||'黄雀分镜脚本')+'.txt';
     a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove();
