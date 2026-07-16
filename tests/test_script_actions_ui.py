@@ -26,6 +26,7 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="scOneClickVideo"', self.html)
         self.assertIn("fetch('/api/gen/script_to_video'", self.html)
         self.assertIn("scenes:scenesForHandoff", self.html)
+        self.assertIn("_resetOneClick", self.html)
 
     def test_history_loads_copy_assets_and_restores_scenes(self):
         self.assertIn("'/api/gen/assets?limit=60&kind=copy'", self.html)
