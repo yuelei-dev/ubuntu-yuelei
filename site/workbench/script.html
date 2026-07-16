@@ -257,9 +257,22 @@
         <a id="bdSourceLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa;">查看原视频 →</a>
       </div>
 
-      <!-- 拆解增强：元信息 -->
-      <div id="bdResultMeta" style="display:none; margin-top:10px; font-size:11.5px; color:#5c6b82;">
-        <a id="bdSourceLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa;">查看原视频 →</a>
+      <!-- 拆解增强：节奏分析 -->
+      <div id="bdRhythm" class="bd-section" style="display:none;">
+        <div class="bd-section-title">⏱ 节奏分析</div>
+        <div class="bd-section-body"></div>
+      </div>
+
+      <!-- 拆解增强：爆款逻辑 -->
+      <div id="bdLogic" class="bd-section" style="display:none;">
+        <div class="bd-section-title">🔥 爆款逻辑</div>
+        <div class="bd-section-body"></div>
+      </div>
+
+      <!-- 拆解增强：可复用模板 -->
+      <div id="bdTemplate" class="bd-section" style="display:none;">
+        <div class="bd-section-title">📋 可复用模板</div>
+        <div class="bd-section-body"></div>
       </div>
 
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; padding-top:16px; border-top:1px solid rgba(148,164,187,.1);">
@@ -427,37 +440,38 @@
   function renderBreakdown(bd){
     lastBreakdown=bd;
     var list=bd.scenes||[];
+    // 元信息行
     if(meta){
       var platformLabel={'douyin':'抖音','xiaohongshu':'小红书','weixin':'视频号','channels':'视频号'};
       meta.innerHTML='<span style="color:#60a5fa;">🔍 拆解</span><span style="color:#5c6b82;">·</span><span>'+esc(bd.source_title||'')+'</span><span style="color:#5c6b82;">·</span><span>'+(platformLabel[bd.source_platform]||bd.source_platform||'')+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+(bd.duration||'')+'s</span><span style="color:#5c6b82;">·</span><span>共 <span class="mono">'+list.length+'</span> 个分镜</span>';
     }
-    scenes.innerHTML=list.map(function(s,i){ return sceneCardHTML(s,i,true); }).join('')
-      +'<div style="margin-top:14px;text-align:center;"><button id="bdRemakeBtn" class="sc-btn" type="button" style="color:#1a1206;background:linear-gradient(135deg,#60a5fa,#3b82f6);border-color:rgba(59,130,246,.4);font-weight:700;font-size:13px;padding:10px 24px;">🎬 生成同款视频（果肉）</button></div>';
-    // bind remake button
-    var remakeBtn=document.getElementById('bdRemakeBtn');
-    if(remakeBtn){ remakeBtn.onclick=function(){
-      if(!list.length) return;
-      oneClickBtn.disabled=true; oneClickBtn.style.opacity='.6'; oneClickBtn.textContent='提交中…';
-      scenes.innerHTML='<div style="padding:34px;text-align:center;color:#60a5fa;font-size:13px;">🎬 正在启动果肉生成…</div>';
-      var pollCount=0;
-      fetch('/api/gen/script_to_video',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify({scenes:list,style:'剧情'})})
-        .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
-        .then(function(x){
-          if(x.s===401){ resetOneClick(); if(window.HQ) HQ.login(); return; }
-          if(!x.d.job_id){ resetOneClick(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">提交失败</div>'; return; }
-          var iv=setInterval(function(){
-            pollCount++;
-            fetch('/api/gen/job/'+x.d.job_id,{headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.json();}).then(function(d){
-              if(d.status==='done'){ clearInterval(iv); resetOneClick();
-                scenes.innerHTML='<div style="padding:24px;text-align:center;"><div style="font-size:40px;">✅</div><div style="font-size:15px;font-weight:700;color:#eaf1fa;">同款视频生成完成！</div><div style="margin-top:12px;"><a href=\"assets.html\" class=\"sc-btn\" style=\"color:#e7b24c;\">📁 查看资产库</a></div></div>';
-                if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
-              }else if(d.status==='error'){ clearInterval(iv); resetOneClick(); scenes.innerHTML='<div style=\"padding:24px;text-align:center;color:#f4708a;\">生成失败</div>'; }
-              if(pollCount>120){ clearInterval(iv); resetOneClick(); }
-            }).catch(function(){});
-          },3000);
-        }).catch(function(){ resetOneClick(); });
-    };}
-    // source link
+    // 分镜卡片
+    scenes.innerHTML=list.map(function(s,i){ return sceneCardHTML(s,i,true); }).join('');
+
+    // 节奏分析
+    var bdRhythm=document.getElementById('bdRhythm');
+    if(bdRhythm && bd.rhythm && bd.rhythm.length){
+      bdRhythm.style.display='';
+      var body=bdRhythm.querySelector('.bd-section-body');
+      if(body) body.innerHTML=bd.rhythm.map(function(r){
+        return '<div style="display:flex;gap:10px;margin-bottom:6px;"><span style="color:#60a5fa;flex:none;font-weight:600;" class="mono">'+esc(r.time||'')+'</span><span style="color:#e7b24c;flex:none;font-weight:600;">'+esc(r.phase||'')+'</span><span style="color:#cbd5e1;">'+esc(r.strategy||'')+'</span></div>';
+      }).join('');
+    }
+    // 爆款逻辑
+    var bdLogic=document.getElementById('bdLogic');
+    if(bdLogic && bd.viral_logic){
+      bdLogic.style.display='';
+      var body2=bdLogic.querySelector('.bd-section-body');
+      if(body2) body2.textContent=bd.viral_logic;
+    }
+    // 可复用模板
+    var bdTemplate=document.getElementById('bdTemplate');
+    if(bdTemplate && bd.template){
+      bdTemplate.style.display='';
+      var body3=bdTemplate.querySelector('.bd-section-body');
+      if(body3) body3.textContent=bd.template;
+    }
+    // 元信息区
     var bdMeta=document.getElementById('bdResultMeta');
     if(bdMeta){ bdMeta.style.display=''; }
     var bdSourceLink=document.getElementById('bdSourceLink');
