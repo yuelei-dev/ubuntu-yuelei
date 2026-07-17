@@ -182,6 +182,39 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("ASR 转录失败", calls["usermsg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
+    def test_do_breakdown_includes_frame_thumbnails(self):
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        tmp.write(bytes.fromhex(
+            "ffd8ffe000104a46494600010101006000600000ffdb004300080606070605080707070909080a0c"
+            "140d0c0b0b0c1912130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c3031343434"
+            "1f27393d38323c2e333432ffdb0043010909090c0b0c180d0d1832211c21323232323232323232"
+            "323232323232323232323232323232323232323232323232323232323232323232323232323232"
+            "ffc00011080001000103012200021101031101ffc4001400010000000000000000000000000000"
+            "0008ffc40014100100000000000000000000000000000000ffda0008010100013f10c9b0a3c4ff"
+            "d9"
+        ))
+        tmp.close()
+
+        calls = self._install_fake_env(
+            '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎"}],"analysis":"ok"}'
+        )
+        self.breakdown._extract_frames = lambda video_path, count, duration: (
+            "fake-frame-dir",
+            [tmp.name],
+        )
+
+        result = self.breakdown._do_breakdown(
+            {"_job_id": 30},
+            {"platform": "douyin", "id": "thumb-test"},
+            "https://example.test/post/thumb",
+        )
+
+        self.assertIn("frame_thumbnails", result)
+        self.assertEqual(len(result["frame_thumbnails"]), 1)
+        self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
+        import os; os.unlink(tmp.name)
+
 
 if __name__ == "__main__":
     unittest.main()

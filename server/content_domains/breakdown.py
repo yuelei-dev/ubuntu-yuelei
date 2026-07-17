@@ -82,6 +82,16 @@ def _do_breakdown(payload, info, url):
 
         result = _parse_breakdown_json(raw)
 
+        # 读取关键帧作为缩略图，供前端展示故事板
+        frame_thumbnails = []
+        for fp in (frames or [])[:4]:
+            try:
+                with open(fp, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode()
+                frame_thumbnails.append("data:image/jpeg;base64," + b64)
+            except Exception:
+                pass
+
         return {
             "type": "breakdown",
             "source_url": url,
@@ -91,6 +101,7 @@ def _do_breakdown(payload, info, url):
             "scenes": result.get("scenes", []),
             "analysis": result.get("analysis", ""),
             "asr_failed": asr_failed,
+            "frame_thumbnails": frame_thumbnails,
         }
     finally:
         if tmp_video:
