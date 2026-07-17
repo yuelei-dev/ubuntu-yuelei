@@ -102,15 +102,6 @@
           </div>
         </div>
 
-        <div class="sc-lab">参考图 <span style="font-weight:400;font-size:11px;color:#5c6b82;">（可选，上传产品/场景图辅助生成）</span></div>
-        <div style="position:relative; border:1px dashed rgba(148,164,187,.16); border-radius:12px; padding:12px; text-align:center;">
-          <input id="scRefImage" type="file" accept="image/*" style="display:none;">
-          <button id="scRefImageBtn" class="sc-btn" type="button" style="font-size:12px;">📷 上传参考图</button>
-          <span id="scRefImageName" style="font-size:11px;color:#5c6b82;margin-left:8px;"></span>
-          <img id="scRefPreview" src="" style="display:none;max-width:100%;max-height:120px;margin-top:8px;border-radius:8px;">
-          <span id="scRefClear" style="display:none;position:absolute;top:4px;right:8px;cursor:pointer;color:#f4708a;font-size:18px;">&times;</span>
-        </div>
-
         <div class="sc-lab">风格</div>
         <div id="segStyle" class="sc-seg" style="grid-template-columns:repeat(3,1fr);">
           <div class="sc-opt on">口播</div>
@@ -141,20 +132,26 @@
 
       <div id="panelBreakdown" style="display:none;">
         <div style="display:flex; align-items:flex-start; justify-content:space-between;">
-          <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><span style="font-size:26px;">🔍</span>爆款拆解</h1><p style="margin:7px 0 0; font-size:13px; color:#94a4bb;">粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频</p></div>
+          <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><span style="font-size:26px;">🔍</span>拆解视频</h1><p id="bdToolIntro" style="margin:7px 0 0; font-size:13px; color:#94a4bb;">粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频</p></div>
+        </div>
+
+        <div class="sc-lab" style="margin-top:22px;">选择功能</div>
+        <div id="bdToolTabs" style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+          <button id="bdToolScenes" class="sc-btn on" type="button" style="padding:9px 14px; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35); font-weight:700;">🎞 分解拆解</button>
+          <button id="bdToolReverse" class="sc-btn" type="button" style="padding:9px 14px;">✨ 提示词反推</button>
         </div>
 
         <div class="sc-lab" style="margin-top:22px;">视频链接</div>
         <div style="position:relative; border:1px solid rgba(148,164,187,.16); background:rgba(7,11,19,.5); border-radius:12px; padding:13px 14px;">
           <input id="bdUrl" type="text" placeholder="粘贴抖音/小红书视频链接…" style="width:100%; background:transparent; border:none; outline:none; color:#eaf1fa; font-size:13.5px; line-height:1.7; font-family:inherit;">
         </div>
-        <div style="margin-top:8px; font-size:11px; color:#5c6b82;">支持抖音、小红书公开视频链接，完成后可直接生成同款视频</div>
+        <div id="bdToolHint" style="margin-top:8px; font-size:11px; color:#5c6b82;">支持抖音、小红书公开视频链接，完成后可直接生成同款视频</div>
 
         <button id="bdGen" class="hv-lift" style="width:100%; height:54px; margin-top:18px; font-size:16px; font-weight:700; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border:none; border-radius:14px; cursor:pointer; box-shadow:0 14px 34px -12px rgba(96,165,250,.55); transition:.2s; font-family:inherit; display:flex; align-items:center; justify-content:center; gap:9px;">
           <span class="sc-ico" style="width:19px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg></span>
-          开始拆解（8 点）
+          <span id="bdGenLabel">开始拆解（8 点）</span>
         </button>
-        <div style="text-align:center; margin-top:11px;"><span class="sc-hint">下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒</span></div>
+        <div style="text-align:center; margin-top:11px;"><span id="bdGenHint" class="sc-hint">下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒</span></div>
 
         <div id="bdProgress" style="display:none; margin-top:20px;">
           <div style="font-size:12.5px; font-weight:600; color:#94a4bb; margin-bottom:8px;">拆解进度</div>
@@ -251,18 +248,13 @@
       <div id="bdResultMeta" style="display:none; margin-top:12px; font-size:11.5px; color:#5c6b82;">
         <span>拆解来源：</span><a id="bdSourceLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa;">查看原视频 →</a>
       </div>
-      <div id="bdAnalysis" style="display:none; margin-top:14px; padding:14px 16px; border-radius:14px; border:1px solid rgba(96,165,250,.18); background:linear-gradient(180deg,rgba(96,165,250,.08),rgba(59,130,246,.04));">
-        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; font-size:12px; font-weight:700; color:#93c5fd;">
-          <span>✨</span><span>内容分析</span>
-        </div>
-        <div id="bdAnalysisText" style="font-size:13px; line-height:1.8; color:#dbeafe; white-space:pre-wrap;"></div>
-      </div>
 
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; padding-top:16px; border-top:1px solid rgba(148,164,187,.1);">
         <span id="scBatchHint" class="sc-hint">每张分镜可单独转视频/转口播，或使用下方一键生成</span>
         <div style="display:flex; gap:9px; flex-wrap:wrap; justify-content:flex-end;">
           <button id="bdRemakeBtn" class="sc-btn" type="button" style="display:none; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35); font-weight:700;">🎬 生成同款视频</button>
-          <button id="bdEditBtn" class="sc-btn" type="button" style="display:none; color:#60a5fa; background:rgba(96,165,250,.08); border-color:rgba(96,165,250,.24);">✏️ 编辑分镜</button>
+          <button id="bdReverseCopyBtn" class="sc-btn" type="button" style="display:none; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35); font-weight:700;">📋 复制提示词</button>
+          <button id="bdReverseDrawBtn" class="sc-btn" type="button" style="display:none; color:#1a1206; background:linear-gradient(135deg,#f4cd72,#e7b24c); border-color:rgba(231,178,76,.4); font-weight:700;">🖼 去作图</button>
           <button id="scGenVideo" class="sc-btn" type="button" style="color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35); font-weight:700;">🎬 一键生成视频</button>
           <button id="scGenAudio" class="sc-btn" type="button" style="color:#1a1206; background:linear-gradient(135deg,#f4cd72,#e7b24c); border-color:rgba(231,178,76,.4); font-weight:700;">🎙 一键生成口播</button>
           <button id="scExport" class="sc-btn" type="button" style="color:#e7b24c; background:rgba(231,178,76,.08); border-color:rgba(231,178,76,.24);"><span class="sc-ico" style="width:13px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></span>导出脚本</button>
@@ -295,12 +287,16 @@
   var previewTitle=document.getElementById('scPreviewTitle'), batchHint=document.getElementById('scBatchHint');
   var panelWrite=document.getElementById('panelWrite'), panelBreakdown=document.getElementById('panelBreakdown');
   var genVideoBtn=document.getElementById('scGenVideo'), genAudioBtn=document.getElementById('scGenAudio'),
-      bdRemakeBtn=document.getElementById('bdRemakeBtn'), bdEditBtn=document.getElementById('bdEditBtn');
+      bdRemakeBtn=document.getElementById('bdRemakeBtn'), bdReverseCopyBtn=document.getElementById('bdReverseCopyBtn'),
+      bdReverseDrawBtn=document.getElementById('bdReverseDrawBtn');
   var bdUrl=document.getElementById('bdUrl'), bdGen=document.getElementById('bdGen'),
       bdProgress=document.getElementById('bdProgress'), bdPhases=document.getElementById('bdPhases'),
       bdResultMeta=document.getElementById('bdResultMeta'), bdSourceLink=document.getElementById('bdSourceLink'),
-      bdAnalysis=document.getElementById('bdAnalysis'), bdAnalysisText=document.getElementById('bdAnalysisText');
-  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, currentMode='write', refImageData=null, bdEditing=false;
+      bdToolIntro=document.getElementById('bdToolIntro'), bdToolHint=document.getElementById('bdToolHint'),
+      bdGenLabel=document.getElementById('bdGenLabel'), bdGenHint=document.getElementById('bdGenHint'),
+      bdToolScenesBtn=document.getElementById('bdToolScenes'), bdToolReverseBtn=document.getElementById('bdToolReverse');
+  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, currentMode='write', currentBreakdownTool='scenes';
+  var lastBreakdownByTool={scenes:null, reverse_prompt:null};
   var initialMeta=meta?meta.innerHTML:'', initialScenes=scenes?scenes.innerHTML:'',
       initialPreviewTitle=previewTitle?previewTitle.textContent:'脚本 · 分镜预览',
       initialBatchHint=batchHint?batchHint.textContent:'';
@@ -332,6 +328,19 @@
     return (list||[]).map(function(s){
       return {dur:s&&s.dur||'', scene:s&&s.scene||'', line:s&&s.line||''};
     }).filter(function(s){ return s.scene||s.line; });
+  }
+  function normalizeBreakdownTool(tool){
+    return tool==='reverse_prompt'?'reverse_prompt':'scenes';
+  }
+  function breakdownResultTool(bd){
+    return bd&&bd.type==='breakdown_reverse'?'reverse_prompt':'scenes';
+  }
+  function currentBreakdownResult(){
+    return lastBreakdownByTool[currentBreakdownTool]||null;
+  }
+  function getDisplayedPrompt(){
+    var bd=currentMode==='breakdown' ? currentBreakdownResult() : null;
+    return bd&&bd.type==='breakdown_reverse' ? String(bd.prompt||'').trim() : '';
   }
   function scriptText(list){
     return (list||[]).map(function(s,i){
@@ -369,20 +378,16 @@
       +'</div></div>';
   }
   function getDisplayedScenes(){
-    if(currentMode==='breakdown' && lastBreakdown) return normalizeBreakdownScenes(lastBreakdown.scenes||[]);
+    if(currentMode==='breakdown'){
+      var bd=currentBreakdownResult();
+      if(bd&&bd.type!=='breakdown_reverse') return normalizeBreakdownScenes(bd.scenes||[]);
+      return [];
+    }
     return lastScenes.length?lastScenes:readScenesFromDom();
   }
   function hideBreakdownMeta(){
     if(bdResultMeta) bdResultMeta.style.display='none';
     if(bdSourceLink) bdSourceLink.removeAttribute('href');
-    if(bdAnalysis) bdAnalysis.style.display='none';
-    if(bdAnalysisText) bdAnalysisText.textContent='';
-  }
-  function setBreakdownAnalysis(text){
-    var content=(text||'').trim();
-    if(!bdAnalysis||!bdAnalysisText) return;
-    bdAnalysis.style.display=content?'':'none';
-    bdAnalysisText.textContent=content;
   }
   function resetPreview(){
     if(scenes) scenes.innerHTML=initialScenes;
@@ -390,22 +395,56 @@
     hideBreakdownMeta();
     bindSceneHandoffs();
   }
+  function syncBreakdownToolUi(){
+    var isReverse=currentBreakdownTool==='reverse_prompt';
+    if(bdToolScenesBtn) bdToolScenesBtn.classList.toggle('on', currentBreakdownTool==='scenes');
+    if(bdToolReverseBtn) bdToolReverseBtn.classList.toggle('on', isReverse);
+    if(bdToolIntro) bdToolIntro.textContent=isReverse
+      ? '粘贴竞品视频链接，AI 直接反推出可用于下游作图的中文提示词'
+      : '粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频';
+    if(bdToolHint) bdToolHint.textContent=isReverse
+      ? '支持抖音、小红书公开视频链接，完成后可复制提示词或直接去作图'
+      : '支持抖音、小红书公开视频链接，完成后可直接生成同款视频';
+    if(bdGenLabel) bdGenLabel.textContent=isReverse ? '开始反推（8 点）' : '开始拆解（8 点）';
+    if(bdGenHint) bdGenHint.textContent=isReverse ? '下载 → 抽帧 → 转写 → AI反推 · 约 40-90 秒' : '下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒';
+  }
   function syncModeUi(){
+    var isReverse=currentBreakdownTool==='reverse_prompt';
     document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.classList.toggle('on', tab.getAttribute('data-mode')===currentMode); });
     if(panelWrite) panelWrite.style.display=currentMode==='write'?'':'none';
     if(panelBreakdown) panelBreakdown.style.display=currentMode==='breakdown'?'':'none';
-    if(previewTitle) previewTitle.textContent=currentMode==='breakdown'?'拆解结果 · 分镜预览':initialPreviewTitle;
-    if(batchHint) batchHint.textContent=currentMode==='breakdown'?'拆解完成后可直接生成同款视频，或继续逐条转视频 / 转口播':initialBatchHint;
-    if(bdRemakeBtn) bdRemakeBtn.style.display=currentMode==='breakdown'?'':'none';
-    if(bdEditBtn) bdEditBtn.style.display=currentMode==='breakdown' && lastBreakdown && (lastBreakdown.scenes||[]).length?'':'none';
+    if(previewTitle) previewTitle.textContent=currentMode==='breakdown'
+      ? (isReverse?'提示词反推 · 结果预览':'拆解结果 · 分镜预览')
+      : initialPreviewTitle;
+    if(batchHint) batchHint.textContent=currentMode==='breakdown'
+      ? (isReverse?'反推完成后可复制提示词，或直接跳转作图':'拆解完成后可直接生成同款视频，或继续逐条转视频 / 转口播')
+      : initialBatchHint;
+    if(bdRemakeBtn) bdRemakeBtn.style.display=currentMode==='breakdown' && !isReverse ? '' : 'none';
+    if(bdReverseCopyBtn) bdReverseCopyBtn.style.display=currentMode==='breakdown' && isReverse ? '' : 'none';
+    if(bdReverseDrawBtn) bdReverseDrawBtn.style.display=currentMode==='breakdown' && isReverse ? '' : 'none';
     if(genVideoBtn) genVideoBtn.style.display=currentMode==='breakdown'?'none':'';
     if(genAudioBtn) genAudioBtn.style.display=currentMode==='breakdown'?'none':'';
+    if(exportBtn) exportBtn.style.display=currentMode==='breakdown' && isReverse ? 'none' : '';
+    syncBreakdownToolUi();
+  }
+  function setBreakdownTool(tool){
+    currentBreakdownTool=normalizeBreakdownTool(tool);
+    syncModeUi();
+    if(currentMode==='breakdown'){
+      var bd=currentBreakdownResult();
+      if(bd){
+        if(currentBreakdownTool==='reverse_prompt') renderBreakdownReverse(bd); else renderBreakdown(bd);
+      }else resetPreview();
+    }
   }
   function switchMode(mode){
     currentMode=mode==='breakdown'?'breakdown':'write';
     syncModeUi();
     if(currentMode==='breakdown'){
-      if(lastBreakdown) renderBreakdown(lastBreakdown); else resetPreview();
+      var bd=currentBreakdownResult();
+      if(bd){
+        if(currentBreakdownTool==='reverse_prompt') renderBreakdownReverse(bd); else renderBreakdown(bd);
+      }else resetPreview();
     }else{
       if(lastScenes.length) render({scenes:lastScenes}, (topic&&topic.value)||'', lastStyle||'口播', pick('segDur','.sc-opt','30s'));
       else resetPreview();
@@ -421,31 +460,52 @@
     hideBreakdownMeta();
     bindSceneHandoffs();
   }
-  function renderBreakdown(bd){
+  function rememberBreakdownResult(bd){
+    if(!bd) return;
+    var tool=breakdownResultTool(bd);
     lastBreakdown=bd;
-    bdEditing=false; if(bdEditBtn) bdEditBtn.textContent='✏️ 编辑分镜';
+    lastBreakdownByTool[tool]=bd;
+    currentBreakdownTool=tool;
+  }
+  function renderBreakdown(bd){
+    rememberBreakdownResult(bd);
     var list=normalizeBreakdownScenes((bd&&bd.scenes)||[]);
-    var analysis=(bd&&bd.analysis)||'';
     if(meta) meta.innerHTML='<span style="color:#60a5fa;">拆解</span><span style="color:#5c6b82;">·</span><span>'+esc((bd&&bd.source_title)||'爆款拆解')+'</span><span style="color:#5c6b82;">·</span><span>'+esc(platformText(bd&&bd.source_platform))+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+esc((bd&&bd.duration)||'')+'s</span><span style="color:#5c6b82;">·</span><span>共 <span class="mono">'+list.length+'</span> 个分镜</span>';
     scenes.innerHTML=list.length ? list.map(function(s,i){ return sceneCardHTML(s,i); }).join('') : '<div style="padding:24px;text-align:center;color:#f4708a;">拆解结果为空，请重试</div>';
     if(bdResultMeta && bd && bd.source_url){ bdResultMeta.style.display=''; }
     if(bdSourceLink && bd && bd.source_url){ bdSourceLink.href=bd.source_url; }
-    setBreakdownAnalysis(analysis);
-    if(bdEditBtn) bdEditBtn.style.display=list.length?'':'none';
+    syncModeUi();
     bindSceneHandoffs();
+  }
+  function renderBreakdownReverse(bd){
+    rememberBreakdownResult(bd);
+    var prompt=(bd&&bd.prompt)||'';
+    if(meta) meta.innerHTML='<span style="color:#f4cd72;">反推</span><span style="color:#5c6b82;">·</span><span>'+esc((bd&&bd.source_title)||'提示词反推')+'</span><span style="color:#5c6b82;">·</span><span>'+esc(platformText(bd&&bd.source_platform))+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+esc((bd&&bd.duration)||'')+'s</span><span style="color:#5c6b82;">·</span><span>'+(bd&&bd.frame_count?('参考 '+esc(bd.frame_count)+' 帧'):'提示词结果')+'</span>';
+    scenes.innerHTML=prompt
+      ? '<div class="sc-card"><div class="sc-shot"><span style="display:flex; width:20px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 14l.7 1.9L22 17l-2.3.6L19 20l-.7-2.4L16 17l2.3-.5z"/></svg></span><span class="mono" style="font-size:12px; font-weight:700; color:#f4cd72;">PROMPT</span></div>'
+        +'<div style="flex:1; min-width:0;">'
+        +'<div style="font-size:12px; color:#94a4bb; margin-bottom:8px;">适合直接带去作图页继续生成，建议先微调主体和品牌信息再提交。</div>'
+        +'<div id="bdReversePromptCard" style="font-size:13px; color:#eaf1fa; line-height:1.85; white-space:pre-wrap;">'+esc(prompt)+'</div>'
+        +'</div></div>'
+      : '<div style="padding:24px;text-align:center;color:#f4708a;">反推结果为空，请重试</div>';
+    if(bdResultMeta && bd && bd.source_url){ bdResultMeta.style.display=''; }
+    if(bdSourceLink && bd && bd.source_url){ bdSourceLink.href=bd.source_url; }
+    syncModeUi();
   }
   function saveBreakdownHistory(bd){
     if(!bd) return;
-    var item={
-      kind:'breakdown',
-      title:bd.source_title||'爆款拆解',
+    var tool=breakdownResultTool(bd), item={
+      kind:tool==='reverse_prompt'?'breakdown_reverse':'breakdown',
+      title:bd.source_title||(tool==='reverse_prompt'?'提示词反推':'爆款拆解'),
       created_at:Math.floor(Date.now()/1000),
       meta:{
+        breakdown_tool:tool,
         source_url:bd.source_url||'',
         source_title:bd.source_title||'',
         source_platform:bd.source_platform||'',
         duration:bd.duration||'',
-        analysis:(bd.analysis||''),
+        frame_count:bd.frame_count||0,
+        prompt:(bd.prompt||'').trim(),
         scenes:normalizeBreakdownScenes(bd.scenes||[])
       }
     };
@@ -454,7 +514,10 @@
       if(!Array.isArray(list)) list=[];
       var dedup=list.filter(function(x){
         var m=x&&x.meta||{};
-        return !(m.source_url && item.meta.source_url && m.source_url===item.meta.source_url);
+        return !(
+          m.source_url && item.meta.source_url && m.source_url===item.meta.source_url
+          && normalizeBreakdownTool(m.breakdown_tool||((x&&x.kind)==='breakdown_reverse'?'reverse_prompt':'scenes'))===tool
+        );
       });
       dedup.unshift(item);
       localStorage.setItem(BREAKDOWN_HISTORY_KEY, JSON.stringify(dedup.slice(0,12)));
@@ -463,78 +526,15 @@
   function readBreakdownHistory(){
     try{
       var list=JSON.parse(localStorage.getItem(BREAKDOWN_HISTORY_KEY)||'[]');
-      return Array.isArray(list)?list.filter(function(item){ return Array.isArray(((item||{}).meta||{}).scenes)&&((item.meta||{}).scenes.length); }):[];
+      return Array.isArray(list)?list.filter(function(item){
+        var meta=(item||{}).meta||{};
+        return (Array.isArray(meta.scenes)&&meta.scenes.length) || !!String(meta.prompt||'').trim();
+      }):[];
     }catch(_e){ return []; }
   }
-  function prepareBreakdownRemakePayload(bd, style){
-    return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:style||'剧情'};
+  function prepareBreakdownRemakePayload(bd){
+    return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:'剧情'};
   }
-  function _pickRemakeStyle(onPick){
-    var overlay=document.createElement('div');
-    overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.78);z-index:9999;display:flex;align-items:center;justify-content:center;';
-    var box=document.createElement('div');
-    box.style.cssText='background:#111827;border:1px solid rgba(148,164,187,.2);border-radius:18px;padding:24px;width:360px;';
-    box.innerHTML='<div style="font-size:16px;font-weight:700;color:#eaf1fa;margin-bottom:6px;">🎬 生成同款视频</div>'
-      +'<div style="font-size:12px;color:#94a4bb;margin-bottom:18px;">选择视频风格后开始生成</div>'
-      +'<div style="display:flex;flex-direction:column;gap:9px;">'
-      +'<button data-style="口播" style="width:100%;padding:13px 16px;font-size:14px;font-weight:600;border:1px solid rgba(231,178,76,.3);border-radius:12px;background:rgba(231,178,76,.1);color:#e7b24c;cursor:pointer;text-align:left;">🎙 口播 · 数字人出镜</button>'
-      +'<button data-style="剧情" style="width:100%;padding:13px 16px;font-size:14px;font-weight:600;border:1px solid rgba(96,165,250,.3);border-radius:12px;background:rgba(96,165,250,.1);color:#60a5fa;cursor:pointer;text-align:left;">🎬 剧情 · AI 画面生成</button>'
-      +'<button data-style="种草" style="width:100%;padding:13px 16px;font-size:14px;font-weight:600;border:1px solid rgba(74,222,128,.3);border-radius:12px;background:rgba(74,222,128,.1);color:#4ade80;cursor:pointer;text-align:left;">🌿 种草 · 数字人带货</button>'
-      +'</div>'
-      +'<button data-style="" style="width:100%;margin-top:10px;padding:10px;font-size:13px;border:1px solid rgba(148,164,187,.14);border-radius:10px;background:transparent;color:#94a4bb;cursor:pointer;">取消</button>';
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    box.querySelectorAll('button').forEach(function(btn){
-      btn.onclick=function(){
-        var style=btn.getAttribute('data-style');
-        document.body.removeChild(overlay);
-        if(style) onPick(style);
-      };
-    });
-    overlay.onclick=function(e){ if(e.target===overlay) document.body.removeChild(overlay); };
-  }
-  function _toggleBreakdownEdit(){
-    if(!lastBreakdown){ return; }
-    bdEditing=!bdEditing;
-    if(bdEditBtn) bdEditBtn.textContent=bdEditing?'💾 保存分镜':'✏️ 编辑分镜';
-    if(bdEditing){
-      _renderBreakdownEditMode();
-    } else {
-      _saveBreakdownEdit();
-      renderBreakdown(lastBreakdown);
-    }
-  }
-  function _editableCardHTML(s,i){
-    var no=('0'+(i+1)).slice(-2);
-    return '<div class="sc-card"><div class="sc-shot"><span style="display:flex; width:20px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg></span><span class="mono" style="font-size:13px; font-weight:700; color:#e7b24c;">'+no+'</span></div>'
-      +'<div style="flex:1; min-width:0;">'
-      +'<div style="display:flex; align-items:center; gap:9px; margin-bottom:9px;"><span class="mono" style="font-size:13px; font-weight:700; color:#e7b24c;">镜号 '+no+'</span><input data-scene-dur="'+i+'" value="'+escAttr(s.dur||'')+'" style="width:56px;padding:3px 8px;font-size:11px;border-radius:7px;color:#eaf1fa;background:rgba(148,164,187,.08);border:1px solid rgba(148,164,187,.2);outline:none;"></div>'
-      +'<div style="font-size:12px; color:#94a4bb; margin-bottom:7px;"><span style="color:#5c6b82;">画面：</span><input data-scene-text="'+i+'" value="'+escAttr(s.scene||'')+'" style="width:100%;padding:5px 9px;font-size:12px;border-radius:8px;color:#eaf1fa;background:rgba(148,164,187,.08);border:1px solid rgba(148,164,187,.2);outline:none;box-sizing:border-box;"></div>'
-      +'<div style="font-size:13px; color:#eaf1fa; line-height:1.7; margin-bottom:12px;"><span style="color:#5c6b82; font-size:12px;">口播：</span><textarea data-scene-line="'+i+'" rows="2" style="width:100%;padding:5px 9px;font-size:13px;border-radius:8px;color:#eaf1fa;background:rgba(148,164,187,.08);border:1px solid rgba(148,164,187,.2);outline:none;resize:vertical;box-sizing:border-box;font-family:inherit;line-height:1.6;">'+esc(s.line||'')+'</textarea></div>'
-      +'</div></div>';
-  }
-  function _renderBreakdownEditMode(){
-    if(!scenes) return;
-    var list=normalizeBreakdownScenes((lastBreakdown&&lastBreakdown.scenes)||[]);
-    scenes.innerHTML=list.length ? list.map(function(s,i){ return _editableCardHTML(s,i); }).join('') : '<div style="padding:24px;text-align:center;color:#f4708a;">无可编辑分镜</div>';
-  }
-  function _saveBreakdownEdit(){
-    if(!scenes||!lastBreakdown) return;
-    var cards=scenes.querySelectorAll('.sc-card');
-    var updated=[];
-    cards.forEach(function(card){
-      var durInput=card.querySelector('[data-scene-dur]');
-      var textInput=card.querySelector('[data-scene-text]');
-      var lineInput=card.querySelector('[data-scene-line]');
-      updated.push({
-        dur:(durInput&&durInput.value)||'',
-        scene:(textInput&&textInput.value)||'',
-        line:(lineInput&&lineInput.value)||''
-      });
-    });
-    lastBreakdown.scenes=updated.filter(function(s){ return s.scene||s.line; });
-  }
-  if(bdEditBtn){ bdEditBtn.onclick=function(){ _toggleBreakdownEdit(); }; }
   function setBdPhase(phase,state){
     if(!bdPhases) return;
     var order=['downloading','extracting_frames','transcribing','analyzing'];
@@ -546,27 +546,20 @@
     });
   }
   function markAllBdPhasesDone(){ if(bdPhases) bdPhases.querySelectorAll('.bd-phase').forEach(function(node){ node.classList.remove('active'); node.classList.add('done'); }); }
-  function resetBdBtn(){ if(!bdGen) return; bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML='开始拆解（8 点）'; }
+  function setBdBtnBusy(label){
+    if(!bdGen) return;
+    bdGen.disabled=true;
+    bdGen.style.opacity='.6';
+    if(bdGenLabel) bdGenLabel.textContent=label||'提交中…';
+  }
+  function resetBdBtn(){ if(!bdGen) return; bdGen.disabled=false; bdGen.style.opacity='1'; syncBreakdownToolUi(); }
 
   function seg(id,sel){ var box=document.getElementById(id); if(!box) return; box.querySelectorAll(sel).forEach(function(o){ o.onclick=function(){ box.querySelectorAll(sel).forEach(function(x){x.classList.remove('on');}); o.classList.add('on'); }; }); }
   seg('segStyle','.sc-opt'); seg('segDur','.sc-opt'); seg('platRow','.sc-chip');
   document.querySelectorAll('.sc-tag').forEach(function(tag){ tag.onclick=function(){ this.classList.toggle('on'); }; });
-  // 参考图上传
-  var scRefImage=document.getElementById('scRefImage'), scRefImageBtn=document.getElementById('scRefImageBtn'),
-      scRefImageName=document.getElementById('scRefImageName'), scRefPreview=document.getElementById('scRefPreview'),
-      scRefClear=document.getElementById('scRefClear');
-  if(scRefImage&&scRefImageBtn){
-    scRefImageBtn.onclick=function(){ scRefImage.click(); };
-    scRefImage.onchange=function(){
-      var f=scRefImage.files&&scRefImage.files[0]; if(!f) return;
-      if(f.size>5*1024*1024){ if(window.HQ&&window.HQ.toast) HQ.toast('图片不能超过 5MB'); return; }
-      var reader=new FileReader();
-      reader.onload=function(){ refImageData=reader.result; scRefPreview.src=reader.result; scRefPreview.style.display=''; scRefClear.style.display=''; scRefImageName.textContent=f.name; scRefImageBtn.textContent='已上传 ✓'; };
-      reader.readAsDataURL(f);
-    };
-    scRefClear.onclick=function(){ refImageData=null; scRefPreview.src=''; scRefPreview.style.display='none'; scRefClear.style.display='none'; scRefImageName.textContent=''; scRefImageBtn.textContent='📷 上传参考图'; scRefImage.value=''; };
-  }
   document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.onclick=function(){ switchMode(this.getAttribute('data-mode')); }; });
+  if(bdToolScenesBtn) bdToolScenesBtn.onclick=function(){ setBreakdownTool('scenes'); };
+  if(bdToolReverseBtn) bdToolReverseBtn.onclick=function(){ setBreakdownTool('reverse_prompt'); };
   function pick(id,s,def){ var on=document.querySelector('#'+id+' '+s+'.on'); return on?on.textContent.trim():def; }
   function setBtn(t,busy){ gen.innerHTML=busy?t:orig; gen.style.pointerEvents=busy?'none':'auto'; gen.style.opacity=busy?'.7':'1'; }
 
@@ -588,7 +581,6 @@
     var payload={prompt:t+(s?('\n卖点：'+s):''), format:'script', style:style, dur:dur, platform:plat, ctype:'分镜脚本'};
     var tags=[]; document.querySelectorAll('.sc-tag.on').forEach(function(tag){ tags.push(tag.textContent.trim()); });
     if(tags.length) payload.prompt+='\n标签：'+tags.join('、');
-    if(refImageData) payload.reference_images=[refImageData];
     fetch('/api/gen/copy',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify(payload)})
       .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
       .then(function(x){
@@ -608,52 +600,53 @@
     var url=(bdUrl.value||'').trim();
     if(!url){ scenes.innerHTML='<div style="padding:22px;text-align:center;color:#f4708a;font-size:13px;">请先粘贴视频链接</div>'; return; }
     currentMode='breakdown'; syncModeUi();
-    bdGen.disabled=true; bdGen.style.opacity='.6'; bdGen.textContent='提交中…';
+    setBdBtnBusy('提交中…');
     if(bdProgress) bdProgress.style.display='';
     setBdPhase('downloading','active');
     scenes.innerHTML='<div style="padding:34px; text-align:center; color:#60a5fa; font-size:13px;">正在下载视频…</div>';
     hideBreakdownMeta();
-    var pollCount=0, lastPhase='downloading', pollErrors=0;
-    fetch('/api/gen/breakdown',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify({url:url})})
+    var pollCount=0, lastPhase='downloading', submitMode=currentBreakdownTool;
+    fetch('/api/gen/breakdown',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify({url:url,mode:submitMode})})
       .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
       .then(function(x){
         if(x.s===401){ resetBdBtn(); if(window.HQ) HQ.login(); return; }
         if(x.s===402){ resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">点数不足 · <a href="recharge.html" style="color:#e7b24c">去充值</a></div>'; return; }
         if(!x.d.job_id){ resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">提交失败：'+((x.d&&x.d.detail)||'未知')+'</div>'; return; }
-        var MAX_POLL_ERRORS=10;
         var iv=setInterval(function(){
           pollCount++;
           fetch('/api/gen/job/'+x.d.job_id,{headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.json();}).then(function(d){
-            pollErrors=0;
             if(d.phase && d.phase!==lastPhase){ lastPhase=d.phase; setBdPhase(d.phase,'active'); }
             if(d.status==='done'){
               clearInterval(iv); resetBdBtn(); markAllBdPhasesDone();
-              renderBreakdown(d.result||{}); saveBreakdownHistory(d.result||{}); loadHistory();
+              if((d.result||{}).type==='breakdown_reverse') renderBreakdownReverse(d.result||{}); else renderBreakdown(d.result||{});
+              saveBreakdownHistory(d.result||{}); loadHistory();
               if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
             } else if(d.status==='error'||d.status==='failed'){
               clearInterval(iv); resetBdBtn();
-              scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">拆解失败：'+(d.error||'')+' · 已退点</div>';
+              scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">'+(submitMode==='reverse_prompt'?'反推失败：':'拆解失败：')+(d.error||'')+' · 已退点</div>';
             } else if(d.phase){
-              var phaseMsg={downloading:'正在下载视频…',extracting_frames:'正在抽取关键帧…',transcribing:'正在转写口播…',analyzing:'AI 分析拆解中…'};
+              var phaseMsg=submitMode==='reverse_prompt'
+                ? {downloading:'正在下载视频…',extracting_frames:'正在抽取关键帧…',transcribing:'正在转写口播…',analyzing:'AI 正在反推提示词…'}
+                : {downloading:'正在下载视频…',extracting_frames:'正在抽取关键帧…',transcribing:'正在转写口播…',analyzing:'AI 分析拆解中…'};
               scenes.innerHTML='<div style="padding:34px; text-align:center; color:#60a5fa; font-size:13px;">'+(phaseMsg[d.phase]||'处理中…')+'</div>';
             }
-            if(pollCount>120){ clearInterval(iv); resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">拆解超时，请稍后重试</div>'; }
-          }).catch(function(){
-            pollErrors++;
-            if(pollErrors>=3 && pollErrors<MAX_POLL_ERRORS) scenes.innerHTML='<div style="padding:34px; text-align:center; color:#f4a460; font-size:13px;">网络不稳定，正在重试…（'+pollErrors+'/'+MAX_POLL_ERRORS+'）</div>';
-            if(pollErrors>=MAX_POLL_ERRORS){ clearInterval(iv); resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">网络连接失败，请检查网络后重试</div>'; }
-          });
+            if(pollCount>120){ clearInterval(iv); resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">'+(submitMode==='reverse_prompt'?'反推超时，请稍后重试':'拆解超时，请稍后重试')+'</div>'; }
+          }).catch(function(){});
         },3000);
       }).catch(function(){ resetBdBtn(); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">网络错误，请重试</div>'; });
   }; }
 
   var copyBtn=null; document.querySelectorAll('.sc-btn').forEach(function(b){ if(b.textContent.indexOf('复制全部')>=0) copyBtn=b; });
   if(copyBtn){ var co=copyBtn.innerHTML; copyBtn.onclick=function(){
-    var copyScenes=getDisplayedScenes();
-    if(!copyScenes.length) return;
-    var txt=scriptText(copyScenes);
+    var prompt=getDisplayedPrompt(), txt='';
+    if(prompt) txt=prompt;
+    else {
+      var copyScenes=getDisplayedScenes();
+      if(!copyScenes.length) return;
+      txt=scriptText(copyScenes);
+    }
     if(navigator.clipboard) navigator.clipboard.writeText(txt);
-    copyBtn.textContent='已复制 ✓'; setTimeout(function(){ copyBtn.innerHTML=co; },1500);
+    copyBtn.textContent=prompt?'提示词已复制 ✓':'已复制 ✓'; setTimeout(function(){ copyBtn.innerHTML=co; },1500);
   }; }
 
   if(exportBtn){ var exportOrig=exportBtn.innerHTML; exportBtn.onclick=function(){
@@ -670,12 +663,14 @@
 
   function historyCard(item){
     var m=item.meta||{}, list=Array.isArray(m.scenes)?m.scenes:[];
-    var isBreakdown=(item.kind==='breakdown')||!!m.source_platform;
+    var breakdownTool=normalizeBreakdownTool(m.breakdown_tool||((item.kind==='breakdown_reverse')?'reverse_prompt':'scenes'));
+    var isBreakdown=(item.kind==='breakdown')||(item.kind==='breakdown_reverse')||!!m.source_platform;
+    var isReverseBreakdown=isBreakdown && breakdownTool==='reverse_prompt';
     var btn=document.createElement('button'); btn.type='button'; btn.className='sc-history-item';
     var title=document.createElement('div'); title.className='sc-history-title'; title.textContent=item.title||'（无标题）'; title.title=item.title||'';
     var info=document.createElement('div'); info.className='sc-history-meta';
     info.textContent=isBreakdown
-      ? ['拆解',platformText(m.source_platform),(m.duration||'')?((m.duration||'')+'s'):'',list.length+'个分镜'].filter(Boolean).join(' · ')
+      ? [(isReverseBreakdown?'反推':'拆解'),platformText(m.source_platform),(m.duration||'')?((m.duration||'')+'s'):'',isReverseBreakdown?'提示词':(list.length+'个分镜')].filter(Boolean).join(' · ')
       : [m.style||'分镜脚本',m.dur||'',list.length+'个分镜'].filter(Boolean).join(' · ');
     var when=document.createElement('div'); when.className='sc-history-time';
     when.textContent=item.created_at?new Date(Number(item.created_at)*1000).toLocaleString('zh-CN',{hour12:false}):'';
@@ -684,8 +679,13 @@
       var heading=item.title||'历史脚本';
       if(isBreakdown){
         if(bdUrl) bdUrl.value=m.source_url||'';
+        setBreakdownTool(breakdownTool);
         switchMode('breakdown');
-        renderBreakdown({source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,analysis:m.analysis||'',scenes:list});
+        if(isReverseBreakdown){
+          renderBreakdownReverse({type:'breakdown_reverse',source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,frame_count:m.frame_count||0,prompt:m.prompt||''});
+        }else{
+          renderBreakdown({source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,scenes:list});
+        }
         if(historyState) historyState.textContent='已载入：'+heading;
       }else{
         if(topic) topic.value=heading;
@@ -701,20 +701,16 @@
   function loadHistory(){
     if(!historyList) return;
     if(historyState) historyState.textContent='正在加载…';
-    Promise.all([
-      fetch('/api/gen/assets?limit=60&kind=copy',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.ok?r.json():{items:[]};}).catch(function(){return {items:[]};}),
-      fetch('/api/gen/assets?limit=60&kind=breakdown',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.ok?r.json():{items:[]};}).catch(function(){return {items:[]};})
-    ]).then(function(results){
-      var copyItems=(results[0].items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;});
-      var bdItems=(results[1].items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;});
-      // 合并 API 结果 + localStorage 兜底
-      var localItems=readBreakdownHistory();
-      var all=copyItems.concat(bdItems).concat(localItems).sort(function(a,b){return (b.created_at||0)-(a.created_at||0);}).slice(0,12);
-      // 去重
-      var seen={}; all=all.filter(function(item){ var key=item.title+'|'+(item.meta||{}).source_url; if(seen[key]) return false; seen[key]=true; return true; });
-      historyList.innerHTML=''; all.forEach(function(item){historyList.appendChild(historyCard(item));});
-      if(historyState) historyState.textContent=all.length?('共 '+all.length+' 条'):'暂无历史脚本';
-    }).catch(function(){ if(historyState) historyState.textContent='加载失败，请稍后重试'; });
+    fetch('/api/gen/assets?limit=60&kind=copy',{cache:'no-store',credentials:'same-origin',headers:{'Authorization':'Bearer '+tok()}})
+      .then(function(r){return r.ok?r.json():{items:[]};})
+      .catch(function(){return {items:[]};})
+      .then(function(d){
+        var copyItems=(d.items||[]).filter(function(item){return Array.isArray((item.meta||{}).scenes)&&item.meta.scenes.length;});
+        var breakdownItems=readBreakdownHistory();
+        var all=copyItems.concat(breakdownItems).sort(function(a,b){return (b.created_at||0)-(a.created_at||0);}).slice(0,12);
+        historyList.innerHTML=''; all.forEach(function(item){historyList.appendChild(historyCard(item));});
+        if(historyState) historyState.textContent=all.length?('共 '+all.length+' 条'):'暂无历史脚本';
+      }).catch(function(){ if(historyState) historyState.textContent='加载失败，请稍后重试'; });
   }
   if(historyBtn&&historySection) historyBtn.onclick=function(){historySection.scrollIntoView({behavior:'smooth',block:'start'});};
 
@@ -828,17 +824,22 @@
   if(bdRemakeBtn){ bdRemakeBtn.onclick=function(e){
     e.preventDefault();
     if(!lastBreakdown){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成拆解'); return; }
-    var scenes=normalizeBreakdownScenes((lastBreakdown&&lastBreakdown.scenes)||[]);
-    if(!scenes.length){ if(window.HQ&&window.HQ.toast) HQ.toast('拆解结果里没有可用分镜'); return; }
-    _pickRemakeStyle(function(style){
-      if(style==='剧情'){
-        _doGenerate({scenes:scenes,style:'剧情'},bdRemakeBtn);
-      } else {
-        _showAvatarPicker(function(avatarId){
-          _doGenerate({scenes:scenes,style:style,avatar_id:avatarId},bdRemakeBtn);
-        });
-      }
-    });
+    var payload=prepareBreakdownRemakePayload(lastBreakdown);
+    if(!payload.scenes.length){ if(window.HQ&&window.HQ.toast) HQ.toast('拆解结果里没有可用分镜'); return; }
+    _doGenerate(payload,bdRemakeBtn);
+  }; }
+  if(bdReverseCopyBtn){ var reverseCopyOrig=bdReverseCopyBtn.innerHTML; bdReverseCopyBtn.onclick=function(e){
+    e.preventDefault();
+    var prompt=getDisplayedPrompt();
+    if(!prompt){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成提示词反推'); return; }
+    if(navigator.clipboard) navigator.clipboard.writeText(prompt);
+    bdReverseCopyBtn.textContent='已复制 ✓'; setTimeout(function(){ bdReverseCopyBtn.innerHTML=reverseCopyOrig; },1500);
+  }; }
+  if(bdReverseDrawBtn){ bdReverseDrawBtn.onclick=function(e){
+    e.preventDefault();
+    var prompt=getDisplayedPrompt();
+    if(!prompt){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成提示词反推'); return; }
+    location.href=handoffUrl('banana.html',prompt,'&engine=nb2');
   }; }
   loadHistory();
 })();

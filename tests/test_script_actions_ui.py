@@ -42,7 +42,10 @@ class ScriptActionsUiTests(unittest.TestCase):
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
         self.assertIn('id="panelBreakdown"', self.html)
+        self.assertIn('id="bdToolScenes"', self.html)
+        self.assertIn('id="bdToolReverse"', self.html)
         self.assertIn('id="bdGen"', self.html)
+        self.assertIn('id="bdGenLabel"', self.html)
         self.assertIn("fetch('/api/gen/breakdown'", self.html)
 
     def test_breakdown_progress_and_history_restore_exist(self):
@@ -54,22 +57,27 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("BREAKDOWN_HISTORY_KEY='hq_script_breakdown_history'", self.html)
         self.assertIn("switchMode('breakdown')", self.html)
         self.assertIn("renderBreakdown({source_url:m.source_url", self.html)
-        self.assertIn("analysis:m.analysis||''", self.html)
+        self.assertIn("renderBreakdownReverse({type:'breakdown_reverse'", self.html)
 
-    def test_breakdown_analysis_is_rendered_and_saved_to_history(self):
-        self.assertIn('id="bdAnalysis"', self.html)
-        self.assertIn('id="bdAnalysisText"', self.html)
-        self.assertIn("function setBreakdownAnalysis(text)", self.html)
-        self.assertIn("setBreakdownAnalysis(analysis)", self.html)
-        self.assertIn("analysis:(bd.analysis||'')", self.html)
+    def test_breakdown_request_switches_between_scenes_and_reverse_prompt(self):
+        self.assertIn("setBreakdownTool('scenes')", self.html)
+        self.assertIn("setBreakdownTool('reverse_prompt')", self.html)
+        self.assertIn("body:JSON.stringify({url:url,mode:submitMode})", self.html)
+        self.assertIn("if((d.result||{}).type==='breakdown_reverse') renderBreakdownReverse(d.result||{}); else renderBreakdown(d.result||{});", self.html)
 
     def test_breakdown_remake_reuses_current_one_click_flow(self):
         self.assertIn('id="bdRemakeBtn"', self.html)
-        self.assertIn("prepareBreakdownRemakePayload(bd, style)", self.html)
-        self.assertIn("return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:style||'剧情'};", self.html)
-        self.assertIn("_pickRemakeStyle(function(style)", self.html)
-        self.assertIn("_showAvatarPicker(function(avatarId)", self.html)
-        self.assertIn("_doGenerate({scenes:scenes,style:'剧情'},bdRemakeBtn)", self.html)
+        self.assertIn("prepareBreakdownRemakePayload(lastBreakdown)", self.html)
+        self.assertIn("return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:'剧情'};", self.html)
+        self.assertIn("_doGenerate(payload,bdRemakeBtn)", self.html)
+        self.assertIn("fetch('/api/gen/script_to_video'", self.html)
+
+    def test_breakdown_reverse_actions_exist(self):
+        self.assertIn('id="bdReverseCopyBtn"', self.html)
+        self.assertIn('id="bdReverseDrawBtn"', self.html)
+        self.assertIn("function renderBreakdownReverse(bd){", self.html)
+        self.assertIn("function getDisplayedPrompt(){", self.html)
+        self.assertIn("location.href=handoffUrl('banana.html',prompt,'&engine=nb2');", self.html)
 
     def test_history_loads_copy_assets_and_restores_scenes(self):
         self.assertIn("'/api/gen/assets?limit=60&kind=copy'", self.html)
@@ -80,24 +88,6 @@ class ScriptActionsUiTests(unittest.TestCase):
     def test_history_controls_are_accessible_buttons(self):
         self.assertIn('id="scHistoryBtn" class="sc-btn" type="button"', self.html)
         self.assertIn("btn.type='button'; btn.className='sc-history-item'", self.html)
-
-    def test_breakdown_poll_handles_network_errors(self):
-        self.assertIn("pollErrors=0", self.html)
-        self.assertIn("MAX_POLL_ERRORS=10", self.html)
-        self.assertIn("pollErrors++;", self.html)
-        self.assertIn("网络不稳定，正在重试", self.html)
-        self.assertIn("网络连接失败，请检查网络后重试", self.html)
-
-    def test_breakdown_scenes_are_editable(self):
-        self.assertIn('id="bdEditBtn"', self.html)
-        self.assertIn("function _toggleBreakdownEdit()", self.html)
-        self.assertIn("function _editableCardHTML(s,i)", self.html)
-        self.assertIn("function _saveBreakdownEdit()", self.html)
-        self.assertIn("function _renderBreakdownEditMode()", self.html)
-        self.assertIn('data-scene-dur', self.html)
-        self.assertIn('data-scene-text', self.html)
-        self.assertIn('data-scene-line', self.html)
-        self.assertIn("bdEditing=false", self.html)
 
 
 if __name__ == "__main__":
