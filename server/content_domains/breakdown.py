@@ -12,12 +12,22 @@ _UNSUPPORTED_PLATFORMS = {"channels", "weixin", "wechat"}
 
 def gen_breakdown(payload):
     """下载视频 → 抽帧 → ASR → GPT-4o 多模态分析 → 分镜拆解。
-    由 run_job 调用，走标准 job 生命周期（扣点/退点/reaper 全自动）。"""
+    由 run_job 调用，走标准 job 生命周期（扣点/退点/reaper 全自动）。
+    支持单个 url 或批量 urls（≤5 条，顺序处理）。"""
+    import tikhub
+
+    urls = payload.get("urls")
+    if urls and isinstance(urls, list):
+        urls = [u.strip() for u in urls if isinstance(u, str) and u.strip()]
+        if not urls:
+            raise ValueError("请粘贴抖音/小红书/视频号链接")
+        if len(urls) > 5:
+            raise ValueError("批量拆解最多 5 条链接")
+        return _do_batch_breakdown(payload, urls)
+
     url = (payload.get("url") or "").strip()
     if not url:
         raise ValueError("请粘贴抖音/小红书/视频号链接")
-
-    import tikhub
 
     # ① 解析链接
     info = tikhub.parse_link(url)
@@ -26,6 +36,36 @@ def gen_breakdown(payload):
         raise ValueError("视频号暂不支持拆解，请粘贴抖音/小红书链接")
 
     return _do_breakdown(payload, info, url)
+
+
+def _do_batch_breakdown(payload, urls):
+    """批量拆解：逐个处理，收拢结果。"""
+    import tikhub
+
+    job_id = payload.get("_job_id")
+    results = []
+    errors = []
+    for idx, url in enumerate(urls):
+        _heartbeat(job_id, "batch_%d_%d" % (idx + 1, len(urls)))
+        try:
+            info = tikhub.parse_link(url)
+            platform = (info.get("platform") or "").lower()
+            if platform in _UNSUPPORTED_PLATFORMS:
+                errors.append({"url": url, "error": "视频号暂不支持"})
+                continue
+            r = _do_breakdown(payload, info, url)
+            results.append(r)
+        except ValueError as e:
+            errors.append({"url": url, "error": str(e)})
+        except Exception as e:
+            errors.append({"url": url, "error": "拆解失败：" + str(e)[:200]})
+
+    return {
+        "type": "breakdown_batch",
+        "results": results,
+        "errors": errors,
+        "total": len(urls),
+    }
 
 
 def _do_breakdown(payload, info, url):
