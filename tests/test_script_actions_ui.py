@@ -23,15 +23,16 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("a.download=filename", self.html)
 
     def test_one_click_video_calls_script_to_video_api(self):
-        self.assertIn('id="scOneClickVideo"', self.html)
+        self.assertIn('id="scGenVideo"', self.html)
+        self.assertIn('id="scGenAudio"', self.html)
         self.assertIn("fetch('/api/gen/script_to_video'", self.html)
-        self.assertIn("scenes:scenesForHandoff", self.html)
-        self.assertIn("_resetOneClick", self.html)
+        self.assertIn("_setBusy", self.html)
+        self.assertIn("_doGenerate", self.html)
 
     def test_one_click_video_passes_style_and_selected_avatar(self):
         self.assertIn("lastStyle=style||'口播'", self.html)
-        self.assertIn("_doOneClick({scenes:scenesForHandoff,style:'剧情'})", self.html)
-        self.assertIn("_doOneClick({scenes:scenesForHandoff,style:lastStyle,avatar_id:avatarId})", self.html)
+        self.assertIn("_showAvatarPicker", self.html)
+        self.assertIn("avatar_id:avatarId", self.html)
 
     def test_one_click_video_loads_avatar_picker_for_talking_styles(self):
         self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
