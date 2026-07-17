@@ -44,6 +44,15 @@
   .sc-history-meta{margin-top:8px;color:#94a4bb;font-size:11.5px;line-height:1.6}
   .sc-history-time{margin-top:10px;color:#5c6b82;font-size:11px}
   @media (max-width:760px){.sc-history-grid{grid-template-columns:1fr}}
+  .sc-mode-tab{padding:9px 18px;font-size:14px;font-weight:600;border:1px solid rgba(148,164,187,.16);border-radius:12px;background:rgba(148,164,187,.04);color:#94a4bb;cursor:pointer;font-family:inherit;transition:.16s}
+  .sc-mode-tab:hover{border-color:rgba(231,178,76,.34);color:#eaf1fa}
+  .sc-mode-tab.on{color:#e7b24c;background:rgba(231,178,76,.1);border-color:rgba(231,178,76,.32)}
+  .bd-phase{padding:4px 10px;font-size:11px;border-radius:7px;color:#5c6b82;background:rgba(148,164,187,.06);border:1px solid rgba(148,164,187,.1)}
+  .bd-phase.active{color:#2dd4bf;border-color:rgba(45,212,191,.3);background:rgba(45,212,191,.06)}
+  .bd-phase.done{color:#4ade80;border-color:rgba(74,222,128,.2);background:rgba(74,222,128,.05)}
+  .bd-section{margin-top:14px;padding:13px 15px;border:1px solid rgba(148,164,187,.1);border-radius:12px;background:rgba(7,11,19,.3)}
+  .bd-section-title{font-size:12px;font-weight:700;color:#94a4bb;margin-bottom:7px}
+  .bd-section-body{font-size:12.5px;color:#cbd5e1;line-height:1.7;white-space:pre-wrap}
 </style>
 <link rel="stylesheet" href="theme.css?v=5873a2f4">
 </head>
@@ -65,10 +74,17 @@
     </div>
   </div>
 
+  <!-- 模式切换 -->
+  <div id="scModeTabs" style="display:flex; gap:6px; margin-bottom:18px;">
+    <button class="sc-mode-tab on" data-mode="write" type="button">✍️ AI写脚本</button>
+    <button class="sc-mode-tab" data-mode="breakdown" type="button">🔍 拆解视频</button>
+  </div>
+
   <div class="gScript">
 
     <!-- 左：创作面板 -->
     <div class="sc-panel">
+      <div id="panelWrite">
       <div style="display:flex; align-items:flex-start; justify-content:space-between;">
         <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><img src="../assets/icons/ic_script.png" alt="" style="width:30px;height:30px;object-fit:contain;flex:none;">文案编导</h1><p style="margin:7px 0 0; font-size:13px; color:#94a4bb;">填好选题与卖点，一键生成可拍的分镜脚本</p></div>
       </div>
@@ -116,6 +132,33 @@
       </button>
       <div style="text-align:center; margin-top:11px;"><span class="sc-hint">每次生成 1 套 3 分镜脚本 · 失败自动退点</span></div>
     </div>
+    </div>
+
+    <!-- ====== 拆解视频模式 ====== -->
+    <div id="panelBreakdown" style="display:none;">
+      <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+        <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><span style="font-size:26px;">🔍</span>爆款拆解</h1><p style="margin:7px 0 0; font-size:13px; color:#94a4bb;">粘贴竞品视频链接，AI 拆解分镜脚本</p></div>
+      </div>
+      <div class="sc-lab" style="margin-top:22px;">视频链接</div>
+      <div style="position:relative; border:1px solid rgba(148,164,187,.16); background:rgba(7,11,19,.5); border-radius:12px; padding:13px 14px;">
+        <input id="bdUrl" type="text" placeholder="粘贴抖音/小红书视频链接…" style="width:100%; background:transparent; border:none; outline:none; color:#eaf1fa; font-size:13.5px; line-height:1.7; font-family:inherit;">
+      </div>
+      <div style="margin-top:8px; font-size:11px; color:#5c6b82;">支持抖音、小红书公开视频链接</div>
+      <button id="bdGen" class="hv-lift" style="width:100%; height:54px; margin-top:18px; font-size:16px; font-weight:700; color:#1a1206; background:linear-gradient(135deg,#60a5fa,#3b82f6); border:none; border-radius:14px; cursor:pointer; box-shadow:0 14px 34px -12px rgba(59,130,246,.5); transition:.2s; font-family:inherit; display:flex; align-items:center; justify-content:center; gap:9px;">
+        🔍 开始拆解（8 点）
+      </button>
+      <div style="text-align:center; margin-top:11px;"><span class="sc-hint">下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒</span></div>
+      <div id="bdProgress" style="display:none; margin-top:20px;">
+        <div style="font-size:12.5px; font-weight:600; color:#94a4bb; margin-bottom:8px;">拆解进度</div>
+        <div class="bd-progress" id="bdPhases">
+          <span class="bd-phase" data-p="downloading">⬇ 下载视频</span><span style="color:#5c6b82;font-size:10px;">→</span>
+          <span class="bd-phase" data-p="extracting_frames">🎞 抽帧</span><span style="color:#5c6b82;font-size:10px;">→</span>
+          <span class="bd-phase" data-p="transcribing">🎙 语音转写</span><span style="color:#5c6b82;font-size:10px;">→</span>
+          <span class="bd-phase" data-p="analyzing">🧠 AI分析</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
     <!-- 右：脚本 / 分镜预览 -->
     <div class="sc-panel script-preview-panel" style="border-color:rgba(231,178,76,.16); background:linear-gradient(165deg, rgba(20,17,10,.55), rgba(12,16,26,.5));">
@@ -197,6 +240,16 @@
 
       </div>
 
+      <!-- 拆解：元信息 -->
+      <div id="bdResultMeta" style="display:none; margin-top:10px; font-size:11.5px; color:#5c6b82;">
+        <a id="bdSourceLink" href="#" target="_blank" rel="noopener" style="color:#60a5fa;">查看原视频 →</a>
+      </div>
+      <!-- 拆解：内容分析 -->
+      <div id="bdAnalysis" class="bd-section" style="display:none;">
+        <div class="bd-section-title">📋 内容分析</div>
+        <div class="bd-section-body"></div>
+      </div>
+
       <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; padding-top:16px; border-top:1px solid rgba(148,164,187,.1);">
         <span class="sc-hint">每张分镜可单独转视频/转口播，或使用下方批量操作</span>
         <div style="display:flex; gap:9px;">
@@ -230,7 +283,7 @@
   var historyBtn=document.getElementById('scHistoryBtn'), exportBtn=document.getElementById('scExport'),
       historySection=document.getElementById('scHistorySection'), historyList=document.getElementById('scHistoryList'),
       historyState=document.getElementById('scHistoryState');
-  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播';
+  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', currentMode='write', lastBreakdown=null;
   function tok(){ return '__cookie__'; }
   function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
   function escAttr(s){ return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
@@ -286,6 +339,43 @@
   function pick(id,s,def){ var on=document.querySelector('#'+id+' '+s+'.on'); return on?on.textContent.trim():def; }
   function setBtn(t,busy){ gen.innerHTML=busy?t:orig; gen.style.pointerEvents=busy?'none':'auto'; gen.style.opacity=busy?'.7':'1'; }
 
+  // ============ 模式切换 ============
+  function switchMode(mode){
+    currentMode=mode;
+    var panelWrite=document.getElementById('panelWrite'), panelBreakdown=document.getElementById('panelBreakdown');
+    var previewHeader=document.querySelector('.script-preview-panel > div:first-child span:last-child');
+    if(panelWrite) panelWrite.style.display=mode==='write'?'':'none';
+    if(panelBreakdown) panelBreakdown.style.display=mode==='breakdown'?'':'none';
+    if(previewHeader) previewHeader.textContent=mode==='write'?'脚本 · 分镜预览':'拆解结果 · 分镜';
+    document.querySelectorAll('.sc-mode-tab').forEach(function(t){t.classList.toggle('on',t.dataset.mode===mode);});
+    if(mode==='write' && !lastScenes.length) _resetPreview();
+    if(mode==='breakdown' && !lastBreakdown) _resetPreview();
+    if(mode==='breakdown' && lastBreakdown) renderBreakdown(lastBreakdown);
+    if(mode==='write' && lastScenes.length) render({scenes:lastScenes},(topic&&topic.value)||'',pick('segStyle','.sc-opt','口播'),pick('segDur','.sc-opt','30s'));
+  }
+  document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.onclick=function(){ switchMode(this.dataset.mode); }; });
+  function _resetPreview(){
+    scenes.innerHTML='<div class=\"sc-card\"><div class=\"sc-shot\"><span class=\"mono\" style=\"font-size:13px;font-weight:700;color:#e7b24c;\">镜号 01</span></div><div style=\"flex:1;min-width:0;\"><div style=\"font-size:12px;color:#5c6b82;\">等待生成…</div></div></div>';
+    if(meta) meta.innerHTML='';
+    var bdMeta=document.getElementById('bdResultMeta'), bdAnalysis=document.getElementById('bdAnalysis');
+    if(bdMeta) bdMeta.style.display='none';
+    if(bdAnalysis) bdAnalysis.style.display='none';
+  }
+  // ============ 渲染：爆款拆解 ============
+  function renderBreakdown(bd){
+    lastBreakdown=bd;
+    var list=bd.scenes||[];
+    if(meta){
+      var platformLabel={douyin:'抖音',xiaohongshu:'小红书'};
+      meta.innerHTML='<span style=\"color:#60a5fa;\">🔍 拆解</span><span style=\"color:#5c6b82;\">·</span><span>'+esc(bd.source_title||'')+'</span><span style=\"color:#5c6b82;\">·</span><span>'+(platformLabel[bd.source_platform]||bd.source_platform||'')+'</span><span style=\"color:#5c6b82;\">·</span><span class=\"mono\">'+(bd.duration||'')+'s</span><span style=\"color:#5c6b82;\">·</span><span>共 <span class=\"mono\">'+list.length+'</span> 个分镜</span>';
+    }
+    scenes.innerHTML=list.map(function(s,i){ return sceneCardHTML(s,i,false); }).join('');
+    var bdAnalysis=document.getElementById('bdAnalysis');
+    if(bdAnalysis && bd.analysis){ bdAnalysis.style.display=''; bdAnalysis.querySelector('.bd-section-body').textContent=bd.analysis; }
+    var bdMeta=document.getElementById('bdResultMeta'); if(bdMeta) bdMeta.style.display='';
+    var bdSourceLink=document.getElementById('bdSourceLink'); if(bdSourceLink&&bd.source_url) bdSourceLink.href=bd.source_url;
+  }
+
   // 事件委托：动态分镜的「转视频」/「转口播」(data-to-video / data-to-audio 带画面/口播文案)
   if(scenes){ scenes.addEventListener('click', function(e){
     var a=e.target.closest('[data-to-video]'); if(a){ e.preventDefault(); location.href=handoffUrl('video.html',a.getAttribute('data-to-video')); return; }
@@ -331,6 +421,43 @@
         },3000);
       }).catch(function(){ setBtn(orig,false); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">网络错误，请重试</div>'; });
   };
+
+  // ============ 爆款拆解：提交 ============
+  var bdGen=document.getElementById('bdGen'), bdUrl=document.getElementById('bdUrl');
+  if(bdGen){ var bdOrig=bdGen.innerHTML; bdGen.onclick=function(){
+    var url=(bdUrl.value||'').trim();
+    if(!url){ alert('请粘贴抖音或小红书视频链接'); return; }
+    if(!/douyin\.com|xiaohongshu\.com|xhslink\.com|iesdouyin\.com/i.test(url)){
+      scenes.innerHTML='<div style=\"padding:22px;text-align:center;color:#f4708a;font-size:13px;\">暂只支持抖音、小红书链接</div>'; return; }
+    bdGen.disabled=true; bdGen.style.opacity='.6'; bdGen.textContent='提交中…';
+    var bdProgress=document.getElementById('bdProgress'); if(bdProgress) bdProgress.style.display='';
+    var phases=document.querySelectorAll('#bdPhases .bd-phase'); phases.forEach(function(p){p.classList.remove('active','done');});
+    (document.querySelector('#bdPhases [data-p=\"downloading\"]')||{}).classList.add('active');
+    scenes.innerHTML='<div style=\"padding:34px;text-align:center;color:#60a5fa;font-size:13px;\">正在下载视频…</div>';
+    var pollCount=0, lastPhase='downloading';
+    fetch('/api/gen/breakdown',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify({url:url})})
+      .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
+      .then(function(x){
+        if(x.s===401){ bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig; if(window.HQ) HQ.login(); return; }
+        if(!x.d.job_id){ bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig; scenes.innerHTML='<div style=\"padding:24px;text-align:center;color:#f4708a;\">提交失败：'+((x.d&&x.d.detail)||'未知')+'</div>'; return; }
+        var iv=setInterval(function(){ pollCount++;
+          fetch('/api/gen/job/'+x.d.job_id,{headers:{'Authorization':'Bearer '+tok()}}).then(function(r){return r.json();}).then(function(d){
+            if(d.phase && d.phase!==lastPhase){ lastPhase=d.phase; var el=document.querySelector('#bdPhases [data-p=\"'+d.phase+'\"]'); if(el){el.classList.add('active');el.classList.remove('done');}
+              var order=['downloading','extracting_frames','transcribing','analyzing']; var idx=order.indexOf(d.phase);
+              for(var i=0;i<idx;i++){ var pe=document.querySelector('#bdPhases [data-p=\"'+order[i]+'\"]'); if(pe){pe.classList.add('done');pe.classList.remove('active');} }
+            }
+            if(d.status==='done'){ clearInterval(iv); bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig;
+              document.querySelectorAll('#bdPhases .bd-phase').forEach(function(p){p.classList.add('done');p.classList.remove('active');});
+              if(bdProgress) bdProgress.style.display='none'; scenes.innerHTML=''; renderBreakdown(d.result);
+              if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints(); }
+            else if(d.status==='error'||d.status==='failed'){ clearInterval(iv); bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig;
+              scenes.innerHTML='<div style=\"padding:24px;text-align:center;color:#f4708a;\">拆解失败：'+(d.error||'')+' · 已退点</div>'; }
+            if(pollCount>120){ clearInterval(iv); bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig;
+              scenes.innerHTML='<div style=\"padding:24px;text-align:center;color:#f4708a;\">拆解超时，请重试</div>'; }
+          }).catch(function(){});
+        },3000);
+      }).catch(function(){ bdGen.disabled=false; bdGen.style.opacity='1'; bdGen.innerHTML=bdOrig; scenes.innerHTML='<div style=\"padding:24px;text-align:center;color:#f4708a;\">网络错误，请重试</div>'; });
+  }; }
 
   // 复制全部
   var copyBtn=null; document.querySelectorAll('.sc-btn').forEach(function(b){ if(b.textContent.indexOf('复制全部')>=0) copyBtn=b; });
