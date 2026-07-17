@@ -182,6 +182,22 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("ASR 转录失败", calls["usermsg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
+    def test_iter_json_objects_skips_oversized_input(self):
+        big = "x" * 50001
+        result = list(self.breakdown._iter_json_objects(big))
+        self.assertEqual(result, [])
+
+    def test_iter_json_objects_handles_normal_input(self):
+        result = list(self.breakdown._iter_json_objects('{"a":1} extra {"b":2}'))
+        self.assertEqual(len(result), 2)
+        self.assertIn('{"a":1}', result)
+        self.assertIn('{"b":2}', result)
+
+    def test_extract_frames_clamps_count_to_range(self):
+        import inspect
+        src = inspect.getsource(self.breakdown._extract_frames)
+        self.assertIn("max(2, min(count, 12))", src)
+
 
 if __name__ == "__main__":
     unittest.main()
