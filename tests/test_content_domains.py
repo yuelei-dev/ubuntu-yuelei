@@ -348,6 +348,133 @@ class ContentDomainTests(unittest.TestCase):
             finally:
                 audio.adb = original_adb
 
+    def test_breakdown_default_mode_keeps_scene_flow(self):
+        breakdown = importlib.import_module("content_domains.breakdown")
+        original_extract = breakdown._extract_frames
+        original_scenes = breakdown._breakdown_scenes_from_frames
+        original_reverse = breakdown._reverse_prompt_from_frames
+        original_heartbeat = breakdown._heartbeat
+        original_tikhub = sys.modules.get("tikhub")
+
+        temp_dirs = []
+
+        class FakeTikHub:
+            @staticmethod
+            def parse_link(url):
+                return {"platform": "douyin", "id": "123"}
+
+            @staticmethod
+            def detail(platform, item_id, note_type=None):
+                return {"play_url": "https://example.test/video.mp4", "duration": 18, "title": "示例爆款视频"}
+
+            @staticmethod
+            def download_to_file(play_url, deadline, path):
+                Path(path).write_bytes(b"video")
+
+            @staticmethod
+            def transcript(det, video_path=None):
+                return [{"start": 0, "end": 2, "text": "开场台词"}]
+
+        def fake_extract(video_path, count=6, duration=30):
+            td = tempfile.TemporaryDirectory()
+            temp_dirs.append(td)
+            frame = Path(td.name) / "frame_1.jpg"
+            frame.write_bytes(b"frame")
+            return td.name, [str(frame)]
+
+        sys.modules["tikhub"] = FakeTikHub()
+        breakdown._extract_frames = fake_extract
+        breakdown._heartbeat = lambda job_id, phase: None
+        breakdown._breakdown_scenes_from_frames = lambda title, duration, platform, script_text, frames: {
+            "scenes": [{"dur": "3s", "scene": "开场近景", "line": "开场台词"}]
+        }
+        breakdown._reverse_prompt_from_frames = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("reverse flow should not run"))
+        try:
+            result = breakdown.gen_breakdown({"url": "https://v.douyin.com/demo"})
+        finally:
+            breakdown._extract_frames = original_extract
+            breakdown._breakdown_scenes_from_frames = original_scenes
+            breakdown._reverse_prompt_from_frames = original_reverse
+            breakdown._heartbeat = original_heartbeat
+            if original_tikhub is None:
+                sys.modules.pop("tikhub", None)
+            else:
+                sys.modules["tikhub"] = original_tikhub
+            for td in temp_dirs:
+                td.cleanup()
+
+        self.assertEqual(result["type"], "breakdown")
+        self.assertEqual(result["source_title"], "示例爆款视频")
+        self.assertEqual(result["source_platform"], "douyin")
+        self.assertEqual(result["duration"], 18)
+        self.assertEqual(result["scenes"], [{"dur": "3s", "scene": "开场近景", "line": "开场台词"}])
+
+    def test_breakdown_reverse_prompt_mode_reuses_video_pipeline(self):
+        breakdown = importlib.import_module("content_domains.breakdown")
+        original_extract = breakdown._extract_frames
+        original_scenes = breakdown._breakdown_scenes_from_frames
+        original_reverse = breakdown._reverse_prompt_from_frames
+        original_heartbeat = breakdown._heartbeat
+        original_tikhub = sys.modules.get("tikhub")
+
+        temp_dirs = []
+
+        class FakeTikHub:
+            @staticmethod
+            def parse_link(url):
+                return {"platform": "xiaohongshu", "id": "abc"}
+
+            @staticmethod
+            def detail(platform, item_id, note_type=None):
+                return {"play_url": "https://example.test/video.mp4", "duration": 27, "title": "质感样片"}
+
+            @staticmethod
+            def download_to_file(play_url, deadline, path):
+                Path(path).write_bytes(b"video")
+
+            @staticmethod
+            def transcript(det, video_path=None):
+                return "[0s-3s] 高级感口播"
+
+        def fake_extract(video_path, count=6, duration=30):
+            td = tempfile.TemporaryDirectory()
+            temp_dirs.append(td)
+            frame = Path(td.name) / "frame_1.jpg"
+            frame.write_bytes(b"frame")
+            return td.name, [str(frame)]
+
+        sys.modules["tikhub"] = FakeTikHub()
+        breakdown._extract_frames = fake_extract
+        breakdown._heartbeat = lambda job_id, phase: None
+        breakdown._breakdown_scenes_from_frames = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("scene flow should not run"))
+        breakdown._reverse_prompt_from_frames = lambda title, duration, platform, script_text, frames: "轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子"
+        try:
+            result = breakdown.gen_breakdown({"url": "https://www.xiaohongshu.com/discovery/item/123", "mode": "reverse_prompt"})
+        finally:
+            breakdown._extract_frames = original_extract
+            breakdown._breakdown_scenes_from_frames = original_scenes
+            breakdown._reverse_prompt_from_frames = original_reverse
+            breakdown._heartbeat = original_heartbeat
+            if original_tikhub is None:
+                sys.modules.pop("tikhub", None)
+            else:
+                sys.modules["tikhub"] = original_tikhub
+            for td in temp_dirs:
+                td.cleanup()
+
+        self.assertEqual(result["type"], "breakdown_reverse")
+        self.assertEqual(result["source_title"], "质感样片")
+        self.assertEqual(result["source_platform"], "xiaohongshu")
+        self.assertEqual(result["duration"], 27)
+        self.assertEqual(result["frame_count"], 1)
+        self.assertIn("轻奢美容院场景", result["prompt"])
+
+    def test_breakdown_rejects_unknown_mode(self):
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with self.assertRaises(ValueError) as cm:
+            breakdown.gen_breakdown({"url": "https://v.douyin.com/demo", "mode": "mystery"})
+        self.assertIn("mode 仅支持 scenes / reverse_prompt", str(cm.exception))
+
     def _slot_snapshot(self, adb, username, slot_id):
         with closing(adb()) as c:
             row = c.execute("""SELECT status, voice_id, reclone_count, updated_at, clone_upload_at

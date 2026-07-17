@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → GPT-4o 多模态 → 分镜脚本"""
+"""爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → GPT-4o 多模态 → 分镜脚本 / 提示词反推"""
 import os, json, time, base64, tempfile, subprocess, shutil
 from contextlib import closing
 
@@ -8,14 +8,18 @@ from . import egress
 
 # 不支持的平台（视频号加密流需要 Isaac64 解密，暂不支持）
 _UNSUPPORTED_PLATFORMS = {"channels", "weixin", "wechat"}
+_BREAKDOWN_MODE_SCENES = "scenes"
+_BREAKDOWN_MODE_REVERSE_PROMPT = "reverse_prompt"
+_BREAKDOWN_SUPPORTED_MODES = {_BREAKDOWN_MODE_SCENES, _BREAKDOWN_MODE_REVERSE_PROMPT}
 
 
 def gen_breakdown(payload):
-    """下载视频 → 抽帧 → ASR → GPT-4o 多模态分析 → 分镜拆解。
+    """下载视频 → 抽帧 → ASR → GPT-4o 多模态分析 → 分镜拆解 / 提示词反推。
     由 run_job 调用，走标准 job 生命周期（扣点/退点/reaper 全自动）。"""
     url = (payload.get("url") or "").strip()
     if not url:
         raise ValueError("请粘贴抖音/小红书/视频号链接")
+    mode = _normalize_mode(payload)
 
     import tikhub
 
@@ -25,12 +29,22 @@ def gen_breakdown(payload):
     if platform in _UNSUPPORTED_PLATFORMS:
         raise ValueError("视频号暂不支持拆解，请粘贴抖音/小红书链接")
 
-    return _do_breakdown(payload, info, url)
+    return _do_breakdown(payload, info, url, mode)
 
 
-def _do_breakdown(payload, info, url):
+def _normalize_mode(payload):
+    mode = str((payload or {}).get("mode") or _BREAKDOWN_MODE_SCENES).strip().lower()
+    if not mode:
+        mode = _BREAKDOWN_MODE_SCENES
+    if mode not in _BREAKDOWN_SUPPORTED_MODES:
+        raise ValueError("mode 仅支持 scenes / reverse_prompt")
+    return mode
+
+
+def _do_breakdown(payload, info, url, mode=None):
     import tikhub
 
+    mode = mode or _normalize_mode(payload)
     det = tikhub.detail(info["platform"], info["id"], info.get("note_type"))
     play_url = det.get("play_url")
     if not play_url:
@@ -54,34 +68,28 @@ def _do_breakdown(payload, info, url):
         frame_dir, frames = _extract_frames(tmp_video.name, frame_count, duration)
 
         script_text = ""
-        asr_failed = False
         try:
             _heartbeat(job_id, "transcribing")
             segs = tikhub.transcript(det, video_path=tmp_video.name)
             script_text = _format_transcript(segs)
         except Exception:
-            asr_failed = True
+            pass
 
         _heartbeat(job_id, "analyzing")
         platform = info.get("platform", "")
-        usermsg = (
-            "视频标题：" + str(title) + "\n"
-            "时长：" + str(duration) + "s\n"
-            "平台：" + str(platform) + "\n\n"
-            "口播文案（带时间轴）：\n" + (str(script_text) if script_text else "（ASR 转录失败，请根据画面帧判断内容）") + "\n\n"
-            "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"画面描述(10字内)\",\"line\":\"口播台词\"}],"
-            "\"analysis\":\"视频内容综合分析(含视频主题、背景、构图运镜、人物特征、产品细节、情绪氛围、字幕建议等)\"}，"
-            "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
-            "每个 scene 一句话说清画面，line 是原视频对应的口播内容。"
-        )
-        raw = _chat_multimodal(
-            "你是黄雀传媒资深短视频编导。分析视频关键帧和口播，拆解为简洁的分镜脚本，同时输出一份视频内容综合分析。"
-            "只输出 JSON，不要多余内容。",
-            usermsg, frames
-        )
+        if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
+            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, frames)
+            return {
+                "type": "breakdown_reverse",
+                "source_url": url,
+                "source_title": title,
+                "source_platform": platform,
+                "duration": duration,
+                "frame_count": len(frames or []),
+                "prompt": prompt,
+            }
 
-        result = _parse_breakdown_json(raw)
-
+        result = _breakdown_scenes_from_frames(title, duration, platform, script_text, frames)
         return {
             "type": "breakdown",
             "source_url": url,
@@ -89,8 +97,6 @@ def _do_breakdown(payload, info, url):
             "source_platform": platform,
             "duration": duration,
             "scenes": result.get("scenes", []),
-            "analysis": result.get("analysis", ""),
-            "asr_failed": asr_failed,
         }
     finally:
         if tmp_video:
@@ -101,84 +107,76 @@ def _do_breakdown(payload, info, url):
             except: pass
 
 
+def _source_context(title, duration, platform, script_text):
+    return (
+        "视频标题：" + str(title) + "\n"
+        "时长：" + str(duration) + "s\n"
+        "平台：" + str(platform) + "\n\n"
+        "口播文案（带时间轴）：\n" + str(script_text or "（未识别到口播）")
+    )
+
+
+def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames):
+    usermsg = (
+        _source_context(title, duration, platform, script_text) + "\n\n"
+        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"画面描述(10字内)\",\"line\":\"口播台词\"}]}，"
+        "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
+        "每个 scene 一句话说清画面，line 是原视频对应的口播内容。"
+    )
+    raw = _chat_multimodal(
+        "你是黄雀传媒资深短视频编导。分析视频关键帧和口播，拆解为简洁的分镜脚本。"
+        "只输出 JSON，不要多余内容。",
+        usermsg, frames
+    )
+    return _parse_scenes_json(raw)
+
+
+def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
+    usermsg = (
+        _source_context(title, duration, platform, script_text) + "\n\n"
+        "请基于关键帧与口播，反推出一条适合黄雀主站下游创作的中文提示词。"
+        "目标不是逐字复刻原视频，而是保留它的主体设定、镜头语言、场景道具、光线氛围、色调质感、节奏与文案钩子，"
+        "用于生成同风格但原创的新内容。"
+        "请直接输出 1 条完整提示词，80-160 字，不要 JSON，不要标题，不要解释，不要 markdown 代码块。"
+    )
+    raw = _chat_multimodal(
+        "你是黄雀传媒资深短视频创意总监。你擅长根据视频关键帧和口播，提炼出可直接用于后续创作的中文提示词。"
+        "只输出提示词本身，不要任何多余内容。",
+        usermsg, frames, temp=0.6
+    )
+    return _clean_prompt_text(raw)
+
+
+def _parse_scenes_json(raw):
+    s, e = raw.find("{"), raw.rfind("}")
+    if s < 0 or e <= s:
+        raise ValueError("拆解结果解析失败，请重试")
+    return json.loads(raw[s:e+1])
+
+
+def _clean_prompt_text(raw):
+    text = str(raw or "").replace("\r", "").strip()
+    if text.startswith("```"):
+        lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    text = " ".join(line.strip() for line in text.splitlines() if line.strip()).strip().strip('"“”')
+    if not text:
+        raise ValueError("反推结果解析失败，请重试")
+    return text[:600]
+
+
 # ============ 辅助函数 ============
-
-def _strip_json_code_fence(raw):
-    text = str(raw or "").strip()
-    if not text.startswith("```"):
-        return text
-    lines = text.splitlines()
-    if len(lines) < 3:
-        return text
-    first = lines[0].strip().lower()
-    last = lines[-1].strip()
-    if not last.startswith("```"):
-        return text
-    if first not in ("```", "```json"):
-        return text
-    return "\n".join(lines[1:-1]).strip()
-
-
-def _iter_json_objects(raw):
-    text = str(raw or "")
-    n = len(text)
-    for start in range(n):
-        if text[start] != "{":
-            continue
-        depth = 0
-        in_str = False
-        escape = False
-        for i in range(start, n):
-            ch = text[i]
-            if in_str:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_str = False
-                continue
-            if ch == '"':
-                in_str = True
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    yield text[start:i + 1]
-                    break
-
-
-def _parse_breakdown_json(raw):
-    candidates = []
-    seen = set()
-    for candidate in (str(raw or "").strip(), _strip_json_code_fence(raw)):
-        if candidate and candidate not in seen:
-            candidates.append(candidate)
-            seen.add(candidate)
-    for candidate in list(candidates):
-        for obj in _iter_json_objects(candidate):
-            if obj not in seen:
-                candidates.append(obj)
-                seen.add(obj)
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-    raise ValueError("拆解结果解析失败，请重试")
 
 
 def _heartbeat(job_id, phase):
-    """刷新 updated_at 防止 reaper 误杀 + 写 _hb_phase 供前端展示（用前缀防与用户 payload 字段冲突）"""
+    """刷新 updated_at 防止 reaper 误杀 + 写 phase 供前端展示"""
     try:
         now = int(time.time())
         with closing(jdb()) as c:
             row = c.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row:
                 p = json.loads(row["payload"] or "{}")
-                p["_hb_phase"] = phase
+                p["phase"] = phase
                 c.execute("UPDATE jobs SET payload=?, updated_at=? WHERE id=?",
                           (json.dumps(p, ensure_ascii=False), now, job_id))
                 c.commit()
