@@ -38,7 +38,7 @@ STAGES = {MATERIAL, WORK, DELIVERY}
 # 纯粹的死写：每次出图多一次 SQLite 写入，soft_delete 对它生效却影响不到 UI 看到的数据。
 # 要把 image 也收进来，得先让前端图片分类改读 /api/gen/assets 并把 meta 摊平，
 # 那是一次独立的迁移，不该顺手夹带。
-KIND_STAGE = {"copy": WORK, "collect": MATERIAL, "leads": DELIVERY, "breakdown": WORK}
+KIND_STAGE = {"copy": WORK, "collect": MATERIAL, "leads": DELIVERY, "breakdown": WORK, "kuaijian": WORK}
 KINDS = set(KIND_STAGE)
 
 _initialized = False
@@ -218,6 +218,15 @@ def _project(kind, result):
             })
         item = _project_breakdown_item(r)
         return (_clip(r.get("source_title")), None, r.get("source_url"), item)
+    if kind == "kuaijian":
+        # 只有剪辑成片（op=cut）入资产库；转写（op=transcribe）是中间产物，不入。
+        if r.get("op") != "cut":
+            return None
+        return (_clip(r.get("filename") or "文字快剪成片"), r.get("file"), r.get("url"), {
+            "duration_before": r.get("duration_before"), "duration_after": r.get("duration_after"),
+            "removed_s": r.get("removed_s"), "deleted_sentences": r.get("deleted_sentences"),
+            "tighten_pauses": r.get("tighten_pauses"), "source_job_id": r.get("source_job_id"),
+        })
     return (None, None, None, {})
 
 
@@ -230,7 +239,10 @@ def record_asset(job_id, username, kind, result, stage=None, created_at=None):
         return False
     _ensure()
     stage = stage if stage in STAGES else KIND_STAGE[kind]
-    title, file, url, meta = _project(kind, result)
+    proj = _project(kind, result)
+    if proj is None:   # domain 选择不入库（如 kuaijian 的 transcribe 中间产物），见 _project 分支
+        return False
+    title, file, url, meta = proj
     with closing(adb()) as c:
         cur = c.execute(
             """INSERT OR IGNORE INTO assets(job_id, kind, stage, username, title, file, url, meta, created_at)

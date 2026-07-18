@@ -21,7 +21,7 @@ class ContentDomainTests(unittest.TestCase):
         # （avatar/cinematic 是把动作模仿拆成「建形象 / 生成剧情视频」两步时加的）
         self.assertEqual(
             sorted(content_api.HANDLERS),
-            ["audio", "avatar", "breakdown", "cinematic", "collect", "copy", "image", "leads", "script_to_video", "tryon", "video", "xiaole_video"],
+            ["audio", "avatar", "breakdown", "cinematic", "collect", "copy", "image", "kuaijian", "leads", "script_to_video", "tryon", "video", "xiaole_video"],
         )
         self.assertIs(content_api.HANDLERS, content_api.registry.HANDLERS)
 
@@ -54,7 +54,9 @@ class ContentDomainTests(unittest.TestCase):
         #   真实点数计算 talking_actual_cost 在 video.py），门禁上调到 1675。
         # 一键成片对齐(#P0)：队列路由（口播池）+ 运行闸计数同属 core 队列/限流基础设施；
         #   批量拆解退点结算逻辑在 points.settle_breakdown_batch，core 只留 2 行接线，门禁上调到 1680。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1680)
+        # 文字快剪：提交校验接线 3 行 + 敏感文件归属校验 6 行（kuaijian/<job_id>/ 归提交人），
+        #   转写/剪辑/计费逻辑全在 kuaijian.py / points.cost_of，门禁上调到 1695。
+        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1695)
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，

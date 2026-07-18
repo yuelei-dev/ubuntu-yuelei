@@ -103,6 +103,12 @@ def cost_of(kind, body):
             n = max(1, min(5, len([u for u in urls if isinstance(u, str) and u.strip()])))
             return 8 + 4 * (n - 1)
         return 8
+    if kind == "kuaijian":
+        # 文字快剪：转写 2 点；剪辑按源视频时长档（validate 已从源 job 落定 duration 写回 body）。
+        if str(body.get("op") or "transcribe") == "cut":
+            dur = float(body.get("duration") or 0)
+            return 5 if dur <= 60 else (10 if dur <= 180 else 15)
+        return 2
     return COST.get(kind, 0)
 
 def breakdown_batch_refund(cost, total, failed):

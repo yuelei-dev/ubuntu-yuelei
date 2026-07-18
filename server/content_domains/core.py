@@ -145,6 +145,7 @@ def _sensitive_output_file(rel):
     rel = str(rel or "").replace("\\", "/").lstrip("/")
     name = os.path.basename(rel)
     return (rel.startswith("video/") or
+            rel.startswith("kuaijian/") or
             rel.startswith("audio/voice_preview_") or
             rel.startswith("audio/clone_") or
             rel.startswith("audio/vid_aud_") or
@@ -178,6 +179,14 @@ def _user_owns_output_file(username, rel):
             (username, rel)).fetchone()
         if row:
             return True
+        # 文字快剪：kuaijian/<job_id>/… 归属该 job 提交人（源视频/成片本地回退链走这条）
+        m = re.match(r"^kuaijian/(\d+)/", rel)
+        if m:
+            with closing(jdb()) as cj:
+                hit = cj.execute("SELECT 1 FROM jobs WHERE id=? AND username=? LIMIT 1",
+                                 (int(m.group(1)), username)).fetchone()
+            if hit:
+                return True
         row = c.execute("""SELECT 1 FROM audio_voices
             WHERE username=? AND scope='personal' AND preview_file=? LIMIT 1""",
             (username, rel)).fetchone()
@@ -235,7 +244,7 @@ AVATAR_COST = _env_positive_int("AVATAR_COST", 5)   # 建形象：象征性收�
 # ⚠️ cost_of() 回落到 COST.get(kind, 0) —— 新增 kind 忘了在这里登记，就是【免费】。
 COST = {"image": 12, "copy": 3, "audio": 10, "video": VIDEO_COST, "tryon": 40,
         "cinematic": VIDEO_COST, "avatar": AVATAR_COST, "breakdown": 8,
-        "script_to_video": VIDEO_COST}  # collect/leads/cinematic 走 cost_of() 动态算
+        "script_to_video": VIDEO_COST, "kuaijian": 2}  # collect/leads/cinematic 走 cost_of() 动态算
 # cinematic 的这条已经不生效了 —— 电影化身按成片秒数计费（video.cinematic_cost），
 # cost_of() 里有它自己的分支、必定先 return。留在这里只当保险：万一哪天分支被绕过，
 # 也是按 VIDEO_COST 收费，而不是回落到 0（=免费送 $7 一条的视频）。
@@ -1019,7 +1028,7 @@ def run_job(job_id):
         # 抢到 running 才开心跳（前面几个 return 都还没认领，不该有心跳）。
         # 有了它，reaper 的「没心跳」才真的等于「worker 死了」—— 而不是「正在轮询/烧字幕」。
         stop_heartbeat = _start_job_heartbeat(job_id)
-        if kind in {"audio", "video", "tryon", "xiaole_video", "leads", "cinematic", "avatar", "breakdown", "script_to_video"}:
+        if kind in {"audio", "video", "tryon", "xiaole_video", "leads", "cinematic", "avatar", "breakdown", "script_to_video", "kuaijian"}:
             payload["_username"] = username   # 少一个 kind，handler 就拿不到用户名/job_id：
             payload["_job_id"] = job_id       # gen_avatar 记不了形象归属，gen_cinematic 查不到用户的形象
         result = HANDLERS[kind](payload)
@@ -1369,8 +1378,11 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
+                elif kind == "kuaijian":
+                    from . import kuaijian as kuaijian_domain
+                    body = kuaijian_domain.validate_kuaijian_payload(body, user["username"])
                 # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
-                idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic"} else ""
+                idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic", "kuaijian"} else ""
             except ValueError as e:
                 return self._send(400, {"detail": str(e)[:220]})
             # 正在停机（部署中）→ 不收新活。⚠️ 必须在【扣点之前】。
@@ -1471,7 +1483,7 @@ class H(BaseHTTPRequestHandler):
             if r["username"] != user.get("username"):
                 return self._send(404, {"detail": "任务不存在"})
             phase = video_domain.get_video_job_phase(jid) if r["kind"] in {"video", "tryon", "xiaole_video", "cinematic"} else None
-            if phase is None and r["kind"] == "breakdown":
+            if phase is None and r["kind"] in {"breakdown", "kuaijian"}:
                 try:
                     p = json.loads(r["payload"] or "{}") or {}; phase = p.get("_hb_phase") or p.get("phase")  # 新 key 优先，兼容旧数据
                 except Exception:
