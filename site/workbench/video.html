@@ -94,6 +94,14 @@
   .avatar-action:hover{color:#e7b24c;border-color:rgba(231,178,76,.3)}
   .avatar-empty{grid-column:1/-1;padding:14px;border:1px dashed rgba(148,164,187,.16);border-radius:12px;color:#5c6b82;font-size:12px;text-align:center}
   .talking-shape-modes{max-width:280px;margin-bottom:12px}
+  /* 字幕样式图片选择器：看图选模板（开拍形态）；仍是 .seg button，沿用既有点击绑定 */
+  .seg.substyle-cards{grid-template-columns:repeat(4,1fr);gap:8px}
+  .seg button.substyle-card{border:1px solid rgba(148,164,187,.16);border-radius:12px;background:rgba(148,164,187,.05);padding:5px;cursor:pointer;transition:.16s;text-align:center;height:auto}
+  .seg button.substyle-card:hover{border-color:rgba(231,178,76,.34)}
+  .seg button.substyle-card.on{border-color:rgba(231,178,76,.6);box-shadow:0 0 0 1px rgba(231,178,76,.35)}
+  .seg button.substyle-card img{width:100%;display:block;border-radius:8px;aspect-ratio:9/16;object-fit:cover}
+  .seg button.substyle-card span{display:block;font-size:11px;font-weight:700;color:#94a4bb;margin-top:5px}
+  .seg button.substyle-card.on span{color:#e7b24c}
   .form-grid.batch-mode{grid-template-columns:1fr}
   .batch-avatar-panel{min-height:var(--video-input-height);padding:12px;border:1px solid rgba(148,164,187,.13);border-radius:8px;background:rgba(148,164,187,.025)}
   .batch-avatar-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:9px;max-height:318px;overflow-y:auto;padding-right:3px}
@@ -359,7 +367,7 @@
           </div>
           <div id="subtitleStyleRow" style="display:none;">
             <div class="faint" style="font-size:12px;margin-bottom:8px;">字幕样式</div>
-            <div class="seg" style="grid-template-columns:repeat(4,1fr);"><button class="on" data-substyle="white">白字黑边</button><button data-substyle="variety">综艺大字</button><button data-substyle="bar">底部半透条</button><button data-substyle="wg_red">网感·高级红</button></div>
+            <div class="seg substyle-cards"><button class="substyle-card on" data-substyle="white"><img src="assets/tpl-preview/white.png" alt="白字黑边"><span>白字黑边</span></button><button class="substyle-card" data-substyle="variety"><img src="assets/tpl-preview/variety.png" alt="综艺大字"><span>综艺大字</span></button><button class="substyle-card" data-substyle="bar"><img src="assets/tpl-preview/bar.png" alt="底部半透条"><span>底部半透条</span></button><button class="substyle-card" data-substyle="wg_red"><img src="assets/tpl-preview/wg_red.png" alt="网感·高级红"><span>网感·高级红</span></button></div>
           </div>
           <div id="subtitlePositionRow" style="display:none;margin-top:12px;">
             <div class="faint" style="font-size:12px;margin-bottom:8px;">字幕位置</div>
