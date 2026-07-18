@@ -82,10 +82,16 @@ def cost_of(kind, body):
     if kind == "script_to_video":
         # 一键成片：口播/种草与 video 业务同价 —— 10 点/秒 × 文案估算秒数【预扣】，
         # 跑完由 run_job 对 pipeline==talking 按成片真实时长结算多退少不补（2026-07-17 调价，
-        # 此前固定 20 点，长口播稳亏）；剧情走 grok 仍按 COST 表固定价。
+        # 此前固定 20 点，长口播稳亏）；剧情与 xiaole_video 同价 30 点/秒 × 时长、上限 15s
+        # （2026-07-18 拉平 —— 此前固定 20 点，同一 grok 引擎直走视频页 30 点/秒、走编导仅 20 点，
+        # 15 倍倒挂，编导页的「一键生成视频/生成同款」成了套利入口）。
         style = (body.get("style") or "口播").strip()
         if style == "剧情":
-            return COST.get("script_to_video", 20)
+            try:
+                duration = min(15, int(float(body.get("duration") or 10)))
+            except (TypeError, ValueError):
+                duration = 10
+            return max(30, int(math.ceil(duration)) * 30)
         from . import video as video_domain
         lines = [(s.get("line") or "").strip() for s in (body.get("scenes") or []) if isinstance(s, dict)]
         text = "\n\n".join([l for l in lines if l])
@@ -98,6 +104,40 @@ def cost_of(kind, body):
             return 8 + 4 * (n - 1)
         return 8
     return COST.get(kind, 0)
+
+def breakdown_batch_refund(cost, total, failed):
+    """批量拆解的退点额：全灭全退；部分失败每条退边际价 +4（首条 8 点溢价留给成功条）。
+
+    定价是首条 8 + 每多一条 4（见 cost_of 的 breakdown 分支），所以 k 条失败且至少 1 条
+    成功时退 4k —— 用户实付恰好等于成功条数对应的价；一条都没成则全退，与单条拆解失败
+    走 error 全退保持一致。由 run_job 在抢到 done 终态后调用（每 job 至多一次），
+    失败条数取 len(result.errors) —— 视频号被跳过也记在 errors 里，同样退。
+    """
+    try:
+        cost, total, failed = int(cost or 0), int(total or 0), int(failed or 0)
+    except (TypeError, ValueError):
+        return 0
+    if cost <= 0 or total <= 0 or failed <= 0:
+        return 0
+    failed = min(failed, total)
+    if failed >= total:
+        return cost
+    return min(cost, 4 * failed)
+
+def settle_breakdown_batch(username, cost, result, job_id):
+    """run_job 的批量拆解结算钩子：只对 breakdown_batch 结果按失败条数退点。
+
+    调用时机与口播结算相同 —— run_job 抢到 done 终态之后（每 job 至多一次）。
+    吞异常：结算是次要副作用，退点接口故障不该影响已出结果的任务。
+    """
+    try:
+        if (result or {}).get("type") != "breakdown_batch":
+            return
+        refund = breakdown_batch_refund(cost, (result or {}).get("total"), len((result or {}).get("errors") or []))
+        if refund:
+            safe_refund_points(username, refund, "job#%d 批量拆解失败退点" % job_id)
+    except Exception:
+        pass
 
 class AuthPointsError(Exception):
     def __init__(self, status, detail, data=None):
