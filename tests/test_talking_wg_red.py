@@ -232,9 +232,19 @@ class WgFrontendTests(unittest.TestCase):
     def test_video_html_has_wg_red_button(self):
         self.assertIn('data-substyle="wg_red"', self.VIDEO_HTML)
         self.assertIn("网感·高级红", self.VIDEO_HTML)
-        # 样式行 4 按钮等宽：grid 从 3 列改 4 列
-        style_row = self.VIDEO_HTML.split('id="subtitleStyleRow"')[1][:400]
-        self.assertIn("repeat(4,1fr)", style_row)
+
+    def test_substyle_cards_are_image_picker(self):
+        # 选择器图片化（开拍形态）：4 个样式各一张真实渲染的预览缩略图，按钮仍是 .seg button 沿用既有绑定
+        import re
+        for key in ("white", "variety", "bar", "wg_red"):
+            self.assertRegex(self.VIDEO_HTML,
+                             r'<button class="substyle-card[^"]*" data-substyle="%s"><img src="assets/tpl-preview/%s\.png"' % (key, key),
+                             "缺样式卡片或预览图: " + key)
+            img = pathlib.Path(__file__).resolve().parents[1] / ("site/workbench/assets/tpl-preview/%s.png" % key)
+            self.assertTrue(img.is_file() and img.stat().st_size > 10000, "预览图缺失或过小: " + str(img))
+        style_row = self.VIDEO_HTML.split('id="subtitleStyleRow"')[1][:600]
+        self.assertIn("seg substyle-cards", style_row)
+        self.assertIn(".seg button.substyle-card", self.VIDEO_HTML)   # 卡片样式覆盖 .seg button 基础样式
 
 
 if __name__ == "__main__":
