@@ -52,7 +52,9 @@ class ContentDomainTests(unittest.TestCase):
         #   下载+ffmpeg+ASR+多模态 domain 逻辑全在 breakdown.py，故门禁上调到 1665。
         # 口播按秒结算：run_job 抢到 done 后按成片真实时长结算多退（thin 计费生命周期胶水，
         #   真实点数计算 talking_actual_cost 在 video.py），门禁上调到 1675。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1675)
+        # 一键成片对齐(#P0)：队列路由（口播池）+ 运行闸计数同属 core 队列/限流基础设施；
+        #   批量拆解退点结算逻辑在 points.settle_breakdown_batch，core 只留 2 行接线，门禁上调到 1680。
+        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1680)
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，
@@ -241,28 +243,39 @@ class ContentDomainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             core.JOB_DB = str(Path(td) / "jobs.db")
             called = []
-            core.HANDLERS = {"video": lambda p: called.append(p) or {"ok": 1}}
+            core.HANDLERS = {"video": lambda p: called.append(p) or {"ok": 1},
+                             "script_to_video": lambda p: called.append(p) or {"ok": 1}}
             try:
                 with closing(core.jdb()) as c:
                     c.execute("""CREATE TABLE jobs(
                         id INTEGER PRIMARY KEY, kind TEXT, username TEXT, cost INTEGER,
                         status TEXT, payload TEXT, result TEXT, error TEXT,
                         created_at INTEGER, updated_at INTEGER, refunded INTEGER DEFAULT 0)""")
-                    # fang: 2 条口播 running(kind=video 现在只有口播 text/audio)
+                    # fang: 1 条口播 + 1 条一键成片 running —— 两个 kind 都占口播运行槽
                     c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(1,'video','fang',20,'running','{\"mode\":\"text\"}',1,1)")
-                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(2,'video','fang',20,'running','{\"mode\":\"audio\"}',1,1)")
+                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(2,'script_to_video','fang',20,'running','{\"style\":\"口播\"}',1,1)")
                     # 第4条 pending 口播 —— 应被运行闸 defer，留 pending、不调 handler
                     c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(4,'video','fang',20,'pending','{\"mode\":\"text\"}',1,1)")
+                    # 第5条 pending 一键成片 —— 同样应被运行闸 defer
+                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(5,'script_to_video','fang',20,'pending','{\"style\":\"口播\"}',1,1)")
                     c.commit()
-                # count = 全部 kind=video running = 2
+                # count = kind IN (video, script_to_video) 的 running = 2
                 self.assertEqual(core._user_running_talking_count("fang"), 2)
                 core.run_job(4)
+                core.run_job(5)
                 self.assertEqual(called, [])  # 超运行闸→handler 不该被调
                 with closing(core.jdb()) as c:
                     self.assertEqual(c.execute("SELECT status FROM jobs WHERE id=4").fetchone()["status"], "pending")
+                    self.assertEqual(c.execute("SELECT status FROM jobs WHERE id=5").fetchone()["status"], "pending")
             finally:
                 core.JOB_DB = original_job_db
                 core.HANDLERS = original_handlers
+
+    def test_script_to_video_routes_to_talking_queue(self):
+        """一键成片是 HeyGen 分钟级长任务：必须进口播专用池 —— 落快池 3 条就堵死 copy/audio 等秒级任务"""
+        core = importlib.import_module("content_domains.core")
+        self.assertIs(core._pick_job_queue("script_to_video"), core._talking_job_queue)
+        self.assertIsNot(core._pick_job_queue("script_to_video"), core._fast_job_queue)
 
     def test_clone_vip_validation_rejects_before_mutation(self):
         audio = importlib.import_module("content_domains.audio")

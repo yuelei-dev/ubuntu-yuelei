@@ -1200,7 +1200,7 @@
       .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
       .then(function(x){
         if(x.s===401){ _setGenerateBusy(btn,false); if(window.HQ) HQ.login(); return; }
-        if(x.s===402){ _setGenerateBusy(btn,false); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">点数不足（需要 '+ (x.d.cost||20) +' 点）· <a href="recharge.html" style="color:#e7b24c">去充值</a></div>'; return; }
+        if(x.s===402){ _setGenerateBusy(btn,false); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">点数不足（需要 '+ ((x.d&&(x.d.need||x.d.cost))||'') +' 点）· <a href="recharge.html" style="color:#e7b24c">去充值</a></div>'; return; }
         if(!x.d.job_id){ _setGenerateBusy(btn,false); var msg=(x.d&&x.d.detail)||'未知错误';
           if(msg.indexOf('形象')>=0||msg.indexOf('人物')>=0) msg+='<br><a href="video.html" style="color:#60a5fa;">→ 去视频页创建形象</a>';
           scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">提交失败：'+msg+'</div>'; return; }

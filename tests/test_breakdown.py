@@ -476,5 +476,10 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["duration"], 18)
 
+    def test_run_job_settles_batch_breakdown_refund(self):
+        """run_job 必须对批量拆解结果结算退点（结算本体在 points.settle_breakdown_batch）"""
+        core_src = (Path(__file__).resolve().parents[1] / "server/content_domains/core.py").read_text(encoding="utf-8")
+        self.assertIn("settle_breakdown_batch", core_src)
+
 if __name__ == "__main__":
     unittest.main()

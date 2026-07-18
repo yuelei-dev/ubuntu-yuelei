@@ -715,7 +715,7 @@ def _refund_once(job_id, username, cost):
 
 def _pick_job_queue(kind, mode=None):
     # kind缺省(旧调用/测试)保守走慢队列；生图(慢90~450s)走生图池；秒级快任务(音频/文案/采集/名单)走快队列；
-    # video(口播 text/audio)走口播池；tryon/xiaole_video 走慢池。
+    # video(口播 text/audio)与 script_to_video(一键成片，同 HeyGen 口播链路)走口播池；tryon/xiaole_video 走慢池。
     if kind is None:
         return _job_queue
     if kind == "image":
@@ -726,6 +726,8 @@ def _pick_job_queue(kind, mode=None):
         return _cinematic_job_queue     # HeyGen 剧情视频，约 8 分钟/条，10 个 worker
     if kind == "avatar":
         return _avatar_job_queue        # 建形象，串行 1 个 worker
+    if kind == "script_to_video":
+        return _talking_job_queue       # 一键成片也是 HeyGen 分钟级长任务：落快池 3 条就堵死全站秒级任务，口播池 10 路闲着
     if kind not in {"video", "tryon", "xiaole_video"}:
         return _fast_job_queue
     if kind == "video":
@@ -798,11 +800,11 @@ def _user_video_submit_limit(kind, body, username, cost):
     return None
 
 def _user_running_talking_count(username):
-    """该用户「运行中」的口播条数(kind=video，即 text/audio 口播)。"""
+    """该用户「运行中」的口播条数：kind IN (video, script_to_video) —— 漏数一键成片它就不占运行槽。"""
     if not username:
         return 0
     with closing(jdb()) as c:
-        row = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE username=? AND status='running' AND kind='video'",
+        row = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE username=? AND status='running' AND kind IN ('video','script_to_video')",
                         (username,)).fetchone()
     return row["n"] if row else 0
 
@@ -1033,6 +1035,9 @@ def run_job(job_id):
                     _domains()[1].safe_refund_points(username, int(cost) - actual, "job#%d 口播结算" % job_id)
             except Exception:
                 pass
+        # 批量拆解按失败条数退点（全灭全退/部分退边际价，结算逻辑在 points.settle_breakdown_batch）
+        if kind == "breakdown":
+            _domains()[1].settle_breakdown_batch(username, int(cost or 0), result, job_id)
         # 已确认拿到 done 终态；入库是次要副作用，失败也不改状态、不退点
         try:
             audio_domain, _, video_domain = _domains()
@@ -1040,7 +1045,7 @@ def run_job(job_id):
                 audio_domain.record_audio_asset(job_id, username, result)
             if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"}:
                 video_domain.record_video_asset(job_id, username, result)
-            assets_store.record_asset(job_id, username, kind, result)  # 只有 copy 会入统一 assets 表；其余 kind 内部忽略
+            assets_store.record_asset(job_id, username, kind, result)  # copy/breakdown 入统一 assets 表；其余 kind 内部忽略
         except Exception:
             pass
     except Exception as e:
