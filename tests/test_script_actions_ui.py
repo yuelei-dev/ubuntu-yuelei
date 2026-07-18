@@ -27,7 +27,7 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="scGenAudio"', self.html)
         self.assertIn("fetch('/api/gen/script_to_video'", self.html)
         self.assertIn("_setGenerateBusy", self.html)
-        self.assertIn("_doGenerate({scenes:list,style:'剧情'},genVideoBtn)", self.html)
+        self.assertIn("_doGenerate({scenes:list,style:'剧情',duration:durSec},genVideoBtn)", self.html)
 
     def test_one_click_video_passes_style_and_selected_avatar(self):
         self.assertIn("lastStyle=style||'口播'", self.html)
@@ -74,7 +74,7 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:style||'剧情'};", self.html)
         self.assertIn("_pickRemakeStyle(function(style)", self.html)
         self.assertIn("_showAvatarPicker(function(avatarId)", self.html)
-        self.assertIn("_doGenerate({scenes:scenes,style:'剧情'},bdRemakeBtn)", self.html)
+        self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:durSec},bdRemakeBtn)", self.html)
 
     def test_breakdown_reverse_prompt_ui_and_actions_exist(self):
         self.assertIn('id="bdReverseCopyBtn"', self.html)

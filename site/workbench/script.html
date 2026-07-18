@@ -1006,7 +1006,8 @@
     if(!list.length){ location.href='video.html'; return; }
     var hasScenes=list.some(function(s){ return (s.scene||'').trim(); });
     if(!hasScenes){ if(window.HQ&&window.HQ.toast) HQ.toast('脚本中没有画面描述'); return; }
-    _doGenerate({scenes:list,style:'剧情'},genVideoBtn);
+    var durSec=parseInt((list[0]&&list[0].dur||'30s').replace('s',''))||30;
+    _doGenerate({scenes:list,style:'剧情',duration:durSec},genVideoBtn);
   }; }
   if(genAudioBtn){ genAudioBtn.onclick=function(e){
     e.preventDefault();
@@ -1033,13 +1034,15 @@
     if(!scenes.length){ if(window.HQ&&window.HQ.toast) HQ.toast('没有可用分镜'); return; }
     if(isReverse){
       // 反推模式：提示词即画面描述，直接走剧情链路
-      _doGenerate({scenes:scenes,style:'剧情'},bdRemakeBtn);
+      var durSec=parseInt((scenes[0]&&scenes[0].dur||'30s').replace('s',''))||30;
+      _doGenerate({scenes:scenes,style:'剧情',duration:durSec},bdRemakeBtn);
       return;
     }
     _pickRemakeStyle(function(style){
       if(style==='剧情'){
         if(!scenes.some(function(s){ return (s.scene||'').trim(); })){ if(window.HQ&&window.HQ.toast) HQ.toast('拆解结果里没有画面描述，无法生成剧情视频'); return; }
-        _doGenerate({scenes:scenes,style:'剧情'},bdRemakeBtn);
+        var durSec=parseInt((scenes[0]&&scenes[0].dur||'30s').replace('s',''))||30;
+        _doGenerate({scenes:scenes,style:'剧情',duration:durSec},bdRemakeBtn);
       } else {
         if(!scenes.some(function(s){ return (s.line||'').trim(); })){ if(window.HQ&&window.HQ.toast) HQ.toast('拆解结果里没有口播文案，无法生成'+style+'视频'); return; }
         _showAvatarPicker(function(avatarId){
