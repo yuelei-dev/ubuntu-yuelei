@@ -10,6 +10,8 @@ from .core import (
 )
 
 import random   # 429 退避重试的抖动：不加抖动，同一批 worker 退避后又会撞在一起
+import shutil   # wg_red 字幕模板：探测 systemd-run/nice，给 ASR 子进程套资源闸
+import sys      # wg_red 字幕模板：TALKING_ASR_PYTHON 缺省回退 sys.executable
 
 from .audio import gen_audio
 
@@ -1701,6 +1703,10 @@ _SUB_STYLES = {
     "white":   {"fs": 0.052, "primary": "&H00FFFFFF", "outline": "&H00000000", "back": "&H00000000", "border": 1, "ow": 3.0, "shadow": 1, "mv": 0.060},
     "variety": {"fs": 0.066, "primary": "&H0000E5FF", "outline": "&H00202020", "back": "&H00000000", "border": 1, "ow": 4.0, "shadow": 1, "mv": 0.072},
     "bar":     {"fs": 0.050, "primary": "&H00FFFFFF", "outline": "&H00000000", "back": "&H80101010", "border": 3, "ow": 8.0, "shadow": 0, "mv": 0.050},
+    # wg_red（网感·高级红）不吃上面这套通用参数：它是固定模板（顶部双行大标题+底部双行字幕+
+    # 关键词红标），由 _wg_build_ass 渲整份 ASS。挂进词表只是让参数校验一处生效；
+    # burn_subtitle 见到它就走模板分支，绝不进 _build_ass。
+    "wg_red":  {"template": "wg_red"},
 }
 # 字幕位置5档 → (ASS Alignment, MarginV系数)。底部/偏下用底锚(Align2,离底);顶部/偏上用顶锚(Align8,离顶);
 # 中央垂直居中(Align5)。bottom 的 mv=None 沿用样式自带值,保持旧默认行为(向后兼容)。
@@ -1912,33 +1918,208 @@ def _build_ass(segs, style_key, w, h, position="bottom"):
             body.append("Dialogue: 0,%s,%s,Default,,0,0,,%s" % (_ass_time(start), _ass_time(end), line))
     return "\n".join(head + body) + "\n"
 
+# ============ 网感字幕模板 wg_red（高级红：顶部双行大标题 + 底部双行字幕 + 关键词红标） ============
+# 版式/配色按 demo 拍板值（基准画布 1080x1920），只在实际视频尺寸不同时按高度等比缩放。
+# white/variety/bar 三个旧样式的渲染路径【一字不动】，wg_red 全部走这条独立分支。
+TALKING_ASR_PYTHON = os.environ.get("TALKING_ASR_PYTHON", "").strip()  # 缺省回退 sys.executable，见 _run_talking_asr
+TALKING_ASR_TIMEOUT = int(os.environ.get("TALKING_ASR_TIMEOUT", "600"))
+# 模板字体：demo 写的是 "Noto Sans CJK SC"，服务器上以 SUBTITLE_FONT 为准（已装、libass 可用）；
+# 同一字体族的不同打包名，想精确复刻 demo 可用 WG_RED_FONT 指回。
+_WG_FONT = os.environ.get("WG_RED_FONT", "") or SUBTITLE_FONT
+_WG_RED = "&H00303BFF"            # 高级红 RGB FF3B30（ASS 颜色 &HAABBGGRR），关键词 inline 高亮用
+_WG_TITLE_MAX = 10                # 标题每行最多 10 字，超出截断
+_WG_TWO_LINE_MAX = 13             # 字幕超过 13 字按最靠中点的标点劈双行
+# 关键词红标词表：模板自带默认词表（demo 拍板版），最长优先、每词只标第一处。
+_WG_KEYWORDS = [
+    "0元", "0 元", "20个名额", "20 个名额",
+    "冷光嫩肤", "毛孔细腻", "肤色透亮",
+    "免费", "小气泡深层清洁", "抢先预约",
+]
+
+def _wg_ms_to_ass(ms):
+    cs = max(0, int(ms)) // 10
+    return "%d:%02d:%02d.%02d" % (cs // 360000, (cs // 6000) % 60, (cs // 100) % 60, cs % 100)
+
+def _wg_split_sentences(text):
+    """口播原文 → 按句末标点切句（标点留在句尾；断双行优先在标点处劈）。空结果 = 对齐失败。"""
+    parts = re.findall(r"[^。！？!?；;…\n]+[。！？!?；;…]*", (text or "").replace("\r", "\n"))
+    out = [re.sub(r"\s+", "", p) for p in parts]   # 中文字幕不留空白，也免得空白干扰按字数分配
+    return [p for p in out if p]
+
+def _wg_align_script(segs, script_text):
+    """text 模式：ASR 只借时间轴，字幕文本换口播原文（ASR 会有错别字/繁简漂移）。
+    原文切句后与 ASR 段【按序】配对：句数相等一一对应；不等按各段识别字数比例分配整句
+    （不切半句，防张冠李戴；最后一段吃掉剩余全部，保证原文不丢字）；
+    切不出句 / 分不到句的段，退回该段 ASR 文本。"""
+    sents = _wg_split_sentences(script_text)
+    if not segs or not sents:
+        return segs
+    n, m = len(segs), len(sents)
+    if n == m:
+        groups = [[s] for s in sents]
+    else:
+        total = sum(max(1, len(s[2])) for s in segs)
+        groups, pos = [], 0
+        for i, s in enumerate(segs):
+            take = (m - pos) if i == n - 1 else max(0, min(m - pos, int(round(len(s[2]) / total * m))))
+            groups.append(sents[pos:pos + take])
+            pos += take
+    return [(st, en, ("".join(g) if g else rec)) for (st, en, rec), g in zip(segs, groups)]
+
+def _wg_titles(script_text, segs):
+    """标题双行：TitleTop=首句提炼（去标点 ≤10 字，超出截断）；TitleBox=次句，没有就不渲染。
+    audio 模式没有原文，退用 ASR 前两段文本。"""
+    src = _wg_split_sentences(script_text) if script_text else []
+    if not src:
+        src = [s[2] for s in segs][:2]
+    def distill(s):
+        return re.sub(r"[。.!！?？,，、;；:：…\s]+", "", s or "")[:_WG_TITLE_MAX]
+    top = distill(src[0]) if src else ""
+    box = distill(src[1]) if len(src) > 1 else ""
+    return top, box
+
+def _wg_two_lines(text):
+    """双行排版更网感：超过 13 字按最靠中点的标点劈成两行（标点留在上行尾）。"""
+    if len(text) <= _WG_TWO_LINE_MAX:
+        return text
+    mid = len(text) // 2
+    best = -1
+    for i, ch in enumerate(text):
+        if ch in "，、；！？~～":
+            if best < 0 or abs(i - mid) < abs(best - mid):
+                best = i
+    if 0 < best < len(text) - 1:
+        return text[:best + 1] + "\\N" + text[best + 1:]
+    return text[:mid] + "\\N" + text[mid:]
+
+def _wg_highlight(text):
+    """关键词 inline 标红：{\c&H00303BFF&}…{\c&H00FFFFFF&}，最长词优先、每词只标第一处。"""
+    for kw in sorted(_WG_KEYWORDS, key=len, reverse=True):
+        m = re.compile(re.escape(kw)).search(text)
+        if m:
+            text = (text[:m.start()]
+                    + "{\\c" + _WG_RED + "&}" + kw + "{\\c&H00FFFFFF&}"
+                    + text[m.end():])
+    return text
+
+def _wg_build_ass(segs, w, h, title_top="", title_box=""):
+    """高级红网感模板 ASS。数值是 demo 拍板值（1080x1920），按实际视频宽高等比缩放。"""
+    r, rw = h / 1920.0, w / 1080.0
+    fs_top, fs_box, fs_sub = (max(18, int(round(v * r))) for v in (84, 72, 56))
+    mv_top, mv_box, mv_sub = (max(10, int(round(v * r))) for v in (130, 268, 120))
+    mlr_ttl, mlr_sub = (max(10, int(round(v * rw))) for v in (60, 50))
+    ow_top, ow_box, ow_sub = int(round(5 * r)), int(round(14 * r)), round(3.2 * r, 1)
+    head = [
+        "[Script Info]", "ScriptType: v4.00+", "PlayResX: %d" % w, "PlayResY: %d" % h,
+        "ScaledBorderAndShadow: yes", "WrapStyle: 2", "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        # TitleTop：白字 + 红粗描边（红 &H000000FF）；TitleBox：白字红底条(BorderStyle 3 不透明底框)；
+        # Sub：白字黑边底锚。三色值/边框/位置均为 demo 拍板值，别"顺手优化"。
+        "Style: TitleTop,%s,%d,&H00FFFFFF,&H000000FF,&H000000FF,&H00000000,1,0,0,0,100,100,2,0,1,%s,0,8,%d,%d,%d,1" % (
+            _WG_FONT, fs_top, ow_top, mlr_ttl, mlr_ttl, mv_top),
+        "Style: TitleBox,%s,%d,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,1,0,0,0,100,100,2,0,3,%s,0,8,%d,%d,%d,1" % (
+            _WG_FONT, fs_box, ow_box, mlr_ttl, mlr_ttl, mv_box),
+        "Style: Sub,%s,%d,&H00FFFFFF,&H000000FF,&H00141414,&H00000000,1,0,0,0,100,100,1,0,1,%s,0,2,%d,%d,%d,1" % (
+            _WG_FONT, fs_sub, ow_sub, mlr_sub, mlr_sub, mv_sub),
+        "", "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    body = []
+    full_end = _wg_ms_to_ass(segs[-1][1] + 300) if segs else "0:00:10.00"
+    for style, text in (("TitleTop", title_top), ("TitleBox", title_box)):
+        if text:  # 第二行可选：没有就不渲染，不留空标题条
+            body.append("Dialogue: 0,0:00:00.00,%s,%s,,0,0,0,,%s" % (full_end, style, _ass_escape(text)))
+    for (start, end, text) in segs:
+        # 先转义再断行/标红：防用户文案里的 {} 注入 ASS 覆盖块；我们自己的标红 tag 在转义之后插入
+        line = _wg_highlight(_wg_two_lines(_ass_escape(text)))
+        if line:
+            body.append("Dialogue: 0,%s,%s,Sub,,0,0,0,,%s" % (_wg_ms_to_ass(start), _wg_ms_to_ass(end + 200), line))
+    return "\n".join(head + body) + "\n"
+
+def _run_talking_asr(wav_fp, out_json):
+    """子进程跑 whisper small 逐句时间轴 → [(start_ms, end_ms, text)]。
+    服务器 3.4GB 内存，模型峰值约 1GB：有 systemd 就套 scope 限死内存（OOM 只杀 scope，
+    不拖垮主服务），没有就 nice 兜底让出 CPU 调度优先级。"""
+    # 缺省 = 当前解释器：服务器 content_api 的环境装着 faster-whisper，与旧口播 ASR 同源、
+    # 行为一致；要隔离 ASR 依赖/模型缓存，用 TALKING_ASR_PYTHON 指到独立 venv。
+    asr_python = TALKING_ASR_PYTHON or sys.executable
+    cmd = [asr_python, "-m", "content_domains.talking_asr_cli", str(wav_fp), str(out_json)]
+    if shutil.which("systemd-run"):
+        cmd = ["systemd-run", "--scope", "-q", "-p", "MemoryMax=1500M"] + cmd
+    elif shutil.which("nice"):
+        cmd = ["nice", "-n", "19"] + cmd
+    env = dict(os.environ)          # HF_ENDPOINT/HF_HUB_OFFLINE 随环境透传给子进程
+    env["OMP_NUM_THREADS"] = "2"    # 与 CLI 的 cpu_threads=2 对齐，防 OpenMP 默认把核打满
+    try:
+        # cwd 指到 server/：python -m 靠 cwd 上 sys.path 才能找到 content_domains 包
+        subprocess.run(cmd, check=True, timeout=TALKING_ASR_TIMEOUT, env=env,
+                       cwd=str(pathlib.Path(__file__).resolve().parents[1]),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise ValueError("口播模板 ASR 解释器不存在: %s" % asr_python)
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or b"").decode("utf-8", "replace")[-220:]
+        raise ValueError("口播模板 ASR 识别失败" + (": " + detail if detail else ""))
+    except subprocess.TimeoutExpired:
+        raise ValueError("口播模板 ASR 识别超时")
+    try:
+        segs = json.loads(out_json.read_text(encoding="utf-8"))
+    except Exception:
+        raise ValueError("口播模板 ASR 结果解析失败")
+    out = []
+    for s in segs:
+        try:
+            text = str(s.get("text") or "").strip()
+            if text:
+                out.append((int(s["start"]), int(s["end"]), text))
+        except Exception:
+            continue
+    return out
+
 def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, position="bottom"):
-    """把 video_file 抽音频→whisper 转写→生成 .ass→ffmpeg 烧录，返回带字幕视频的相对路径。"""
+    """把 video_file 抽音频→whisper 转写→生成 .ass→ffmpeg 烧录，返回带字幕视频的相对路径。
+    wg_red 走网感模板分支（子进程 ASR + 整份模板 ASS）；white/variety/bar 维持进程内模型+单卡字幕。"""
     src = _resolve_out_file(video_file)
     if not src:
         raise ValueError("字幕烧录：视频文件不存在")
     tok = "%d_%s" % (int(time.time() * 1000), uuid.uuid4().hex[:8])  # 唯一，防同毫秒并发撞名/互相覆盖
     wav = VIDEO_OUT_DIR / ("sub_%s.wav" % tok)
     ass = VIDEO_OUT_DIR / ("sub_%s.ass" % tok)
+    js = VIDEO_OUT_DIR / ("sub_%s.json" % tok)
     out_rel = "video/subtitled_%s.mp4" % tok
     out_fp = _out_path(out_rel)
     try:
         _sub_ffmpeg(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
                      "-vn", "-ar", "16000", "-ac", "1", str(wav)], timeout=300)
-        with _whisper_sem:  # 限制并发转写，避免多任务把 CPU 打满
+        with _whisper_sem:  # 限制并发转写，避免多任务把 CPU 打满（两种 ASR 共用同一把闸）
             update_video_asset_phase(job_id, "burning_subtitle")  # 心跳：拿到信号量、开始转写，刷新 updated_at 防 reaper 误杀
-            model = _get_whisper_model()
-            seg_iter, _info = model.transcribe(str(wav), language="zh", vad_filter=True)
-            segs = [(s.start, s.end, (s.text or "").strip()) for s in seg_iter if (s.text or "").strip()]
+            if style_key == "wg_red":
+                segs = _run_talking_asr(wav, js)   # 子进程：内存即起即灭 + scope 限死
+            else:
+                model = _get_whisper_model()
+                seg_iter, _info = model.transcribe(str(wav), language="zh", vad_filter=True)
+                segs = [(s.start, s.end, (s.text or "").strip()) for s in seg_iter if (s.text or "").strip()]
         if not segs:
             raise ValueError("字幕识别结果为空")
-        if known_text:  # text 模式：用已知文案替换识别文本，时间轴仍用 whisper
-            try:
-                segs = _redistribute_known_text(known_text, segs)
-            except Exception:
-                pass
-        w, h = _probe_video_size(src)
-        ass.write_text(_build_ass(segs, (style_key or "white"), w, h, position or "bottom"), encoding="utf-8")
+        if style_key == "wg_red":
+            if known_text:  # text 模式：借 ASR 时间轴、字幕文本换口播原文（防错别字/繁简漂移）
+                try:
+                    segs = _wg_align_script(segs, known_text)
+                except Exception:
+                    pass
+            w, h = _probe_video_size(src)
+            title_top, title_box = _wg_titles(known_text, segs)
+            ass_text = _wg_build_ass(segs, w, h, title_top, title_box)
+        else:
+            if known_text:  # text 模式：用已知文案替换识别文本，时间轴仍用 whisper
+                try:
+                    segs = _redistribute_known_text(known_text, segs)
+                except Exception:
+                    pass
+            w, h = _probe_video_size(src)
+            ass_text = _build_ass(segs, (style_key or "white"), w, h, position or "bottom")
+        ass.write_text(ass_text, encoding="utf-8")
         update_video_asset_phase(job_id, "burning_subtitle")  # 心跳：开始烧录
         # cwd=视频目录 + ass 用文件名，避免 filtergraph 路径转义问题
         _sub_ffmpeg(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
@@ -1949,7 +2130,7 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
             raise ValueError("字幕烧录输出为空")
         return _faststart_video_file(out_rel)
     finally:
-        for tmp in (wav, ass):
+        for tmp in (wav, ass, js):
             try:
                 if tmp.exists():
                     tmp.unlink()
