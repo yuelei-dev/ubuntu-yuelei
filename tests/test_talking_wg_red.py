@@ -33,11 +33,19 @@ class WgAlignTests(unittest.TestCase):
         out = video._wg_align_script(segs, "第一句。第二句。第三句。第四句。")
         self.assertEqual([t for _, _, t in out], ["第一句。第二句。", "第三句。第四句。"])
 
-    def test_align_more_segments_falls_back_to_asr_text(self):
-        # 段多句少：原文按时间顺序前段先得，分不到的后段退回 ASR 文本（原文没有就是没有）
+    def test_align_more_segments_merges_tail_timeline(self):
+        # 段多句少：多余的尾部时间轴归并进最后一段——ASR 只借时间轴，错字文本永不上屏；
+        # 原文不丢字，碎段语音区间仍有正确字幕（E2E 实测末句被切成 5:4 的场景）
         segs = [(0, 1000, "识别甲"), (1000, 2000, "识别乙"), (2000, 3000, "识别丙")]
         out = video._wg_align_script(segs, "只有一句原文。")
-        self.assertEqual([t for _, _, t in out], ["只有一句原文。", "识别乙", "识别丙"])
+        self.assertEqual(out, [(0, 3000, "只有一句原文。")])
+
+    def test_align_whisper_split_last_sentence_merges(self):
+        # E2E 回归：whisper 把末句切成两段（5 段:4 句），归并后每句原文一段、时间轴覆盖到尾
+        segs = [(0, 1000, "一"), (1000, 2000, "二"), (2000, 3000, "三"), (3000, 4000, "四甲"), (4000, 5000, "四乙")]
+        out = video._wg_align_script(segs, "第一句。第二句。第三句。第四句。")
+        self.assertEqual([t for _, _, t in out], ["第一句。", "第二句。", "第三句。", "第四句。"])
+        self.assertEqual(out[-1][:2], (3000, 5000))   # 末段 = 原第4段 start → 原最后段 end
 
     def test_align_no_segment_starves_when_sentences_enough(self):
         # E2E 回归：长短不一的段按比例分句时，短段也不能被饿到 0 句（0 句会退回 ASR 错字上屏）
@@ -93,9 +101,10 @@ class WgAssTests(unittest.TestCase):
         self.assertIn("(偷梁换柱)", ass)
         self.assertIn("{\\c&H00303BFF&}免费{\\c&H00FFFFFF&}", ass)
 
-    def test_sub_event_extends_200ms_tail(self):
+    def test_sub_event_ends_exactly_no_tail(self):
+        # 结束即走下句即来：不留尾延，防相邻两句短暂同屏
         ass = video._wg_build_ass([(0, 1000, "你好")], 1080, 1920, "", "")
-        self.assertIn("Dialogue: 0,0:00:00.00,0:00:01.20,Sub,,0,0,0,,你好", ass)
+        self.assertIn("Dialogue: 0,0:00:00.00,0:00:01.00,Sub,,0,0,0,,你好", ass)
 
 
 class WgTitlesTests(unittest.TestCase):

@@ -1955,6 +1955,12 @@ def _wg_align_script(segs, script_text):
     sents = _wg_split_sentences(script_text)
     if not segs or not sents:
         return segs
+    # 段多句少（whisper 把句子切碎，E2E 实测末句被切成 5:4）：先把多余的【尾部】时间轴
+    # 归并进最后一段——ASR 只借时间轴，它自己的错字文本永远不许上屏；
+    # 归并后一一对应，原文不丢字、碎段的语音区间仍有正确字幕。
+    if len(segs) > len(sents):
+        k = len(sents) - 1
+        segs = list(segs[:k]) + [(segs[k][0], segs[-1][1], "".join(s[2] for s in segs[k:]))]
     n, m = len(segs), len(sents)
     if n == m:
         groups = [[s] for s in sents]
@@ -2059,7 +2065,8 @@ def _wg_build_ass(segs, w, h, title_top="", title_box=""):
         # 先转义再断行/标红：防用户文案里的 {} 注入 ASS 覆盖块；我们自己的标红 tag 在转义之后插入
         line = _wg_highlight(_wg_two_lines(_ass_escape(text)))
         if line:
-            body.append("Dialogue: 0,%s,%s,Sub,,0,0,0,,%s" % (_wg_ms_to_ass(start), _wg_ms_to_ass(end + 200), line))
+            # 结束即走下句即来，不留尾延：尾延会让相邻两句短暂同屏（上一句没走下句已挂上）
+            body.append("Dialogue: 0,%s,%s,Sub,,0,0,0,,%s" % (_wg_ms_to_ass(start), _wg_ms_to_ass(end), line))
     return "\n".join(head + body) + "\n"
 
 def _run_talking_asr(wav_fp, out_json):
