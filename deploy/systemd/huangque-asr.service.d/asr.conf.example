@@ -1,0 +1,14 @@
+# huangque-asr 的环境变量说明（真值永远不进 git）
+#
+# 环境变量不走 drop-in：主单元 EnvironmentFile=/root/asr-service/asr.env 一次加载。
+# asr.env 落地：/root/asr-service/asr.env，chmod 600，内容：
+#
+#   ASR_INTERNAL_TOKEN=<随机 32 位十六进制>   # content_api 调 /transcribe 的凭据，必填
+#   # ASR_PORT=8102                           # 默认 8102，一般不改
+#   # ASR_MAX_AUDIO_BYTES=31457280            # 默认 30MB（≈15 分钟 16k wav），一般不改
+#
+# 同一个 ASR_INTERNAL_TOKEN 还要写进【主站】content-api/content.env：
+#   ASR_BASE=http://8.148.158.106:8102
+#   ASR_INTERNAL_TOKEN=<同一个值>
+#
+# 网络：8102 只对主站服务器公网 IP 开放（阿里云安全组白名单），token 做第二道保险。

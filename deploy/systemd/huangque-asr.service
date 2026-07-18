@@ -1,0 +1,14 @@
+[Unit]
+Description=Huangque ASR (FunASR 字级时间戳转写，独立机)
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/asr-service
+EnvironmentFile=/root/asr-service/asr.env
+ExecStart=/root/asr-service/.venv/bin/python /root/asr-service/asr_service.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

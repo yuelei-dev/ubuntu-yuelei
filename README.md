@@ -79,6 +79,7 @@
 | huangque-auth | 8095 | `server/auth_server.py` | 账号/token/点数（预扣+失败退点）/充值订单/审计 |
 | huangque-content | 8096 | `server/content_api.py` → `server/content_domains/` | 生成任务主力：作图/视频/配音/文案/采集/获客的 jobs 队列 |
 | huangque-imggen-api | 8101 | `server/imggen_api.py` | nano banana（Gemini）作图 + 反推 |
+| huangque-asr（独立机） | 8102 | `server/asr_service.py` | FunASR 字级时间戳转写（文字快剪），模型常驻独立服务器 |
 | huangque-dl | 8097 | `server/dl_service.py` | 无水印视频下载代理 |
 | huangque-leadgen-api | 8100 | `server/leadgen_api.py` | 采集/获客后端 |
 | huangque-admin | 8098 | `server/admin_api.py` | 运营后台（拨测/日志/用户/审批） |
