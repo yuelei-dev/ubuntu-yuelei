@@ -34,10 +34,16 @@ class WgAlignTests(unittest.TestCase):
         self.assertEqual([t for _, _, t in out], ["第一句。第二句。", "第三句。第四句。"])
 
     def test_align_more_segments_falls_back_to_asr_text(self):
-        # 段多句少：分不到整句的段退回该段 ASR 文本，句子只被消费一次（不重复发配）
+        # 段多句少：原文按时间顺序前段先得，分不到的后段退回 ASR 文本（原文没有就是没有）
         segs = [(0, 1000, "识别甲"), (1000, 2000, "识别乙"), (2000, 3000, "识别丙")]
         out = video._wg_align_script(segs, "只有一句原文。")
-        self.assertEqual([t for _, _, t in out], ["识别甲", "识别乙", "只有一句原文。"])
+        self.assertEqual([t for _, _, t in out], ["只有一句原文。", "识别乙", "识别丙"])
+
+    def test_align_no_segment_starves_when_sentences_enough(self):
+        # E2E 回归：长短不一的段按比例分句时，短段也不能被饿到 0 句（0 句会退回 ASR 错字上屏）
+        segs = [(0, 1000, "a"), (1000, 2000, "bbbbbbbbbbbb"), (2000, 3000, "a")]
+        out = video._wg_align_script(segs, "第一句。第二句。第三句。第四句。")
+        self.assertEqual([t for _, _, t in out], ["第一句。", "第二句。第三句。", "第四句。"])
 
     def test_align_total_failure_keeps_asr_text(self):
         segs = [(0, 1000, "识别文本")]
@@ -93,10 +99,21 @@ class WgAssTests(unittest.TestCase):
 
 
 class WgTitlesTests(unittest.TestCase):
-    def test_title_top_distilled_from_first_sentence_max_10(self):
+    def test_title_top_distilled_from_first_sentence_max_20(self):
         top, box = video._wg_titles("科技焕肤体验官招募活动现在开始啦。0元招募限20名。", [])
-        self.assertEqual(top, "科技焕肤体验官招募活")   # 去标点、截到 10 字
-        self.assertEqual(box, "0元招募限20名")           # 次句 → 第二行
+        self.assertEqual(top, "科技焕肤体验官招募活动现在开始啦")   # 去标点，≤20 字不截断
+        self.assertEqual(box, "0元招募限20名")           # 次句 ≤10 字 → 第二行
+
+    def test_title_skips_greeting_sentence(self):
+        # 首句是寒暄（姐妹们好呀～）要跳过，标题要信息句；次句 >10 字截断难看，宁可不渲染
+        top, box = video._wg_titles(
+            "姐妹们好呀～仙颜美容本月科技焕肤体验官招募正式开启！首批 20 个名额，0 元体验德国进口冷光嫩肤。", [])
+        self.assertEqual(top, "仙颜美容本月科技焕肤体验官招募正式开启")
+        self.assertEqual(box, "")
+
+    def test_title_top_splits_two_lines_when_over_10(self):
+        ass = video._wg_build_ass([(0, 1000, "你好")], 1080, 1920, "仙颜美容本月科技焕肤体验官招募正式开启", "")
+        self.assertIn("仙颜美容本月科技焕肤\\N体验官招募正式开启", ass)   # 长标题硬劈双行，字号不变
 
     def test_title_box_absent_when_single_sentence(self):
         top, box = video._wg_titles("只有一句话。", [])
