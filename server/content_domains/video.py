@@ -1927,7 +1927,8 @@ TALKING_ASR_TIMEOUT = int(os.environ.get("TALKING_ASR_TIMEOUT", "600"))
 # 同一字体族的不同打包名，想精确复刻 demo 可用 WG_RED_FONT 指回。
 _WG_FONT = os.environ.get("WG_RED_FONT", "") or SUBTITLE_FONT
 _WG_RED = "&H00303BFF"            # 高级红 RGB FF3B30（ASS 颜色 &HAABBGGRR），关键词 inline 高亮用
-_WG_TITLE_MAX = 10                # 标题每行最多 10 字，超出截断
+_WG_TITLE_MAX = 10                # 标题每行最多 10 字（超出劈双行）；整题最多 20 字，超出截断
+_WG_TITLE_TOTAL_MAX = 20
 _WG_TWO_LINE_MAX = 13             # 字幕超过 13 字按最靠中点的标点劈双行
 # 关键词红标词表：模板自带默认词表（demo 拍板版），最长优先、每词只标第一处。
 _WG_KEYWORDS = [
@@ -1958,24 +1959,44 @@ def _wg_align_script(segs, script_text):
     if n == m:
         groups = [[s] for s in sents]
     else:
+        # 句多段少：预算制按各段识别字数占比分整句（不切半句），并给后面每段留至少一句口粮，
+        # 任何段都不被饿到 0 句（饿到 0 句会退回 ASR 错字文本，E2E 亲眼见过"幻夫"上屏）；
+        # 段多句少：不够分时前段先得、后段退回 ASR 文本（原文只有那么多，没有就是没有）。
         total = sum(max(1, len(s[2])) for s in segs)
         groups, pos = [], 0
         for i, s in enumerate(segs):
-            take = (m - pos) if i == n - 1 else max(0, min(m - pos, int(round(len(s[2]) / total * m))))
+            if i == n - 1:
+                take = m - pos                              # 末段吃余量，原文不丢字
+            else:
+                budget = max(1, int(round(len(s[2]) / total * m)))
+                take = min(budget, m - pos - (n - 1 - i))   # 口粮约束：后面每段还能分到一句
+                take = max(1, min(take, m - pos))           # 本段至少一句（还有剩的话）
             groups.append(sents[pos:pos + take])
             pos += take
     return [(st, en, ("".join(g) if g else rec)) for (st, en, rec), g in zip(segs, groups)]
 
+_WG_GREETING = re.compile(
+    r"^\s*(hello大家好|哈喽大家好|大家好呀|大家好|哈喽|嗨|姐妹们好呀|宝子们好呀|家人们好呀|姐妹们|宝子们|家人们|各位(?:好|朋友(?:们)?))[呀啊呢哈~～，,！! ]*",
+    re.I)
+
 def _wg_titles(script_text, segs):
-    """标题双行：TitleTop=首句提炼（去标点 ≤10 字，超出截断）；TitleBox=次句，没有就不渲染。
+    """标题双行：TitleTop=首句剥掉寒暄前缀后提炼（去标点 ≤20 字，渲染时超 10 字劈双行）；
+    TitleBox=次句提炼，但 >10 字必须截断时宁可不渲染（"0元体"式半句话丢人）。
     audio 模式没有原文，退用 ASR 前两段文本。"""
     src = _wg_split_sentences(script_text) if script_text else []
     if not src:
-        src = [s[2] for s in segs][:2]
-    def distill(s):
-        return re.sub(r"[。.!！?？,，、;；:：…\s]+", "", s or "")[:_WG_TITLE_MAX]
-    top = distill(src[0]) if src else ""
-    box = distill(src[1]) if len(src) > 1 else ""
+        src = [s[2] for s in segs][:3]
+    # 句首寒暄只剥前缀不整句丢：寒暄常和信息句焊在同一句（"姐妹们好呀～仙颜美容…"），
+    # 整句丢了标题就歪成下一句（E2E 实测跑偏成"首批20个名额…"）；剥空了保留原句兜底
+    src = [(_WG_GREETING.sub("", s, count=1) or s) for s in src]
+    def distill(s, hard_max):
+        return re.sub(r"[。.!！?？,，、;；:：…~～\s]+", "", s or "")[:hard_max]
+    top = distill(src[0], _WG_TITLE_TOTAL_MAX) if src else ""
+    box = ""
+    if len(src) > 1:
+        raw = re.sub(r"[。.!！?？,，、;；:：…~～\s]+", "", src[1] or "")
+        if len(raw) <= _WG_TITLE_MAX:   # 副标题只收能完整放下的，截断版不上屏
+            box = raw
     return top, box
 
 def _wg_two_lines(text):
@@ -2029,7 +2050,11 @@ def _wg_build_ass(segs, w, h, title_top="", title_box=""):
     full_end = _wg_ms_to_ass(segs[-1][1] + 300) if segs else "0:00:10.00"
     for style, text in (("TitleTop", title_top), ("TitleBox", title_box)):
         if text:  # 第二行可选：没有就不渲染，不留空标题条
-            body.append("Dialogue: 0,0:00:00.00,%s,%s,,0,0,0,,%s" % (full_end, style, _ass_escape(text)))
+            esc = _ass_escape(text)
+            if style == "TitleTop" and len(esc) > _WG_TITLE_MAX:
+                mid = (len(esc) + 1) // 2   # 长标题劈双行（提炼已去标点，无标点可借，硬劈）；
+                esc = esc[:mid] + "\\N" + esc[mid:]   # 转义后再插 \N，否则反斜杠被二次转义上屏
+            body.append("Dialogue: 0,0:00:00.00,%s,%s,,0,0,0,,%s" % (full_end, style, esc))
     for (start, end, text) in segs:
         # 先转义再断行/标红：防用户文案里的 {} 注入 ASS 覆盖块；我们自己的标红 tag 在转义之后插入
         line = _wg_highlight(_wg_two_lines(_ass_escape(text)))
