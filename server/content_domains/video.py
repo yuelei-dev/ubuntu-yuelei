@@ -2045,7 +2045,10 @@ def _run_talking_asr(wav_fp, out_json):
     # 行为一致；要隔离 ASR 依赖/模型缓存，用 TALKING_ASR_PYTHON 指到独立 venv。
     asr_python = TALKING_ASR_PYTHON or sys.executable
     cmd = [asr_python, "-m", "content_domains.talking_asr_cli", str(wav_fp), str(out_json)]
-    if shutil.which("systemd-run"):
+    # systemd-run --scope 建 transient unit 要 root/polkit（线上 E2E 实测：ubuntu 服务用户下报
+    # "Interactive authentication required"），非 root 用不了；非 root 一律 nice -n 19
+    # （非 root 只能调高 nice 值、恰好就是让出调度优先级）。geteuid 缺省按 root 处理（Windows 开发机无此函数）。
+    if getattr(os, "geteuid", lambda: 0)() == 0 and shutil.which("systemd-run"):
         cmd = ["systemd-run", "--scope", "-q", "-p", "MemoryMax=1500M"] + cmd
     elif shutil.which("nice"):
         cmd = ["nice", "-n", "19"] + cmd

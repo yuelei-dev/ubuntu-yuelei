@@ -127,7 +127,8 @@ class WgAsrSubprocessTests(unittest.TestCase):
     def test_subprocess_wraps_systemd_scope_and_parses_json(self):
         with tempfile.TemporaryDirectory() as td:
             out_json = pathlib.Path(td) / "asr.json"
-            with patch.object(video.shutil, "which", side_effect=lambda n: "/usr/bin/systemd-run" if n == "systemd-run" else None), \
+            with patch.object(video.os, "geteuid", return_value=0), \
+                 patch.object(video.shutil, "which", side_effect=lambda n: "/usr/bin/systemd-run" if n == "systemd-run" else None), \
                  patch.object(video.subprocess, "run", side_effect=self._fake_run_ok(
                      [{"start": 0, "end": 1000, "text": "你好"}, {"start": 1000, "end": 2000, "text": "  "}])) as run:
                 segs = video._run_talking_asr(pathlib.Path(td) / "a.wav", out_json)
@@ -142,7 +143,19 @@ class WgAsrSubprocessTests(unittest.TestCase):
     def test_subprocess_falls_back_to_nice_without_systemd(self):
         with tempfile.TemporaryDirectory() as td:
             out_json = pathlib.Path(td) / "asr.json"
-            with patch.object(video.shutil, "which", side_effect=lambda n: "/usr/bin/nice" if n == "nice" else None), \
+            with patch.object(video.os, "geteuid", return_value=1000), \
+                 patch.object(video.shutil, "which", side_effect=lambda n: "/usr/bin/nice" if n == "nice" else None), \
+                 patch.object(video.subprocess, "run", side_effect=self._fake_run_ok([])) as run:
+                video._run_talking_asr(pathlib.Path(td) / "a.wav", out_json)
+        self.assertEqual(run.call_args.args[0][:3], ["nice", "-n", "19"])
+
+    def test_subprocess_non_root_uses_nice_even_with_systemd(self):
+        # 线上 E2E 实测：content 服务跑在 ubuntu 用户下，systemd-run --scope 要 polkit 交互认证必挂
+        # （"Interactive authentication required"）；非 root 即使有 systemd-run 也必须走 nice。
+        with tempfile.TemporaryDirectory() as td:
+            out_json = pathlib.Path(td) / "asr.json"
+            with patch.object(video.os, "geteuid", return_value=1000), \
+                 patch.object(video.shutil, "which", side_effect=lambda n: "/usr/bin/" + n if n in ("systemd-run", "nice") else None), \
                  patch.object(video.subprocess, "run", side_effect=self._fake_run_ok([])) as run:
                 video._run_talking_asr(pathlib.Path(td) / "a.wav", out_json)
         self.assertEqual(run.call_args.args[0][:3], ["nice", "-n", "19"])
