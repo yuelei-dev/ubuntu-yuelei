@@ -82,6 +82,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("function renderBreakdownReverse(bd)", self.html)
         self.assertIn("} else if(result.type==='breakdown_reverse'){", self.html)
         self.assertIn("switchBreakdownTool('reverse_prompt')", self.html)
+        self.assertIn("document.getElementById('bdReversePromptText')", self.html)
+        self.assertIn("return prompt && prompt!==sourceUrl ? prompt : '';", self.html)
         self.assertIn("location.href=handoffUrl('banana.html',prompt)", self.html)
         self.assertIn("if(currentMode==='breakdown' && isBreakdownReverseTool()) txt=reversePromptText();", self.html)
         self.assertIn("提示词反推暂仅支持单条视频链接", self.html)
