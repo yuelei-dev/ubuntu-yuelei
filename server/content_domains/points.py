@@ -97,19 +97,19 @@ def cost_of(kind, body):
         text = "\n\n".join([l for l in lines if l])
         return video_domain.video_cost({"text": text})
     if kind == "breakdown":
-        # 批量拆解按条累进：首条 8 点，每多一条 +4（后端上限 5 条 = 24 点）；单条维持 8 点。
+        # 分镜拆解与提示词反推均按每个有效链接 20 点；批量上限 5 条 = 100 点。
         urls = body.get("urls")
         if isinstance(urls, list):
             n = max(1, min(5, len([u for u in urls if isinstance(u, str) and u.strip()])))
-            return 8 + 4 * (n - 1)
-        return 8
+            return 20 * n
+        return 20
     return COST.get(kind, 0)
 
 def breakdown_batch_refund(cost, total, failed):
-    """批量拆解的退点额：全灭全退；部分失败每条退边际价 +4（首条 8 点溢价留给成功条）。
+    """批量拆解的退点额：全灭全退；部分失败每个失败链接退 20 点。
 
-    定价是首条 8 + 每多一条 4（见 cost_of 的 breakdown 分支），所以 k 条失败且至少 1 条
-    成功时退 4k —— 用户实付恰好等于成功条数对应的价；一条都没成则全退，与单条拆解失败
+    定价是每个有效链接 20 点（见 cost_of 的 breakdown 分支），所以 k 条失败且至少 1 条
+    成功时退 20k —— 用户实付恰好等于成功链接数对应的价；一条都没成则全退，与单条拆解失败
     走 error 全退保持一致。由 run_job 在抢到 done 终态后调用（每 job 至多一次），
     失败条数取 len(result.errors) —— 视频号被跳过也记在 errors 里，同样退。
     """
@@ -122,7 +122,7 @@ def breakdown_batch_refund(cost, total, failed):
     failed = min(failed, total)
     if failed >= total:
         return cost
-    return min(cost, 4 * failed)
+    return min(cost, 20 * failed)
 
 def settle_breakdown_batch(username, cost, result, job_id):
     """run_job 的批量拆解结算钩子：只对 breakdown_batch 结果按失败条数退点。
