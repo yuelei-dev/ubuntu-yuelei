@@ -204,6 +204,18 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(result["provider_video_id"], "or-1")
         self.assertEqual(result["video_file"], "video/grok_or.mp4")
 
+    def test_grok_does_not_fallback_after_ambiguous_xai_network_failure(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch("content_domains.video_xai.generate",
+                   side_effect=RuntimeError("xAI视频网络异常: connection reset")), \
+             patch("content_domains.video_openrouter.generate") as fallback:
+            with self.assertRaisesRegex(RuntimeError, "网络异常"):
+                self.video.gen_xiaole_video({
+                    "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
+                    "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
+                })
+        fallback.assert_not_called()
+
     def test_gen_grok_official_edit_uploads_source_and_preserves_contract(self):
         fake = {"request_id": "edit-1", "model": "grok-imagine-video",
                 "source_video_url": "https://vidgen.x.ai/edit.mp4", "duration": 6.2}
