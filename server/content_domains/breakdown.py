@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → GPT-4o 多模态 → 分镜脚本"""
+"""爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
 import os, json, time, base64, tempfile, subprocess, shutil
+import urllib.request
 from contextlib import closing
 
 from .core import OPENAI_BASE, OPENAI_KEY, jdb
@@ -391,9 +392,41 @@ def _extract_frames(video_path, count=6, duration=30):
     return outdir, frames
 
 
-def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
-    """GPT-4o 多模态：走 egress 代理链，绕过中转站"""
+def _post_zhipu(body, api_key):
+    base = os.environ.get(
+        "REVERSE_ZHIPU_BASE", "https://open.bigmodel.cn/api/paas/v4"
+    ).rstrip("/")
+    timeout = int(os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210)
+    req = urllib.request.Request(
+        base + "/chat/completions",
+        data=json.dumps(body, ensure_ascii=False).encode(),
+        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    with egress._DIRECT.open(req, timeout=timeout) as response:
+        return json.loads(response.read())
+
+
+def _post_openai_fallback(body):
     from .image import OPENAI_OFFICIAL_BASE
+
+    return egress.post_json(
+        OPENAI_OFFICIAL_BASE, OPENAI_BASE,
+        "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
+        {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
+        log=lambda message: print("[breakdown] %s" % message, flush=True),
+    )
+
+
+def _chat_content(response):
+    content = (response.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+    if not content:
+        raise RuntimeError("multimodal provider returned empty content")
+    return content
+
+
+def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
+    """智谱多模态优先，仅投递前失败时安全回退 GPT。"""
 
     content = [{"type": "text", "text": usermsg}]
     for path in image_paths:
@@ -405,7 +438,7 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
         })
 
     body = {
-        "model": os.environ.get("BREAKDOWN_MODEL", "gpt-4o"),
+        "model": os.environ.get("BREAKDOWN_MODEL", "glm-4v-plus"),
         "messages": [
             {"role": "system", "content": sysmsg},
             {"role": "user", "content": content}
@@ -413,13 +446,32 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
         "temperature": temp,
     }
 
-    d = egress.post_json(
-        OPENAI_OFFICIAL_BASE, OPENAI_BASE,
-        "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
-        {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
-        log=lambda m: print("[breakdown] %s" % m, flush=True)
-    )
-    return (d.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+    zhipu_key = os.environ.get("REVERSE_ZHIPU_KEY", "").strip()
+    if not zhipu_key:
+        raise RuntimeError("REVERSE_ZHIPU_KEY is not configured")
+
+    try:
+        response = _post_zhipu(body, zhipu_key)
+    except Exception as exc:
+        if not egress._pre_delivery_failure(exc):
+            print(
+                "[breakdown] zhipu ambiguous/delivered failure, no fallback: %s"
+                % type(exc).__name__,
+                flush=True,
+            )
+            raise
+        print(
+            "[breakdown] zhipu pre-delivery failure, fallback to openai: %s"
+            % type(exc).__name__,
+            flush=True,
+        )
+        fallback_body = dict(body)
+        fallback_body["model"] = os.environ.get("BREAKDOWN_FALLBACK_MODEL", "gpt-4o")
+        response = _post_openai_fallback(fallback_body)
+        return _chat_content(response)
+
+    print("[breakdown] zhipu success: %s" % body["model"], flush=True)
+    return _chat_content(response)
 
 
 HANDLERS = {"breakdown": gen_breakdown}
