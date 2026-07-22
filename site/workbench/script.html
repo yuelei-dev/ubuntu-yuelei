@@ -1180,6 +1180,7 @@
     document.getElementById('avatarPickClose').onclick=function(){ modal.style.display='none'; if(onCancel) onCancel(); };
     modal.onclick=function(e){ if(e.target===modal){ modal.style.display='none'; if(onCancel) onCancel(); } };
   }
+  var reverseVideoPickerRequest=0;
   function _showReverseVideoPicker(prompt,onConfirm){
     var modal=document.getElementById('reverseVideoPickModal');
     var noAvatar=document.getElementById('reverseVideoNoAvatar');
@@ -1189,6 +1190,7 @@
     var confirm=document.getElementById('reverseVideoConfirm');
     var close=document.getElementById('reverseVideoPickClose');
     if(!modal||!noAvatar||!grid||!duration||!cost||!confirm||!close) return;
+    var requestId=++reverseVideoPickerRequest;
     var selectedAvatarId=null;
     var selectedDuration=10;
     function updateCost(){
@@ -1230,6 +1232,7 @@
     fetch('/api/gen/video/avatars?limit=60',{headers:{'Authorization':'Bearer '+tok()}})
       .then(function(r){ return r.ok?r.json():Promise.reject(); })
       .then(function(d){
+        if(requestId!==reverseVideoPickerRequest) return;
         var avatars=(d&&d.items)||[];
         if(!avatars.length){
           grid.innerHTML='<div style="grid-column:1/-1;color:#94a4bb;font-size:13px;text-align:center;padding:24px 0;">还没有形象<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
@@ -1249,6 +1252,7 @@
         });
       })
       .catch(function(){
+        if(requestId!==reverseVideoPickerRequest) return;
         grid.innerHTML='<div style="grid-column:1/-1;color:#f4a460;font-size:13px;text-align:center;padding:24px 0;">形象加载失败，不影响无形象生成<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
       });
   }

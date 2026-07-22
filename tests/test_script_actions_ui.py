@@ -64,6 +64,11 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("confirm.disabled=true", self.html)
         self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
 
+    def test_reverse_video_picker_ignores_stale_avatar_responses(self):
+        self.assertIn("var reverseVideoPickerRequest=0", self.html)
+        self.assertIn("var requestId=++reverseVideoPickerRequest", self.html)
+        self.assertGreaterEqual(self.html.count("if(requestId!==reverseVideoPickerRequest) return;"), 2)
+
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
         self.assertIn('id="panelBreakdown"', self.html)
