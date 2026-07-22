@@ -388,13 +388,18 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("4-6 个分镜", src)
         self.assertNotIn("10字内", src)
 
-    def test_reverse_prompt_requires_structured_detail(self):
-        """反推 prompt 必须要求五层结构（主体/场景/镜头/光线/钩子）且 500-800 字"""
+    def test_reverse_prompt_requires_structured_action_detail(self):
+        """反推 prompt 必须要求六层结构、人物/镜头动作、动作时序及 500-800 字。"""
         import inspect
         src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
         self.assertIn("500-800 字", src)
         self.assertNotIn("150-300 字", src)
-        self.assertIn("镜头（景别、运镜、视角）", src)
+        self.assertIn("六个层次", src)
+        self.assertIn("动作与时序", src)
+        self.assertIn("表情、视线、手势、肢体姿态、走位", src)
+        self.assertIn("跟随、推进、拉远、摇移或转场", src)
+        self.assertIn("起始—发展—结束", src)
+        self.assertIn("镜头（景别、视角、构图和整体运镜风格）", src)
 
     def test_do_breakdown_reverse_prompt_returns_prompt_and_keeps_asr_flag(self):
         import os, tempfile
