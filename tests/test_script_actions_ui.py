@@ -25,7 +25,7 @@ class ScriptActionsUiTests(unittest.TestCase):
     def test_one_click_video_calls_script_to_video_api(self):
         self.assertIn('id="scGenVideo"', self.html)
         self.assertIn('id="scGenAudio"', self.html)
-        self.assertIn("fetch('/api/gen/script_to_video'", self.html)
+        self.assertIn("options.endpoint||'/api/gen/script_to_video'", self.html)
         self.assertIn("_setGenerateBusy", self.html)
         self.assertIn("_doGenerate({scenes:list,style:'剧情',duration:_dramaDuration(list)},genVideoBtn)", self.html)
 
@@ -38,6 +38,40 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
         self.assertIn('id="avatarPickModal"', self.html)
         self.assertIn('id="avatarPickGrid"', self.html)
+
+    def test_reverse_video_picker_has_optional_avatar_duration_and_cost(self):
+        self.assertIn('id="reverseVideoPickModal"', self.html)
+        self.assertIn('id="reverseVideoNoAvatar"', self.html)
+        self.assertIn('id="reverseVideoAvatarGrid"', self.html)
+        self.assertIn('data-reverse-duration="5"', self.html)
+        self.assertIn('data-reverse-duration="10"', self.html)
+        self.assertIn('data-reverse-duration="15"', self.html)
+        self.assertIn('id="reverseVideoCost"', self.html)
+        self.assertIn("selectedDuration=10", self.html)
+        self.assertIn("selectedAvatarId=null", self.html)
+        self.assertIn("selectedDuration*30", self.html)
+
+    def test_reverse_video_picker_load_failure_keeps_no_avatar_available(self):
+        self.assertIn("function _showReverseVideoPicker(prompt,onConfirm)", self.html)
+        self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
+        self.assertIn("形象加载失败，不影响无形象生成", self.html)
+        self.assertIn("data-reverse-retry", self.html)
+        self.assertIn("retry.onclick=loadAvatars", self.html)
+        self.assertIn("还没有形象", self.html)
+        self.assertIn("video.html", self.html)
+
+    def test_reverse_video_picker_cancel_and_submit_are_explicit(self):
+        self.assertIn('id="reverseVideoPickClose"', self.html)
+        self.assertIn('id="reverseVideoConfirm"', self.html)
+        self.assertIn("confirm.disabled=true", self.html)
+        self.assertIn("if(submitted) return;", self.html)
+        self.assertIn("dismiss();\n      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
+        self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
+
+    def test_reverse_video_picker_ignores_stale_avatar_responses(self):
+        self.assertIn("var reverseVideoPickerRequest=0", self.html)
+        self.assertIn("var requestId=++reverseVideoPickerRequest", self.html)
+        self.assertGreaterEqual(self.html.count("if(requestId!==reverseVideoPickerRequest) return;"), 2)
 
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
@@ -74,7 +108,31 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:style||'剧情'};", self.html)
         self.assertIn("_pickRemakeStyle(function(style)", self.html)
         self.assertIn("_showAvatarPicker(function(avatarId)", self.html)
-        self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn)", self.html)
+        self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
+        self.assertIn("endpoint:'/api/gen/script_to_video'", self.html)
+
+    def test_reverse_video_without_avatar_uses_drama_and_selected_duration(self):
+        self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
+        self.assertIn("dur:choice.duration+'s'", self.html)
+        self.assertIn("style:'剧情',duration:choice.duration", self.html)
+        self.assertIn("endpoint:'/api/gen/script_to_video'", self.html)
+
+    def test_reverse_video_with_avatar_uses_existing_cinematic_api(self):
+        self.assertIn("endpoint:'/api/gen/cinematic'", self.html)
+        self.assertIn("cine_mode:'open'", self.html)
+        self.assertIn("avatar_ids:[choice.avatarId]", self.html)
+        self.assertIn("prompt:prompt", self.html)
+        self.assertIn("duration:choice.duration", self.html)
+        self.assertIn("ratio:'9:16'", self.html)
+        self.assertIn("resolution:'720p'", self.html)
+        self.assertIn("enhance_prompt:false", self.html)
+
+    def test_shared_video_submitter_supports_both_endpoints_safely(self):
+        self.assertIn("function _doGenerate(payload,btn,options)", self.html)
+        self.assertIn("options=options||{}", self.html)
+        self.assertIn("options.endpoint||'/api/gen/script_to_video'", self.html)
+        self.assertIn("(payload.scenes||[]).length", self.html)
+        self.assertIn("confirm.disabled=true", self.html)
 
     def test_breakdown_reverse_prompt_ui_and_actions_exist(self):
         self.assertIn('id="bdReverseCopyBtn"', self.html)
