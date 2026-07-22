@@ -40,13 +40,13 @@ class CostOfTests(unittest.TestCase):
             self.points.cost_of("script_to_video", {"scenes": [{"scene": "画面"}], "style": "剧情", "duration": "abc"}), 300)
 
     def test_breakdown_batch_refund_rules(self):
-        """批量拆解退点：全灭全退；部分失败每条退边际价 4；无失败/无费用/坏参数不退"""
-        self.assertEqual(self.points.breakdown_batch_refund(24, 5, 5), 24)   # 全灭全退
-        self.assertEqual(self.points.breakdown_batch_refund(24, 5, 2), 8)    # 部分失败 4×2
-        self.assertEqual(self.points.breakdown_batch_refund(16, 3, 1), 4)    # 3 条灭 1 条退 4
-        self.assertEqual(self.points.breakdown_batch_refund(8, 1, 1), 8)     # 单条全灭全退
-        self.assertEqual(self.points.breakdown_batch_refund(24, 5, 9), 24)   # failed>total 仍按全灭
-        self.assertEqual(self.points.breakdown_batch_refund(24, 5, 0), 0)    # 无失败不退
+        """批量拆解退点：全灭全退；部分失败每条退 20；无失败/无费用/坏参数不退"""
+        self.assertEqual(self.points.breakdown_batch_refund(100, 5, 5), 100)  # 全灭全退
+        self.assertEqual(self.points.breakdown_batch_refund(100, 5, 2), 40)   # 部分失败 20×2
+        self.assertEqual(self.points.breakdown_batch_refund(60, 3, 1), 20)    # 3 条灭 1 条退 20
+        self.assertEqual(self.points.breakdown_batch_refund(20, 1, 1), 20)    # 单条全灭全退
+        self.assertEqual(self.points.breakdown_batch_refund(100, 5, 9), 100)  # failed>total 仍按全灭
+        self.assertEqual(self.points.breakdown_batch_refund(100, 5, 0), 0)    # 无失败不退
         self.assertEqual(self.points.breakdown_batch_refund(0, 5, 5), 0)     # 无费用不退
         self.assertEqual(self.points.breakdown_batch_refund("x", 5, 5), 0)   # 坏参数不抛异常
 
@@ -57,8 +57,8 @@ class CostOfTests(unittest.TestCase):
         self.points.safe_refund_points = lambda u, a, r="": calls.append((u, a)) or a
         try:
             self.points.settle_breakdown_batch(
-                "fang", 24, {"type": "breakdown_batch", "total": 5, "errors": [{"url": "a"}, {"url": "b"}]}, 99)
-            self.assertEqual(calls, [("fang", 8)])
+                "fang", 100, {"type": "breakdown_batch", "total": 5, "errors": [{"url": "a"}, {"url": "b"}]}, 99)
+            self.assertEqual(calls, [("fang", 40)])
             calls.clear()
             self.points.settle_breakdown_batch("fang", 24, {"type": "breakdown_batch", "total": 5, "errors": []}, 100)
             self.points.settle_breakdown_batch("fang", 8, {"type": "breakdown"}, 101)   # 单条不在这结算
@@ -67,16 +67,16 @@ class CostOfTests(unittest.TestCase):
         finally:
             self.points.safe_refund_points = orig
 
-    def test_breakdown_batch_progressive_pricing(self):
-        """批量拆解：首条 8 点，每多一条 +4，封顶 5 条 = 24 点"""
-        self.assertEqual(self.points.cost_of("breakdown", {"urls": ["https://a.test/1"]}), 8)
+    def test_breakdown_batch_fixed_per_link_pricing(self):
+        """批量拆解：每个有效链接 20 点，封顶 5 条 = 100 点"""
+        self.assertEqual(self.points.cost_of("breakdown", {"urls": ["https://a.test/1"]}), 20)
         self.assertEqual(
-            self.points.cost_of("breakdown", {"urls": ["https://a.test/1", "https://a.test/2", "https://a.test/3"]}), 16)
+            self.points.cost_of("breakdown", {"urls": ["https://a.test/1", "https://a.test/2", "https://a.test/3"]}), 60)
         self.assertEqual(
-            self.points.cost_of("breakdown", {"urls": ["https://a.test/%d" % i for i in range(6)]}), 24)
+            self.points.cost_of("breakdown", {"urls": ["https://a.test/%d" % i for i in range(6)]}), 100)
 
-    def test_breakdown_single_url_stays_8(self):
-        self.assertEqual(self.points.cost_of("breakdown", {"url": "https://a.test/1"}), 8)
+    def test_breakdown_single_url_is_20(self):
+        self.assertEqual(self.points.cost_of("breakdown", {"url": "https://a.test/1"}), 20)
 
 
 if __name__ == "__main__":

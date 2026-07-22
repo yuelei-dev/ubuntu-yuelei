@@ -234,7 +234,7 @@ KIND_GRACE = {"tryon": 2400, "xiaole_video": 1200, "image": 900, "collect": 1200
 AVATAR_COST = _env_positive_int("AVATAR_COST", 5)   # 建形象：象征性收费防刷，失败自动退点
 # ⚠️ cost_of() 回落到 COST.get(kind, 0) —— 新增 kind 忘了在这里登记，就是【免费】。
 COST = {"image": 12, "copy": 3, "audio": 10, "video": VIDEO_COST, "tryon": 40,
-        "cinematic": VIDEO_COST, "avatar": AVATAR_COST, "breakdown": 8,
+        "cinematic": VIDEO_COST, "avatar": AVATAR_COST, "breakdown": 20,
         "script_to_video": VIDEO_COST}  # collect/leads/cinematic 走 cost_of() 动态算
 # cinematic 的这条已经不生效了 —— 电影化身按成片秒数计费（video.cinematic_cost），
 # cost_of() 里有它自己的分支、必定先 return。留在这里只当保险：万一哪天分支被绕过，
