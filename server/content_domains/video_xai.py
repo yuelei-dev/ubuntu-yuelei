@@ -20,6 +20,14 @@ XAI_VIDEO_TIMEOUT = int(os.environ.get("XAI_VIDEO_TIMEOUT", "1200") or 1200)
 XAI_VIDEO_POLL_INTERVAL = int(os.environ.get("XAI_VIDEO_POLL_INTERVAL", "5") or 5)
 
 
+class XaiCreateUnavailableError(RuntimeError):
+    """A definite pre-creation billing/auth failure that is safe to fall back from."""
+
+
+class XaiCredentialError(RuntimeError):
+    pass
+
+
 def available():
     return bool(XAI_API_KEY)
 
@@ -63,9 +71,9 @@ def _request_json(opener, method, path, body=None, timeout=90):
     except urllib.error.HTTPError as exc:
         detail = _error_detail(exc)
         if exc.code in (401, 403):
-            raise RuntimeError("xAI鉴权失败: HTTP %s %s" % (exc.code, detail))
+            raise XaiCredentialError("xAI鉴权失败: HTTP %s %s" % (exc.code, detail))
         if exc.code == 402:
-            raise RuntimeError("xAI账户余额不足: %s" % detail)
+            raise XaiCredentialError("xAI账户余额不足: %s" % detail)
         if exc.code == 429:
             raise RuntimeError("xAI当前请求过多: %s" % detail)
         raise RuntimeError("xAI视频接口失败: HTTP %s %s" % (exc.code, detail))
@@ -116,6 +124,8 @@ def _poll(opener, request_id, model, duration, job_id=None, heartbeat=None, now=
 def generate(model, prompt, duration, aspect_ratio, resolution, image_url=None,
              job_id=None, heartbeat=None, now=None, sleep=None):
     """创建一次 xAI 生成任务并轮询到终态。"""
+    if not XAI_API_KEY:
+        raise XaiCreateUnavailableError("xAI官方视频未配置（XAI_API_KEY）")
     opener = _opener()
     payload = {
         "model": model,
@@ -128,7 +138,10 @@ def generate(model, prompt, duration, aspect_ratio, resolution, image_url=None,
         payload["image"] = {"url": image_url}
 
     # 红线：非幂等 POST 只发一次，不在此处做网络重试或换代理。
-    created = _request_json(opener, "POST", "/videos/generations", payload, timeout=120)
+    try:
+        created = _request_json(opener, "POST", "/videos/generations", payload, timeout=120)
+    except XaiCredentialError as exc:
+        raise XaiCreateUnavailableError(str(exc)) from exc
     request_id = str(created.get("request_id") or "").strip()
     if not request_id:
         raise RuntimeError("xAI视频服务未返回 request_id")

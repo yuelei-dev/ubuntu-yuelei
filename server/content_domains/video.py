@@ -2586,7 +2586,7 @@ def _xiaole_pick_video_url(output):
             return v
     return None
 
-def _xiaole_download_candidates(url, tunnel_proxy):
+def _xiaole_download_candidates(url, tunnel_proxy, origin_headers=None):
     """成片下载候选链(GET 幂等，可自由多档尝试，不像出图 POST 有重复计费顾虑)。顺序：
       ① 原始 URL 走 egress 快隧道(Reality VPS/mihomo)—— tunnel_proxy 非空才加，避开拥塞的 heygen 中转
       ② heygen 法兰克福 /cdn/ 中转 —— 兜底(拥塞时慢到分钟级)，走进程默认(NO_PROXY 含 zelong.vip → 直连中转)
@@ -2594,6 +2594,7 @@ def _xiaole_download_candidates(url, tunnel_proxy):
     返回 [(fetch_url, headers, proxy_or_None), ...]；proxy 非空则该档强制走此代理，None 则用进程默认 urlopen。
     未配隧道(tunnel_proxy 为空)时链退化为 [heygen, 直连]，等于改动前老行为。"""
     plain_headers = {"User-Agent": "huangque-content/1.0"}
+    plain_headers.update(origin_headers or {})
     parts = urllib.parse.urlsplit(url)
     host = (parts.hostname or "").lower()
     candidates = []
@@ -2604,7 +2605,8 @@ def _xiaole_download_candidates(url, tunnel_proxy):
         fetch = "%s/cdn/%s/%s" % (relay, host, parts.path.lstrip("/"))
         if parts.query:
             fetch += "?" + parts.query
-        headers = dict(plain_headers)
+        # Never forward an upstream bearer token to the relay.
+        headers = {"User-Agent": "huangque-content/1.0"}
         token = os.environ.get("HEYGEN_RELAY_TOKEN", "").strip()
         if token:
             headers["X-Relay-Token"] = token
@@ -2613,19 +2615,45 @@ def _xiaole_download_candidates(url, tunnel_proxy):
     return candidates
 
 
-def _download_xiaole_video(url, prefix="xiaole"):
+class _OriginAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects without leaking an origin bearer token cross-origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if (old.scheme.lower(), old.netloc.lower()) != (new.scheme.lower(), new.netloc.lower()):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _authenticated_download_opener(proxy):
+    proxy_handler = urllib.request.ProxyHandler(
+        {"http": proxy, "https": proxy} if proxy else None
+    )
+    return urllib.request.build_opener(proxy_handler, _OriginAuthRedirectHandler()).open
+
+
+def _download_xiaole_video(url, prefix="xiaole", origin_headers=None):
     # 视频 CDN 多在海外(如 vidgen.x.ai)，国内直连不通。成片下载是 GET(幂等)，故可多档尝试：
     # 优先走 egress 快隧道，避开拥塞到分钟级的 heygen 法兰克福老中转(实测 xAI 2 分钟出片、
     # 走老中转下载却要 11~19 分钟，甚至卡死被 reaper 判超时退点)。中转仅作兜底。
     from . import egress
-    candidates = _xiaole_download_candidates(url, egress.preferred_proxy())
+    candidates = _xiaole_download_candidates(
+        url, egress.preferred_proxy(), origin_headers=origin_headers
+    )
     # 下载中断(IncompleteRead/网络抖动)自动重试；前一档耗尽后换下一档
     data = None
     last_err = None
     for fetch_url, headers, proxy in candidates:
         if data is not None:
             break
-        opener_open = egress._opener(proxy).open if proxy else urllib.request.urlopen
+        if headers.get("Authorization"):
+            opener_open = _authenticated_download_opener(proxy)
+        else:
+            opener_open = egress._opener(proxy).open if proxy else urllib.request.urlopen
         for attempt in range(_xiaole_dl_retries):
             try:
                 req = urllib.request.Request(fetch_url, headers=headers)
@@ -2743,7 +2771,7 @@ def gen_xiaole_video(payload):
     if job_id:
         update_video_asset_phase(job_id, "queued", mode=channel, text=prompt, model=model)
     if use_xai:
-        from . import video_xai
+        from . import video_openrouter, video_xai
         operation = payload.get("operation") or "generate"
         reference_video_file = reference_video_url = None
         if operation == "edit":
@@ -2761,17 +2789,32 @@ def gen_xiaole_video(payload):
             image_url = ref_images[0] if ref_images else None
             if image_url and not str(image_url).startswith(("http://", "https://")):
                 raise RuntimeError("xAI官方图生视频需要可公网访问的参考图，COS转存失败")
-            xres = video_xai.generate(
-                model=model, prompt=prompt, image_url=image_url,
-                duration=payload.get("duration") or 10,
-                aspect_ratio=ratio, resolution=payload.get("resolution") or "720p",
-                job_id=job_id, heartbeat=update_video_asset_phase,
-            )
+            try:
+                xres = video_xai.generate(
+                    model=model, prompt=prompt, image_url=image_url,
+                    duration=payload.get("duration") or 10,
+                    aspect_ratio=ratio, resolution=payload.get("resolution") or "720p",
+                    job_id=job_id, heartbeat=update_video_asset_phase,
+                )
+            except video_xai.XaiCreateUnavailableError:
+                if not video_openrouter.available():
+                    raise
+                xres = video_openrouter.generate(
+                    model=model, prompt=prompt, image_urls=ref_images,
+                    duration=payload.get("duration") or 10,
+                    aspect_ratio=ratio, resolution=payload.get("resolution") or "720p",
+                    job_id=job_id, heartbeat=update_video_asset_phase,
+                )
         source_url = xres["source_video_url"]
+        provider = xres.get("provider") or "xai"
         if job_id:
-            update_video_asset_phase(job_id, "downloading", source_video_url=source_url,
+            phase = "openrouter_downloading" if provider == "openrouter" else "downloading"
+            update_video_asset_phase(job_id, phase, source_video_url=source_url,
                                      provider_video_id=xres.get("request_id"), model=xres.get("model") or model)
-        video_file = _download_xiaole_video(source_url, "grok_xai")
+        origin_headers = video_openrouter.download_headers(source_url) if provider == "openrouter" else None
+        video_file = _download_xiaole_video(
+            source_url, "grok_" + provider, origin_headers=origin_headers
+        )
         cover = _extract_first_frame_cover(video_file)
         result = {
             "video_file": video_file, "video_url": _file_url(video_file),

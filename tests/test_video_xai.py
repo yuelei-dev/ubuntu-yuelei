@@ -89,6 +89,73 @@ class XaiVideoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "余额不足"):
                 video_xai.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
 
+    def test_create_403_is_safe_fallback_error(self):
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://api.x.ai/v1/videos/generations", 403, "forbidden", {},
+            io.BytesIO(b'{"error":"monthly spending limit reached"}'),
+        )
+        with patch.object(video_xai, "XAI_API_KEY", "test-key"), \
+             patch.object(video_xai, "_opener", return_value=opener):
+            with self.assertRaises(video_xai.XaiCreateUnavailableError):
+                video_xai.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+
+    def test_create_401_and_402_are_safe_fallback_errors(self):
+        for status in (401, 402):
+            with self.subTest(status=status):
+                opener = Mock()
+                opener.open.side_effect = urllib.error.HTTPError(
+                    "https://api.x.ai/v1/videos/generations", status, "rejected", {},
+                    io.BytesIO(b'{"error":"rejected"}'),
+                )
+                with patch.object(video_xai, "XAI_API_KEY", "test-key"), \
+                     patch.object(video_xai, "_opener", return_value=opener):
+                    with self.assertRaises(video_xai.XaiCreateUnavailableError):
+                        video_xai.generate(
+                            "grok-imagine-video", "demo", 5, "16:9", "480p"
+                        )
+
+    def test_unrelated_value_error_is_not_safe_fallback_error(self):
+        with patch.object(video_xai, "XAI_API_KEY", "test-key"), \
+             patch.object(video_xai, "_opener", side_effect=ValueError("bad proxy")):
+            with self.assertRaises(ValueError) as raised:
+                video_xai.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+        self.assertNotIsInstance(raised.exception, video_xai.XaiCreateUnavailableError)
+
+    def test_missing_key_is_safe_fallback_error(self):
+        with patch.object(video_xai, "XAI_API_KEY", ""):
+            with self.assertRaises(video_xai.XaiCreateUnavailableError):
+                video_xai.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+
+    def test_poll_403_does_not_become_safe_fallback_error(self):
+        opener = Mock()
+        opener.open.side_effect = [
+            _Response({"request_id": "already-billed"}),
+            urllib.error.HTTPError(
+                "https://api.x.ai/v1/videos/already-billed", 403, "forbidden", {},
+                io.BytesIO(b'{"error":"token expired"}'),
+            ),
+        ]
+        with patch.object(video_xai, "XAI_API_KEY", "test-key"), \
+             patch.object(video_xai, "_opener", return_value=opener):
+            with self.assertRaises(video_xai.XaiCredentialError) as raised:
+                video_xai.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+        self.assertNotIsInstance(raised.exception, video_xai.XaiCreateUnavailableError)
+
+    def test_edit_403_never_becomes_generate_fallback_error(self):
+        opener = Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://api.x.ai/v1/videos/edits", 403, "forbidden", {},
+            io.BytesIO(b'{"error":"monthly spending limit reached"}'),
+        )
+        with patch.object(video_xai, "XAI_API_KEY", "test-key"), \
+             patch.object(video_xai, "_opener", return_value=opener):
+            with self.assertRaises(video_xai.XaiCredentialError) as raised:
+                video_xai.edit(
+                    "grok-imagine-video", "demo", "https://cos.example/source.mp4", 5
+                )
+        self.assertNotIsInstance(raised.exception, video_xai.XaiCreateUnavailableError)
+
 
 if __name__ == "__main__":
     unittest.main()
