@@ -372,6 +372,18 @@ def validate_video_payload(payload, username=None):
     if not 0.05 <= bgm_volume <= 0.8:
         raise ValueError("bgm_volume 必须是 0.05-0.8 的数字")
 
+    motion_prompts = {}
+    for field in ("motion_prompt_original", "motion_prompt"):
+        value = payload[field] if field in payload else ""
+        if not isinstance(value, str):
+            raise ValueError("%s 必须是字符串" % field)
+        value = value.strip()
+        if len(value) > 500:
+            raise ValueError("%s 最多 500 个字符" % field)
+        motion_prompts[field] = value
+    if motion_prompts["motion_prompt"]:
+        resolution, ratio = "1080p", "9:16"
+
     cleaned = dict(payload)
     cleaned["mode"] = mode
     cleaned["ratio"] = ratio
@@ -382,6 +394,7 @@ def validate_video_payload(payload, username=None):
         cleaned["audio_data"] = audio_data
     cleaned["bgm_data"] = bgm_data
     cleaned["bgm_volume"] = bgm_volume
+    cleaned.update(motion_prompts)
     cleaned.pop("duration", None)
     cleaned.pop("line", None)   # 动作模仿不再有线路，别把老前端传来的 line 写进 payload 混淆历史记录
     return cleaned
@@ -783,7 +796,8 @@ def _save_data_file(data_url, prefix, allowed_ext):
 def _heygen_relay_token():
     return os.environ.get("HEYGEN_RELAY_TOKEN", "").strip()
 
-def _heygen_request_json(method, path, body=None, headers=None, timeout=180, direct=False):
+def _heygen_request_json(method, path, body=None, headers=None, timeout=180, direct=False,
+                         redact_values=None):
     # direct=True 时同一套 v3 API 打 HeyGen 真身（泽龙即 v3 转发，路径同构），走 mihomo 代理出境
     if not HEYGEN_API_KEY:
         raise ValueError("视频生成服务未配置")
@@ -800,31 +814,35 @@ def _heygen_request_json(method, path, body=None, headers=None, timeout=180, dir
             raw = r.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace").replace("\n", " ")[:600]
-        print("[heygen] FAIL %s %s -> HTTP %s %s" % (method, path, e.code, detail), flush=True)
+        safe_detail = "响应已脱敏" if redact_values else detail
+        print("[heygen] FAIL %s %s -> HTTP %s %s" % (method, path, e.code, safe_detail), flush=True)
         if e.code == 429:
             # 429 单独成一类：请求被【瞬间拒绝、未被处理、未计费】，可以安全重发。
             # 其余错误(超时/RST/5xx)不行——HeyGen 提交即扣 credit，那些可能已经计费了。
             # Retry-After 是 HeyGen 明确告诉我们该等多久（官方文档：「Check the Retry-After
             # response header for the number of seconds to wait before retrying」）——
             # 听它的，比我们瞎猜指数退避准。
-            err = HeyGenRateLimited("HeyGen 限流(429): %s" % detail)
+            err = HeyGenRateLimited("HeyGen 限流(429): %s" % safe_detail)
             try:
                 err.retry_after = float((e.headers or {}).get("Retry-After") or 0)
             except (TypeError, ValueError):
                 err.retry_after = 0.0
             raise err from e
-        raise RuntimeError("HeyGen接口失败: HTTP %s %s" % (e.code, detail)) from e
+        raise RuntimeError("HeyGen接口失败: HTTP %s %s" % (e.code, safe_detail)) from e
     except OSError as e:
         # URLError / socket.timeout(TimeoutError) / ssl.SSLError / ConnectionError —— 传输层瞬时错误。
         # 归为 HeyGenNetworkError：幂等 GET(轮询/下载)可安全重试；提交 POST 照旧穿透不重发。
         # 注意「read timeout」发生在 r.read() 阶段，是 TimeoutError 而非 URLError，
         # 原来的 `except URLError` 漏了它，会裸抛「The read operation timed out」——正是丢片主因(#605)。
         detail = str(getattr(e, "reason", e))[:300]
-        print("[heygen] FAIL %s %s -> network %s" % (method, path, detail), flush=True)
-        raise HeyGenNetworkError("HeyGen接口网络失败: %s" % detail) from e
+        safe_detail = "响应已脱敏" if redact_values else detail
+        print("[heygen] FAIL %s %s -> network %s" % (method, path, safe_detail), flush=True)
+        raise HeyGenNetworkError("HeyGen接口网络失败: %s" % safe_detail) from e
     try:
         return json.loads(raw.decode("utf-8"))
     except Exception:
+        if redact_values:
+            raise RuntimeError("HeyGen返回解析失败: 响应已脱敏")
         raise RuntimeError("HeyGen返回解析失败: %s" % raw[:300].decode("utf-8", "replace"))
 
 def _heygen_upload_asset(file_path, direct=False):
@@ -1116,6 +1134,27 @@ def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, moti
     video_id = ((data.get("data") or {}).get("video_id") or "").strip()
     if not video_id:
         raise RuntimeError("HeyGen未返回video_id: %s" % json.dumps(data, ensure_ascii=False)[:500])
+    return video_id
+
+def _heygen_create_avatar_iv_video(avatar_id, audio_asset_id, motion_prompt, motion, direct=False):
+    body = json.dumps({
+        "type": "avatar",
+        "avatar_id": avatar_id,
+        "audio_asset_id": audio_asset_id,
+        "resolution": "1080p",
+        "aspect_ratio": "9:16",
+        "fit": "cover",
+        "motion_prompt": motion_prompt,
+        "expressiveness": motion,
+        "engine": {"type": "avatar_iv"},
+        "output_format": "mp4",
+    }, ensure_ascii=False).encode()
+    data = _heygen_request_json("POST", "/videos", body, {
+        "Content-Type": "application/json",
+    }, timeout=90, direct=direct, redact_values=(motion_prompt,))
+    video_id = ((data.get("data") or {}).get("video_id") or "").strip()
+    if not video_id:
+        raise RuntimeError("HeyGen Avatar IV 未返回video_id: 响应已脱敏")
     return video_id
 
 def _find_nested_dict(obj, pred):
@@ -1511,31 +1550,40 @@ class HeyGenBilledError(RuntimeError):
 HEYGEN_MOTION_DEADLINE = CINEMATIC_GEN_DEADLINE
 
 
-def _heygen_poll_video(video_id, direct=False, deadline_s=None):
+def _heygen_poll_video(video_id, direct=False, deadline_s=None, redact_values=None):
     deadline = time.time() + (deadline_s or HEYGEN_TIMEOUT)
     last_status = ""
     net_fails = 0
     while time.time() < deadline:
         try:
-            data = _heygen_request_json("GET", "/videos/" + urllib.parse.quote(video_id), timeout=90, direct=direct)
+            request_kwargs = {"timeout": 90, "direct": direct}
+            if redact_values:
+                request_kwargs["redact_values"] = redact_values
+            data = _heygen_request_json(
+                "GET", "/videos/" + urllib.parse.quote(video_id), **request_kwargs)
         except HeyGenNetworkError as e:
             # 轮询是幂等 GET、不计费——隧道瞬时抖动不该判死任务、白烧提交费(#605)。
             # 等下一轮重试；deadline 仍是总上限，不会无限转。provider 明确 failed 才判失败(见下)。
             net_fails += 1
+            safe_detail = "响应已脱敏" if redact_values else str(e)[:120]
             print("[heygen] poll video_id=%s 网络抖动(%d)，%ds 后重试: %s"
-                  % (video_id, net_fails, HEYGEN_POLL_INTERVAL, str(e)[:120]), flush=True)
+                  % (video_id, net_fails, HEYGEN_POLL_INTERVAL, safe_detail), flush=True)
             time.sleep(HEYGEN_POLL_INTERVAL)
             continue
         info = data.get("data") or {}
         status = str(info.get("status") or "").lower()
         if status != last_status:
-            print("[heygen] video_id=%s status=%s" % (video_id, status), flush=True)
+            safe_status = "响应已脱敏" if redact_values else status
+            print("[heygen] video_id=%s status=%s" % (video_id, safe_status), flush=True)
             last_status = status
         if status == "completed":
             if not info.get("video_url"):
                 raise RuntimeError("HeyGen完成但未返回video_url")
             return info
         if status in {"failed", "error"}:
+            if redact_values:
+                print("[heygen] FAIL GET /videos/%s -> provider 响应已脱敏" % video_id, flush=True)
+                raise RuntimeError("HeyGen视频生成失败: 响应已脱敏")
             detail = json.dumps(info, ensure_ascii=False)[:500]
             print("[heygen] FAIL GET /videos/%s -> provider %s" % (video_id, detail), flush=True)
             raise RuntimeError("HeyGen视频生成失败: %s" % detail)
@@ -1689,6 +1737,101 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
         ret["image_file"] = cover
         ret["image_url"] = public_url(cover, "image/jpeg")
     return ret
+
+def _generate_heygen_avatar_iv_attempt(image_file, audio_file, motion_prompt, motion,
+                                       avatar_look_id="", direct=False):
+    audio_fp = _resolve_out_file(audio_file)
+    if not audio_fp:
+        raise ValueError("视频素材文件不存在")
+    audio_fp = _ensure_heygen_audio_mp3(audio_fp)
+    image_asset_id = None
+    avatar_look_id = str(avatar_look_id or "").strip()
+    if not avatar_look_id:
+        image_fp = _resolve_out_file(image_file)
+        if not image_fp:
+            raise ValueError("视频素材文件不存在")
+        image_fp = _ensure_heygen_image_jpg(image_fp)
+        image_asset_id = _heygen_retry_net(
+            lambda: _heygen_upload_asset(image_fp, direct=direct), "口播动作传图")
+        created_avatar = _heygen_retry_net(
+            lambda: _heygen_retry_429(
+                lambda: _heygen_create_photo_avatar(image_asset_id, direct=direct),
+                "口播动作建形象"),
+            "口播动作建形象提交")
+        if not created_avatar:
+            raise RuntimeError("HeyGen未返回Photo Avatar")
+        avatar_look_id, avatar_group_id = created_avatar
+        _heygen_wait_photo_avatar(avatar_look_id, avatar_group_id, direct=direct)
+    audio_asset_id = _heygen_retry_net(
+        lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播动作传音")
+    label = "口播动作直连" if direct else "口播动作中转"
+    with heygen_slot(label):
+        try:
+            video_id = _heygen_retry_429(
+                lambda: _heygen_create_avatar_iv_video(
+                    avatar_look_id, audio_asset_id, motion_prompt, motion, direct=direct),
+                label)
+        except HeyGenRateLimited:
+            raise  # 429 明确拒绝、未计费；允许外层改走 relay。
+        except Exception as e:
+            # create-video 是计费 POST。只有能证明应用层字节未送达，或上游明确 4xx 拒绝，
+            # 才属于安全的“提交前失败”；超时/RST/5xx/200 解析失败都可能已经创建并扣费。
+            safe_to_fallback = False
+            if isinstance(e, HeyGenNetworkError):
+                from . import egress
+                safe_to_fallback = egress._pre_delivery_failure(e.__cause__ or e)
+            else:
+                matched = re.search(r"HTTP\s+(\d{3})", str(e))
+                safe_to_fallback = bool(matched and 400 <= int(matched.group(1)) < 500)
+            if safe_to_fallback:
+                raise
+            raise HeyGenBilledError(
+                "口播动作提交 HeyGen 后响应不确定（可能已计费），禁止自动重发") from e
+        try:
+            info = _heygen_poll_video(
+                video_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
+                redact_values=(motion_prompt,))
+            if direct:
+                video_file = _download_video_file_direct(info["video_url"], "heygen_avatar_iv")
+            else:
+                video_file = _download_video_file(info["video_url"], "heygen_avatar_iv")
+            cover = _extract_first_frame_cover(video_file)
+        except Exception as e:
+            raise HeyGenBilledError(
+                "口播动作已提交 HeyGen(video_id=%s，已计费)，轮询或成片处理失败，禁止自动重发"
+                % video_id) from e
+    ret = {
+        "video_id": video_id,
+        "video_file": video_file,
+        "video_url": _file_url(video_file),
+        "image_asset_id": image_asset_id,
+        "audio_asset_id": audio_asset_id,
+        "source_video_url": info.get("video_url"),
+        "thumbnail_url": info.get("thumbnail_url"),
+        "duration": info.get("duration"),
+        "provider_path": "talking_avatar_iv",
+        "motion_prompt_enabled": True,
+    }
+    if cover:
+        ret["image_file"] = cover
+        ret["image_url"] = public_url(cover, "image/jpeg")
+    return ret
+
+def generate_heygen_avatar_iv_video(image_file, audio_file, motion_prompt, motion,
+                                    avatar_look_id=""):
+    if _HEYGEN_DIRECT and HEYGEN_API_KEY:
+        try:
+            return _generate_heygen_avatar_iv_attempt(
+                image_file, audio_file, motion_prompt, motion,
+                avatar_look_id=avatar_look_id, direct=True)
+        except HeyGenBilledError:
+            raise
+        except Exception as e:
+            print("[heygen] 口播动作直连失败(提交前),回退泽龙中转: %s"
+                  % type(e).__name__, flush=True)
+    return _generate_heygen_avatar_iv_attempt(
+        image_file, audio_file, motion_prompt, motion,
+        avatar_look_id=avatar_look_id, direct=False)
 
 # ============ F4 · 口播视频自动字幕（whisper 时间轴 + libass 烧录） ============
 # 仅 text/audio 口播模式生效；motion 动作模仿不做字幕（多无语音，价值低）。
@@ -2230,8 +2373,25 @@ def gen_video(payload):
         ratio = "9:16"
     if motion not in {"low", "medium", "high"}:
         motion = "medium"
+    motion_prompt = payload["motion_prompt"] if "motion_prompt" in payload else ""
+    if not isinstance(motion_prompt, str):
+        raise ValueError("motion_prompt 必须是字符串")
+    motion_prompt = motion_prompt.strip()
+    if len(motion_prompt) > 500:
+        raise ValueError("motion_prompt 最多 500 个字符")
     created_avatar = None
-    video_result = generate_heygen_video(image_file, audio_file, resolution, ratio, motion)
+    if motion_prompt:
+        resolution, ratio = "1080p", "9:16"
+        avatar_look_id = ""
+        if avatar:
+            avatar_look_id = str(avatar.get("provider_avatar_id") or "").strip()
+            if str(avatar.get("status") or "").lower() != "ready" or not avatar_look_id:
+                raise ValueError("所选形象尚未就绪，请重新创建后再试")
+        video_result = generate_heygen_avatar_iv_video(
+            image_file, audio_file, motion_prompt, motion,
+            avatar_look_id=avatar_look_id)
+    else:
+        video_result = generate_heygen_video(image_file, audio_file, resolution, ratio, motion)
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
@@ -2262,7 +2422,7 @@ def gen_video(payload):
             subtitle_on = True
         except Exception as e:
             subtitle_error = str(e)[:200]
-    return {
+    result = {
         "type": "video", "status": "done", "mode": mode,
         "image_file": video_result.get("image_file") or image_file,
         "image_url": video_result.get("image_url") or _file_url(video_result.get("image_file") or image_file),
@@ -2294,6 +2454,10 @@ def gen_video(payload):
         "batch_index": payload.get("batch_index"), "batch_size": payload.get("batch_size"),
         "message": "视频生成完成"
     }
+    if motion_prompt:
+        result["provider_path"] = "talking_avatar_iv"
+        result["motion_prompt_enabled"] = True
+    return result
 
 # ============ F8 · 视频换装 / 换背景（RunningHub 两段式 AI App） ============
 # 两段：换装(Wan2.2 Animate) → 换背景(VideoRefusion)。按有无衣服图/背景图裁剪阶段。
