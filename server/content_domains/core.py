@@ -24,23 +24,18 @@ except ImportError:  # Running core.py directly during local checks.
     import asset_batch
     import feature_flags
 
-PORT       = int(os.environ.get("CONTENT_API_PORT", "8096"))
-AUTH_BASE  = os.environ.get("AUTH_BASE", "http://127.0.0.1:8095")
-AUTH_INTERNAL_TOKEN = os.environ.get("HQ_INTERNAL_TOKEN", "")
+PORT = int(os.environ.get("CONTENT_API_PORT", "8096")); AUTH_BASE = os.environ.get("AUTH_BASE", "http://127.0.0.1:8095"); AUTH_INTERNAL_TOKEN = os.environ.get("HQ_INTERNAL_TOKEN", "")
 try:
     VERIFY_CACHE_TTL = max(0.0, float(os.environ.get("VERIFY_CACHE_TTL", "8") or 8)); VERIFY_CACHE_MAX = max(1, int(os.environ.get("VERIFY_CACHE_MAX", "2048") or 2048))
 except Exception:
     VERIFY_CACHE_TTL = 8; VERIFY_CACHE_MAX = 2048
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 BASE       = pathlib.Path(__file__).resolve().parents[1]
-JOB_DB     = str(BASE / "content_jobs.db")
-AUDIO_DB   = str(BASE / "audio_assets.db")
+JOB_DB = str(BASE / "content_jobs.db"); AUDIO_DB = str(BASE / "audio_assets.db")
 OUT_DIR    = pathlib.Path(os.environ.get("CONTENT_OUT", str(BASE / "content_out")))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-AUDIO_OUT_DIR = OUT_DIR / "audio"
-VIDEO_OUT_DIR = OUT_DIR / "video"
-AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
-VIDEO_OUT_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_OUT_DIR = OUT_DIR / "audio"; VIDEO_OUT_DIR = OUT_DIR / "video"
+AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True); VIDEO_OUT_DIR.mkdir(parents=True, exist_ok=True)
 DL_MIME_EXT = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -51,9 +46,7 @@ DL_MIME_EXT = {
     "video/quicktime": ".mov",
 }
 
-def _download_content_type_ext(headers):
-    ctype = (headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip().lower()
-    return ctype or "application/octet-stream", DL_MIME_EXT.get(ctype, ".mp4")
+def _download_content_type_ext(headers): ctype = (headers.get("Content-Type") or "application/octet-stream").split(";", 1)[0].strip().lower(); return ctype or "application/octet-stream", DL_MIME_EXT.get(ctype, ".mp4")
 
 def _out_path(rel):
     rel = str(rel or "").replace("\\", "/").lstrip("/")
@@ -62,8 +55,7 @@ def _out_path(rel):
         raise ValueError("文件路径不能为空")
     return OUT_DIR.joinpath(*parts)
 
-def _file_url(rel):
-    return "/api/gen/file/" + str(rel or "").replace("\\", "/").lstrip("/")
+def _file_url(rel): return "/api/gen/file/" + str(rel or "").replace("\\", "/").lstrip("/")
 
 _cos_disabled_warned = False
 def _warn_cos_disabled_once():
@@ -264,10 +256,7 @@ HANDLERS = {}
 def jdb():
     c = sqlite3.connect(JOB_DB, timeout=10); c.row_factory = sqlite3.Row; return c
 
-def adb():
-    c = sqlite3.connect(AUDIO_DB, timeout=10)
-    c.row_factory = sqlite3.Row
-    return c
+def adb(): c = sqlite3.connect(AUDIO_DB, timeout=10); c.row_factory = sqlite3.Row; return c
 
 def init_db():
     with closing(jdb()) as c:
@@ -444,14 +433,12 @@ ASSET_MARK_KINDS = {"image", "audio", "video", "avatar"} | assets_store.KINDS  #
 
 def _clean_asset_kind(kind):
     kind = str(kind or "").strip().lower()
-    if kind not in ASSET_MARK_KINDS:
-        raise ValueError("不支持的资产类型")
+    if kind not in ASSET_MARK_KINDS: raise ValueError("不支持的资产类型")
     return kind
 
 def _clean_asset_key(key):
     key = str(key or "").strip()
-    if not key:
-        raise ValueError("缺少资产标识")
+    if not key: raise ValueError("缺少资产标识")
     return key[:500]
 
 def _clean_asset_tags(tags):
@@ -617,14 +604,9 @@ def verify(token):
             _verify_cache[token] = (now + VERIFY_CACHE_TTL, dict(user))
     return dict(user)
 
-def _domains():
-    from . import audio, points, video
-    return audio, points, video
-def _leads_domain():
-    from . import leads
-    return leads
-def _must_change_password(user):
-    return bool(user and user.get("must_change"))
+def _domains(): from . import audio, points, video; return audio, points, video
+def _leads_domain(): from . import leads; return leads
+def _must_change_password(user): return bool(user and user.get("must_change"))
 
 _job_public_dict, _idempotency_key = jobs_store.public_dict, submission_idempotency.clean_key
 def _idempotency_begin(username, endpoint, key, body): return submission_idempotency.begin(jdb, username, endpoint, key, body)
@@ -676,7 +658,7 @@ _avatar_job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)     # 建形象队列(kin
 _queued_job_ids = set()
 _job_queue_lock = threading.Lock()
 _run_gate_lock = threading.Lock()  # 单用户口播运行闸：count+抢running 在此锁内原子，防多worker同时超发
-_submission_lock = threading.Lock()  # 活跃数检查+扣点+入队串行，批量与单条不能一起冲破单用户上限
+_submission_lock = threading.Lock(); _motion_prompt_inflight = set()  # 提交原子锁；同步动作优化按用户名限 1 个在途请求
 _workers_started = False
 
 # ============ 优雅停机（graceful drain）============
@@ -699,14 +681,10 @@ _inflight = 0                      # 正在 run_job 里跑着的任务数
 _inflight_lock = threading.Lock()
 # 排空最长等多久。视频最长 15 分钟（VIDEO_GEN_DEADLINE=900s）+ 上传下载余量。
 DRAIN_TIMEOUT = _env_positive_int("CONTENT_DRAIN_TIMEOUT", 1200)
-
-
-def is_shutting_down():
-    return _shutting_down.is_set()
+def is_shutting_down(): return _shutting_down.is_set()
 
 # CAS 抢终态 / 退点幂等：实现在 content_domains/jobs_store.py，三个共写 jobs 表的服务共用一份。
-def _set_terminal(job_id, status, result=None, error=None, from_states=("running",)):
-    return jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
+def _set_terminal(job_id, status, result=None, error=None, from_states=("running",)): return jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
 
 def _refund_once(job_id, username, cost):
     # safe_refund_points 吞掉异常并返回当前点数，不让退点接口故障影响主流程 → 视为永远成功。
@@ -749,8 +727,7 @@ def enqueue_jobs(job_ids, kind=None, mode=None):
             _queued_job_ids.add(job_id)
         return True
 
-def enqueue_job(job_id, kind=None, mode=None):
-    return enqueue_jobs([job_id], kind, mode)
+def enqueue_job(job_id, kind=None, mode=None): return enqueue_jobs([job_id], kind, mode)
 
 def _user_active_job_count(username):
     if not username:
@@ -816,8 +793,6 @@ def _user_running_image_count(username):
         row = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE username=? AND status='running' AND kind='image'",
                         (username,)).fetchone()
     return int(row["n"] if row else 0)
-
-
 def _global_running_breakdown_count():   # 全局运行中的爆款拆解数（按 owner 过滤，仅本服务）
     with closing(jdb()) as c:
         row = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE status='running' AND kind='breakdown' AND COALESCE(owner,?)=?",
@@ -883,8 +858,6 @@ def _pending_job_scanner():
 
 _ALL_JOB_QUEUES = (_job_queue, _fast_job_queue, _talking_job_queue,
                    _image_job_queue, _cinematic_job_queue, _avatar_job_queue)
-
-
 def start_job_workers():
     global _workers_started
     with _job_queue_lock:
@@ -918,8 +891,6 @@ def drain_and_exit(signum=None, frame=None):
     _shutting_down.set()
     # 等待放到后台线程 —— 主线程立刻返回，serve_forever 继续 accept，读接口不受影响。
     threading.Thread(target=_drain_then_exit, args=(time.time(),), daemon=True).start()
-
-
 def _drain_then_exit(t0):
     """后台线程：等在飞任务跑完（或超时）再退。期间 HTTP 服务不停，读接口照常。"""
     while time.time() - t0 < DRAIN_TIMEOUT:
@@ -936,14 +907,8 @@ def _drain_then_exit(t0):
     print("[drain] 超过 %ds 仍未排空，强制退出 —— 剩下的由 reclaim_orphaned_running 判失败退点"
           % DRAIN_TIMEOUT, flush=True)
     os._exit(0)
-
-
 def install_signal_handlers():
-    import signal
-    signal.signal(signal.SIGTERM, drain_and_exit)
-    signal.signal(signal.SIGINT, drain_and_exit)
-
-
+    import signal; signal.signal(signal.SIGTERM, drain_and_exit); signal.signal(signal.SIGINT, drain_and_exit)
 def _mark_video_asset_failed(job_id, kind, error):
     """判失败时同步 video_asset 到失败终态(否则前端历史卡片读 video_assets 一直「生成中」)。⚠️用 update_video_asset_phase(UPDATE)非 record_video_asset(INSERT):mode 有 NOT NULL，cinematic/xiaole 失败路径无 mode→IntegrityError 被吞→卡 running。"""
     if kind not in {"video", "tryon", "xiaole_video", "cinematic"}:
@@ -1344,6 +1309,41 @@ class H(BaseHTTPRequestHandler):
                         "count": len(job_ids), "cost": total, "cost_per_job": costs[0], "points_left": points_left}
             _idempotency_complete(user["username"], p, idem_key, response)
             return self._send(200, response)
+        if p == "/api/gen/video/motion-prompt-optimize":
+            user = verify(self._token())
+            if not user: return self._send(401, {"detail": "login required"})
+            if _must_change_password(user): return self._send(403, {"detail": "password change required"})
+            try:
+                body = self._json_body_strict()
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)[:220]})
+            prompt = body.get("prompt") if isinstance(body, dict) else None
+            if not isinstance(prompt, str):
+                return self._send(400, {"detail": "prompt must be a string"})
+            prompt = prompt.strip()
+            if not prompt:
+                return self._send(400, {"detail": "prompt must not be blank"})
+            if len(prompt) > 500:
+                return self._send(400, {"detail": "prompt must be at most 500 characters"})
+            system = (
+                "Write one concise English Photo Avatar IV motion prompt; preserve the user's intent. "
+                "You may specify facial, head, upper-body, hand, and pacing details. "
+                "Do not add camera direction, scene details, multiple-person actions, or unsafe additions. "
+                "Output no explanation, title, or Markdown."
+            )
+            username = user["username"]
+            with _submission_lock:
+                if username in _motion_prompt_inflight: return self._send(429, {"detail": "当前账号的动作提示优化正在处理中，请稍后再试", "code": "motion_prompt_optimize_busy", "retry_after_ms": 1000})
+                _motion_prompt_inflight.add(username)
+            try:
+                from . import text; motion_prompt = text._chat(system, prompt, 0.3)
+            except Exception:
+                return self._send(502, {"detail": "motion prompt optimization service is unavailable"})
+            finally:
+                with _submission_lock: _motion_prompt_inflight.discard(username)
+            if not isinstance(motion_prompt, str) or not motion_prompt.strip():
+                return self._send(400, {"detail": "motion prompt optimization returned empty output"})
+            return self._send(200, {"motion_prompt": motion_prompt.strip()})
         if p.startswith("/api/gen/") and p[9:] in HANDLERS:
             kind = p[9:]
             user = verify(self._token())
