@@ -1,12 +1,25 @@
 # -*- coding: utf-8 -*-
-from .core import COPY_MODEL, OPENAI_BASE, OPENAI_KEY, _post, base64, json, os
+from .core import OPENAI_BASE, OPENAI_KEY, _NOPROXY, base64, json, os, urllib
+
+COPY_MODEL = "glm-4-plus"
+ZHIPU_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
+ZHIPU_API_KEY = (os.environ.get("ZHIPU_API_KEY") or "").strip()
 
 
 def _chat(sysmsg, usermsg, temp):
+    if not ZHIPU_API_KEY:
+        raise ValueError("ZHIPU_API_KEY is required to generate copy")
     body = json.dumps({"model": COPY_MODEL,
                        "messages": [{"role": "system", "content": sysmsg}, {"role": "user", "content": usermsg}],
                        "temperature": temp}).encode()
-    d = _post("/v1/chat/completions", body, "application/json")
+    req = urllib.request.Request(
+        ZHIPU_API_BASE + "/chat/completions",
+        data=body,
+        headers={"Authorization": "Bearer " + ZHIPU_API_KEY, "Content-Type": "application/json"},
+        method="POST",
+    )
+    with _NOPROXY.open(req, timeout=300) as response:
+        d = json.loads(response.read())
     return (d.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
 
 
