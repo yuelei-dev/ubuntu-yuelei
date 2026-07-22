@@ -156,4 +156,3 @@ git status --short
 ```
 
 Expected: 差异只包含设计/计划文档、`server/content_domains/breakdown.py` 和 `tests/test_breakdown.py`；不存在未提交源码修改。
-
