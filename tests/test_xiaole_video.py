@@ -57,6 +57,18 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(cands[-1][0], url)
         self.assertIsNone(cands[-1][2])
 
+    def test_authenticated_download_header_is_not_forwarded_to_relay(self):
+        import os as _os
+        url = "https://openrouter.ai/api/v1/videos/job/content?index=0"
+        with patch.dict(_os.environ, {"HEYGEN_RELAY_BASE": "https://relay.example"}, clear=False):
+            cands = self.video._xiaole_download_candidates(
+                url, "http://127.0.0.1:10809",
+                origin_headers={"Authorization": "Bearer secret"},
+            )
+        self.assertEqual(cands[0][1]["Authorization"], "Bearer secret")
+        self.assertNotIn("Authorization", cands[1][1])
+        self.assertEqual(cands[-1][1]["Authorization"], "Bearer secret")
+
     def test_gen_xiaole_video_maps_ratio_to_size_and_defaults_unknown_ratio(self):
         calls = []
 
@@ -162,6 +174,35 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(result["model"], "grok-imagine-video")
         self.assertEqual(result["duration"], 10)
         generate.assert_called_once()
+
+    def test_grok_uses_openrouter_only_after_safe_xai_create_failure(self):
+        from content_domains import video_xai
+
+        fallback = {
+            "request_id": "or-1", "model": "grok-imagine-video",
+            "source_video_url": "https://openrouter.ai/api/v1/videos/or-1/content",
+            "duration": 10, "provider": "openrouter",
+        }
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch("content_domains.video_xai.generate",
+                   side_effect=video_xai.XaiCreateUnavailableError("xAI quota")), \
+             patch("content_domains.video_openrouter.available", return_value=True), \
+             patch("content_domains.video_openrouter.generate", return_value=fallback) as generate, \
+             patch("content_domains.video_openrouter.download_headers",
+                   return_value={"Authorization": "Bearer test"}), \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/grok_or.mp4") as download, \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
+            result = self.video.gen_xiaole_video({
+                "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
+                "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
+            })
+        generate.assert_called_once()
+        download.assert_called_once_with(
+            fallback["source_video_url"], "grok_openrouter",
+            origin_headers={"Authorization": "Bearer test"},
+        )
+        self.assertEqual(result["provider_video_id"], "or-1")
+        self.assertEqual(result["video_file"], "video/grok_or.mp4")
 
     def test_gen_grok_official_edit_uploads_source_and_preserves_contract(self):
         fake = {"request_id": "edit-1", "model": "grok-imagine-video",
