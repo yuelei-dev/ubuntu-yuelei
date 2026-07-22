@@ -334,10 +334,11 @@ class BreakdownTests(unittest.TestCase):
             ["frame_1.jpg", "frame_2.jpg"],
         )
 
-        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls["sysmsg"] = sysmsg
             calls["usermsg"] = usermsg
             calls["frames"] = list(frames)
+            calls["chat_kwargs"] = kwargs
             return raw_json
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
@@ -402,7 +403,47 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("表情、视线、手势、肢体姿态、走位", src)
         self.assertIn("跟随、推进、拉远、摇移或转场", src)
         self.assertIn("起始—发展—结束", src)
-        self.assertIn("镜头（景别、视角、构图和整体运镜风格）", src)
+        self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
+
+    def test_reverse_prompt_requires_minimum_detail_counts(self):
+        import inspect
+        src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
+        self.assertIn("主体至少 5 项", src)
+        self.assertIn("场景至少 5 项", src)
+        self.assertIn("动作与时序至少 8 项", src)
+        self.assertIn("镜头至少 5 项", src)
+        self.assertIn("光线与色调至少 4 项", src)
+        self.assertIn("节奏与情绪钩子至少 3 项", src)
+        self.assertIn("左侧早于右侧", src)
+        self.assertIn("图片顺序代表时间推进", src)
+
+    def test_chat_multimodal_supports_reverse_output_and_image_options(self):
+        import inspect
+        signature = str(inspect.signature(self.breakdown._chat_multimodal))
+        self.assertIn("max_tokens=None", signature)
+        self.assertIn("image_detail='low'", signature)
+        captured = []
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+
+        def fake_zhipu(body, api_key):
+            captured.append(body)
+            return {"choices": [{"message": {"content": "结果"}}]}
+
+        self.breakdown._post_zhipu = fake_zhipu
+        with tempfile.TemporaryDirectory() as directory:
+            frame = self._frame_file(directory)
+            self.breakdown._chat_multimodal(
+                "system", "user", [frame], max_tokens=1800, image_detail=None
+            )
+            self.breakdown._chat_multimodal("system", "user", [frame])
+
+        reverse_body, default_body = captured
+        self.assertEqual(reverse_body["max_tokens"], 1800)
+        reverse_image = reverse_body["messages"][1]["content"][1]["image_url"]
+        self.assertNotIn("detail", reverse_image)
+        self.assertNotIn("max_tokens", default_body)
+        default_image = default_body["messages"][1]["content"][1]["image_url"]
+        self.assertEqual(default_image["detail"], "low")
 
     def test_do_breakdown_reverse_prompt_returns_prompt_and_keeps_asr_flag(self):
         import os, tempfile
@@ -474,14 +515,15 @@ class BreakdownTests(unittest.TestCase):
 
     def test_breakdown_reverse_prompt_calls_model_once(self):
         calls = []
-        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
-            calls.append((sysmsg, usermsg, list(frames), temp))
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
             return ''
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
             self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][4], {"max_tokens": 1800, "image_detail": None})
 
     def test_clean_reverse_prompt_does_not_truncate_long_output(self):
         raw = "画" * 850
