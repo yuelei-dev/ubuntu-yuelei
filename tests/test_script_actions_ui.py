@@ -55,6 +55,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("function _showReverseVideoPicker(prompt,onConfirm)", self.html)
         self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
         self.assertIn("形象加载失败，不影响无形象生成", self.html)
+        self.assertIn("data-reverse-retry", self.html)
+        self.assertIn("retry.onclick=loadAvatars", self.html)
         self.assertIn("还没有形象", self.html)
         self.assertIn("video.html", self.html)
 
@@ -62,6 +64,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="reverseVideoPickClose"', self.html)
         self.assertIn('id="reverseVideoConfirm"', self.html)
         self.assertIn("confirm.disabled=true", self.html)
+        self.assertIn("if(submitted) return;", self.html)
+        self.assertIn("dismiss();\n      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
         self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
 
     def test_reverse_video_picker_ignores_stale_avatar_responses(self):

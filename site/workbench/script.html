@@ -1190,9 +1190,9 @@
     var confirm=document.getElementById('reverseVideoConfirm');
     var close=document.getElementById('reverseVideoPickClose');
     if(!modal||!noAvatar||!grid||!duration||!cost||!confirm||!close) return;
-    var requestId=++reverseVideoPickerRequest;
     var selectedAvatarId=null;
     var selectedDuration=10;
+    var submitted=false;
     function updateCost(){
       cost.textContent='预计消耗 '+(selectedDuration*30)+' 点';
       duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
@@ -1217,7 +1217,6 @@
     confirm.style.opacity='1';
     selectAvatar(null);
     updateCost();
-    grid.innerHTML='<div style="grid-column:1/-1;color:#5c6b82;font-size:13px;text-align:center;padding:32px 0;">正在读取形象…</div>';
     duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
       btn.onclick=function(){ selectedDuration=Number(btn.getAttribute('data-reverse-duration')); updateCost(); };
     });
@@ -1225,36 +1224,53 @@
     close.onclick=dismiss;
     modal.onclick=function(e){ if(e.target===modal) dismiss(); };
     confirm.onclick=function(){
+      if(submitted) return;
+      submitted=true;
       confirm.disabled=true;
       confirm.style.opacity='.6';
+      dismiss();
       onConfirm({avatarId:selectedAvatarId,duration:selectedDuration});
     };
-    fetch('/api/gen/video/avatars?limit=60',{headers:{'Authorization':'Bearer '+tok()}})
-      .then(function(r){ return r.ok?r.json():Promise.reject(); })
-      .then(function(d){
-        if(requestId!==reverseVideoPickerRequest) return;
-        var avatars=(d&&d.items)||[];
-        if(!avatars.length){
-          grid.innerHTML='<div style="grid-column:1/-1;color:#94a4bb;font-size:13px;text-align:center;padding:24px 0;">还没有形象<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
-          return;
-        }
-        grid.innerHTML='';
-        avatars.forEach(function(avatar){
-          var card=document.createElement('button');
-          card.type='button';
-          card.className='sc-opt';
-          card.setAttribute('data-reverse-avatar',avatar.id);
-          card.setAttribute('aria-pressed','false');
-          card.style.cssText='padding:9px;border-radius:12px;font-family:inherit;overflow:hidden;';
-          card.innerHTML=(avatar.image_url?'<img src="'+esc(avatar.image_url)+'" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:50%;display:block;margin:0 auto 6px;">':'<div style="font-size:24px;margin-bottom:6px;">👤</div>')+'<div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+esc(avatar.name||('形象 '+avatar.id))+'</div>';
-          card.onclick=function(){ selectAvatar(avatar.id); };
-          grid.appendChild(card);
+    function loadAvatars(){
+      var requestId=++reverseVideoPickerRequest;
+      grid.innerHTML='<div style="grid-column:1/-1;color:#5c6b82;font-size:13px;text-align:center;padding:32px 0;">正在读取形象…</div>';
+      fetch('/api/gen/video/avatars?limit=60',{headers:{'Authorization':'Bearer '+tok()}})
+        .then(function(r){ return r.ok?r.json():Promise.reject(); })
+        .then(function(d){
+          if(requestId!==reverseVideoPickerRequest) return;
+          var avatars=(d&&d.items)||[];
+          if(!avatars.length){
+            grid.innerHTML='<div style="grid-column:1/-1;color:#94a4bb;font-size:13px;text-align:center;padding:24px 0;">还没有形象<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
+            return;
+          }
+          grid.innerHTML='';
+          avatars.forEach(function(avatar){
+            var card=document.createElement('button');
+            card.type='button';
+            card.className='sc-opt';
+            card.setAttribute('data-reverse-avatar',avatar.id);
+            card.setAttribute('aria-pressed','false');
+            card.style.cssText='padding:9px;border-radius:12px;font-family:inherit;overflow:hidden;';
+            card.innerHTML=(avatar.image_url?'<img src="'+esc(avatar.image_url)+'" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:50%;display:block;margin:0 auto 6px;">':'<div style="font-size:24px;margin-bottom:6px;">👤</div>')+'<div style="font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+esc(avatar.name||('形象 '+avatar.id))+'</div>';
+            card.onclick=function(){ selectAvatar(avatar.id); };
+            grid.appendChild(card);
+          });
+          selectAvatar(selectedAvatarId);
+        })
+        .catch(function(){
+          if(requestId!==reverseVideoPickerRequest) return;
+          grid.innerHTML='<div style="grid-column:1/-1;color:#f4a460;font-size:13px;text-align:center;padding:16px 0 4px;">形象加载失败，不影响无形象生成</div>';
+          var retry=document.createElement('button');
+          retry.type='button';
+          retry.className='sc-opt';
+          retry.setAttribute('data-reverse-retry','');
+          retry.style.cssText='grid-column:1/-1;justify-self:center;font-family:inherit;padding:8px 18px;';
+          retry.textContent='重新加载形象';
+          retry.onclick=loadAvatars;
+          grid.appendChild(retry);
         });
-      })
-      .catch(function(){
-        if(requestId!==reverseVideoPickerRequest) return;
-        grid.innerHTML='<div style="grid-column:1/-1;color:#f4a460;font-size:13px;text-align:center;padding:24px 0;">形象加载失败，不影响无形象生成<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
-      });
+    }
+    loadAvatars();
   }
   function _setGenerateBusy(btn, busy){
     if(!btn) return;
