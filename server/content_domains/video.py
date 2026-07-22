@@ -1761,8 +1761,7 @@ def _generate_heygen_avatar_iv_attempt(image_file, audio_file, motion_prompt, mo
             raise RuntimeError("HeyGen未返回Photo Avatar")
         avatar_look_id, avatar_group_id = created_avatar
         _heygen_wait_photo_avatar(avatar_look_id, avatar_group_id, direct=direct)
-    audio_asset_id = _heygen_retry_net(
-        lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播动作传音")
+    audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播动作传音")
     label = "口播动作直连" if direct else "口播动作中转"
     with heygen_slot(label):
         try:
