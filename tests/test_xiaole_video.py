@@ -258,6 +258,23 @@ class XiaoleVideoTests(unittest.TestCase):
                 })
         fallback.assert_not_called()
 
+    def test_grok_does_not_fallback_after_successful_xai_download_failure(self):
+        generated = {
+            "request_id": "xai-1", "model": "grok-imagine-video",
+            "source_video_url": "https://vidgen.x.ai/demo.mp4", "duration": 10,
+        }
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch("content_domains.video_xai.generate", return_value=generated), \
+             patch("content_domains.video_openrouter.generate") as fallback, \
+             patch.object(self.video, "_download_xiaole_video",
+                          side_effect=RuntimeError("视频下载失败")):
+            with self.assertRaisesRegex(RuntimeError, "下载失败"):
+                self.video.gen_xiaole_video({
+                    "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
+                    "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
+                })
+        fallback.assert_not_called()
+
     def test_gen_grok_official_edit_uploads_source_and_preserves_contract(self):
         fake = {"request_id": "edit-1", "model": "grok-imagine-video",
                 "source_video_url": "https://vidgen.x.ai/edit.mp4", "duration": 6.2}

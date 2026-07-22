@@ -46,6 +46,12 @@ class OpenRouterVideoTests(unittest.TestCase):
                 ),
                 {},
             )
+            self.assertEqual(
+                video_openrouter.download_headers(
+                    "https://openrouter.ai/api/v1/chat/completions"
+                ),
+                {},
+            )
 
     def test_generate_maps_model_references_and_result(self):
         responses = [
