@@ -181,9 +181,13 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("((s.line||'').trim()?'<div style=\"font-size:13px; color:#eaf1fa;", self.html)
         self.assertIn("((s.line||'').trim()?'<a data-to-audio=", self.html)
 
-    def test_batch_breakdown_hint_shows_progressive_pricing(self):
-        """批量拆解提示必须标明累进计费（首条 8 点每多一条+4 点）"""
-        self.assertIn("首条 8 点每多一条+4 点", self.html)
+    def test_breakdown_labels_show_20_points_per_link(self):
+        """分镜拆解、提示词反推及批量说明必须与后端每链接 20 点一致"""
+        self.assertIn("开始拆解（20 点）", self.html)
+        self.assertIn("开始反推（20 点）", self.html)
+        self.assertIn("每个链接 20 点", self.html)
+        for stale in ("开始拆解（8 点）", "开始反推（8 点）", "首条 8 点每多一条+4 点"):
+            self.assertNotIn(stale, self.html)
 
     def test_default_selling_point_tags_removed(self):
         """核心卖点下的默认标签（清爽控油/补水保湿/抗老紧致/提亮肤色）已移除"""
