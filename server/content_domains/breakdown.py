@@ -220,19 +220,14 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "用于生成同风格但原创的新内容。"
         "提示词要具体可执行，写清五个层次：①主体（人物/产品的外观、姿态、动作细节）②场景（环境、道具、背景层次）"
         "③镜头（景别、运镜、视角）④光线与色调（氛围、质感）⑤节奏与情绪钩子。"
-        "直接输出 1 条完整提示词，150-300 字，不要 JSON、不要标题、不要解释、不要 markdown 代码块。"
+        "直接输出 1 条完整提示词，500-800 字，不要 JSON、不要标题、不要解释、不要 markdown 代码块。"
     )
     sysmsg = (
         "你是黄雀传媒资深短视频创意总监。你擅长根据视频关键帧和口播，提炼出可直接用于后续创作的中文提示词。"
         "只输出提示词本身，不要任何多余内容。"
     )
     raw = _chat_multimodal(sysmsg, usermsg, frames, temp=0.6)
-    try:
-        return _clean_reverse_prompt(raw)
-    except ValueError:
-        print("[breakdown] reverse prompt parse failed, raw(%d)=%s" % (len(raw or ""), str(raw)[:400].replace("\n", " ")))
-        raw = _chat_multimodal(sysmsg, usermsg, frames, temp=0.6)
-        return _clean_reverse_prompt(raw)
+    return _clean_reverse_prompt(raw)
 
 
 def _clean_reverse_prompt(raw):
@@ -243,7 +238,7 @@ def _clean_reverse_prompt(raw):
     text = " ".join(line.strip() for line in text.splitlines() if line.strip()).strip().strip('"“”')
     if not text:
         raise ValueError("反推结果解析失败，请重试")
-    return text[:600]
+    return text
 
 
 def _strip_json_code_fence(raw):

@@ -115,10 +115,11 @@ class BreakdownTests(unittest.TestCase):
         self.assertNotIn("10字内", src)
 
     def test_reverse_prompt_requires_structured_detail(self):
-        """反推 prompt 必须要求五层结构（主体/场景/镜头/光线/钩子）且 150-300 字"""
+        """反推 prompt 必须要求五层结构（主体/场景/镜头/光线/钩子）且 500-800 字"""
         import inspect
         src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
-        self.assertIn("150-300 字", src)
+        self.assertIn("500-800 字", src)
+        self.assertNotIn("150-300 字", src)
         self.assertIn("镜头（景别、运镜、视角）", src)
 
     def test_do_breakdown_reverse_prompt_returns_prompt_and_keeps_asr_flag(self):
@@ -188,29 +189,20 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["analysis"], "ok")
         self.assertEqual(len(calls), 2)
 
-    def test_breakdown_reverse_prompt_retries_once_when_clean_fails(self):
+    def test_breakdown_reverse_prompt_calls_model_once(self):
         calls = []
-        original_clean = self.breakdown._clean_reverse_prompt
-        try:
-            def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
-                calls.append((sysmsg, usermsg, list(frames), temp))
-                return 'first' if len(calls) == 1 else '轻奢美容院场景，主角手持精华产品，暖金柔光'
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
+            calls.append((sysmsg, usermsg, list(frames), temp))
+            return ''
 
-            seen = {"count": 0}
-            def fake_clean(raw):
-                seen["count"] += 1
-                if seen["count"] == 1:
-                    raise ValueError("反推结果解析失败，请重试")
-                return original_clean(raw)
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
+            self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
+        self.assertEqual(len(calls), 1)
 
-            self.breakdown._chat_multimodal = fake_chat_multimodal
-            self.breakdown._clean_reverse_prompt = fake_clean
-            result = self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
-        finally:
-            self.breakdown._clean_reverse_prompt = original_clean
-
-        self.assertIn("轻奢美容院场景", result)
-        self.assertEqual(len(calls), 2)
+    def test_clean_reverse_prompt_does_not_truncate_long_output(self):
+        raw = "画" * 850
+        self.assertEqual(self.breakdown._clean_reverse_prompt(raw), raw)
 
     def test_gen_breakdown_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "mode 仅支持 scenes / reverse_prompt"):
