@@ -1273,13 +1273,16 @@
     var sum=(list||[]).reduce(function(total,s){ var n=parseInt((s.dur||'').replace('s',''))||0; return total+n; },0);
     return Math.min(15, Math.max(1, sum||30));
   }
-  function _doGenerate(payload, btn){
+  function _doGenerate(payload,btn,options){
+    options=options||{};
+    var endpoint=options.endpoint||'/api/gen/script_to_video';
+    var sceneCount=options.sceneCount==null?(payload.scenes||[]).length:options.sceneCount;
     _setGenerateBusy(btn,true);
     scenes.innerHTML='<div style="padding:34px;text-align:center;color:#e7b24c;font-size:13px;">🎬 正在启动生成…</div>';
     if(meta) meta.innerHTML='';
     hideBreakdownMeta();
-    var pollCount=0, lastProgress=-1, pollErrors=0, sceneCount=payload.scenes.length, startTs=Date.now();
-    fetch('/api/gen/script_to_video',{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify(payload)})
+    var pollCount=0, lastProgress=-1, pollErrors=0, startTs=Date.now();
+    fetch(endpoint,{method:'POST',headers:{'Authorization':'Bearer '+tok(),'Content-Type':'application/json'},body:JSON.stringify(payload)})
       .then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});})
       .then(function(x){
         if(x.s===401){ _setGenerateBusy(btn,false); if(window.HQ) HQ.login(); return; }
@@ -1357,17 +1360,24 @@
     if(isReverse){
       var prompt=reversePromptText();
       if(!prompt){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成提示词反推'); return; }
-      scenes=[{scene:prompt, line:'', dur:'30s'}];
+      _showReverseVideoPicker(prompt,function(choice){
+        if(choice.avatarId){
+          _doGenerate({
+            cine_mode:'open', avatar_ids:[choice.avatarId], prompt:prompt,
+            duration:choice.duration, ratio:'9:16', resolution:'720p', enhance_prompt:false
+          },bdRemakeBtn,{endpoint:'/api/gen/cinematic',sceneCount:1});
+          return;
+        }
+        var reverseScenes=[{scene:prompt,line:'',dur:choice.duration+'s'}];
+        _doGenerate({scenes:reverseScenes,style:'剧情',duration:choice.duration},
+                    bdRemakeBtn,{endpoint:'/api/gen/script_to_video',sceneCount:1});
+      });
+      return;
     } else {
       if(!lastBreakdown){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成拆解'); return; }
       scenes=normalizeBreakdownScenes((lastBreakdown&&lastBreakdown.scenes)||[]);
     }
     if(!scenes.length){ if(window.HQ&&window.HQ.toast) HQ.toast('没有可用分镜'); return; }
-    if(isReverse){
-      // 反推模式：提示词即画面描述，直接走剧情链路
-      _doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn);
-      return;
-    }
     _pickRemakeStyle(function(style){
       if(style==='剧情'){
         if(!scenes.some(function(s){ return (s.scene||'').trim(); })){ if(window.HQ&&window.HQ.toast) HQ.toast('拆解结果里没有画面描述，无法生成剧情视频'); return; }
