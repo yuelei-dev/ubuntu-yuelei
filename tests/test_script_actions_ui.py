@@ -39,6 +39,31 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="avatarPickModal"', self.html)
         self.assertIn('id="avatarPickGrid"', self.html)
 
+    def test_reverse_video_picker_has_optional_avatar_duration_and_cost(self):
+        self.assertIn('id="reverseVideoPickModal"', self.html)
+        self.assertIn('id="reverseVideoNoAvatar"', self.html)
+        self.assertIn('id="reverseVideoAvatarGrid"', self.html)
+        self.assertIn('data-reverse-duration="5"', self.html)
+        self.assertIn('data-reverse-duration="10"', self.html)
+        self.assertIn('data-reverse-duration="15"', self.html)
+        self.assertIn('id="reverseVideoCost"', self.html)
+        self.assertIn("selectedDuration=10", self.html)
+        self.assertIn("selectedAvatarId=null", self.html)
+        self.assertIn("selectedDuration*30", self.html)
+
+    def test_reverse_video_picker_load_failure_keeps_no_avatar_available(self):
+        self.assertIn("function _showReverseVideoPicker(prompt,onConfirm)", self.html)
+        self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
+        self.assertIn("形象加载失败，不影响无形象生成", self.html)
+        self.assertIn("还没有形象", self.html)
+        self.assertIn("video.html", self.html)
+
+    def test_reverse_video_picker_cancel_and_submit_are_explicit(self):
+        self.assertIn('id="reverseVideoPickClose"', self.html)
+        self.assertIn('id="reverseVideoConfirm"', self.html)
+        self.assertIn("confirm.disabled=true", self.html)
+        self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
+
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
         self.assertIn('id="panelBreakdown"', self.html)
