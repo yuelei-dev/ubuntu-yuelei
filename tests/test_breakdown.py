@@ -329,7 +329,7 @@ class BreakdownTests(unittest.TestCase):
                 return transcript if transcript is not None else [{"start": 0, "end": 3, "text": "先看门头"}]
 
         self.breakdown._heartbeat = lambda job_id, phase: calls.setdefault("phases", []).append(phase)
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
             "fake-frame-dir",
             ["frame_1.jpg", "frame_2.jpg"],
         )
@@ -462,7 +462,7 @@ class BreakdownTests(unittest.TestCase):
             '```\n轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子\n```',
             transcript=None,
         )
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
             "fake-frame-dir",
             [thumb.name] * 8,
         )
@@ -532,8 +532,8 @@ class BreakdownTests(unittest.TestCase):
     def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
         calls = self._install_fake_env("反推结果", transcript=[])
 
-        def fake_extract(path, count, duration, scale_width=512):
-            calls["extract_args"] = (count, scale_width)
+        def fake_extract(path, count, duration, scale_width=512, min_frames=None):
+            calls["extract_args"] = (count, scale_width, min_frames)
             return "frames-dir", ["f%d.jpg" % i for i in range(1, 9)]
 
         def fake_pair(frame_dir, frames):
@@ -561,7 +561,7 @@ class BreakdownTests(unittest.TestCase):
             else:
                 delattr(self.breakdown, "_pair_reverse_frames")
 
-        self.assertEqual(calls["extract_args"], (8, 1024))
+        self.assertEqual(calls["extract_args"], (8, 1024, 8))
         self.assertEqual(calls["pair_args"][1], ["f%d.jpg" % i for i in range(1, 9)])
         self.assertEqual(calls["frames"], ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"])
         self.assertEqual(result["frame_count"], 8)
@@ -722,6 +722,39 @@ class BreakdownTests(unittest.TestCase):
         import inspect
         src = inspect.getsource(self.breakdown._extract_frames)
         self.assertIn("max(2, min(count, 12))", src)
+
+    def test_reverse_extract_falls_back_when_scene_detection_returns_six_frames(self):
+        import inspect
+        import shutil
+        signature = str(inspect.signature(self.breakdown._extract_frames))
+        self.assertIn("min_frames=None", signature)
+        original_run = self.breakdown.subprocess.run
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            output_pattern = command[-1]
+            frame_total = 6 if len(calls) == 1 else 8
+            for index in range(1, frame_total + 1):
+                Path(output_pattern.replace("%d", str(index))).write_bytes(b"jpeg")
+            return type("Completed", (), {"returncode": 0})()
+
+        self.breakdown.subprocess.run = fake_run
+        frame_dir = None
+        try:
+            frame_dir, frames = self.breakdown._extract_frames(
+                "video.mp4", 8, 30, scale_width=1024, min_frames=8
+            )
+        finally:
+            self.breakdown.subprocess.run = original_run
+
+        try:
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(frames), 8)
+            self.assertIn("fps=", calls[1][calls[1].index("-vf") + 1])
+        finally:
+            if frame_dir:
+                shutil.rmtree(frame_dir, ignore_errors=True)
 
     def test_gen_breakdown_single_url_still_works(self):
         calls = self._install_fake_env(

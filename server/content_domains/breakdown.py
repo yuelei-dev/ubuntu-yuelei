@@ -113,10 +113,15 @@ def _do_breakdown(payload, info, url, mode=None):
         _heartbeat(job_id, "extracting_frames")
         is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
         frame_count = 8 if is_reverse else max(4, min(10, int(duration / 5)))
-        frame_dir, frames = _extract_frames(
-            tmp_video.name, frame_count, duration,
-            scale_width=1024 if is_reverse else 512,
-        )
+        if is_reverse:
+            frame_dir, frames = _extract_frames(
+                tmp_video.name, frame_count, duration,
+                scale_width=1024, min_frames=8,
+            )
+        else:
+            frame_dir, frames = _extract_frames(
+                tmp_video.name, frame_count, duration, scale_width=512,
+            )
         model_frames = _pair_reverse_frames(frame_dir, frames) if is_reverse else frames
 
         script_text = ""
@@ -368,7 +373,8 @@ def _format_transcript(segs):
     return str(segs)
 
 
-def _extract_frames(video_path, count=6, duration=30, scale_width=512):
+def _extract_frames(video_path, count=6, duration=30, scale_width=512,
+                    min_frames=None):
     """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
     scale_width = max(256, min(int(scale_width or 512), 2048))
@@ -387,7 +393,11 @@ def _extract_frames(video_path, count=6, duration=30, scale_width=512):
     frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
                      if f.endswith(".jpg")],
                     key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
-    if len(frames) < max(2, count // 2):
+    fallback_threshold = (
+        max(2, min(int(min_frames), count))
+        if min_frames is not None else max(2, count // 2)
+    )
+    if len(frames) < fallback_threshold:
         shutil.rmtree(outdir)
         outdir = tempfile.mkdtemp()
         fps = max(float(count) / max(float(duration or 1), 1.0), 0.001)
