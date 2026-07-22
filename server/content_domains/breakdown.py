@@ -111,8 +111,13 @@ def _do_breakdown(payload, info, url, mode=None):
         tikhub.download_to_file(play_url, dl_deadline, tmp_video.name)
 
         _heartbeat(job_id, "extracting_frames")
-        frame_count = max(4, min(10, int(duration / 5)))
-        frame_dir, frames = _extract_frames(tmp_video.name, frame_count, duration)
+        is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
+        frame_count = 8 if is_reverse else max(4, min(10, int(duration / 5)))
+        frame_dir, frames = _extract_frames(
+            tmp_video.name, frame_count, duration,
+            scale_width=1024 if is_reverse else 512,
+        )
+        model_frames = _pair_reverse_frames(frame_dir, frames) if is_reverse else frames
 
         script_text = ""
         asr_failed = False
@@ -129,7 +134,7 @@ def _do_breakdown(payload, info, url, mode=None):
         platform = info.get("platform", "")
         frame_thumbnails = _frame_thumbnails(frames)
         if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
-            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, frames)
+            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, model_frames)
             return {
                 "type": "breakdown_reverse",
                 "source_url": url,
@@ -358,15 +363,16 @@ def _format_transcript(segs):
     return str(segs)
 
 
-def _extract_frames(video_path, count=6, duration=30):
+def _extract_frames(video_path, count=6, duration=30, scale_width=512):
     """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
+    scale_width = max(256, min(int(scale_width or 512), 2048))
     outdir = tempfile.mkdtemp()
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-i", video_path,
-             "-vf", "select='gt(scene,0.15)',scale=512:-1",
+             "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
              "-vsync", "vfr", "-vframes", str(count),
              "%s/frame_%%d.jpg" % outdir],
             check=True, timeout=60,
@@ -384,7 +390,7 @@ def _extract_frames(video_path, count=6, duration=30):
             subprocess.run(
                 ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                  "-i", video_path,
-                 "-vf", "fps=%.6f,scale=512:-1" % fps,
+                 "-vf", "fps=%.6f,scale=%d:-1" % (fps, scale_width),
                  "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
@@ -395,6 +401,26 @@ def _extract_frames(video_path, count=6, duration=30):
                          if f.endswith(".jpg")],
                         key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
     return outdir, frames
+
+
+def _pair_reverse_frames(frame_dir, frames):
+    """将 8 个时间点按先后顺序拼成 4 张左右双帧图。"""
+    ordered = list(frames or [])
+    if len(ordered) < 8:
+        raise ValueError("反推高清帧不足 8 张")
+    paired = []
+    for index in range(4):
+        left, right = ordered[index * 2:index * 2 + 2]
+        output = os.path.join(frame_dir, "reverse_pair_%d.jpg" % (index + 1))
+        subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", left, "-i", right,
+             "-filter_complex", "hstack=inputs=2", "-q:v", "2", output],
+            check=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        paired.append(output)
+    return paired
 
 
 def _post_zhipu(body, api_key):
