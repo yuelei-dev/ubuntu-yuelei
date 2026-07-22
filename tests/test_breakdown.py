@@ -33,6 +33,7 @@ class BreakdownTests(unittest.TestCase):
     def setUp(self):
         self.orig_heartbeat = self.breakdown._heartbeat
         self.orig_extract_frames = self.breakdown._extract_frames
+        self.orig_pair_reverse_frames = getattr(self.breakdown, "_pair_reverse_frames", None)
         self.orig_chat_multimodal = self.breakdown._chat_multimodal
         self.orig_tempfile = self.breakdown.tempfile.NamedTemporaryFile
         self.orig_tikhub = sys.modules.get("tikhub")
@@ -47,6 +48,8 @@ class BreakdownTests(unittest.TestCase):
     def tearDown(self):
         self.breakdown._heartbeat = self.orig_heartbeat
         self.breakdown._extract_frames = self.orig_extract_frames
+        if self.orig_pair_reverse_frames is not None:
+            self.breakdown._pair_reverse_frames = self.orig_pair_reverse_frames
         self.breakdown._chat_multimodal = self.orig_chat_multimodal
         self.breakdown.tempfile.NamedTemporaryFile = self.orig_tempfile
         if self.orig_tikhub is None:
@@ -326,15 +329,16 @@ class BreakdownTests(unittest.TestCase):
                 return transcript if transcript is not None else [{"start": 0, "end": 3, "text": "先看门头"}]
 
         self.breakdown._heartbeat = lambda job_id, phase: calls.setdefault("phases", []).append(phase)
-        self.breakdown._extract_frames = lambda video_path, count, duration: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
             "fake-frame-dir",
             ["frame_1.jpg", "frame_2.jpg"],
         )
 
-        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls["sysmsg"] = sysmsg
             calls["usermsg"] = usermsg
             calls["frames"] = list(frames)
+            calls["chat_kwargs"] = kwargs
             return raw_json
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
@@ -399,7 +403,47 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("表情、视线、手势、肢体姿态、走位", src)
         self.assertIn("跟随、推进、拉远、摇移或转场", src)
         self.assertIn("起始—发展—结束", src)
-        self.assertIn("镜头（景别、视角、构图和整体运镜风格）", src)
+        self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
+
+    def test_reverse_prompt_requires_minimum_detail_counts(self):
+        import inspect
+        src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
+        self.assertIn("主体至少 5 项", src)
+        self.assertIn("场景至少 5 项", src)
+        self.assertIn("动作与时序至少 8 项", src)
+        self.assertIn("镜头至少 5 项", src)
+        self.assertIn("光线与色调至少 4 项", src)
+        self.assertIn("节奏与情绪钩子至少 3 项", src)
+        self.assertIn("左侧早于右侧", src)
+        self.assertIn("图片顺序代表时间推进", src)
+
+    def test_chat_multimodal_supports_reverse_output_and_image_options(self):
+        import inspect
+        signature = str(inspect.signature(self.breakdown._chat_multimodal))
+        self.assertIn("max_tokens=None", signature)
+        self.assertIn("image_detail='low'", signature)
+        captured = []
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+
+        def fake_zhipu(body, api_key):
+            captured.append(body)
+            return {"choices": [{"message": {"content": "结果"}}]}
+
+        self.breakdown._post_zhipu = fake_zhipu
+        with tempfile.TemporaryDirectory() as directory:
+            frame = self._frame_file(directory)
+            self.breakdown._chat_multimodal(
+                "system", "user", [frame], max_tokens=1800, image_detail=None
+            )
+            self.breakdown._chat_multimodal("system", "user", [frame])
+
+        reverse_body, default_body = captured
+        self.assertEqual(reverse_body["max_tokens"], 1800)
+        reverse_image = reverse_body["messages"][1]["content"][1]["image_url"]
+        self.assertNotIn("detail", reverse_image)
+        self.assertNotIn("max_tokens", default_body)
+        default_image = default_body["messages"][1]["content"][1]["image_url"]
+        self.assertEqual(default_image["detail"], "low")
 
     def test_do_breakdown_reverse_prompt_returns_prompt_and_keeps_asr_flag(self):
         import os, tempfile
@@ -418,10 +462,11 @@ class BreakdownTests(unittest.TestCase):
             '```\n轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子\n```',
             transcript=None,
         )
-        self.breakdown._extract_frames = lambda video_path, count, duration: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
             "fake-frame-dir",
-            [thumb.name, thumb.name],
+            [thumb.name] * 8,
         )
+        self.breakdown._pair_reverse_frames = lambda frame_dir, frames: list(frames)[:4]
 
         try:
             result = self.breakdown._do_breakdown(
@@ -436,8 +481,8 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["type"], "breakdown_reverse")
         self.assertEqual(result["source_platform"], "douyin")
         self.assertIn("轻奢美容院场景", result["prompt"])
-        self.assertEqual(result["frame_count"], 2)
-        self.assertEqual(len(result["frame_thumbnails"]), 2)
+        self.assertEqual(result["frame_count"], 8)
+        self.assertEqual(len(result["frame_thumbnails"]), 4)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
         self.assertIn("反推出一条适合后续作图/创作的中文提示词", calls["usermsg"])
@@ -470,18 +515,85 @@ class BreakdownTests(unittest.TestCase):
 
     def test_breakdown_reverse_prompt_calls_model_once(self):
         calls = []
-        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
-            calls.append((sysmsg, usermsg, list(frames), temp))
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
             return ''
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
             self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][4], {"max_tokens": 1800, "image_detail": None})
 
     def test_clean_reverse_prompt_does_not_truncate_long_output(self):
         raw = "画" * 850
         self.assertEqual(self.breakdown._clean_reverse_prompt(raw), raw)
+
+    def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
+        calls = self._install_fake_env("反推结果", transcript=[])
+
+        def fake_extract(path, count, duration, scale_width=512, min_frames=None):
+            calls["extract_args"] = (count, scale_width, min_frames)
+            return "frames-dir", ["f%d.jpg" % i for i in range(1, 9)]
+
+        def fake_pair(frame_dir, frames):
+            calls["pair_args"] = (frame_dir, list(frames))
+            return ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"]
+
+        self.breakdown._extract_frames = fake_extract
+        had_pair = hasattr(self.breakdown, "_pair_reverse_frames")
+        original_pair = getattr(self.breakdown, "_pair_reverse_frames", None)
+        self.breakdown._pair_reverse_frames = fake_pair
+        def fake_chat(sysmsg, usermsg, frames, **kwargs):
+            calls["frames"] = list(frames)
+            return "反推结果"
+        self.breakdown._chat_multimodal = fake_chat
+        try:
+            result = self.breakdown._do_breakdown(
+                {"_job_id": 80, "mode": "reverse_prompt"},
+                {"platform": "douyin", "id": "detail-depth"},
+                "https://example.test/detail-depth",
+                "reverse_prompt",
+            )
+        finally:
+            if had_pair:
+                self.breakdown._pair_reverse_frames = original_pair
+            else:
+                delattr(self.breakdown, "_pair_reverse_frames")
+
+        self.assertEqual(calls["extract_args"], (8, 1024, 8))
+        self.assertEqual(calls["pair_args"][1], ["f%d.jpg" % i for i in range(1, 9)])
+        self.assertEqual(calls["frames"], ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"])
+        self.assertEqual(result["frame_count"], 8)
+
+    def test_pair_reverse_frames_preserves_time_order(self):
+        pair_frames = getattr(self.breakdown, "_pair_reverse_frames", None)
+        self.assertIsNotNone(pair_frames, "_pair_reverse_frames is missing")
+        original_run = self.breakdown.subprocess.run
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return type("Completed", (), {"returncode": 0})()
+
+        self.breakdown.subprocess.run = fake_run
+        try:
+            outputs = pair_frames("frames-dir", ["f%d.jpg" % i for i in range(1, 9)])
+        finally:
+            self.breakdown.subprocess.run = original_run
+
+        self.assertEqual(len(outputs), 4)
+        self.assertEqual([(cmd[cmd.index("-i") + 1], cmd[cmd.index("-i", cmd.index("-i") + 1) + 1]) for cmd in commands], [
+            ("f1.jpg", "f2.jpg"), ("f3.jpg", "f4.jpg"),
+            ("f5.jpg", "f6.jpg"), ("f7.jpg", "f8.jpg"),
+        ])
+        self.assertTrue(all("hstack=inputs=2" in cmd for cmd in commands))
+
+    def test_pair_reverse_frames_rejects_fewer_than_eight(self):
+        pair_frames = getattr(self.breakdown, "_pair_reverse_frames", None)
+        self.assertIsNotNone(pair_frames, "_pair_reverse_frames is missing")
+        with self.assertRaisesRegex(ValueError, "反推高清帧不足 8 张"):
+            pair_frames("frames-dir", ["f%d.jpg" % i for i in range(1, 8)])
 
     def test_gen_breakdown_rejects_unknown_mode(self):
         with self.assertRaisesRegex(ValueError, "mode 仅支持 scenes / reverse_prompt"):
@@ -542,7 +654,7 @@ class BreakdownTests(unittest.TestCase):
                 raise RuntimeError("ASR service unavailable")
 
         self.breakdown._heartbeat = lambda job_id, phase: calls.setdefault("phases", []).append(phase)
-        self.breakdown._extract_frames = lambda video_path, count, duration: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: (
             "fake-frame-dir",
             ["frame_1.jpg", "frame_2.jpg"],
         )
@@ -611,6 +723,39 @@ class BreakdownTests(unittest.TestCase):
         src = inspect.getsource(self.breakdown._extract_frames)
         self.assertIn("max(2, min(count, 12))", src)
 
+    def test_reverse_extract_falls_back_when_scene_detection_returns_six_frames(self):
+        import inspect
+        import shutil
+        signature = str(inspect.signature(self.breakdown._extract_frames))
+        self.assertIn("min_frames=None", signature)
+        original_run = self.breakdown.subprocess.run
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            output_pattern = command[-1]
+            frame_total = 6 if len(calls) == 1 else 8
+            for index in range(1, frame_total + 1):
+                Path(output_pattern.replace("%d", str(index))).write_bytes(b"jpeg")
+            return type("Completed", (), {"returncode": 0})()
+
+        self.breakdown.subprocess.run = fake_run
+        frame_dir = None
+        try:
+            frame_dir, frames = self.breakdown._extract_frames(
+                "video.mp4", 8, 30, scale_width=1024, min_frames=8
+            )
+        finally:
+            self.breakdown.subprocess.run = original_run
+
+        try:
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(frames), 8)
+            self.assertIn("fps=", calls[1][calls[1].index("-vf") + 1])
+        finally:
+            if frame_dir:
+                shutil.rmtree(frame_dir, ignore_errors=True)
+
     def test_gen_breakdown_single_url_still_works(self):
         calls = self._install_fake_env(
             '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎"}],"analysis":"ok"}'
@@ -644,7 +789,7 @@ class BreakdownTests(unittest.TestCase):
                 return [{"start": 0, "end": 3, "text": "测试文案"}]
 
         self.breakdown._heartbeat = lambda job_id, phase: None
-        self.breakdown._extract_frames = lambda video_path, count, duration: ("d", ["f1.jpg", "f2.jpg"])
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: ("d", ["f1.jpg", "f2.jpg"])
         self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7: '{"scenes":[{"dur":"3s","scene":"画面","line":"口播"}],"analysis":"分析"}'
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "f.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
@@ -677,7 +822,7 @@ class BreakdownTests(unittest.TestCase):
         calls = self._install_fake_env(
             '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎"}],"analysis":"ok"}'
         )
-        self.breakdown._extract_frames = lambda video_path, count, duration: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: (
             "fake-frame-dir",
             [tmp.name],
         )

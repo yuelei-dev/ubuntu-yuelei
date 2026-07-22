@@ -111,8 +111,18 @@ def _do_breakdown(payload, info, url, mode=None):
         tikhub.download_to_file(play_url, dl_deadline, tmp_video.name)
 
         _heartbeat(job_id, "extracting_frames")
-        frame_count = max(4, min(10, int(duration / 5)))
-        frame_dir, frames = _extract_frames(tmp_video.name, frame_count, duration)
+        is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
+        frame_count = 8 if is_reverse else max(4, min(10, int(duration / 5)))
+        if is_reverse:
+            frame_dir, frames = _extract_frames(
+                tmp_video.name, frame_count, duration,
+                scale_width=1024, min_frames=8,
+            )
+        else:
+            frame_dir, frames = _extract_frames(
+                tmp_video.name, frame_count, duration, scale_width=512,
+            )
+        model_frames = _pair_reverse_frames(frame_dir, frames) if is_reverse else frames
 
         script_text = ""
         asr_failed = False
@@ -129,7 +139,7 @@ def _do_breakdown(payload, info, url, mode=None):
         platform = info.get("platform", "")
         frame_thumbnails = _frame_thumbnails(frames)
         if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
-            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, frames)
+            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, model_frames)
             return {
                 "type": "breakdown_reverse",
                 "source_url": url,
@@ -219,12 +229,14 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "请基于关键帧和口播，反推出一条适合后续作图/创作的中文提示词。"
         "目标不是逐字复刻原视频，而是保留它的主体设定、镜头语言、场景道具、光线氛围、色调质感、构图与文案钩子，"
         "用于生成同风格但原创的新内容。"
-        "提示词要具体可执行，写清六个层次：①主体（人物/产品的外观、身份、服装和状态）"
-        "②场景（环境、关键道具、前中后景和空间关系）"
-        "③动作与时序（按起始—发展—结束描述人物的表情、视线、手势、肢体姿态、走位及与道具的互动，"
+        "输入的每张图是两个连续时间点组成的双帧图，左侧早于右侧，图片顺序代表时间推进。"
+        "提示词要具体可执行，写清六个层次：①主体至少 5 项（人物/产品的外观、身份、服装、状态和显著特征）"
+        "②场景至少 5 项（环境、关键道具、前中后景和空间关系）"
+        "③动作与时序至少 8 项（按起始—发展—结束描述人物的表情、视线、手势、肢体姿态、走位及与道具的互动，"
         "同时写清镜头跟随、推进、拉远、摇移或转场的时机，形成可执行的连续过程，避免‘自然地动起来’等笼统表达）"
-        "④镜头（景别、视角、构图和整体运镜风格）"
-        "⑤光线与色调（照明方向、氛围、材质和色彩质感）⑥节奏与情绪钩子。"
+        "④镜头至少 5 项（景别、视角、构图和整体运镜风格）"
+        "⑤光线与色调至少 4 项（照明方向、氛围、材质和色彩质感）"
+        "⑥节奏与情绪钩子至少 3 项（节奏变化、情绪推进和观看钩子）。"
         "关键帧无法证明的动作不要写成原视频事实；可基于可见信息补充适合原创生成的合理动作，但要保持人物、场景和内容逻辑一致。"
         "直接输出 1 条完整提示词，500-800 字，不要 JSON、不要标题、不要解释、不要 markdown 代码块。"
     )
@@ -232,7 +244,10 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "你是黄雀传媒资深短视频创意总监。你擅长根据视频关键帧和口播，提炼出可直接用于后续创作的中文提示词。"
         "只输出提示词本身，不要任何多余内容。"
     )
-    raw = _chat_multimodal(sysmsg, usermsg, frames, temp=0.6)
+    raw = _chat_multimodal(
+        sysmsg, usermsg, frames, temp=0.6,
+        max_tokens=1800, image_detail=None,
+    )
     return _clean_reverse_prompt(raw)
 
 
@@ -358,15 +373,17 @@ def _format_transcript(segs):
     return str(segs)
 
 
-def _extract_frames(video_path, count=6, duration=30):
+def _extract_frames(video_path, count=6, duration=30, scale_width=512,
+                    min_frames=None):
     """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
+    scale_width = max(256, min(int(scale_width or 512), 2048))
     outdir = tempfile.mkdtemp()
     try:
         subprocess.run(
             ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
              "-i", video_path,
-             "-vf", "select='gt(scene,0.15)',scale=512:-1",
+             "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
              "-vsync", "vfr", "-vframes", str(count),
              "%s/frame_%%d.jpg" % outdir],
             check=True, timeout=60,
@@ -376,7 +393,11 @@ def _extract_frames(video_path, count=6, duration=30):
     frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
                      if f.endswith(".jpg")],
                     key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
-    if len(frames) < max(2, count // 2):
+    fallback_threshold = (
+        max(2, min(int(min_frames), count))
+        if min_frames is not None else max(2, count // 2)
+    )
+    if len(frames) < fallback_threshold:
         shutil.rmtree(outdir)
         outdir = tempfile.mkdtemp()
         fps = max(float(count) / max(float(duration or 1), 1.0), 0.001)
@@ -384,7 +405,7 @@ def _extract_frames(video_path, count=6, duration=30):
             subprocess.run(
                 ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
                  "-i", video_path,
-                 "-vf", "fps=%.6f,scale=512:-1" % fps,
+                 "-vf", "fps=%.6f,scale=%d:-1" % (fps, scale_width),
                  "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
@@ -395,6 +416,26 @@ def _extract_frames(video_path, count=6, duration=30):
                          if f.endswith(".jpg")],
                         key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
     return outdir, frames
+
+
+def _pair_reverse_frames(frame_dir, frames):
+    """将 8 个时间点按先后顺序拼成 4 张左右双帧图。"""
+    ordered = list(frames or [])
+    if len(ordered) < 8:
+        raise ValueError("反推高清帧不足 8 张")
+    paired = []
+    for index in range(4):
+        left, right = ordered[index * 2:index * 2 + 2]
+        output = os.path.join(frame_dir, "reverse_pair_%d.jpg" % (index + 1))
+        subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-i", left, "-i", right,
+             "-filter_complex", "hstack=inputs=2", "-q:v", "2", output],
+            check=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        paired.append(output)
+    return paired
 
 
 def _post_zhipu(body, api_key):
@@ -430,17 +471,18 @@ def _chat_content(response):
     return content
 
 
-def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
+def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
+                     max_tokens=None, image_detail="low"):
     """智谱多模态优先，仅投递前失败时安全回退 GPT。"""
 
     content = [{"type": "text", "text": usermsg}]
     for path in image_paths:
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": "data:image/jpeg;base64," + b64, "detail": "low"}
-        })
+        image_url = {"url": "data:image/jpeg;base64," + b64}
+        if image_detail is not None:
+            image_url["detail"] = image_detail
+        content.append({"type": "image_url", "image_url": image_url})
 
     body = {
         "model": os.environ.get("BREAKDOWN_MODEL", "glm-4v-plus"),
@@ -450,6 +492,8 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
         ],
         "temperature": temp,
     }
+    if max_tokens is not None:
+        body["max_tokens"] = int(max_tokens)
 
     zhipu_key = os.environ.get("REVERSE_ZHIPU_KEY", "").strip()
     if not zhipu_key:
