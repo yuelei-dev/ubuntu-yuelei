@@ -1,10 +1,15 @@
 import importlib
+import errno
+import io
+import json
 import os
 import socket
+import ssl
 import sys
 import tempfile
 import unittest
 import urllib.error
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -13,6 +18,7 @@ _ROUTING_ENV = (
     "BREAKDOWN_FALLBACK_MODEL",
     "REVERSE_ZHIPU_BASE",
     "REVERSE_ZHIPU_KEY",
+    "BREAKDOWN_ZHIPU_TIMEOUT",
 )
 
 
@@ -36,6 +42,7 @@ class BreakdownTests(unittest.TestCase):
         self.had_openai_post = hasattr(self.breakdown, "_post_openai_fallback")
         self.orig_openai_post = getattr(self.breakdown, "_post_openai_fallback", None)
         self.orig_egress_post_json = self.breakdown.egress.post_json
+        self.orig_egress_direct = self.breakdown.egress._DIRECT
 
     def tearDown(self):
         self.breakdown._heartbeat = self.orig_heartbeat
@@ -60,11 +67,69 @@ class BreakdownTests(unittest.TestCase):
         elif hasattr(self.breakdown, "_post_openai_fallback"):
             delattr(self.breakdown, "_post_openai_fallback")
         self.breakdown.egress.post_json = self.orig_egress_post_json
+        self.breakdown.egress._DIRECT = self.orig_egress_direct
 
     def _frame_file(self, directory):
         path = Path(directory) / "frame.jpg"
         path.write_bytes(b"jpeg-test-data")
         return str(path)
+
+    def test_post_zhipu_uses_official_endpoint_key_json_and_timeout(self):
+        captured = {}
+        os.environ["REVERSE_ZHIPU_BASE"] = "https://open.bigmodel.cn/api/paas/v4/"
+        os.environ["BREAKDOWN_ZHIPU_TIMEOUT"] = "123"
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b'{"choices":[]}'
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                captured["request"] = request
+                captured["timeout"] = timeout
+                return FakeResponse()
+
+        self.breakdown.egress._DIRECT = FakeOpener()
+        body = {"model": "glm-4v-plus", "messages": []}
+
+        result = self.breakdown._post_zhipu(body, "zhipu-test-key")
+
+        request = captured["request"]
+        self.assertEqual(request.full_url, "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+        self.assertEqual(request.get_header("Authorization"), "Bearer zhipu-test-key")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(json.loads(request.data), body)
+        self.assertEqual(captured["timeout"], 123)
+        self.assertEqual(result, {"choices": []})
+
+    def test_post_openai_fallback_uses_openai_endpoint_key_and_body(self):
+        from content_domains.image import OPENAI_OFFICIAL_BASE
+
+        captured = {}
+
+        def fake_post_json(*args, **kwargs):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return {"choices": [{"message": {"content": "GPT 结果"}}]}
+
+        self.breakdown.egress.post_json = fake_post_json
+        body = {"model": "gpt-4o", "messages": []}
+
+        result = self.breakdown._post_openai_fallback(body)
+
+        args = captured["args"]
+        self.assertEqual(args[0], OPENAI_OFFICIAL_BASE)
+        self.assertEqual(args[1], self.breakdown.OPENAI_BASE)
+        self.assertEqual(args[2], "/v1/chat/completions")
+        self.assertEqual(json.loads(args[3]), body)
+        self.assertEqual(args[4]["Authorization"], "Bearer " + self.breakdown.OPENAI_KEY)
+        self.assertEqual(result["choices"][0]["message"]["content"], "GPT 结果")
 
     def test_chat_multimodal_uses_zhipu_primary_without_openai(self):
         captured = {}
@@ -115,6 +180,48 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result, "GPT 结果")
         self.assertEqual(captured["openai_body"]["model"], "gpt-4o")
 
+    def test_chat_multimodal_falls_back_for_all_pre_delivery_failure_types(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        failures = (
+            urllib.error.URLError(socket.gaierror(-2, "dns")),
+            urllib.error.URLError(ConnectionRefusedError("refused")),
+            urllib.error.URLError(OSError(errno.EHOSTUNREACH, "unreachable")),
+            urllib.error.URLError(ssl.SSLError("handshake")),
+        )
+
+        for failure in failures:
+            with self.subTest(failure=repr(failure)), tempfile.TemporaryDirectory() as directory:
+                called = []
+
+                def fake_zhipu(body, api_key, error=failure):
+                    raise error
+
+                self.breakdown._post_zhipu = fake_zhipu
+                self.breakdown._post_openai_fallback = lambda body: (
+                    called.append(body) or {"choices": [{"message": {"content": "GPT 结果"}}]}
+                )
+
+                result = self.breakdown._chat_multimodal(
+                    "system", "user", [self._frame_file(directory)]
+                )
+
+                self.assertEqual(result, "GPT 结果")
+                self.assertEqual(len(called), 1)
+
+    def test_chat_multimodal_missing_zhipu_key_fails_without_openai(self):
+        os.environ.pop("REVERSE_ZHIPU_KEY", None)
+        called = []
+        self.breakdown._post_openai_fallback = lambda body: called.append(body)
+
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(
+            RuntimeError, "REVERSE_ZHIPU_KEY"
+        ):
+            self.breakdown._chat_multimodal(
+                "system", "user", [self._frame_file(directory)]
+            )
+
+        self.assertEqual(called, [])
+
     def test_chat_multimodal_does_not_fallback_after_possible_delivery(self):
         os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
         failures = (
@@ -162,6 +269,39 @@ class BreakdownTests(unittest.TestCase):
             self.breakdown._chat_multimodal(
                 "system", "user", [self._frame_file(directory)]
             )
+
+    def test_chat_multimodal_logs_openai_fallback_failure(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        self.breakdown._post_zhipu = lambda body, api_key: (_ for _ in ()).throw(
+            urllib.error.URLError(socket.gaierror(-2, "dns"))
+        )
+        self.breakdown._post_openai_fallback = lambda body: (_ for _ in ()).throw(
+            RuntimeError("openai failed")
+        )
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(output), self.assertRaises(
+            RuntimeError
+        ):
+            self.breakdown._chat_multimodal(
+                "system", "user", [self._frame_file(directory)]
+            )
+
+        self.assertIn("openai fallback failure: RuntimeError", output.getvalue())
+
+    def test_chat_multimodal_does_not_log_success_for_empty_zhipu_response(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        self.breakdown._post_zhipu = lambda body, api_key: {"choices": []}
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(output), self.assertRaisesRegex(
+            RuntimeError, "empty content"
+        ):
+            self.breakdown._chat_multimodal(
+                "system", "user", [self._frame_file(directory)]
+            )
+
+        self.assertNotIn("zhipu success", output.getvalue())
 
     def _install_fake_env(self, raw_json, transcript=None):
         calls = {}

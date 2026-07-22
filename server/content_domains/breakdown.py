@@ -467,11 +467,20 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7):
         )
         fallback_body = dict(body)
         fallback_body["model"] = os.environ.get("BREAKDOWN_FALLBACK_MODEL", "gpt-4o")
-        response = _post_openai_fallback(fallback_body)
-        return _chat_content(response)
+        try:
+            response = _post_openai_fallback(fallback_body)
+            return _chat_content(response)
+        except Exception as fallback_exc:
+            print(
+                "[breakdown] openai fallback failure: %s"
+                % type(fallback_exc).__name__,
+                flush=True,
+            )
+            raise
 
+    content = _chat_content(response)
     print("[breakdown] zhipu success: %s" % body["model"], flush=True)
-    return _chat_content(response)
+    return content
 
 
 HANDLERS = {"breakdown": gen_breakdown}
