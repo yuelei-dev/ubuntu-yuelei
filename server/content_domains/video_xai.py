@@ -124,6 +124,8 @@ def _poll(opener, request_id, model, duration, job_id=None, heartbeat=None, now=
 def generate(model, prompt, duration, aspect_ratio, resolution, image_url=None,
              job_id=None, heartbeat=None, now=None, sleep=None):
     """创建一次 xAI 生成任务并轮询到终态。"""
+    if not XAI_API_KEY:
+        raise XaiCreateUnavailableError("xAI官方视频未配置（XAI_API_KEY）")
     opener = _opener()
     payload = {
         "model": model,
@@ -138,7 +140,7 @@ def generate(model, prompt, duration, aspect_ratio, resolution, image_url=None,
     # 红线：非幂等 POST 只发一次，不在此处做网络重试或换代理。
     try:
         created = _request_json(opener, "POST", "/videos/generations", payload, timeout=120)
-    except (XaiCredentialError, ValueError) as exc:
+    except XaiCredentialError as exc:
         raise XaiCreateUnavailableError(str(exc)) from exc
     request_id = str(created.get("request_id") or "").strip()
     if not request_id:

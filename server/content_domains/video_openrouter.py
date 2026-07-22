@@ -34,9 +34,15 @@ def available():
     return bool(OPENROUTER_API_KEY)
 
 
-def download_headers():
+def download_headers(url):
     if not OPENROUTER_API_KEY:
         raise ValueError("OpenRouter 视频备用渠道未配置（OPENROUTER_API_KEY）")
+    base = urllib.parse.urlparse(OPENROUTER_API_BASE)
+    target = urllib.parse.urlparse(str(url or ""))
+    trusted_path = base.path.rstrip("/") + "/videos/"
+    if (target.scheme != "https" or target.netloc != base.netloc
+            or not target.path.startswith(trusted_path)):
+        return {}
     return {"Authorization": "Bearer " + OPENROUTER_API_KEY}
 
 

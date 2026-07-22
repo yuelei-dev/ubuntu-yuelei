@@ -2615,6 +2615,27 @@ def _xiaole_download_candidates(url, tunnel_proxy, origin_headers=None):
     return candidates
 
 
+class _OriginAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects without leaking an origin bearer token cross-origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        old = urllib.parse.urlsplit(req.full_url)
+        new = urllib.parse.urlsplit(newurl)
+        if (old.scheme.lower(), old.netloc.lower()) != (new.scheme.lower(), new.netloc.lower()):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def _authenticated_download_opener(proxy):
+    proxy_handler = urllib.request.ProxyHandler(
+        {"http": proxy, "https": proxy} if proxy else None
+    )
+    return urllib.request.build_opener(proxy_handler, _OriginAuthRedirectHandler()).open
+
+
 def _download_xiaole_video(url, prefix="xiaole", origin_headers=None):
     # 视频 CDN 多在海外(如 vidgen.x.ai)，国内直连不通。成片下载是 GET(幂等)，故可多档尝试：
     # 优先走 egress 快隧道，避开拥塞到分钟级的 heygen 法兰克福老中转(实测 xAI 2 分钟出片、
@@ -2629,7 +2650,10 @@ def _download_xiaole_video(url, prefix="xiaole", origin_headers=None):
     for fetch_url, headers, proxy in candidates:
         if data is not None:
             break
-        opener_open = egress._opener(proxy).open if proxy else urllib.request.urlopen
+        if headers.get("Authorization"):
+            opener_open = _authenticated_download_opener(proxy)
+        else:
+            opener_open = egress._opener(proxy).open if proxy else urllib.request.urlopen
         for attempt in range(_xiaole_dl_retries):
             try:
                 req = urllib.request.Request(fetch_url, headers=headers)
@@ -2787,7 +2811,7 @@ def gen_xiaole_video(payload):
             phase = "openrouter_downloading" if provider == "openrouter" else "downloading"
             update_video_asset_phase(job_id, phase, source_video_url=source_url,
                                      provider_video_id=xres.get("request_id"), model=xres.get("model") or model)
-        origin_headers = video_openrouter.download_headers() if provider == "openrouter" else None
+        origin_headers = video_openrouter.download_headers(source_url) if provider == "openrouter" else None
         video_file = _download_xiaole_video(
             source_url, "grok_" + provider, origin_headers=origin_headers
         )

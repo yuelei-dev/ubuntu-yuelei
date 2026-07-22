@@ -29,8 +29,22 @@ class OpenRouterVideoTests(unittest.TestCase):
     def test_download_headers_use_server_side_key(self):
         with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"):
             self.assertEqual(
-                video_openrouter.download_headers(),
+                video_openrouter.download_headers(
+                    "https://openrouter.ai/api/v1/videos/job/content"
+                ),
                 {"Authorization": "Bearer test-key"},
+            )
+
+    def test_download_headers_reject_third_party_and_plain_http_urls(self):
+        with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"):
+            self.assertEqual(
+                video_openrouter.download_headers("https://cdn.example/video.mp4"), {}
+            )
+            self.assertEqual(
+                video_openrouter.download_headers(
+                    "http://openrouter.ai/api/v1/videos/job/content"
+                ),
+                {},
             )
 
     def test_generate_maps_model_references_and_result(self):
@@ -112,6 +126,74 @@ class OpenRouterVideoTests(unittest.TestCase):
              patch.object(video_openrouter, "_opener", return_value=opener):
             with self.assertRaisesRegex(RuntimeError, "余额不足"):
                 video_openrouter.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+
+    def test_create_network_failure_is_not_retried(self):
+        opener = Mock()
+        opener.open.side_effect = urllib.error.URLError("connection reset")
+        with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"), \
+             patch.object(video_openrouter, "_opener", return_value=opener):
+            with self.assertRaises(video_openrouter.TransientOpenRouterError):
+                video_openrouter.generate("grok-imagine-video", "demo", 5, "16:9", "480p")
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(opener.open.call_args.args[0].get_method(), "POST")
+
+    def test_poll_network_failure_retries_get_only(self):
+        opener = Mock()
+        opener.open.side_effect = [
+            _Response({"id": "or-job-1"}),
+            urllib.error.URLError("temporary reset"),
+            _Response({"status": "completed", "unsigned_urls": ["https://cdn.example/v.mp4"]}),
+        ]
+        clock = iter([0, 0, 1, 2, 3])
+        with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"), \
+             patch.object(video_openrouter, "_opener", return_value=opener):
+            video_openrouter.generate(
+                "grok-imagine-video", "demo", 5, "16:9", "480p",
+                now=lambda: next(clock), sleep=lambda _: None,
+            )
+        methods = [call.args[0].get_method() for call in opener.open.call_args_list]
+        self.assertEqual(methods, ["POST", "GET", "GET"])
+
+    def test_poll_transient_http_failures_retry_get_only(self):
+        for status in (429, 503):
+            with self.subTest(status=status):
+                opener = Mock()
+                opener.open.side_effect = [
+                    _Response({"id": "or-job-1"}),
+                    urllib.error.HTTPError(
+                        "https://openrouter.ai/api/v1/videos/or-job-1",
+                        status, "temporary", {}, io.BytesIO(b'{"error":"temporary"}'),
+                    ),
+                    _Response({
+                        "status": "completed",
+                        "unsigned_urls": ["https://cdn.example/v.mp4"],
+                    }),
+                ]
+                clock = iter([0, 0, 1, 2, 3])
+                with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"), \
+                     patch.object(video_openrouter, "_opener", return_value=opener):
+                    video_openrouter.generate(
+                        "grok-imagine-video", "demo", 5, "16:9", "480p",
+                        now=lambda: next(clock), sleep=lambda _: None,
+                    )
+                methods = [call.args[0].get_method() for call in opener.open.call_args_list]
+                self.assertEqual(methods, ["POST", "GET", "GET"])
+
+    def test_completed_without_unsigned_url_fails(self):
+        opener = Mock()
+        opener.open.side_effect = [_Response({"id": "or-job-1"}), _Response({"status": "completed"})]
+        clock = iter([0, 0, 1])
+        with patch.object(video_openrouter, "OPENROUTER_API_KEY", "test-key"), \
+             patch.object(video_openrouter, "_opener", return_value=opener):
+            with self.assertRaisesRegex(RuntimeError, "未返回"):
+                video_openrouter.generate(
+                    "grok-imagine-video", "demo", 5, "16:9", "480p",
+                    now=lambda: next(clock), sleep=lambda _: None,
+                )
+
+    def test_rejects_plain_http_api_url(self):
+        with self.assertRaisesRegex(RuntimeError, "不可信"):
+            video_openrouter._safe_url("http://openrouter.ai/api/v1/videos/job")
 
 
 if __name__ == "__main__":
