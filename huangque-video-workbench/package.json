@@ -1,0 +1,41 @@
+{
+  "name": "huangque-video-workbench",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "tsx scripts/start-local-composition.ts",
+    "build": "tsc -b && tsc -p scripts/tsconfig.json",
+    "test": "vitest run",
+    "test:e2e": "playwright test tests/e2e/create-project.spec.ts",
+    "fixture": "tsx scripts/run-fixture-project.ts",
+    "typecheck": "tsc -b && tsc -p scripts/tsconfig.json",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down",
+    "db:generate": "drizzle-kit generate --config=drizzle.config.ts",
+    "db:migrate": "drizzle-kit migrate --config=drizzle.config.ts",
+    "db:verify": "drizzle-kit check --config=drizzle.config.ts && vitest run apps/api/src/db/migrations.test.ts",
+    "docker:api": "tsx scripts/docker-api.ts",
+    "docker:worker": "tsx scripts/docker-worker.ts"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@playwright/test": "^1.61.1",
+    "@remotion/bundler": "4.0.496",
+    "@remotion/renderer": "4.0.496",
+    "@types/react-dom": "^19.2.3",
+    "drizzle-kit": "^0.31.10",
+    "react-dom": "^19.2.8",
+    "tsx": "^4.23.1",
+    "typescript": "5.9.3",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10",
+    "yaml": "^2.9.0",
+    "zod": "4.3.6"
+  }
+}

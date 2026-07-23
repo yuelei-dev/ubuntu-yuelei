@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM"]
+  },
+  "include": ["*.ts", "*.tsx", "../tests/e2e/**/*.ts", "../playwright.config.ts", "../drizzle.config.ts"],
+  "exclude": ["*.test.ts"]
+}
