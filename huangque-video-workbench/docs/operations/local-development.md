@@ -7,7 +7,7 @@
 - `ffmpeg` and `ffprobe` on `PATH`.
 - Docker Desktop only for the optional PostgreSQL/Redis/MinIO checks.
 
-Copy `.env.example` only if you need to override a local default. It intentionally contains no credentials.
+Copy `env.sample` to `.env` only if you need to override a local default. The sample intentionally contains no credentials.
 
 Install the workspace from the repository root:
 

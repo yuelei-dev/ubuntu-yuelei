@@ -584,7 +584,7 @@ git commit -m "feat: add storyboard review and preview workbench"
 **Files:**
 - Create: `tests/e2e/create-project.spec.ts`
 - Create: `scripts/run-fixture-project.ts`
-- Create: `.env.example`
+- Create: `env.sample`
 - Create: `README.md`
 - Create: `docs/operations/local-development.md`
 
@@ -612,7 +612,7 @@ Expected: FAIL before the full stack is started or while the missing fixture pip
 
 - [ ] **Step 3: Implement the fixture runner and documentation**
 
-`scripts/run-fixture-project.ts` starts a project through the HTTP API and waits until a terminal state. `.env.example` lists only local values and variable names; it must contain no production server address, password, token, or personal data.
+`scripts/run-fixture-project.ts` starts a project through the HTTP API and waits until a terminal state. `env.sample` lists only local values and variable names; it must contain no production server address, password, token, or personal data.
 
 - [ ] **Step 4: Run complete verification**
 
@@ -631,7 +631,7 @@ Expected: typecheck and all tests pass; ffprobe reports H.264, AAC, 1080?1920, a
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests scripts .env.example README.md docs/operations
+git add tests scripts env.sample README.md docs/operations
 git commit -m "test: verify one-click mixed video pipeline"
 ```
 
