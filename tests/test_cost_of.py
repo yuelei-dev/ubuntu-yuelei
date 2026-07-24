@@ -23,6 +23,26 @@ class CostOfTests(unittest.TestCase):
         self.assertEqual(
             self.points.cost_of("script_to_video", {"scenes": [{"line": "短"}], "style": "种草"}), 10)
 
+    def test_script_to_video_preflights_talking_and_missing_static_materials(self):
+        body = {
+            "scenes": [{"line": "短", "scene": "枇杷树"}],
+            "style": "口播",
+            "material_plan": [
+                {"source": "asset"},
+                {"source": "generate"},
+                {"source": "generate"},
+            ],
+            "material_generate_count": 2,
+        }
+        self.assertEqual(self.points.cost_of("script_to_video", body), 50)
+        self.assertEqual(body["cost_breakdown"], {
+            "talking": 10,
+            "material_images": 40,
+            "material_generate_count": 2,
+            "material_reused_count": 1,
+            "total": 50,
+        })
+
     def test_script_to_video_drama_aligns_with_xiaole_per_second(self):
         """剧情与 xiaole_video 同价：30 点/秒 × 时长（默认 10s，上限 15s），不再固定 20 点"""
         self.assertEqual(

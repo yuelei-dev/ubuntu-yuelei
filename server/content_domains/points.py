@@ -80,11 +80,8 @@ def cost_of(kind, body):
             duration = min(15, int(body.get("duration") or 10))
         return max(30, int(math.ceil(duration)) * 30)
     if kind == "script_to_video":
-        # 一键成片：口播/种草与 video 业务同价 —— 10 点/秒 × 文案估算秒数【预扣】，
-        # 跑完由 run_job 对 pipeline==talking 按成片真实时长结算多退少不补（2026-07-17 调价，
-        # 此前固定 20 点，长口播稳亏）；剧情与 xiaole_video 同价 30 点/秒 × 时长、上限 15s
-        # （2026-07-18 拉平 —— 此前固定 20 点，同一 grok 引擎直走视频页 30 点/秒、走编导仅 20 点，
-        # 15 倍倒挂，编导页的「一键生成视频/生成同款」成了套利入口）。
+        # 提交前一次性冻结全部费用：数字人口播 + 没有命中用户资产的静态素材图。
+        # 原子预扣避免生成到一半才发现点数不足；cost_breakdown 会返回前端明细。
         style = (body.get("style") or "口播").strip()
         if style == "剧情":
             try:
@@ -95,7 +92,20 @@ def cost_of(kind, body):
         from . import video as video_domain
         lines = [(s.get("line") or "").strip() for s in (body.get("scenes") or []) if isinstance(s, dict)]
         text = "\n\n".join([l for l in lines if l])
-        return video_domain.video_cost({"text": text})
+        talking = video_domain.video_cost({"text": text})
+        generated = max(0, min(8, int(body.get("material_generate_count") or 0)))
+        image_each = cost_of("image", {
+            "provider": "openai", "quality": "standard", "count": 1,
+        })
+        images = generated * image_each
+        body["cost_breakdown"] = {
+            "talking": talking,
+            "material_images": images,
+            "material_generate_count": generated,
+            "material_reused_count": max(0, len(body.get("material_plan") or []) - generated),
+            "total": talking + images,
+        }
+        return talking + images
     if kind == "breakdown":
         # 分镜拆解与提示词反推均按每个有效链接 20 点；批量上限 5 条 = 100 点。
         urls = body.get("urls")

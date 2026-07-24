@@ -991,11 +991,11 @@ def run_job(job_id):
         # 先 CAS 抢 done 终态：仅当仍是 running 才写 done，防 reaper 已判 error 又被无条件覆盖(既出片又退点)
         if not _set_terminal(job_id, "done", result=result):
             return  # 已被 reaper 接管为 error+退点：放弃成功副作用(不入库、不覆盖状态)
-        # 口播按成片真实时长结算：预扣(cost)是 hold，跑完多退少不补。只在抢到 done 后调 —— done CAS
-        # 互斥 + reaper/reclaim 不碰 done → 每 job 至多结算一次，不重复退。结算失败不影响出片。
-        if kind == "video" or (kind == "script_to_video" and (result or {}).get("pipeline") == "talking"):  # 含一键成片的口播链路（剧情走 grok 不按秒结算）
+        # 口播按成片真实时长结算；一键成片还要保留已生成素材图费用。
+        if kind == "video" or (kind == "script_to_video" and (result or {}).get("pipeline") in {"talking", "talking_with_materials"}):
             try:
                 actual = _domains()[2].talking_actual_cost(result)
+                actual += int(((payload.get("cost_breakdown") or {}).get("material_images")) or 0) if kind == "script_to_video" else 0
                 if actual and int(cost or 0) > actual:
                     _domains()[1].safe_refund_points(username, int(cost) - actual, "job#%d 口播结算" % job_id)
             except Exception:
@@ -1369,8 +1369,8 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
-                # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
-                idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic"} else ""
+                elif kind == "script_to_video": from . import script_to_video as script_to_video_domain; body = script_to_video_domain.prepare_script_to_video_payload(body, user["username"])
+                idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"} else ""
             except ValueError as e:
                 return self._send(400, {"detail": str(e)[:220]})
             # 正在停机（部署中）→ 不收新活。⚠️ 必须在【扣点之前】。
@@ -1380,13 +1380,12 @@ class H(BaseHTTPRequestHandler):
                                         "code": "shutting_down", "retry_after_ms": 5000})
 
             # 上游没额度就当场拒 —— ⚠️ 必须在【扣点之前】。
-            # 余额哨兵每 10 分钟告警一次，但告警只叫醒我们、拦不住用户：从「余额见底」到
             # 「有人充上钱」这段时间里，用户照样点生成、照样被扣点、照样等几分钟，然后看到
-            # 一句天书（"积分余额不足，请先充值" / "Insufficient credits"）。近 14 天 48 条
             # 任务是这么死的。这里把它们挡在门外：不扣点、不排队、不让用户等。
             # fail-open：熔断器自己出问题一律放行（见 upstream_guard）。
             from . import upstream_guard
             blocked = upstream_guard.exhausted_reason(kind, body)
+            if not blocked and kind == "script_to_video" and int(body.get("material_generate_count") or 0) > 0: blocked = upstream_guard.exhausted_reason("image", {"provider": "openai", "quality": "standard", "count": 1})
             if blocked:
                 return self._send(503, {"detail": blocked, "code": "upstream_exhausted",
                                         "retry_after_ms": 60000})
@@ -1428,6 +1427,7 @@ class H(BaseHTTPRequestHandler):
                     _idempotency_abort(user["username"], p, idem_key)
                     return self._send(429, {"detail": "任务队列已满，请稍后再试", "code": "queue_full", "retry_after_ms": 4000, "need": cost})
             response = {"job_id": jid, "cost": cost, "points_left": points_left}
+            if kind == "script_to_video" and body.get("cost_breakdown"): response["cost_breakdown"] = body["cost_breakdown"]
             _idempotency_complete(user["username"], p, idem_key, response)
             return self._send(200, response)
         self._send(404, {"detail": "not found"})
