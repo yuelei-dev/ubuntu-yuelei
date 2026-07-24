@@ -1,8 +1,0 @@
-.worktrees/
-.superpowers/
-node_modules/
-tests/output/
-reports/
-build/
-test-results/
-.env

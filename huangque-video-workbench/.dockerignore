@@ -1,6 +1,0 @@
-.git
-.worktrees
-node_modules
-tests/output
-.superpowers
-npm-debug.log
