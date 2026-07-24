@@ -157,6 +157,31 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertEqual(result["video_file"], "video/final.mp4")
         self.assertEqual(result["material_generated_count"], 1)
 
+    def test_photo_motion_randomly_uses_only_gentle_ken_burns_effects(self):
+        for motion in self.script_to_video.PHOTO_MOTIONS:
+            with self.subTest(motion=motion), \
+                 mock.patch.object(self.script_to_video.random, "choice", return_value=motion):
+                effect = self.script_to_video._photo_motion_filter(1080, 1920)
+            self.assertIn("zoompan=", effect)
+            self.assertIn("d=1:s=1080x1920:fps=25", effect)
+            self.assertNotIn("rotate", effect)
+
+    def test_material_composition_applies_motion_before_overlay(self):
+        material = {"scene_index": 0, "prompt": "产品特写", "source": "asset", "file": "image/a.png"}
+        with mock.patch.object(self.video, "_resolve_out_file", return_value=Path("/tmp/avatar.mp4")), \
+             mock.patch.object(self.video, "_probe_video_duration", return_value=10), \
+             mock.patch.object(self.video, "_probe_video_size", return_value=(1080, 1920)), \
+             mock.patch.object(self.script_to_video, "_photo_motion_filter", return_value="zoompan=test") as motion, \
+             mock.patch.object(self.script_to_video.subprocess, "run") as run, \
+             mock.patch.object(self.video, "_faststart_video_file", side_effect=lambda value: value):
+            self.script_to_video._compose_materials(
+                "video/avatar.mp4", [{"dur": "10s", "line": "台词"}], [material],
+            )
+
+        motion.assert_called_once_with(1080, 1920)
+        filter_complex = run.call_args.args[0][run.call_args.args[0].index("-filter_complex") + 1]
+        self.assertIn("setsar=1,zoompan=test[mat0]", filter_complex)
+
     def test_failed_composition_cleans_only_newly_generated_materials(self):
         with tempfile.TemporaryDirectory() as raw:
             old_out = self.script_to_video.OUT_DIR
