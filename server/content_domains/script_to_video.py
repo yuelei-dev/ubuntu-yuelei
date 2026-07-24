@@ -10,6 +10,8 @@ from .core import OUT_DIR, adb, closing, jdb
 
 MAX_MATERIAL_SCENES = 8
 PHOTO_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
+MATERIAL_IMAGE_RETRY_CODES = {520}
+MATERIAL_IMAGE_RETRY_DELAY = 2
 
 
 def _scene_prompt(scene):
@@ -118,10 +120,20 @@ def _material_images(plan):
             rel = item.get("file")
             source = item.get("source")
             if source == "generate":
-                generated = image_domain.gen_image({
+                image_payload = {
                     "prompt": item["prompt"], "ratio": "9:16", "quality": "standard",
                     "provider": "openai", "count": 1,
-                })
+                }
+                try:
+                    generated = image_domain.gen_image(image_payload)
+                except Exception as exc:
+                    # 520 来自出境中转的瞬时异常。此时整段数字人口播已经生成并计费；
+                    # 只补偿重试当前图片一次，比重跑整条 HeyGen 成片的成本低得多。
+                    # 已生成的前序图片保留在 materials 中，不重复调用。
+                    if getattr(exc, "code", None) not in MATERIAL_IMAGE_RETRY_CODES:
+                        raise
+                    time.sleep(MATERIAL_IMAGE_RETRY_DELAY)
+                    generated = image_domain.gen_image(image_payload)
                 rel = generated.get("file")
             if not rel or not _safe_existing_image(rel):
                 raise RuntimeError("分镜 %d 的素材不可用" % (int(item["scene_index"]) + 1))
