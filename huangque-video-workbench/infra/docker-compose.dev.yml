@@ -1,0 +1,42 @@
+services:
+  auth-dev:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    command: npx tsx scripts/docker-dev-auth.ts
+    expose: ["8095"]
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: localdev
+    ports: ["127.0.0.1:5432:5432"]
+  redis:
+    command: redis-server --requirepass localdevredis
+    environment:
+      REDIS_PASSWORD: localdevredis
+    ports: ["127.0.0.1:6379:6379"]
+  minio:
+    environment:
+      MINIO_ROOT_USER: localdev
+      MINIO_ROOT_PASSWORD: localdevsecret
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
+  api:
+    environment:
+      DATABASE_URL: postgresql://huangque:localdev@postgres:5432/huangque
+      REDIS_PASSWORD: localdevredis
+      MINIO_ACCESS_KEY: localdev
+      MINIO_SECRET_KEY: localdevsecret
+      HUANGQUE_AUTH_BASE: http://auth-dev:8095
+      HUANGQUE_RUNTIME_MODE: development
+    depends_on:
+      auth-dev: {condition: service_started}
+  migrate:
+    environment:
+      DATABASE_URL: postgresql://huangque:localdev@postgres:5432/huangque
+  worker:
+    environment:
+      DATABASE_URL: postgresql://huangque:localdev@postgres:5432/huangque
+      REDIS_PASSWORD: localdevredis
+      MINIO_ACCESS_KEY: localdev
+      MINIO_SECRET_KEY: localdevsecret
+      HUANGQUE_AUTH_BASE: http://auth-dev:8095
+      HUANGQUE_RUNTIME_MODE: development
