@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """一键成片：现有数字人口播 + 用户图片资产/按需生图 + FFmpeg 自动穿插。"""
 import json
+import random
 import re
 import subprocess
 import time
@@ -8,6 +9,7 @@ import time
 from .core import OUT_DIR, adb, closing, jdb
 
 MAX_MATERIAL_SCENES = 8
+PHOTO_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
 
 
 def _scene_prompt(scene):
@@ -163,6 +165,27 @@ def _scene_ranges(scenes, duration):
     return ranges
 
 
+def _photo_motion_filter(width, height):
+    """为静态素材随机选择轻微 Ken Burns 动效；只改变剪辑，不调用视频生成 API。"""
+    motion = random.choice(PHOTO_MOTIONS)
+    center = "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+    if motion == "zoom_in":
+        effect = "z='min(zoom+0.0008,1.08)':" + center
+    elif motion == "zoom_out":
+        effect = "z='if(eq(on,0),1.08,max(1.001,zoom-0.0008))':" + center
+    else:
+        progress = "min(on/200\\,1)"
+        axes = {
+            "pan_left":  ("(iw-iw/zoom)*%s" % progress, "(ih-ih/zoom)/2"),
+            "pan_right": ("(iw-iw/zoom)*(1-%s)" % progress, "(ih-ih/zoom)/2"),
+            "pan_up":    ("(iw-iw/zoom)/2", "(ih-ih/zoom)*%s" % progress),
+            "pan_down":  ("(iw-iw/zoom)/2", "(ih-ih/zoom)*(1-%s)" % progress),
+        }
+        x, y = axes[motion]
+        effect = "z=1.06:x='%s':y='%s'" % (x, y)
+    return "zoompan=%s:d=1:s=%dx%d:fps=25" % (effect, width, height)
+
+
 def _compose_materials(video_file, scenes, materials):
     if not materials:
         return video_file
@@ -188,8 +211,9 @@ def _compose_materials(video_file, scenes, materials):
         prepared, output = "[mat%d]" % pos, "[mix%d]" % pos
         filters.append(
             "[%d:v]scale=%d:%d:force_original_aspect_ratio=increase,"
-            "crop=%d:%d,setsar=1%s" %
-            (pos + 1, width, height, width, height, prepared)
+            "crop=%d:%d,setsar=1,%s%s" %
+            (pos + 1, width, height, width, height,
+             _photo_motion_filter(width, height), prepared)
         )
         filters.append(
             "%s%soverlay=0:0:enable='between(t,%.3f,%.3f)'%s" %
