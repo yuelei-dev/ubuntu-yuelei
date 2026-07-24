@@ -200,6 +200,42 @@ class ScriptToVideoTests(unittest.TestCase):
             finally:
                 self.script_to_video.OUT_DIR = old_out
 
+    def test_material_image_520_retries_only_current_image(self):
+        plan = [
+            {"scene_index": 0, "prompt": "第一张", "source": "generate", "file": None},
+            {"scene_index": 1, "prompt": "第二张", "source": "generate", "file": None},
+        ]
+        transient = RuntimeError("HTTP Error 520")
+        transient.code = 520
+        generated = [
+            {"file": "image/first.png"},
+            transient,
+            {"file": "image/second.png"},
+        ]
+        with mock.patch("content_domains.image.gen_image", side_effect=generated) as gen_image, \
+             mock.patch.object(self.script_to_video, "_safe_existing_image", return_value=True), \
+             mock.patch.object(self.script_to_video.time, "sleep") as sleep:
+            materials = self.script_to_video._material_images(plan)
+
+        self.assertEqual(gen_image.call_count, 3)
+        sleep.assert_called_once_with(self.script_to_video.MATERIAL_IMAGE_RETRY_DELAY)
+        self.assertEqual(
+            [item["file"] for item in materials],
+            ["image/first.png", "image/second.png"],
+        )
+
+    def test_material_image_non_520_is_not_retried(self):
+        plan = [{"scene_index": 0, "prompt": "第一张", "source": "generate", "file": None}]
+        failure = RuntimeError("HTTP Error 500")
+        failure.code = 500
+        with mock.patch("content_domains.image.gen_image", side_effect=failure) as gen_image, \
+             mock.patch.object(self.script_to_video.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "500"):
+                self.script_to_video._material_images(plan)
+
+        gen_image.assert_called_once()
+        sleep.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
