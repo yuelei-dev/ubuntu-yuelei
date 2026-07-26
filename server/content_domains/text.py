@@ -1,9 +1,71 @@
 # -*- coding: utf-8 -*-
+import re
+
 from .core import OPENAI_BASE, OPENAI_KEY, _NOPROXY, base64, json, os, urllib
 
 COPY_MODEL = "glm-4-plus"
 ZHIPU_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
 ZHIPU_API_KEY = (os.environ.get("ZHIPU_API_KEY") or "").strip()
+
+
+SCRIPT_FACT_GUARD = (
+    "只使用用户明确提供的产品、品牌、参数、检测结果和优惠信息。"
+    "未提供品牌名时不得虚构品牌或安排必须展示品牌文字的镜头；"
+    "未提供功效依据时不得使用“最、第一、顶级、100%、完全、绝对、根治、"
+    "不怕晒黑、超强”等绝对化或无法证实的承诺。"
+    "信息不足时使用中性、可核实的表达，不得自行补造数据。"
+)
+
+
+def validate_copy_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    cleaned = dict(payload)
+    brief = str(cleaned.get("prompt") or "").strip()
+    if not brief:
+        raise ValueError("请输入文案需求")
+    cleaned["prompt"] = brief
+    return cleaned
+
+
+_SCRIPT_CLAIM_REPLACEMENTS = (
+    ("不必害怕阳光直射", "面对日常通勤光照时"),
+    ("不怕晒黑", "帮助减少日晒影响"),
+    ("全天候守护", "帮助进行日常防护"),
+    ("必不可少", "值得重视"),
+    ("毫无负担", "使用感更轻盈"),
+    ("100%", "尽量"),
+    ("完全不", "不易"),
+    ("超强", "良好"),
+    ("绝对", "相对"),
+    ("顶级", "优质"),
+    ("根治", "改善"),
+)
+_SCRIPT_OFFER_MARKERS = ("活动", "优惠", "折扣", "立减", "到手价", "限时", "名额", "超划算")
+
+
+def sanitize_script_scenes(scenes, brief):
+    brief = str(brief or "")
+    has_offer_facts = any(marker in brief for marker in _SCRIPT_OFFER_MARKERS)
+    has_brand_facts = "品牌" in brief
+    cleaned = []
+    for scene in scenes or []:
+        item = dict(scene) if isinstance(scene, dict) else {}
+        for field in ("scene", "line"):
+            value = str(item.get(field) or "")
+            for source, replacement in _SCRIPT_CLAIM_REPLACEMENTS:
+                value = value.replace(source, replacement)
+            if not has_brand_facts:
+                value = value.replace("品牌名称", "产品包装").replace("品牌标识", "产品包装")
+            if not has_offer_facts:
+                value = re.sub(
+                    r"[^。！？]*(?:活动|优惠|折扣|立减|到手价|限时|名额|超划算)[^。！？]*[。！？]?",
+                    "如需了解更多，请以产品实际信息为准。",
+                    value,
+                )
+            item[field] = value
+        cleaned.append(item)
+    return cleaned
 
 
 def _chat(sysmsg, usermsg, temp):
@@ -38,9 +100,8 @@ def _chat_multimodal(sysmsg, usermsg, image_data_urls, temp=0.85):
 
 
 def gen_copy(payload):
-    brief = (payload.get("prompt") or "").strip()
-    if not brief:
-        raise ValueError("请输入文案需求")
+    payload = validate_copy_payload(payload)
+    brief = payload["prompt"]
     ctype = (payload.get("ctype") or payload.get("type") or "通用").strip()
     ref_images = payload.get("reference_images") or []
     # 编导：结构化分镜脚本（返回 scenes 数组）
@@ -61,6 +122,8 @@ def gen_copy(payload):
                     "严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"画面描述\",\"line\":\"%s\"}]}，"
                     "生成 %d 个分镜，各 dur 之和≈总时长。"
                     % (style, plat, dur, brief, line_desc, n_scenes))
+        sysmsg += SCRIPT_FACT_GUARD
+        usermsg += "\n事实约束：" + SCRIPT_FACT_GUARD
         if ref_images:
             usermsg += "\n（可参考上传的图片来构思分镜画面）"
             raw = _chat_multimodal(sysmsg, usermsg, ref_images)
@@ -71,6 +134,7 @@ def gen_copy(payload):
             try: scenes = json.loads(raw[s:e+1]).get("scenes", [])
             except Exception: scenes = []
         if not scenes: raise ValueError("脚本解析失败，请重试")
+        scenes = sanitize_script_scenes(scenes, brief)
         return {"type": "copy", "mode": "script", "scenes": scenes, "ctype": ctype,
                 "style": style, "dur": dur, "platform": plat, "prompt": brief}
     # 通用文案（多条，--- 分隔）
