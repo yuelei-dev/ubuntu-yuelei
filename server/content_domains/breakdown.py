@@ -19,6 +19,9 @@ def gen_breakdown(payload):
     由 run_job 调用，走标准 job 生命周期（扣点/退点/reaper 全自动）。
     支持单个 url 或批量 urls（≤5 条，顺序处理）。"""
     import tikhub
+    if (payload or {}).get("local_media_path"):
+        from .local_reverse_processor import gen_local_reverse
+        return gen_local_reverse(payload)
 
     mode = _normalize_mode(payload)
     urls = payload.get("urls")

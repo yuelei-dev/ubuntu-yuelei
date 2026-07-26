@@ -152,10 +152,12 @@ def _project_breakdown_item(result):
     r = result or {}
     return {
         "type": r.get("type") or "breakdown",
+        "source_type": r.get("source_type"),
         "source_url": r.get("source_url"),
         "source_title": r.get("source_title"),
         "source_platform": r.get("source_platform"),
         "duration": r.get("duration"),
+        "sections": r.get("sections"),
         "scenes": r.get("scenes"),
         "analysis": r.get("analysis"),
         "prompt": r.get("prompt"),

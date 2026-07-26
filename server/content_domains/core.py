@@ -1108,10 +1108,10 @@ class H(BaseHTTPRequestHandler):
             return json.loads(raw)
         except Exception:
             raise ValueError("请求体不是合法 JSON")
-
     def do_POST(self):
         p = self.path.split("?")[0]
         audio_domain, points_domain, video_domain = _domains()
+        if p == "/api/gen/breakdown/local-upload": return __import__(__package__ + ".local_reverse_upload", fromlist=["handle_post"]).handle_post(self, verify=verify, points_domain=points_domain, jdb=jdb, jobs_store=jobs_store, enqueue_job=enqueue_job, reject_pending_job=_reject_pending_job, service_owner=SERVICE_OWNER, out_dir=OUT_DIR, is_shutting_down=is_shutting_down, user_active_job_count=_user_active_job_count, max_user_active_jobs=MAX_USER_ACTIVE_JOBS, must_change_password=_must_change_password)
         if p == "/api/gen/asset/favorite":
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录"})
