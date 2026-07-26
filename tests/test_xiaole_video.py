@@ -117,6 +117,34 @@ class XiaoleVideoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "当前仅部分比例可用，请优先尝试 16:9（横屏）"):
                 self.video.generate_xiaole_video("Grok Image Video", "demo", size="720x1280", prefix="grok")
 
+    def test_validate_micro_duration(self):
+        for duration in (5, 10, 15):
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "cinematic demo", "duration": duration,
+            })
+            self.assertEqual(body["duration"], duration)
+        with self.assertRaisesRegex(ValueError, "5、10 或 15"):
+            self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "cinematic demo", "duration": 7,
+            })
+
+    def test_validate_micro_image_video_requires_ten_seconds(self):
+        with self.assertRaisesRegex(ValueError, "图生视频仅支持 10 秒"):
+            self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "cinematic demo", "duration": 15,
+                "reference_images": ["https://example.com/ref.jpg"],
+            })
+
+    def test_gen_micro_passes_selected_duration_to_supplier(self):
+        fake = {"video_file": "video/micro.mp4", "video_url": "/video/micro.mp4",
+                "source_video_url": "https://example.com/micro.mp4", "model": "seedance-2.0-fast"}
+        with patch.object(self.video, "generate_xiaole_video", return_value=fake) as generate:
+            result = self.video.gen_xiaole_video({
+                "channel": "micro", "prompt": "cinematic demo", "duration": 15,
+            })
+        self.assertEqual(generate.call_args.kwargs["duration"], 15)
+        self.assertEqual(result["duration"], 15)
+
     def test_validate_official_grok_parameters(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
             body = self.video.validate_xiaole_video_payload({

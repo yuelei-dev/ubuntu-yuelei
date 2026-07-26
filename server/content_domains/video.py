@@ -101,6 +101,16 @@ def validate_xiaole_video_payload(payload):
         raise ValueError("请输入视频提示词")
     cleaned["channel"] = channel
     cleaned["prompt"] = prompt
+    if channel == "micro":
+        try:
+            duration = int(cleaned.get("duration") or 10)
+        except (TypeError, ValueError):
+            raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
+        if duration not in {5, 10, 15}:
+            raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
+        if cleaned.get("reference_images") and duration != 10:
+            raise ValueError("豆姐图生视频仅支持 10 秒")
+        cleaned["duration"] = duration
     if channel != "grok" or GROK_VIDEO_PROVIDER == "xiaole":
         return cleaned
 
@@ -2988,13 +2998,15 @@ def gen_xiaole_video(payload):
             "reference_video_url": reference_video_url,
         }
     else:
+        duration = payload.get("duration") if channel == "micro" else XIAOLE_CHANNEL_DURATION.get(channel)
         result = generate_xiaole_video(model, prompt, reference_images=ref_images, size=size, job_id=job_id, prefix=channel,
-                                       duration=XIAOLE_CHANNEL_DURATION.get(channel))
+                                       duration=duration)
     return {
         "type": "video", "status": "done", "mode": channel, "model": result.get("model") or model, "text": prompt,
         "operation": payload.get("operation") or "generate",
         "ratio": ratio, "resolution": payload.get("resolution") if use_xai and payload.get("operation") != "edit" else None,
-        "duration": result.get("duration") or (payload.get("duration") if use_xai else None),
+        "duration": result.get("duration") or (payload.get("duration") if use_xai or channel == "micro"
+                                                else XIAOLE_CHANNEL_DURATION.get(channel)),
         "provider_video_id": result.get("request_id"),
         "video_file": result.get("video_file"), "video_url": result.get("video_url"),
         "source_video_url": result.get("source_video_url"),
