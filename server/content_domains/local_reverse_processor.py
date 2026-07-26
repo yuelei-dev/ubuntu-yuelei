@@ -37,7 +37,17 @@ def _structured_prompt(media_type, title, duration, script_text, frames):
     context = "素材：%s\n类型：%s\n时长：%ss" % (
         title, "本地图片" if media_type == "image" else "本地视频", duration or 0)
     if script_text:
-        context += "\n口播转写：\n" + script_text
+        context += (
+            "\n音频语义参考（低权重，仅用于判断主题；不得复述原句或输出口播稿）：\n"
+            + script_text[:600]
+        )
+    visual_rules = ""
+    if media_type == "video":
+        visual_rules = """
+这是视频生成提示词反推，不是口播文案、解说词、字幕或脚本创作。以关键帧中的可见画面、人物动作、场景变化和镜头运动为第一依据；
+音频语义仅辅助判断主题，不得把转写原句、营销话术、旁白或台词写入任何字段。音频与画面冲突时以画面为准。
+动作字段必须按时间顺序描述起始—发展—结束，并写清人物/物体运动、镜头运动和转场；构图字段必须体现视频镜头的景别变化与运镜关系。
+"""
     usermsg = context + """
 
 请根据素材反推出可直接用于同风格原创生成的中文提示词，并严格输出一个 JSON 对象：
@@ -45,7 +55,7 @@ def _structured_prompt(media_type, title, duration, script_text, frames):
 七个字段都必须是非空字符串。主体写清外观、服装、材质和状态；场景写清前中后景与道具；构图写清景别、视角和镜头关系；
 动作写清表情、视线、手势、姿态、位移、物体互动及起始—发展—结束；图片根据可见姿态描述动作状态，不虚构既成事实；
 光影写清方向、软硬、色温与氛围；风格写清媒介、质感、色调；参数给出画幅、清晰度、帧率或镜头运动等可执行参数。
-只输出 JSON，不要 Markdown，不要解释。"""
+只输出 JSON，不要 Markdown，不要解释。""" + visual_rules
     raw = _chat_multimodal(
         "你是黄雀传媒提示词反推专家。忠实识别可见信息，输出结构化、具体、可执行的中文生成提示词。",
         usermsg, frames, temp=0.45, max_tokens=1800, image_detail="high")
