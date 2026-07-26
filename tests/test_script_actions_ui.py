@@ -109,13 +109,13 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("_pickRemakeStyle(function(style)", self.html)
         self.assertIn("_showAvatarPicker(function(avatarId)", self.html)
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
-        self.assertIn("endpoint:'/api/gen/script_to_video'", self.html)
+        self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn)", self.html)
 
-    def test_reverse_video_without_avatar_uses_drama_and_selected_duration(self):
+    def test_reverse_video_without_avatar_uses_seedance_micro_channel(self):
+        # 反推“生成同款视频”不选形象 → Seedance 2.0 Fast（豆姐视频 micro 渠道），时长沿用用户选择
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
-        self.assertIn("dur:choice.duration+'s'", self.html)
-        self.assertIn("style:'剧情',duration:choice.duration", self.html)
-        self.assertIn("endpoint:'/api/gen/script_to_video'", self.html)
+        self.assertIn("{channel:'micro',prompt:prompt,duration:choice.duration}", self.html)
+        self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
 
     def test_reverse_video_with_avatar_uses_existing_cinematic_api(self):
         self.assertIn("endpoint:'/api/gen/cinematic'", self.html)

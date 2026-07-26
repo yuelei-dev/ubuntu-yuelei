@@ -1513,9 +1513,9 @@
           },bdRemakeBtn,{endpoint:'/api/gen/cinematic',sceneCount:1});
           return;
         }
-        var reverseScenes=[{scene:prompt,line:'',dur:choice.duration+'s'}];
-        _doGenerate({scenes:reverseScenes,style:'剧情',duration:choice.duration},
-                    bdRemakeBtn,{endpoint:'/api/gen/script_to_video',sceneCount:1});
+        // 无形象：改走 Seedance 2.0 Fast（豆姐视频 micro 渠道）文生视频，时长沿用用户选择
+        _doGenerate({channel:'micro',prompt:prompt,duration:choice.duration},
+                    bdRemakeBtn,{endpoint:'/api/gen/xiaole_video',sceneCount:1});
       });
       return;
     } else {
