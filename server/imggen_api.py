@@ -14,7 +14,7 @@ content_out/ 鍑哄浘鐩綍(鏂囦欢鐢?content_api 鐨?/api/gen/file 鏈�
 鈿狅笍 鏈嶅姟鍣ㄥ湪澶ч檰锛孏oogle API 琚 鈫?鏈湇鍔?*璧扮幆澧冧唬鐞?*(content.env 閲岀殑 HTTPS_PROXY=mihomo)鍑哄锛?
    涓?TikHub(寮哄埗鐩磋繛)鐩稿弽銆俿ystemd 鍔犺浇鍚屼竴浠?content.env銆?
 """
-import os, json, time, base64, threading, queue, sqlite3, pathlib, urllib.request, urllib.error, io
+import os, json, time, base64, threading, queue, sqlite3, pathlib, urllib.request, urllib.error, io, re
 from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -468,6 +468,23 @@ def start_job_workers():
 
 
 # ============ 提示词反推：图 → Gemini 多模态 → 文生图提示词（同步，不建 job） ============
+def _clean_reverse_prompt(text):
+    """清洗反推输出：去代码围栏/包裹引号、合并空白、截掉结尾悬空半句。
+
+    模型偶发输出 ``` 围栏、首尾引号，或被截断时以“，、；：”等顿号收尾的半截
+    句子——这类残句直接填进生成框就是用户看到的“一堆符号”，在这里兜底清掉。
+    """
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if t.startswith("```"):                      # markdown 代码围栏
+        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
+        t = re.sub(r"\s*```\s*$", "", t).strip()
+    t = t.strip('"“”\'')
+    if t and t[-1] in "，、；：,;:":             # 结尾悬空半句：回退到上一个句读
+        cut = max(t.rfind(p) for p in ("。", "！", "？", ".", "!", "?"))
+        t = t[:cut + 1] if cut > 0 else t.rstrip("，、；：,;:")
+    return t
+
+
 def gen_reverse(image):
     if not GEMINI_KEY:
         raise ValueError("GEMINI_API_KEY 未配置")
@@ -478,7 +495,11 @@ def gen_reverse(image):
             {"inlineData": {"mimeType": "image/png", "data": image}},
             {"text": REVERSE_INSTRUCTION},
         ]}],
-        "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.7, "maxOutputTokens": 500},
+        # gemini-2.5-flash 默认开启思考且思考 token 计入 maxOutputTokens：
+        # 旧值 500 曾被思考吃光，提示词只吐出二十来字就被截断（线上已复现）。
+        # 反推是直出任务无需推理，thinkingBudget=0 关掉思考，预算提到 1024 兜底。
+        "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.7,
+                             "maxOutputTokens": 1024, "thinkingConfig": {"thinkingBudget": 0}},
     }).encode()
     req = urllib.request.Request(
         GEMINI_BASE + "/v1beta/models/" + REVERSE_MODEL + ":generateContent",
@@ -488,10 +509,14 @@ def gen_reverse(image):
             d = json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise ValueError("Gemini %s: %s" % (e.code, e.read()[:160].decode("u8", "ignore")))
-    parts = (d.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
-    text = " ".join(p.get("text", "") for p in parts if p.get("text")).strip().strip('"“”')
+    cand = (d.get("candidates") or [{}])[0]
+    parts = cand.get("content", {}).get("parts", [])
+    text = _clean_reverse_prompt(" ".join(p.get("text", "") for p in parts if p.get("text")))
     if not text:
         raise ValueError("反推失败：" + str((d.get("error") or {}).get("message") or d)[:140])
+    if cand.get("finishReason") == "MAX_TOKENS":
+        # 关思考+1024 仍打满说明输出异常，按失败处理（路由会退点），不给用户半截提示词
+        raise ValueError("反推失败：输出异常被截断，请重试")
     return text[:600]
 
 
