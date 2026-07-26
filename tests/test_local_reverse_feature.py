@@ -84,6 +84,7 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         def fake_chat(system, user, frames, **kwargs):
             captured["system"] = system
             captured["user"] = user
+            captured["kwargs"] = kwargs
             return response
 
         breakdown = importlib.import_module("content_domains.breakdown")
@@ -96,7 +97,32 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertIn("可见画面、人物动作、场景变化和镜头运动为第一依据", prompt)
         self.assertIn("不得把转写原句、营销话术、旁白或台词写入任何字段", prompt)
         self.assertIn("音频与画面冲突时以画面为准", prompt)
+        self.assertIn("七个字段合计写 500-800 个中文字符", prompt)
+        self.assertIn("subject 写 70-100 字，至少 5 项可见细节", prompt)
+        self.assertIn("scene 写 70-100 字，至少 5 项场景细节", prompt)
+        self.assertIn("composition 写 70-100 字，至少 5 项镜头细节", prompt)
+        self.assertIn("action 写 150-200 字，至少 8 个连续动作节点", prompt)
+        self.assertIn("lighting 写 55-80 字，至少 4 项光影细节", prompt)
+        self.assertIn("style 写 55-80 字，至少 4 项风格细节", prompt)
+        self.assertIn("parameters 写 55-80 字，至少 6 项可执行参数", prompt)
+        self.assertEqual(captured["kwargs"]["max_tokens"], 1800)
         self.assertNotIn("口播转写：", prompt)
+
+    def test_image_prompt_does_not_inherit_video_length_requirements(self):
+        captured = {}
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+
+        def fake_chat(system, user, frames, **kwargs):
+            captured["user"] = user
+            return response
+
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", side_effect=fake_chat):
+            self.processor._structured_prompt(
+                "image", "demo.jpg", 0, "", ["frame.jpg"])
+
+        self.assertNotIn("七个字段合计写 500-800 个中文字符", captured["user"])
 
     def test_transcript_reference_is_capped_to_avoid_dominating_frames(self):
         captured = {}
