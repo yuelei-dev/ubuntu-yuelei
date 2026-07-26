@@ -76,6 +76,46 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
             self.assertEqual(result["prompt"], "完整提示词")
             self.assertFalse(image.exists())
 
+    def test_video_prompt_prioritizes_visual_motion_over_transcript(self):
+        captured = {}
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+
+        def fake_chat(system, user, frames, **kwargs):
+            captured["system"] = system
+            captured["user"] = user
+            return response
+
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", side_effect=fake_chat):
+            self.processor._structured_prompt(
+                "video", "demo.mp4", 30, "现在购买产品立减一百元", ["frame.jpg"])
+
+        prompt = captured["user"]
+        self.assertIn("视频生成提示词反推", prompt)
+        self.assertIn("可见画面、人物动作、场景变化和镜头运动为第一依据", prompt)
+        self.assertIn("不得把转写原句、营销话术、旁白或台词写入任何字段", prompt)
+        self.assertIn("音频与画面冲突时以画面为准", prompt)
+        self.assertNotIn("口播转写：", prompt)
+
+    def test_transcript_reference_is_capped_to_avoid_dominating_frames(self):
+        captured = {}
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+
+        def fake_chat(system, user, frames, **kwargs):
+            captured["user"] = user
+            return response
+
+        breakdown = importlib.import_module("content_domains.breakdown")
+        transcript = "甲" * 800
+        with mock.patch.object(breakdown, "_chat_multimodal", side_effect=fake_chat):
+            self.processor._structured_prompt(
+                "video", "demo.mp4", 120, transcript, ["frame.jpg"])
+
+        self.assertIn("甲" * 600, captured["user"])
+        self.assertNotIn("甲" * 601, captured["user"])
+
 
 class LocalReverseFeatureSourceTests(unittest.TestCase):
     @classmethod
@@ -109,6 +149,8 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertIn("max_tokens=1800", self.processor)
         self.assertIn('id="bdReverseCopyBtn"', self.ui)
         self.assertIn('id="bdRemakeBtn"', self.ui)
+        self.assertIn("正在读取音频语义（仅辅助）", self.ui)
+        self.assertNotIn("正在转写视频口播", self.ui)
 
     def test_standard_paid_job_and_refund_flow_is_reused(self):
         self.assertIn("jobs_store.create_paid_job", (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8"))

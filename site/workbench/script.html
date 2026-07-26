@@ -1043,7 +1043,7 @@
         }else if(d.status==='error'||d.status==='failed'){
           clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · 已退点');
         }else if(d.phase){
-          var msg={extracting_frames:'正在读取关键画面…',transcribing:'正在转写视频口播…',analyzing:'AI 正在按七个栏目反推…'}[d.phase]||'处理中…';
+          var msg={extracting_frames:'正在读取关键画面…',transcribing:'正在读取音频语义（仅辅助）…',analyzing:'AI 正在按七个栏目反推视频画面…'}[d.phase]||'处理中…';
           scenes.innerHTML='<div style="padding:34px;text-align:center;color:#a78bfa;font-size:13px;">'+msg+'</div>';
         }
         if(count>160){clearInterval(iv);_localBusy(btn,false);_localFail('反推处理时间较长，请稍后在生成记录查看');}
