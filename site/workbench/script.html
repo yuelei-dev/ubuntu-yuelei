@@ -55,6 +55,11 @@
   .bd-phase{padding:4px 10px;font-size:11px;border-radius:7px;color:#5c6b82;background:rgba(148,164,187,.06);border:1px solid rgba(148,164,187,.1)}
   .bd-phase.active{color:#2dd4bf;border-color:rgba(45,212,191,.3);background:rgba(45,212,191,.06)}
   .bd-phase.done{color:#4ade80;border-color:rgba(74,222,128,.2);background:rgba(74,222,128,.05)}
+  .bd-source-grid{display:grid;grid-template-columns:1fr;gap:14px;margin-top:22px}
+  .bd-source-grid.with-local{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
+  .bd-source-card{border:1px solid rgba(148,164,187,.14);border-radius:14px;padding:14px;background:rgba(7,11,19,.34)}
+  .bd-local-row{padding:12px;border:1px dashed rgba(167,139,250,.3);border-radius:12px;background:rgba(167,139,250,.05)}
+  @media (max-width:760px){.bd-source-grid.with-local{grid-template-columns:1fr}}
   .sc-theme-toggle{display:flex;align-items:center;gap:6px;padding:4px;border:1px solid rgba(148,164,187,.14);border-radius:12px;background:rgba(148,164,187,.05)}
   .sc-theme-btn{min-width:74px;justify-content:center;font-weight:700}
   .sc-theme-btn.on{color:#0f172a;background:linear-gradient(135deg,#f4cd72,#e7b24c);border-color:rgba(231,178,76,.42)}
@@ -155,6 +160,8 @@
           <button id="bdToolReverse" class="sc-btn" data-bd-tool="reverse_prompt" type="button" style="padding:10px 14px; border-radius:12px; font-weight:700;">✨ 提示词反推</button>
         </div>
 
+        <div id="bdSourceGrid" class="bd-source-grid">
+        <div class="bd-source-card">
         <div class="sc-lab" style="margin-top:22px;">视频链接</div>
         <div style="position:relative; border:1px solid rgba(148,164,187,.16); background:rgba(7,11,19,.5); border-radius:12px; padding:13px 14px;">
           <textarea id="bdUrl" rows="2" placeholder="粘贴抖音/小红书视频链接…（每行一个，可批量≤5条）" style="width:100%; resize:none; background:transparent; border:none; outline:none; color:#eaf1fa; font-size:13.5px; line-height:1.7; font-family:inherit;"></textarea>
@@ -166,6 +173,31 @@
           <span id="bdGenText">开始拆解（20 点）</span>
         </button>
         <div style="text-align:center; margin-top:11px;"><span id="bdActionHint" class="sc-hint">下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒</span></div>
+        </div>
+        <div id="bdLocalCard" class="bd-source-card" style="display:none;">
+          <div style="font-size:13.5px;font-weight:700;color:#c4b5fd;margin-bottom:5px;">本地图片 / 视频反推</div>
+          <div class="sc-hint" style="margin-bottom:12px;">单独上传，不经过链接下载；每个文件固定 20 点</div>
+          <input id="bdLocalImage" type="file" accept="image/jpeg,image/png,image/webp" style="display:none;">
+          <input id="bdLocalVideo" type="file" accept="video/mp4,video/quicktime,video/webm" style="display:none;">
+          <div class="bd-local-row">
+            <div style="font-size:12.5px;font-weight:700;color:#eaf1fa;">🖼️ 上传本地图片</div>
+            <div id="bdLocalImageName" class="sc-hint" style="margin:6px 0 10px;">JPG / PNG / WEBP，最大 20MB</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button id="bdImagePick" class="sc-btn" type="button">选择图片</button>
+              <button id="bdImageReverse" class="sc-btn" type="button" style="color:#111827;background:linear-gradient(135deg,#c4b5fd,#a78bfa);font-weight:700;">反推图片（20 点）</button>
+            </div>
+          </div>
+          <div class="bd-local-row" style="margin-top:10px;">
+            <div style="font-size:12.5px;font-weight:700;color:#eaf1fa;">🎬 上传本地视频</div>
+            <div id="bdLocalVideoName" class="sc-hint" style="margin:6px 0 10px;">MP4 / MOV / WEBM，最大 200MB、最长 2 分钟</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button id="bdVideoPick" class="sc-btn" type="button">选择视频</button>
+              <button id="bdVideoReverse" class="sc-btn" type="button" style="color:#111827;background:linear-gradient(135deg,#c4b5fd,#a78bfa);font-weight:700;">反推视频（20 点）</button>
+            </div>
+          </div>
+          <div id="bdLocalStatus" class="sc-hint" style="margin-top:10px;">失败自动退点，结果保存到“我的生成记录”</div>
+        </div>
+        </div>
 
         <div id="bdProgress" style="display:none; margin-top:20px;">
           <div style="font-size:12.5px; font-weight:600; color:#94a4bb; margin-bottom:8px;">拆解进度</div>
@@ -337,6 +369,12 @@
       bdStoryboard=document.getElementById('bdStoryboard'), bdStoryboardStrip=document.getElementById('bdStoryboardStrip'),
       bdIntroText=document.getElementById('bdIntroText'), bdUrlHint=document.getElementById('bdUrlHint'),
       bdActionHint=document.getElementById('bdActionHint');
+  var bdSourceGrid=document.getElementById('bdSourceGrid'), bdLocalCard=document.getElementById('bdLocalCard'),
+      bdLocalImage=document.getElementById('bdLocalImage'), bdLocalVideo=document.getElementById('bdLocalVideo'),
+      bdImagePick=document.getElementById('bdImagePick'), bdVideoPick=document.getElementById('bdVideoPick'),
+      bdImageReverse=document.getElementById('bdImageReverse'), bdVideoReverse=document.getElementById('bdVideoReverse'),
+      bdLocalImageName=document.getElementById('bdLocalImageName'), bdLocalVideoName=document.getElementById('bdLocalVideoName'),
+      bdLocalStatus=document.getElementById('bdLocalStatus');
   var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, lastBreakdownReverse=null, currentMode='write', currentBreakdownTool='scenes', refImageData=null, bdEditing=false;
   var initialMeta=meta?meta.innerHTML:'', initialScenes=scenes?scenes.innerHTML:'',
       initialPreviewTitle=previewTitle?previewTitle.textContent:'脚本 · 分镜预览',
@@ -552,6 +590,8 @@
     if(previewTitle) previewTitle.textContent=currentMode==='breakdown' ? (reverseMode?'拆解结果 · 提示词反推':'拆解结果 · 分镜预览') : initialPreviewTitle;
     if(batchHint) batchHint.textContent=currentMode==='breakdown' ? (reverseMode?'反推完成后可复制提示词，或直接去作图继续生成':'拆解完成后可直接生成同款视频，或继续逐条转视频 / 转口播') : initialBatchHint;
     if(bdRemakeBtn) bdRemakeBtn.style.display=currentMode==='breakdown'&&((!reverseMode&&hasBreakdownScenes)||(reverseMode&&hasReversePrompt))?'':'none';
+    if(bdLocalCard) bdLocalCard.style.display=reverseMode?'':'none';
+    if(bdSourceGrid) bdSourceGrid.classList.toggle('with-local',reverseMode);
     if(bdEditBtn){ var hasScenes=currentMode==='breakdown' ? (!reverseMode&&hasBreakdownScenes) : (lastScenes.length>0); bdEditBtn.style.display=hasScenes?'':'none'; }
     if(liveStats && currentMode==='breakdown' && ((reverseMode&&!hasReversePrompt)||(!reverseMode&&!hasBreakdownScenes))) liveStats.style.display='none';
     if(bdReverseCopyBtn) bdReverseCopyBtn.style.display=currentMode==='breakdown'&&reverseMode&&hasReversePrompt?'':'none';
@@ -589,7 +629,7 @@
     }
   }
   function platformText(name){
-    return ({douyin:'抖音',xiaohongshu:'小红书',weixin:'视频号',channels:'视频号'})[name]||name||'';
+    return ({douyin:'抖音',xiaohongshu:'小红书',weixin:'视频号',channels:'视频号',local_image:'本地图片',local_video:'本地视频'})[name]||name||'';
   }
   function fmtDur(d){
     // 兼容存量毫秒数据：>1000 视为毫秒转秒（tikhub 原始值如 18320 → 18s）
@@ -628,9 +668,13 @@
     lastBreakdownReverse=bd;
     bdEditing=false; if(bdEditBtn) bdEditBtn.textContent='✏️ 编辑分镜'; if(bdEditCancelBtn) bdEditCancelBtn.style.display='none';
     var prompt=((bd&&bd.prompt)||'').trim();
+    var labels={subject:'主体',scene:'场景',composition:'构图',action:'动作',lighting:'光影',style:'风格',parameters:'参数'};
+    var sectionOrder=['subject','scene','composition','action','lighting','style','parameters'];
+    var sectionHtml=(bd&&bd.sections)?'<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;">'
+      +sectionOrder.map(function(key){ var value=(bd.sections&&bd.sections[key])||''; return '<div class="sc-card" style="display:block;"><div style="font-size:12px;font-weight:700;color:#c4b5fd;margin-bottom:7px;">'+labels[key]+'</div><div style="font-size:13px;line-height:1.75;color:#f5f3ff;">'+esc(value)+'</div></div>'; }).join('')+'</div>':'';
     if(meta) meta.innerHTML='<span style="color:#a78bfa;">反推</span><span style="color:#5c6b82;">·</span><span>'+esc((bd&&bd.source_title)||'视频提示词反推')+'</span><span style="color:#5c6b82;">·</span><span>'+esc(platformText(bd&&bd.source_platform))+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+esc(String(fmtDur((bd&&bd.duration)||'')))+'s</span>';
     scenes.innerHTML=prompt
-      ? '<div id="bdReverseResult" class="sc-card" style="display:block;">'
+      ? sectionHtml+'<div id="bdReverseResult" class="sc-card" style="display:'+(sectionHtml?'none':'block')+';">'
         +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:12px;font-weight:700;color:#c4b5fd;"><span>✨</span><span>反推提示词</span></div>'
         +'<div id="bdReversePromptText" style="font-size:14px;line-height:1.85;color:#f5f3ff;white-space:pre-wrap;word-break:break-word;">'+esc(prompt)+'</div>'
         +'</div>'
@@ -653,6 +697,8 @@
       analysis:(bd.analysis||''),
       scenes:normalizeBreakdownScenes(bd.scenes||[]),
       prompt:(bd.prompt||''),
+      source_type:bd.source_type||'',
+      sections:bd.sections||null,
       frame_thumbnails:(bd.frame_thumbnails||[]).slice(0,2)
     };
   }
@@ -960,6 +1006,83 @@
         },3000);
       }).catch(function(){ setBtn(orig,false); scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">网络错误，请重试</div>'; });
   };
+
+  function _localBusy(btn,busy){ if(!btn)return; btn.disabled=busy; btn.style.opacity=busy?'.6':'1'; }
+  function _localFail(message){
+    if(bdLocalStatus){ bdLocalStatus.textContent=message; bdLocalStatus.style.color='#f4708a'; }
+    scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">'+esc(message)+'</div>';
+  }
+  function _localPointsCheck(){
+    return fetch('/api/auth/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){
+      if(r.status===401) throw {login:true,message:'请先登录'};
+      return r.json().then(function(d){ if(!r.ok) throw {message:d.detail||'点数检查失败'}; return d; });
+    }).then(function(d){ if(Number(d.points||0)<20) throw {points:true,message:'点数不足（需要 20 点）'}; });
+  }
+  function _videoDuration(file){
+    return new Promise(function(resolve,reject){
+      var video=document.createElement('video'), url=URL.createObjectURL(file);
+      video.preload='metadata';
+      video.onloadedmetadata=function(){ var d=Number(video.duration||0); URL.revokeObjectURL(url); d>0?resolve(d):reject(new Error('无法读取视频时长')); };
+      video.onerror=function(){ URL.revokeObjectURL(url); reject(new Error('无法读取视频，请重新选择')); };
+      video.src=url;
+    });
+  }
+  function _pollLocalReverse(jobId,btn){
+    var count=0,errors=0,lastPhase='';
+    var iv=setInterval(function(){
+      count++;
+      fetch('/api/gen/job/'+jobId,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(d){
+        errors=0;
+        if(d.phase&&d.phase!==lastPhase){ lastPhase=d.phase; setBdPhase(d.phase,'active'); }
+        if(d.status==='done'){
+          clearInterval(iv); _localBusy(btn,false); markAllBdPhasesDone();
+          switchBreakdownTool('reverse_prompt'); renderBreakdownReverse(d.result||{});
+          saveBreakdownHistory(d.result||{}); loadHistory();
+          if(bdLocalStatus){bdLocalStatus.textContent='反推完成，已保存到生成记录';bdLocalStatus.style.color='#4ade80';}
+          if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
+        }else if(d.status==='error'||d.status==='failed'){
+          clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · 已退点');
+        }else if(d.phase){
+          var msg={extracting_frames:'正在读取关键画面…',transcribing:'正在转写视频口播…',analyzing:'AI 正在按七个栏目反推…'}[d.phase]||'处理中…';
+          scenes.innerHTML='<div style="padding:34px;text-align:center;color:#a78bfa;font-size:13px;">'+msg+'</div>';
+        }
+        if(count>160){clearInterval(iv);_localBusy(btn,false);_localFail('反推处理时间较长，请稍后在生成记录查看');}
+      }).catch(function(){ errors++; if(errors>=10){clearInterval(iv);_localBusy(btn,false);_localFail('网络连接失败，任务可在生成记录继续查看');} });
+    },3000);
+  }
+  function _submitLocalReverse(mediaType,file,btn){
+    var isImage=mediaType==='image', max=isImage?20*1024*1024:200*1024*1024;
+    if(!file){_localFail('请先选择本地'+(isImage?'图片':'视频'));return;}
+    if(file.size>max){_localFail((isImage?'图片不能超过 20MB':'视频不能超过 200MB'));return;}
+    var durationCheck=isImage?Promise.resolve():_videoDuration(file).then(function(d){if(d>120.05)throw new Error('视频最长支持 2 分钟');});
+    var ext=(file.name.split('.').pop()||'').toLowerCase();
+    var mime=file.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm'})[ext]||'';
+    _localBusy(btn,true);
+    durationCheck.then(_localPointsCheck).then(function(){
+      if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
+      if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
+      return fetch('/api/gen/breakdown/local-upload?media_type='+mediaType,{
+        method:'POST',credentials:'same-origin',
+        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name)},body:file
+      });
+    }).then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});}).then(function(x){
+      if(x.s===401){_localBusy(btn,false);if(window.HQ)HQ.login();return;}
+      if(x.s===402){_localBusy(btn,false);_localFail('点数不足（需要 20 点）');return;}
+      if(!x.d.job_id){_localBusy(btn,false);_localFail((x.d&&x.d.detail)||'提交失败');return;}
+      if(bdLocalStatus)bdLocalStatus.textContent='上传完成，正在反推…';
+      _pollLocalReverse(x.d.job_id,btn);
+    }).catch(function(error){
+      _localBusy(btn,false);
+      if(error&&error.login&&window.HQ)HQ.login();
+      _localFail((error&&error.message)||'上传失败，请重试');
+    });
+  }
+  if(bdImagePick)bdImagePick.onclick=function(){bdLocalImage.click();};
+  if(bdVideoPick)bdVideoPick.onclick=function(){bdLocalVideo.click();};
+  if(bdLocalImage)bdLocalImage.onchange=function(){bdLocalImageName.textContent=this.files[0]?this.files[0].name:'JPG / PNG / WEBP，最大 20MB';};
+  if(bdLocalVideo)bdLocalVideo.onchange=function(){bdLocalVideoName.textContent=this.files[0]?this.files[0].name:'MP4 / MOV / WEBM，最大 200MB、最长 2 分钟';};
+  if(bdImageReverse)bdImageReverse.onclick=function(){_submitLocalReverse('image',bdLocalImage.files[0],bdImageReverse);};
+  if(bdVideoReverse)bdVideoReverse.onclick=function(){_submitLocalReverse('video',bdLocalVideo.files[0],bdVideoReverse);};
 
   if(bdGen){ bdGen.onclick=function(){
     var raw=(bdUrl.value||'').trim();
