@@ -12,6 +12,14 @@ _SECTION_ORDER = (
     ("action", "动作"), ("lighting", "光影"), ("style", "风格"),
     ("parameters", "参数"),
 )
+_PLACEHOLDER_VALUES = {
+    "主体细节", "场景细节", "构图与镜头", "动作细节",
+    "光影色彩", "视觉风格", "生成参数", "画幅、清晰度",
+}
+_VIDEO_SECTION_MIN_CHARS = {
+    "subject": 24, "scene": 24, "composition": 24, "action": 48,
+    "lighting": 18, "style": 18, "parameters": 18,
+}
 
 def _upload_path(payload):
     root = (pathlib.Path(OUT_DIR) / "reverse_uploads").resolve()
@@ -59,6 +67,35 @@ def _reverse_overview(frame_dir, frames):
     )
     return output
 
+def _model_text(value):
+    """Normalize GLM's occasional list/dict values into readable Chinese."""
+    if isinstance(value, (list, tuple)):
+        return "；".join(filter(None, (_model_text(item) for item in value)))
+    if isinstance(value, dict):
+        return "；".join(filter(None, (_model_text(item) for item in value.values())))
+    return str(value or "").strip()
+
+def _detail_items(value):
+    text = _model_text(value)
+    for separator in ("\n", "，", ",", "；", ";", "→", "->"):
+        text = text.replace(separator, "|")
+    return [item.strip(" -—0123456789.、：:") for item in text.split("|")
+            if item.strip(" -—0123456789.、：:")]
+
+def _validate_video_result(data, sections):
+    core_subject = _model_text(data.get("core_subject"))
+    evidence = _model_text(data.get("subject_evidence"))
+    timeline = _model_text(data.get("timeline"))
+    if not core_subject or len(_detail_items(evidence)) < 3 or len(_detail_items(timeline)) < 6:
+        raise ValueError("反推结果缺少核心主体判断，请重试")
+    for key, minimum in _VIDEO_SECTION_MIN_CHARS.items():
+        value = sections.get(key, "")
+        if value in _PLACEHOLDER_VALUES or len(value) < minimum:
+            raise ValueError("反推结果%s过于简略，请重试" % dict(_SECTION_ORDER)[key])
+    if sum(len(sections[key]) for key in _VIDEO_SECTION_MIN_CHARS) < 260:
+        raise ValueError("反推结果未达到详细度要求，请重试")
+    return core_subject, evidence, timeline
+
 def _structured_prompt(media_type, title, duration, script_text, frames):
     from .breakdown import _chat_multimodal, _parse_breakdown_json
     context = "素材：%s\n类型：%s\n时长：%ss" % (
@@ -79,6 +116,7 @@ def _structured_prompt(media_type, title, duration, script_text, frames):
 人物仅作为展示者或使用者，不得用后段出现的办公、咖啡馆等生活场景替代贯穿视频的产品主线。
 JSON 还必须包含三个非空内部字段："core_subject" 写唯一核心主体，"subject_evidence" 写至少 3 个不同时间点的可见证据，
 "timeline" 按总览图顺序写至少 6 个连续节点。subject 必须同时覆盖核心产品和关键人物，action 必须与 timeline 一致。
+subject_evidence 和 timeline 可以输出 JSON 字符串数组，其余字段必须是字符串。所有值必须来自实际画面，禁止复制字段名或字段说明。
 七个字段合计写 500-800 个中文字符，每个字段都使用具体、可执行的视觉短语，不得用“氛围感强”“动作自然”“画面精美”等笼统表述：
 - subject 写 70-100 字，至少 5 项可见细节，包括人物/物体的外观、身份、服装、材质、状态和显著特征；
 - scene 写 70-100 字，至少 5 项场景细节，包括环境、道具、前中后景、空间关系和背景变化；
@@ -88,32 +126,33 @@ JSON 还必须包含三个非空内部字段："core_subject" 写唯一核心主
 - style 写 55-80 字，至少 4 项风格细节，包括媒介、质感、色调、节奏和成片观感；
 - parameters 写 55-80 字，至少 6 项可执行参数，包括画幅、分辨率、帧率、快门/景深、镜头运动、时长或生成限制。
 """
+    required_keys = (
+        "core_subject, subject_evidence, timeline, "
+        if media_type == "video" else ""
+    ) + "subject, scene, composition, action, lighting, style, parameters"
     usermsg = context + """
 
-请根据素材反推出可直接用于同风格原创生成的中文提示词，并严格输出一个 JSON 对象：
-{"subject":"主体细节","scene":"场景细节","composition":"构图与镜头","action":"动作细节","lighting":"光影色彩","style":"视觉风格","parameters":"生成参数"}
-七个字段都必须是非空字符串。主体写清外观、服装、材质和状态；场景写清前中后景与道具；构图写清景别、视角和镜头关系；
+请根据素材反推出可直接用于同风格原创生成的中文提示词，并严格输出一个 JSON 对象。
+必需字段名：%s。
+不要输出示例、字段说明或占位词；每个字段值都必须替换为从当前素材实际识别出的具体内容。
+主体写清外观、服装、材质和状态；场景写清前中后景与道具；构图写清景别、视角和镜头关系；
 动作写清表情、视线、手势、姿态、位移、物体互动及起始—发展—结束；图片根据可见姿态描述动作状态，不虚构既成事实；
 光影写清方向、软硬、色温与氛围；风格写清媒介、质感、色调；参数给出画幅、清晰度、帧率或镜头运动等可执行参数。
-只输出 JSON，不要 Markdown，不要解释。""" + visual_rules
+只输出 JSON，不要 Markdown，不要解释。""" % required_keys + visual_rules
     raw = _chat_multimodal(
-        "你是黄雀传媒提示词反推专家。忠实识别可见信息，输出结构化、具体、可执行的中文生成提示词。",
-        usermsg, frames, temp=0.45, max_tokens=1800, image_detail="high")
+        "你是黄雀传媒提示词反推专家。忠实识别当前图片中的可见信息；禁止复制字段说明，所有字段必须填写具体识别结果。",
+        usermsg, frames, temp=0.25 if media_type == "video" else 0.45,
+        max_tokens=1800, image_detail="high")
     data = _parse_breakdown_json(raw)
-    core_subject = subject_evidence = timeline = ""
-    if media_type == "video":
-        core_subject = str(data.get("core_subject") or "").strip()
-        subject_evidence = str(data.get("subject_evidence") or "").strip()
-        timeline = str(data.get("timeline") or "").strip()
-        if not core_subject or not subject_evidence or not timeline:
-            raise ValueError("反推结果缺少核心主体判断，请重试")
     sections = {}
     for key, label in _SECTION_ORDER:
-        value = str(data.get(key) or data.get(label) or "").strip()
+        value = _model_text(data.get(key) or data.get(label))
         if not value:
             raise ValueError("反推结果缺少%s信息，请重试" % label)
         sections[key] = value
     if media_type == "video":
+        core_subject, subject_evidence, timeline = _validate_video_result(
+            data, sections)
         sections["subject"] = "核心主体：%s；识别依据：%s；%s" % (
             core_subject, subject_evidence, sections["subject"])
         sections["action"] = "完整时间线：%s；%s" % (

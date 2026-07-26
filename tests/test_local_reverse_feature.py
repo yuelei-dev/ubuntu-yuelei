@@ -55,6 +55,21 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
             sys.path.insert(0, server)
         cls.processor = importlib.import_module("content_domains.local_reverse_processor")
 
+    def _valid_video_data(self):
+        return {
+            "core_subject": "透明保护壳中的白色无线耳机",
+            "subject_evidence": ["开场展示闭合耳机盒", "中段手指取出耳机", "结尾人物完成佩戴"],
+            "timeline": ["耳机盒静置", "盒盖打开", "手指靠近耳机", "取出单只耳机",
+                         "耳机移向人物耳部", "人物完成佩戴并进入使用场景"],
+            "subject": "透明磨砂保护壳包裹白色无线耳机盒，白色入耳式耳机为核心产品，年轻人物作为操作与佩戴演示者。",
+            "scene": "开场为冷灰色产品展示台，中段保持干净摄影背景，后段切入人物日常使用环境，桌面与背景陈设层次清楚。",
+            "composition": "先以居中特写突出闭合盒体，再切正面近景展示开盖结构，随后使用手部微距，最终转为人物耳部特写。",
+            "action": "盒体先保持闭合静置，随后盒盖向上打开；手指从画面上方进入并捏住耳机，将其平稳取出，再移向人物耳部，人物侧头完成佩戴，镜头跟随产品从盒内过渡到实际使用状态。",
+            "lighting": "冷灰背景使用顶部大面积柔光，产品边缘形成清晰轮廓高光；人物段保持柔和侧光，白色材质不过曝。",
+            "style": "写实商业产品广告风格，画面克制简洁，金属与透明材质清晰，剪辑节奏由静态展示逐步转入生活化使用。",
+            "parameters": "竖屏九比十六，四K清晰度，每秒三十帧，中长焦微距，浅景深，稳定推近与跟随运镜，保持产品外观一致。",
+        }
+
     def test_local_image_result_is_structured_and_upload_is_deleted(self):
         original_out = self.processor.OUT_DIR
         with tempfile.TemporaryDirectory() as folder:
@@ -78,12 +93,7 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
 
     def test_video_prompt_prioritizes_visual_motion_over_transcript(self):
         captured = {}
-        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
-        sections.update({
-            "core_subject": "透明耳机盒与无线耳机",
-            "subject_evidence": "闭合盒特写；开盖特写；佩戴耳机特写",
-            "timeline": "盒子闭合；盒盖打开；手指取出耳机；耳机靠近耳朵；完成佩戴；进入使用场景",
-        })
+        sections = self._valid_video_data()
         response = __import__("json").dumps(sections, ensure_ascii=False)
 
         def fake_chat(system, user, frames, **kwargs):
@@ -115,32 +125,54 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertIn("style 写 55-80 字，至少 4 项风格细节", prompt)
         self.assertIn("parameters 写 55-80 字，至少 6 项可执行参数", prompt)
         self.assertEqual(captured["kwargs"]["max_tokens"], 1800)
+        self.assertEqual(captured["kwargs"]["temp"], 0.25)
         self.assertNotIn("口播转写：", prompt)
+        self.assertNotIn('"scene":"场景细节"', prompt)
+        self.assertIn("不要输出示例、字段说明或占位词", prompt)
 
     def test_video_result_exposes_verified_subject_and_timeline(self):
-        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
-        sections.update({
-            "core_subject": "透明耳机盒与无线耳机",
-            "subject_evidence": "闭合盒特写；开盖特写；佩戴耳机特写",
-            "timeline": "闭合；开盖；取出；靠近耳朵；佩戴；使用",
-        })
+        sections = self._valid_video_data()
         response = __import__("json").dumps(sections, ensure_ascii=False)
         breakdown = importlib.import_module("content_domains.breakdown")
         with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
             result, prompt = self.processor._structured_prompt(
                 "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
-        self.assertIn("核心主体：透明耳机盒与无线耳机", result["subject"])
-        self.assertIn("识别依据：闭合盒特写；开盖特写；佩戴耳机特写", result["subject"])
-        self.assertIn("完整时间线：闭合；开盖；取出；靠近耳朵；佩戴；使用", result["action"])
+        self.assertIn("核心主体：透明保护壳中的白色无线耳机", result["subject"])
+        self.assertIn("识别依据：开场展示闭合耳机盒；中段手指取出耳机；结尾人物完成佩戴", result["subject"])
+        self.assertIn("完整时间线：耳机盒静置；盒盖打开；手指靠近耳机；取出单只耳机", result["action"])
+        self.assertNotIn("['", result["subject"])
+        self.assertNotIn("['", result["action"])
         self.assertIn(result["subject"], prompt)
         self.assertIn(result["action"], prompt)
 
     def test_video_result_rejects_missing_core_subject_evidence(self):
-        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        sections = self._valid_video_data()
+        for key in ("core_subject", "subject_evidence", "timeline"):
+            sections.pop(key)
         response = __import__("json").dumps(sections, ensure_ascii=False)
         breakdown = importlib.import_module("content_domains.breakdown")
         with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
             with self.assertRaisesRegex(ValueError, "缺少核心主体判断"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
+    def test_video_result_rejects_copied_schema_placeholders(self):
+        sections = self._valid_video_data()
+        sections["scene"] = "场景细节"
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "场景过于简略"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
+    def test_video_result_rejects_short_non_placeholder_content(self):
+        sections = self._valid_video_data()
+        sections["composition"] = "产品居中，固定镜头"
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "构图过于简略"):
                 self.processor._structured_prompt(
                     "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
 
@@ -171,12 +203,7 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
 
     def test_transcript_reference_is_capped_to_avoid_dominating_frames(self):
         captured = {}
-        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
-        sections.update({
-            "core_subject": "产品",
-            "subject_evidence": "时间点一；时间点二；时间点三",
-            "timeline": "节点一；节点二；节点三；节点四；节点五；节点六",
-        })
+        sections = self._valid_video_data()
         response = __import__("json").dumps(sections, ensure_ascii=False)
 
         def fake_chat(system, user, frames, **kwargs):
