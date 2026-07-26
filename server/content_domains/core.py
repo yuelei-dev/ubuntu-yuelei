@@ -1356,7 +1356,8 @@ class H(BaseHTTPRequestHandler):
             try:
                 body = self._json_body_strict() if kind in {"video", "tryon", "cinematic", "avatar"} else self._json_body()
                 request_body = dict(body) if isinstance(body, dict) else body
-                if kind == "video":
+                if kind == "copy": from . import text as text_domain; body = text_domain.validate_copy_payload(body)
+                elif kind == "video":
                     body = video_domain.validate_video_payload(body, user["username"])
                 elif kind == "tryon":
                     body = video_domain.validate_tryon_payload(body)
@@ -1378,7 +1379,6 @@ class H(BaseHTTPRequestHandler):
             if is_shutting_down():
                 return self._send(503, {"detail": "服务正在更新，请稍等几秒后重试（未扣点）",
                                         "code": "shutting_down", "retry_after_ms": 5000})
-
             # 上游没额度就当场拒 —— ⚠️ 必须在【扣点之前】。
             # 「有人充上钱」这段时间里，用户照样点生成、照样被扣点、照样等几分钟，然后看到
             # 任务是这么死的。这里把它们挡在门外：不扣点、不排队、不让用户等。
