@@ -98,6 +98,8 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertIn("function _localPointsCheck()", self.ui)
         self.assertIn("durationCheck.then(_localPointsCheck).then(function()", self.ui)
         self.assertIn("/api/gen/breakdown/local-upload?media_type=", self.ui)
+        self.assertIn("d&&d.user&&d.user.points", self.ui)
+        self.assertNotIn("Number(d.points||0)", self.ui)
         self.assertLess(self.ui.index("function _localBusy"), self.ui.index("if(bdGen)"))
         self.assertIn("headers:{'Content-Type':mime", self.ui)
 

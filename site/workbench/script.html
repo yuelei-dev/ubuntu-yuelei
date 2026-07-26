@@ -1016,7 +1016,7 @@
     return fetch('/api/auth/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){
       if(r.status===401) throw {login:true,message:'请先登录'};
       return r.json().then(function(d){ if(!r.ok) throw {message:d.detail||'点数检查失败'}; return d; });
-    }).then(function(d){ if(Number(d.points||0)<20) throw {points:true,message:'点数不足（需要 20 点）'}; });
+    }).then(function(d){ if(Number(d&&d.user&&d.user.points||0)<20) throw {points:true,message:'点数不足（需要 20 点）'}; });
   }
   function _videoDuration(file){
     return new Promise(function(resolve,reject){
