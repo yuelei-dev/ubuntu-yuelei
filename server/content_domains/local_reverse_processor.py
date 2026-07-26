@@ -77,7 +77,7 @@ def _model_text(value):
 
 def _detail_items(value):
     text = _model_text(value)
-    for separator in ("\n", "，", ",", "；", ";", "→", "->"):
+    for separator in ("\n", "。", "！", "？", "，", ",", "；", ";", "→", "->"):
         text = text.replace(separator, "|")
     return [item.strip(" -—0123456789.、：:") for item in text.split("|")
             if item.strip(" -—0123456789.、：:")]

@@ -176,6 +176,12 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
                 self.processor._structured_prompt(
                     "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
 
+    def test_detail_items_accepts_chinese_sentence_punctuation(self):
+        evidence = "开场展示闭合耳机盒。中段手指取出耳机！结尾人物完成佩戴？"
+        timeline = "盒体静置。盒盖打开。手指靠近。取出耳机。移向耳部。完成佩戴。"
+        self.assertEqual(len(self.processor._detail_items(evidence)), 3)
+        self.assertEqual(len(self.processor._detail_items(timeline)), 6)
+
     def test_reverse_overview_uses_all_eight_frames_in_time_order(self):
         frames = ["frame_%d.jpg" % i for i in range(1, 9)]
         with mock.patch.object(self.processor.subprocess, "run") as run:
