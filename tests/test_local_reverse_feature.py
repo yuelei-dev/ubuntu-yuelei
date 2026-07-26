@@ -79,11 +79,17 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
     def test_video_prompt_prioritizes_visual_motion_over_transcript(self):
         captured = {}
         sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        sections.update({
+            "core_subject": "透明耳机盒与无线耳机",
+            "subject_evidence": "闭合盒特写；开盖特写；佩戴耳机特写",
+            "timeline": "盒子闭合；盒盖打开；手指取出耳机；耳机靠近耳朵；完成佩戴；进入使用场景",
+        })
         response = __import__("json").dumps(sections, ensure_ascii=False)
 
         def fake_chat(system, user, frames, **kwargs):
             captured["system"] = system
             captured["user"] = user
+            captured["kwargs"] = kwargs
             return response
 
         breakdown = importlib.import_module("content_domains.breakdown")
@@ -96,11 +102,81 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertIn("可见画面、人物动作、场景变化和镜头运动为第一依据", prompt)
         self.assertIn("不得把转写原句、营销话术、旁白或台词写入任何字段", prompt)
         self.assertIn("音频与画面冲突时以画面为准", prompt)
+        self.assertIn("第一张图片是 8 个时间点组成的 4×2 总览图", prompt)
+        self.assertIn("产品必须是 core_subject 和 subject 的第一主体", prompt)
+        self.assertIn('"subject_evidence" 写至少 3 个不同时间点的可见证据', prompt)
+        self.assertIn('"timeline" 按总览图顺序写至少 6 个连续节点', prompt)
+        self.assertIn("七个字段合计写 500-800 个中文字符", prompt)
+        self.assertIn("subject 写 70-100 字，至少 5 项可见细节", prompt)
+        self.assertIn("scene 写 70-100 字，至少 5 项场景细节", prompt)
+        self.assertIn("composition 写 70-100 字，至少 5 项镜头细节", prompt)
+        self.assertIn("action 写 150-200 字，至少 8 个连续动作节点", prompt)
+        self.assertIn("lighting 写 55-80 字，至少 4 项光影细节", prompt)
+        self.assertIn("style 写 55-80 字，至少 4 项风格细节", prompt)
+        self.assertIn("parameters 写 55-80 字，至少 6 项可执行参数", prompt)
+        self.assertEqual(captured["kwargs"]["max_tokens"], 1800)
         self.assertNotIn("口播转写：", prompt)
+
+    def test_video_result_exposes_verified_subject_and_timeline(self):
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        sections.update({
+            "core_subject": "透明耳机盒与无线耳机",
+            "subject_evidence": "闭合盒特写；开盖特写；佩戴耳机特写",
+            "timeline": "闭合；开盖；取出；靠近耳朵；佩戴；使用",
+        })
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            result, prompt = self.processor._structured_prompt(
+                "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+        self.assertIn("核心主体：透明耳机盒与无线耳机", result["subject"])
+        self.assertIn("识别依据：闭合盒特写；开盖特写；佩戴耳机特写", result["subject"])
+        self.assertIn("完整时间线：闭合；开盖；取出；靠近耳朵；佩戴；使用", result["action"])
+        self.assertIn(result["subject"], prompt)
+        self.assertIn(result["action"], prompt)
+
+    def test_video_result_rejects_missing_core_subject_evidence(self):
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "缺少核心主体判断"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
+    def test_reverse_overview_uses_all_eight_frames_in_time_order(self):
+        frames = ["frame_%d.jpg" % i for i in range(1, 9)]
+        with mock.patch.object(self.processor.subprocess, "run") as run:
+            output = self.processor._reverse_overview("tmp", frames)
+        command = run.call_args.args[0]
+        self.assertEqual([command[command.index(frame)] for frame in frames], frames)
+        self.assertIn("xstack=inputs=8", " ".join(command))
+        self.assertTrue(output.endswith("reverse_overview.jpg"))
+
+    def test_image_prompt_does_not_inherit_video_length_requirements(self):
+        captured = {}
+        sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+
+        def fake_chat(system, user, frames, **kwargs):
+            captured["user"] = user
+            return response
+
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", side_effect=fake_chat):
+            self.processor._structured_prompt(
+                "image", "demo.jpg", 0, "", ["frame.jpg"])
+
+        self.assertNotIn("七个字段合计写 500-800 个中文字符", captured["user"])
 
     def test_transcript_reference_is_capped_to_avoid_dominating_frames(self):
         captured = {}
         sections = {key: label + "细节" for key, label in self.processor._SECTION_ORDER}
+        sections.update({
+            "core_subject": "产品",
+            "subject_evidence": "时间点一；时间点二；时间点三",
+            "timeline": "节点一；节点二；节点三；节点四；节点五；节点六",
+        })
         response = __import__("json").dumps(sections, ensure_ascii=False)
 
         def fake_chat(system, user, frames, **kwargs):
