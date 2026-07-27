@@ -423,7 +423,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertNotIn("10字内", src)
 
     def test_reverse_prompt_requires_structured_action_detail(self):
-        """反推 prompt 必须要求六层结构、人物/镜头动作、动作时序及 500-800 字。"""
+        """反推 prompt 必须要求时间轴、六层结构、人物/镜头动作及 500-800 字。"""
         import inspect
         src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
         self.assertIn("500-800 字", src)
@@ -434,6 +434,10 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("跟随、推进、拉远、摇移或转场", src)
         self.assertIn("起始—发展—结束", src)
         self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
+        self.assertIn("必须按视频总时长写出连续时间轴", src)
+        self.assertIn("严格依据关键帧还原镜头出现顺序", src)
+        self.assertIn("不要泛化成另一条“同风格原创”视频", src)
+        self.assertIn("不新增人物、道具、镜头或无关情节", src)
 
     def test_reverse_prompt_requires_minimum_detail_counts(self):
         import inspect
@@ -515,7 +519,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["frame_thumbnails"]), 4)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
-        self.assertIn("反推出一条适合后续作图/创作的中文提示词", calls["usermsg"])
+        self.assertIn("反推出一条可直接用于视频模型生成同款视频的中文执行提示词", calls["usermsg"])
         self.assertIn("只输出提示词本身", calls["sysmsg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
