@@ -202,8 +202,9 @@ def _breakdown_source_context(title, duration, platform, script_text):
 
 
 def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames):
+    context = _breakdown_source_context(title, duration, platform, script_text)
     usermsg = (
-        _breakdown_source_context(title, duration, platform, script_text) + "\n\n"
+        context + "\n\n"
         "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"画面描述(20-40字)\",\"line\":\"口播台词\"}],"
         "\"analysis\":\"视频内容综合分析(含视频主题、背景、构图运镜、人物特征、产品细节、情绪氛围、字幕建议等)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
@@ -217,13 +218,53 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "你是黄雀传媒资深短视频编导。分析视频关键帧和口播，拆解为简洁的分镜脚本，同时输出一份视频内容综合分析。"
         "只输出 JSON，不要多余内容。"
     )
-    raw = _chat_multimodal(sysmsg, usermsg, frames)
+    raw = _chat_multimodal(
+        sysmsg, usermsg, frames, temp=0.2, max_tokens=2400,
+    )
     try:
         return _validate_scene_breakdown(_parse_breakdown_json(raw))
-    except ValueError:
-        print("[breakdown] parse failed, raw(%d)=%s" % (len(raw or ""), str(raw)[:400].replace("\n", " ")))
-        raw = _chat_multimodal(sysmsg, usermsg, frames)
+    except ValueError as first_error:
+        _log_breakdown_parse_failure("zhipu-primary", raw, first_error)
+
+    compact_msg = (
+        context + "\n\n"
+        "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
+        "固定输出 4 个分镜，格式为："
+        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"具体画面\",\"line\":\"对应口播或空串\"}],"
+        "\"analysis\":\"150-250字综合分析\"}。"
+        "每个 scene 20-30 字，写清主体、动作、场景和镜头；不得照抄“具体画面”“对应口播”“画面描述”"
+        "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
+    )
+    raw = _chat_multimodal(
+        sysmsg, compact_msg, frames, temp=0.1, max_tokens=1600,
+    )
+    try:
         return _validate_scene_breakdown(_parse_breakdown_json(raw))
+    except ValueError as retry_error:
+        _log_breakdown_parse_failure("zhipu-compact", raw, retry_error)
+
+    raw = _chat_multimodal(
+        sysmsg, compact_msg, frames, temp=0.1, max_tokens=1600,
+        provider="openai",
+    )
+    try:
+        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+    except ValueError as fallback_error:
+        _log_breakdown_parse_failure("openai-fallback", raw, fallback_error)
+        raise
+
+
+def _log_breakdown_parse_failure(attempt, raw, error):
+    print(
+        "[breakdown] %s invalid output: %s raw(%d)=%s"
+        % (
+            attempt,
+            str(error),
+            len(raw or ""),
+            str(raw)[:400].replace("\n", " "),
+        ),
+        flush=True,
+    )
 
 
 def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
@@ -270,15 +311,13 @@ def _strip_json_code_fence(raw):
     if not text.startswith("```"):
         return text
     lines = text.splitlines()
-    if len(lines) < 3:
-        return text
     first = lines[0].strip().lower()
-    last = lines[-1].strip()
-    if not last.startswith("```"):
-        return text
     if first not in ("```", "```json"):
         return text
-    return "\n".join(lines[1:-1]).strip()
+    lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
 
 
 def _iter_json_objects(raw):
@@ -341,10 +380,18 @@ def _validate_scene_breakdown(result):
     scenes = result.get("scenes")
     if not isinstance(scenes, list):
         raise ValueError("拆解结果为空，请重试")
-    valid_scenes = [
-        scene for scene in scenes
-        if isinstance(scene, dict) and str(scene.get("scene") or "").strip()
-    ]
+    placeholders = ("画面描述", "具体画面", "口播台词", "对应口播")
+    valid_scenes = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        scene_text = str(scene.get("scene") or "").strip()
+        line_text = str(scene.get("line") or "").strip()
+        if not scene_text:
+            continue
+        if any(marker in scene_text or marker in line_text for marker in placeholders):
+            raise ValueError("拆解结果包含模板占位内容，请重试")
+        valid_scenes.append(scene)
     if not valid_scenes:
         raise ValueError("拆解结果为空，请重试")
     result["scenes"] = valid_scenes
@@ -491,7 +538,7 @@ def _chat_content(response):
 
 
 def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
-                     max_tokens=None, image_detail="low"):
+                     max_tokens=None, image_detail="low", provider="zhipu"):
     """智谱多模态优先，仅投递前失败时安全回退 GPT。"""
 
     content = [{"type": "text", "text": usermsg}]
@@ -503,8 +550,12 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
             image_url["detail"] = image_detail
         content.append({"type": "image_url", "image_url": image_url})
 
+    use_openai = provider == "openai"
     body = {
-        "model": os.environ.get("BREAKDOWN_MODEL", "glm-4v-plus"),
+        "model": os.environ.get(
+            "BREAKDOWN_FALLBACK_MODEL" if use_openai else "BREAKDOWN_MODEL",
+            "gpt-4o" if use_openai else "glm-4v-plus",
+        ),
         "messages": [
             {"role": "system", "content": sysmsg},
             {"role": "user", "content": content}
@@ -513,6 +564,16 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
     }
     if max_tokens is not None:
         body["max_tokens"] = int(max_tokens)
+
+    if use_openai:
+        if not OPENAI_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+        response = _post_openai_fallback(body)
+        result = _chat_content(response)
+        print("[breakdown] openai format fallback success: %s" % body["model"], flush=True)
+        return result
+    if provider != "zhipu":
+        raise ValueError("unsupported multimodal provider: " + str(provider))
 
     zhipu_key = os.environ.get("REVERSE_ZHIPU_KEY", "").strip()
     if not zhipu_key:
