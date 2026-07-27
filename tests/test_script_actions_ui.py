@@ -123,16 +123,22 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn)", self.html)
 
     def test_reverse_video_without_avatar_uses_seedance_micro_channel(self):
-        # 反推“生成同款视频”不选形象 → Seedance 2.0 Fast（豆姐视频 micro 渠道），时长沿用用户选择
+        # 不选形象 → Seedance，并携带原视频关键帧作为视觉参考。
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
-        self.assertIn("{channel:'micro',prompt:prompt,duration:choice.duration}", self.html)
+        self.assertIn("var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4)", self.html)
+        self.assertIn("prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
+        self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
+        self.assertIn("if(seedanceMode) selectedDuration=10", self.html)
+        self.assertIn("var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
 
     def test_reverse_video_with_avatar_uses_existing_cinematic_api(self):
         self.assertIn("endpoint:'/api/gen/cinematic'", self.html)
         self.assertIn("cine_mode:'open'", self.html)
         self.assertIn("avatar_ids:[choice.avatarId]", self.html)
-        self.assertIn("prompt:prompt", self.html)
+        self.assertIn("prompt:avatarPrompt", self.html)
+        self.assertIn("reference_images:reverseRefs", self.html)
+        self.assertIn("人物身份与面部必须以所选数字人形象为准", self.html)
         self.assertIn("duration:choice.duration", self.html)
         self.assertIn("ratio:'9:16'", self.html)
         self.assertIn("resolution:'720p'", self.html)
