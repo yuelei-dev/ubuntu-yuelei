@@ -1329,6 +1329,13 @@
     }
     function selectAvatar(id){
       selectedAvatarId=id;
+      var seedanceMode=id===null;
+      if(seedanceMode) selectedDuration=10;
+      duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
+        var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10;
+        btn.disabled=unsupported;
+        btn.style.opacity=unsupported?'.45':'1';
+      });
       noAvatar.classList.toggle('on',id===null);
       noAvatar.setAttribute('aria-pressed',id===null?'true':'false');
       grid.querySelectorAll('[data-reverse-avatar]').forEach(function(card){
@@ -1336,6 +1343,7 @@
         card.classList.toggle('on',on);
         card.setAttribute('aria-pressed',on?'true':'false');
       });
+      updateCost();
     }
     function dismiss(){ modal.style.display='none'; }
     modal.style.display='flex';
@@ -1508,16 +1516,20 @@
     if(isReverse){
       var prompt=reversePromptText();
       if(!prompt){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成提示词反推'); return; }
+      var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4);
       _showReverseVideoPicker(prompt,function(choice){
         if(choice.avatarId){
+          var avatarPrompt='人物身份与面部必须以所选数字人形象为准；参考关键帧仅用于还原动作、镜头、构图、场景和节奏。'+prompt;
           _doGenerate({
-            cine_mode:'open', avatar_ids:[choice.avatarId], prompt:prompt,
-            duration:choice.duration, ratio:'9:16', resolution:'720p', enhance_prompt:false
+            cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt,
+            reference_images:reverseRefs, duration:choice.duration,
+            ratio:'9:16', resolution:'720p', enhance_prompt:false
           },bdRemakeBtn,{endpoint:'/api/gen/cinematic',sceneCount:1});
           return;
         }
-        // 无形象：改走 Seedance 2.0 Fast（豆姐视频 micro 渠道）文生视频，时长沿用用户选择
-        _doGenerate({channel:'micro',prompt:prompt,duration:choice.duration},
+        // 无形象：Seedance 同时接收反推提示词和原视频关键帧，避免纯文本重建丢失镜头结构
+        var seedancePrompt='严格按照所附参考关键帧的时间顺序生成，保持动作节点、镜头转换、构图和场景布局。'+prompt;
+        _doGenerate({channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration},
                     bdRemakeBtn,{endpoint:'/api/gen/xiaole_video',sceneCount:1});
       });
       return;
