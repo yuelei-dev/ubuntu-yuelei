@@ -1329,6 +1329,13 @@
     }
     function selectAvatar(id){
       selectedAvatarId=id;
+      var seedanceMode=id===null;
+      if(seedanceMode) selectedDuration=10;
+      duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
+        var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10;
+        btn.disabled=unsupported;
+        btn.style.opacity=unsupported?'.45':'1';
+      });
       noAvatar.classList.toggle('on',id===null);
       noAvatar.setAttribute('aria-pressed',id===null?'true':'false');
       grid.querySelectorAll('[data-reverse-avatar]').forEach(function(card){
@@ -1336,6 +1343,7 @@
         card.classList.toggle('on',on);
         card.setAttribute('aria-pressed',on?'true':'false');
       });
+      updateCost();
     }
     function dismiss(){ modal.style.display='none'; }
     modal.style.display='flex';

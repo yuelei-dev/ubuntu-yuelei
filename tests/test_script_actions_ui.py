@@ -128,6 +128,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4)", self.html)
         self.assertIn("prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
         self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
+        self.assertIn("if(seedanceMode) selectedDuration=10", self.html)
+        self.assertIn("var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
 
     def test_reverse_video_with_avatar_uses_existing_cinematic_api(self):
