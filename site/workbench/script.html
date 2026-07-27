@@ -1117,8 +1117,11 @@
               var result=d.result||{};
               if(result.type==='breakdown_batch'){
                 switchBreakdownTool('scenes');
-                var first=result.results[0];
+                var first=(result.results||[]).find(function(item){
+                  return normalizeBreakdownScenes((item&&item.scenes)||[]).length>0;
+                });
                 if(first) renderBreakdown(first);
+                else scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">批量拆解没有生成有效分镜，请重试</div>';
                 (result.results||[]).forEach(function(item){ saveBreakdownHistory(item); });
                 var msg='批量完成：'+result.results.length+'/'+result.total+' 成功';
                 if(result.errors.length) msg+='，'+result.errors.length+' 条失败';

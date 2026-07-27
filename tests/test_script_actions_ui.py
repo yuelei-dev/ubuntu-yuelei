@@ -102,6 +102,17 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("setBreakdownAnalysis(analysis)", self.html)
         self.assertIn("analysis:(bd.analysis||'')", self.html)
 
+    def test_batch_breakdown_displays_first_result_with_valid_scenes(self):
+        self.assertIn(
+            "var first=(result.results||[]).find(function(item)",
+            self.html,
+        )
+        self.assertIn(
+            "normalizeBreakdownScenes((item&&item.scenes)||[]).length>0",
+            self.html,
+        )
+        self.assertIn("批量拆解没有生成有效分镜，请重试", self.html)
+
     def test_breakdown_remake_reuses_current_one_click_flow(self):
         self.assertIn('id="bdRemakeBtn"', self.html)
         self.assertIn("prepareBreakdownRemakePayload(bd, style)", self.html)
