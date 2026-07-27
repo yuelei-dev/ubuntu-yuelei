@@ -521,8 +521,20 @@ def _post_zhipu(body, api_key):
         headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
         method="POST",
     )
-    with egress._DIRECT.open(req, timeout=timeout) as response:
-        return json.loads(response.read())
+    try:
+        with egress._DIRECT.open(req, timeout=timeout) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", "replace")
+        except Exception:
+            detail = ""
+        print(
+            "[breakdown] zhipu http error: status=%s body=%s"
+            % (getattr(exc, "code", "?"), detail[:500].replace("\n", " ")),
+            flush=True,
+        )
+        raise
 
 
 def _post_openai_fallback(body):
@@ -541,6 +553,14 @@ def _chat_content(response):
     if not content:
         raise RuntimeError("multimodal provider returned empty content")
     return content
+
+
+def _zhipu_rejected_request(exc):
+    """HTTP 4xx 表示请求已被上游明确拒绝，没有可等待的生成结果。"""
+    return (
+        isinstance(exc, urllib.error.HTTPError)
+        and 400 <= int(getattr(exc, "code", 0) or 0) < 500
+    )
 
 
 def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
@@ -588,7 +608,8 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
     try:
         response = _post_zhipu(body, zhipu_key)
     except Exception as exc:
-        if not egress._pre_delivery_failure(exc):
+        rejected = _zhipu_rejected_request(exc)
+        if not rejected and not egress._pre_delivery_failure(exc):
             print(
                 "[breakdown] zhipu ambiguous/delivered failure, no fallback: %s"
                 % type(exc).__name__,
@@ -596,8 +617,11 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
             )
             raise
         print(
-            "[breakdown] zhipu pre-delivery failure, fallback to openai: %s"
-            % type(exc).__name__,
+            "[breakdown] zhipu %s, fallback to openai: %s"
+            % (
+                "request rejected" if rejected else "pre-delivery failure",
+                type(exc).__name__,
+            ),
             flush=True,
         )
         fallback_body = dict(body)
