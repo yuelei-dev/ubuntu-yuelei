@@ -44,6 +44,7 @@ class BreakdownTests(unittest.TestCase):
         self.orig_openai_post = getattr(self.breakdown, "_post_openai_fallback", None)
         self.orig_egress_post_json = self.breakdown.egress.post_json
         self.orig_egress_direct = self.breakdown.egress._DIRECT
+        self.orig_openai_key = self.breakdown.OPENAI_KEY
 
     def tearDown(self):
         self.breakdown._heartbeat = self.orig_heartbeat
@@ -71,6 +72,7 @@ class BreakdownTests(unittest.TestCase):
             delattr(self.breakdown, "_post_openai_fallback")
         self.breakdown.egress.post_json = self.orig_egress_post_json
         self.breakdown.egress._DIRECT = self.orig_egress_direct
+        self.breakdown.OPENAI_KEY = self.orig_openai_key
 
     def _frame_file(self, directory):
         path = Path(directory) / "frame.jpg"
@@ -157,6 +159,30 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(captured["zhipu_body"]["model"], "glm-4v-plus")
         self.assertEqual(captured["zhipu_key"], "zhipu-test-key")
         self.assertNotIn("openai_called", captured)
+
+    def test_chat_multimodal_can_force_openai_for_format_recovery(self):
+        captured = {}
+        os.environ["BREAKDOWN_FALLBACK_MODEL"] = "gpt-4o"
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        self.breakdown.OPENAI_KEY = "openai-test-key"
+
+        self.breakdown._post_zhipu = lambda body, api_key: self.fail("Zhipu should be skipped")
+
+        def fake_openai(body):
+            captured["body"] = body
+            return {"choices": [{"message": {"content": "GPT 修复结果"}}]}
+
+        self.breakdown._post_openai_fallback = fake_openai
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.breakdown._chat_multimodal(
+                "system", "user", [self._frame_file(directory)],
+                temp=0.1, max_tokens=1600, provider="openai",
+            )
+
+        self.assertEqual(result, "GPT 修复结果")
+        self.assertEqual(captured["body"]["model"], "gpt-4o")
+        self.assertEqual(captured["body"]["temperature"], 0.1)
+        self.assertEqual(captured["body"]["max_tokens"], 1600)
 
     def test_chat_multimodal_falls_back_to_gpt_on_pre_delivery_failure(self):
         captured = {}
@@ -390,6 +416,10 @@ class BreakdownTests(unittest.TestCase):
         src = inspect.getsource(self.breakdown._breakdown_scenes_from_frames)
         self.assertIn("20-40字", src)
         self.assertIn("4-6 个分镜", src)
+        self.assertIn("max_tokens=2400", src)
+        self.assertIn("max_tokens=1600", src)
+        self.assertIn('provider="openai"', src)
+        self.assertIn("固定输出 4 个分镜", src)
         self.assertNotIn("10字内", src)
 
     def test_reverse_prompt_requires_structured_action_detail(self):
@@ -493,8 +523,8 @@ class BreakdownTests(unittest.TestCase):
         calls = []
         original_parse = self.breakdown._parse_breakdown_json
         try:
-            def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
-                calls.append((sysmsg, usermsg, list(frames), temp))
+            def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+                calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
                 return (
                     'first' if len(calls) == 1
                     else '{"scenes":[{"dur":"3s","scene":"产品展示","line":""}],"analysis":"ok"}'
@@ -515,6 +545,9 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["analysis"], "ok")
         self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][4]["max_tokens"], 2400)
+        self.assertEqual(calls[1][4]["max_tokens"], 1600)
+        self.assertIn("上一次输出未形成完整 JSON", calls[1][1])
 
     def test_breakdown_reverse_prompt_calls_model_once(self):
         calls = []
@@ -610,6 +643,14 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["analysis"], "先钩子再转化")
         self.assertEqual(result["scenes"][0]["scene"], "门头")
 
+    def test_parse_breakdown_json_accepts_complete_json_without_closing_fence(self):
+        result = self.breakdown._parse_breakdown_json(
+            '```json\n{"scenes":[{"dur":"3s","scene":"门店外景","line":""}],"analysis":"完整对象"}'
+        )
+
+        self.assertEqual(result["analysis"], "完整对象")
+        self.assertEqual(result["scenes"][0]["scene"], "门店外景")
+
     def test_parse_breakdown_json_accepts_wrapped_prose(self):
         result = self.breakdown._parse_breakdown_json(
             '下面是拆解结果，请直接取 JSON：\n```json\n{"scenes":[{"dur":"5s","scene":"产品特写","line":"先看成分"}],"analysis":"中段突出卖点"}\n```\n请查收。'
@@ -662,7 +703,7 @@ class BreakdownTests(unittest.TestCase):
             ["frame_1.jpg", "frame_2.jpg"],
         )
 
-        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls["sysmsg"] = sysmsg
             calls["usermsg"] = usermsg
             calls["frames"] = list(frames)
@@ -793,7 +834,7 @@ class BreakdownTests(unittest.TestCase):
 
         self.breakdown._heartbeat = lambda job_id, phase: None
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: ("d", ["f1.jpg", "f2.jpg"])
-        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7: '{"scenes":[{"dur":"3s","scene":"画面","line":"口播"}],"analysis":"分析"}'
+        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7, **kwargs: '{"scenes":[{"dur":"3s","scene":"画面","line":"口播"}],"analysis":"分析"}'
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "f.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
 
@@ -849,7 +890,7 @@ class BreakdownTests(unittest.TestCase):
         ]
         calls = {"n": 0}
 
-        def flaky_chat(sysmsg, usermsg, frames, temp=0.7):
+        def flaky_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             r = responses[calls["n"]]
             calls["n"] += 1
             return r
@@ -873,7 +914,7 @@ class BreakdownTests(unittest.TestCase):
         ]
         calls = {"n": 0}
 
-        def empty_then_valid(sysmsg, usermsg, frames, temp=0.7):
+        def empty_then_valid(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             response = responses[calls["n"]]
             calls["n"] += 1
             return response
@@ -889,23 +930,37 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(calls["n"], 2)
         self.assertEqual(result["scenes"][0]["scene"], "产品特写")
 
-    def test_do_breakdown_raises_after_two_empty_scene_results(self):
+    def test_do_breakdown_uses_openai_after_two_empty_scene_results(self):
         self._install_fake_env('{"scenes":[]}')
-        self.breakdown._chat_multimodal = (
-            lambda sysmsg, usermsg, frames, temp=0.7:
-            '{"scenes":[{"dur":"3s","scene":"  ","line":""}],"analysis":"empty"}'
+        calls = []
+
+        def empty_then_fallback(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("provider") == "openai":
+                return '{"scenes":[{"dur":"3s","scene":"锦鲤池全景","line":""}],"analysis":"恢复成功"}'
+            return '{"scenes":[{"dur":"3s","scene":"  ","line":""}],"analysis":"empty"}'
+
+        self.breakdown._chat_multimodal = empty_then_fallback
+
+        result = self.breakdown._do_breakdown(
+            {"_job_id": 43},
+            {"platform": "douyin", "id": "empty-retry-fail"},
+            "https://example.test/post/empty-retry-fail",
         )
 
-        with self.assertRaisesRegex(ValueError, "拆解结果为空，请重试"):
-            self.breakdown._do_breakdown(
-                {"_job_id": 43},
-                {"platform": "douyin", "id": "empty-retry-fail"},
-                "https://example.test/post/empty-retry-fail",
-            )
+        self.assertEqual(result["scenes"][0]["scene"], "锦鲤池全景")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1]["provider"], "openai")
 
-    def test_do_breakdown_raises_after_two_parse_failures(self):
+    def test_do_breakdown_raises_after_zhipu_and_openai_parse_failures(self):
         self._install_fake_env('{"scenes":[]}')
-        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7: "not json at all"
+        calls = []
+
+        def invalid_everywhere(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append(kwargs)
+            return "not json at all"
+
+        self.breakdown._chat_multimodal = invalid_everywhere
 
         with self.assertRaisesRegex(ValueError, "拆解结果解析失败，请重试"):
             self.breakdown._do_breakdown(
@@ -913,6 +968,18 @@ class BreakdownTests(unittest.TestCase):
                 {"platform": "douyin", "id": "retry-fail"},
                 "https://example.test/post/retry-fail",
             )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1]["provider"], "openai")
+
+    def test_scene_validation_rejects_prompt_placeholders(self):
+        for result in (
+            {"scenes": [{"dur": "3s", "scene": "画面描述(20-40字)", "line": ""}]},
+            {"scenes": [{"dur": "3s", "scene": "人物站在门口", "line": "口播台词"}]},
+            {"scenes": [{"dur": "3s", "scene": "具体画面", "line": "对应口播或空串"}]},
+        ):
+            with self.subTest(result=result):
+                with self.assertRaisesRegex(ValueError, "模板占位内容"):
+                    self.breakdown._validate_scene_breakdown(result)
 
     def test_do_breakdown_normalizes_millisecond_duration(self):
         """tikhub 返回毫秒时长（18320），结果必须统一成秒（18）"""
