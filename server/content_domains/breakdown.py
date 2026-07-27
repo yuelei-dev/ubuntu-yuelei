@@ -205,11 +205,14 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     context = _breakdown_source_context(title, duration, platform, script_text)
     usermsg = (
         context + "\n\n"
-        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"画面描述(20-40字)\",\"line\":\"口播台词\"}],"
-        "\"analysis\":\"视频内容综合分析(含视频主题、背景、构图运镜、人物特征、产品细节、情绪氛围、字幕建议等)\"}，"
+        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"详细画面描述(60-100字)\",\"line\":\"口播台词\"}],"
+        "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(100-160字)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
-        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 20-40 字具体写清画面：主体是谁、在做什么动作、"
-        "场景环境与关键道具、镜头语言（特写/中景/运镜），结合关键帧里看得见的细节，不要笼统概括。"
+        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 60-100 字描述一个可直接拍摄或生成的完整镜头，"
+        "必须结合关键帧可见内容，至少写清以下六类细节中的五类："
+        "①主体外观、服装或产品特征；②动作起点、过程、结果及与道具的互动；③表情、视线和身体姿态；"
+        "④场景环境、关键道具及前中后景关系；⑤景别、机位、构图和推进/跟随/摇移等运镜；"
+        "⑥光线方向、明暗层次、色调和画面氛围。不要只写“人物出现”“展示产品”等笼统结论。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
         "所有 line 输出空串\"\"，不要编造台词。"
@@ -219,7 +222,7 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "只输出 JSON，不要多余内容。"
     )
     raw = _chat_multimodal(
-        sysmsg, usermsg, frames, temp=0.2, max_tokens=2400,
+        sysmsg, usermsg, frames, temp=0.2, max_tokens=3200,
     )
     try:
         return _validate_scene_breakdown(_parse_breakdown_json(raw))
@@ -231,12 +234,13 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
         "固定输出 4 个分镜，格式为："
         "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"具体画面\",\"line\":\"对应口播或空串\"}],"
-        "\"analysis\":\"150-250字综合分析\"}。"
-        "每个 scene 20-30 字，写清主体、动作、场景和镜头；不得照抄“具体画面”“对应口播”“画面描述”"
+        "\"analysis\":\"80-150字综合分析\"}。"
+        "每个 scene 50-80 字，至少写清主体特征、连续动作、场景道具、构图运镜和光影氛围；"
+        "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
     )
     raw = _chat_multimodal(
-        sysmsg, compact_msg, frames, temp=0.1, max_tokens=1600,
+        sysmsg, compact_msg, frames, temp=0.1, max_tokens=2400,
     )
     try:
         return _validate_scene_breakdown(_parse_breakdown_json(raw))
@@ -244,7 +248,7 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         _log_breakdown_parse_failure("zhipu-compact", raw, retry_error)
 
     raw = _chat_multimodal(
-        sysmsg, compact_msg, frames, temp=0.1, max_tokens=1600,
+        sysmsg, compact_msg, frames, temp=0.1, max_tokens=2400,
         provider="openai",
     )
     try:

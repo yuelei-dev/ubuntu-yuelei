@@ -434,7 +434,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertFalse(result["asr_failed"])
         self.assertIn('"analysis"', calls["usermsg"])
         self.assertIn("同时输出一份视频内容综合分析", calls["sysmsg"])
-        self.assertIn("20-40 字具体写清画面", calls["usermsg"])
+        self.assertIn("60-100 字描述一个可直接拍摄或生成的完整镜头", calls["usermsg"])
         self.assertEqual(calls["frames"], ["frame_1.jpg", "frame_2.jpg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
@@ -455,13 +455,20 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["scenes"]), 1)
 
     def test_scenes_prompt_requires_rich_detail(self):
-        """分镜 prompt 必须要求细致画面（20-40字、4-6镜、镜头语言），不再限 10 字"""
+        """分镜 prompt 必须要求 60-100 字及主体、动作、场景、镜头、光影细节。"""
         import inspect
         src = inspect.getsource(self.breakdown._breakdown_scenes_from_frames)
-        self.assertIn("20-40字", src)
+        self.assertIn("60-100字", src)
         self.assertIn("4-6 个分镜", src)
+        self.assertIn("六类细节中的五类", src)
+        self.assertIn("动作起点、过程、结果", src)
+        self.assertIn("表情、视线和身体姿态", src)
+        self.assertIn("前中后景关系", src)
+        self.assertIn("推进/跟随/摇移", src)
+        self.assertIn("光线方向、明暗层次", src)
+        self.assertIn("max_tokens=3200", src)
+        self.assertIn("每个 scene 50-80 字", src)
         self.assertIn("max_tokens=2400", src)
-        self.assertIn("max_tokens=1600", src)
         self.assertIn('provider="openai"', src)
         self.assertIn("固定输出 4 个分镜", src)
         self.assertNotIn("10字内", src)
@@ -593,8 +600,8 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["analysis"], "ok")
         self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[0][4]["max_tokens"], 2400)
-        self.assertEqual(calls[1][4]["max_tokens"], 1600)
+        self.assertEqual(calls[0][4]["max_tokens"], 3200)
+        self.assertEqual(calls[1][4]["max_tokens"], 2400)
         self.assertIn("上一次输出未形成完整 JSON", calls[1][1])
 
     def test_breakdown_reverse_prompt_calls_model_once(self):
