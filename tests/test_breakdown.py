@@ -113,6 +113,26 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(captured["timeout"], 123)
         self.assertEqual(result, {"choices": []})
 
+    def test_post_zhipu_logs_rejected_response_body(self):
+        os.environ["REVERSE_ZHIPU_BASE"] = "https://open.bigmodel.cn/api/paas/v4"
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                raise urllib.error.HTTPError(
+                    request.full_url, 400, "Bad Request", {},
+                    io.BytesIO(b'{"error":{"message":"invalid image"}}'),
+                )
+
+        self.breakdown.egress._DIRECT = FakeOpener()
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(urllib.error.HTTPError):
+            self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus", "messages": []}, "zhipu-test-key"
+            )
+
+        self.assertIn("status=400", output.getvalue())
+        self.assertIn("invalid image", output.getvalue())
+
     def test_post_openai_fallback_uses_openai_endpoint_key_and_body(self):
         from content_domains.image import OPENAI_OFFICIAL_BASE
 
@@ -237,6 +257,31 @@ class BreakdownTests(unittest.TestCase):
                 self.assertEqual(result, "GPT 结果")
                 self.assertEqual(len(called), 1)
 
+    def test_chat_multimodal_falls_back_after_zhipu_rejects_request(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        failures = (
+            urllib.error.HTTPError("https://open.bigmodel.cn", 400, "Bad Request", {}, None),
+            urllib.error.HTTPError("https://open.bigmodel.cn", 404, "Not Found", {}, None),
+            urllib.error.HTTPError("https://open.bigmodel.cn", 429, "Too Many Requests", {}, None),
+        )
+
+        for failure in failures:
+            with self.subTest(status=failure.code), tempfile.TemporaryDirectory() as directory:
+                called = []
+                self.breakdown._post_zhipu = (
+                    lambda body, api_key, error=failure: (_ for _ in ()).throw(error)
+                )
+                self.breakdown._post_openai_fallback = lambda body: (
+                    called.append(body) or {"choices": [{"message": {"content": "GPT 结果"}}]}
+                )
+
+                result = self.breakdown._chat_multimodal(
+                    "system", "user", [self._frame_file(directory)]
+                )
+
+                self.assertEqual(result, "GPT 结果")
+                self.assertEqual(len(called), 1)
+
     def test_chat_multimodal_missing_zhipu_key_fails_without_openai(self):
         os.environ.pop("REVERSE_ZHIPU_KEY", None)
         called = []
@@ -254,7 +299,6 @@ class BreakdownTests(unittest.TestCase):
     def test_chat_multimodal_does_not_fallback_after_possible_delivery(self):
         os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
         failures = (
-            urllib.error.HTTPError("https://open.bigmodel.cn", 404, "Not Found", {}, None),
             urllib.error.HTTPError("https://open.bigmodel.cn", 500, "Server Error", {}, None),
             TimeoutError("timed out"),
             urllib.error.URLError(ConnectionResetError("reset")),
