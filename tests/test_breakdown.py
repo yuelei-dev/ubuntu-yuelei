@@ -495,7 +495,10 @@ class BreakdownTests(unittest.TestCase):
         try:
             def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7):
                 calls.append((sysmsg, usermsg, list(frames), temp))
-                return 'first' if len(calls) == 1 else '{"scenes":[],"analysis":"ok"}'
+                return (
+                    'first' if len(calls) == 1
+                    else '{"scenes":[{"dur":"3s","scene":"产品展示","line":""}],"analysis":"ok"}'
+                )
 
             seen = {"count": 0}
             def fake_parse(raw):
@@ -861,6 +864,44 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(calls["n"], 2)
         self.assertEqual(result["scenes"][0]["scene"], "门头")
+
+    def test_do_breakdown_retries_once_on_empty_scenes(self):
+        self._install_fake_env('{"scenes":[]}')
+        responses = [
+            '{"scenes":[],"analysis":"没有识别出分镜"}',
+            '{"scenes":[{"dur":"3s","scene":"产品特写","line":""}],"analysis":"ok"}',
+        ]
+        calls = {"n": 0}
+
+        def empty_then_valid(sysmsg, usermsg, frames, temp=0.7):
+            response = responses[calls["n"]]
+            calls["n"] += 1
+            return response
+
+        self.breakdown._chat_multimodal = empty_then_valid
+
+        result = self.breakdown._do_breakdown(
+            {"_job_id": 42},
+            {"platform": "douyin", "id": "empty-retry-ok"},
+            "https://example.test/post/empty-retry",
+        )
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(result["scenes"][0]["scene"], "产品特写")
+
+    def test_do_breakdown_raises_after_two_empty_scene_results(self):
+        self._install_fake_env('{"scenes":[]}')
+        self.breakdown._chat_multimodal = (
+            lambda sysmsg, usermsg, frames, temp=0.7:
+            '{"scenes":[{"dur":"3s","scene":"  ","line":""}],"analysis":"empty"}'
+        )
+
+        with self.assertRaisesRegex(ValueError, "拆解结果为空，请重试"):
+            self.breakdown._do_breakdown(
+                {"_job_id": 43},
+                {"platform": "douyin", "id": "empty-retry-fail"},
+                "https://example.test/post/empty-retry-fail",
+            )
 
     def test_do_breakdown_raises_after_two_parse_failures(self):
         self._install_fake_env('{"scenes":[]}')

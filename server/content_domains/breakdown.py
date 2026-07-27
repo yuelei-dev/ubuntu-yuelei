@@ -219,11 +219,11 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     )
     raw = _chat_multimodal(sysmsg, usermsg, frames)
     try:
-        return _parse_breakdown_json(raw)
+        return _validate_scene_breakdown(_parse_breakdown_json(raw))
     except ValueError:
         print("[breakdown] parse failed, raw(%d)=%s" % (len(raw or ""), str(raw)[:400].replace("\n", " ")))
         raw = _chat_multimodal(sysmsg, usermsg, frames)
-        return _parse_breakdown_json(raw)
+        return _validate_scene_breakdown(_parse_breakdown_json(raw))
 
 
 def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
@@ -333,6 +333,22 @@ def _parse_breakdown_json(raw):
         except Exception:
             pass
     raise ValueError("拆解结果解析失败，请重试")
+
+
+def _validate_scene_breakdown(result):
+    if not isinstance(result, dict):
+        raise ValueError("拆解结果为空，请重试")
+    scenes = result.get("scenes")
+    if not isinstance(scenes, list):
+        raise ValueError("拆解结果为空，请重试")
+    valid_scenes = [
+        scene for scene in scenes
+        if isinstance(scene, dict) and str(scene.get("scene") or "").strip()
+    ]
+    if not valid_scenes:
+        raise ValueError("拆解结果为空，请重试")
+    result["scenes"] = valid_scenes
+    return result
 
 
 def _heartbeat(job_id, phase):
