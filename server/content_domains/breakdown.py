@@ -129,6 +129,8 @@ def _do_breakdown(payload, info, url, mode=None):
             script_text = _format_transcript(segs)
             if _speech_chars(script_text) < 8:
                 script_text = ""  # 热修(20260717)：实际口播字数过短≈无人声（纯音乐/歌舞），按无口播处理
+            elif is_reverse and _reverse_transcript_is_abnormal(script_text, duration):
+                script_text = ""
         except Exception:
             asr_failed = True
 
@@ -322,7 +324,7 @@ def _parse_reverse_segments(raw, expected_count):
     }
     for index, value in enumerate(values, 1):
         if isinstance(value, dict):
-            value = value.get("description") or value.get("prompt") or ""
+            value = _compose_reverse_segment(value)
         text = " ".join(str(value or "").replace("\r", "").split()).strip()
         if not text:
             raise ValueError("反推结果第%d段为空，请重试" % index)
@@ -346,6 +348,29 @@ def _parse_reverse_segments(raw, expected_count):
                     decoded.append(value)
             source_text = "\n".join(decoded)
     return _split_reverse_text(source_text, expected_count)
+
+
+_REVERSE_SEGMENT_FIELDS = (
+    ("subject", "主体"),
+    ("scene", "场景"),
+    ("action", "动作"),
+    ("camera", "镜头"),
+    ("lighting", "光影"),
+    ("sound", "声音"),
+    ("continuity", "衔接"),
+)
+
+
+def _compose_reverse_segment(value):
+    """Turn a structured model segment into one executable Chinese prompt."""
+    parts = []
+    for key, label in _REVERSE_SEGMENT_FIELDS:
+        text = " ".join(str(value.get(key) or "").replace("\r", "").split()).strip()
+        if text:
+            parts.append("%s：%s" % (label, text.rstrip("；;。")))
+    if parts:
+        return "；".join(parts) + "。"
+    return value.get("description") or value.get("prompt") or ""
 
 
 def _split_reverse_text(text, expected_count):
@@ -395,6 +420,8 @@ def _split_reverse_text(text, expected_count):
 def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
     timeline_ranges = _fixed_reverse_ranges(duration)
     segment_count = len(timeline_ranges)
+    segment_min_chars = int(math.ceil(500.0 / segment_count))
+    segment_max_chars = max(segment_min_chars, int(720.0 / segment_count))
     usermsg = (
         _breakdown_source_context(title, duration, platform, script_text) + "\n\n"
         "请基于关键帧和口播，反推出一条可直接用于视频模型生成同款视频的中文执行提示词。"
@@ -415,19 +442,20 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "关键帧无法证明的动作不要写成原视频事实；仅可补充连接相邻关键帧所必需的过渡动作，并明确保持人物、"
         "场景、道具位置和镜头方向连续。提示词结尾增加约束：以随请求附带的参考关键帧为视觉依据，"
         "保持镜头顺序、动作节点和场景布局，不新增人物、道具、镜头或无关情节。"
-        "全部描述合计 500-800 字。严格只输出一个 JSON 对象，不要标题、解释或 markdown；"
-        "对象只能有 segments 一个字段，其值是字符串数组。"
-        "segments 必须恰好包含 %d 个非空字符串，每段至少80个中文字符，不要在字符串中写时间。"
-        "每个字符串必须直接填写基于关键帧观察到的真实内容，不得使用模板占位内容。"
-    ) % (segment_count, segment_count)
+        "全部描述合计 500-800 字，每段目标 %d-%d 个中文字符。严格只输出一个 JSON 对象，不要标题、解释或 markdown；"
+        "对象只能有 segments 一个字段，其值是对象数组。"
+        "segments 必须恰好包含 %d 个对象，不要在对象中写时间。每个对象必须包含 subject、scene、action、camera、"
+        "lighting、sound、continuity 七个字符串字段，分别填写主体、场景、连续动作、镜头、光影、声音和前后衔接。"
+        "每个字段必须直接填写基于关键帧观察到的真实内容；看不清或听不清时写“无可确认信息”，不得编造，不得使用模板占位内容。"
+    ) % (segment_count, segment_min_chars, segment_max_chars, segment_count)
     sysmsg = (
         "你是黄雀传媒资深短视频复刻编导。你擅长从连续关键帧中恢复镜头时间轴、动作节点与空间连续性，"
         "并写成视频生成模型可执行的中文提示词。"
-        "只输出提示词本身，不要任何多余内容。"
+        "严格只输出用户指定结构的 JSON 对象，不要任何多余内容。"
     )
     raw = _chat_multimodal(
         sysmsg, usermsg, frames, temp=0.1,
-        max_tokens=1800, image_detail=None,
+        max_tokens=2400, image_detail=None,
     )
     segments = _parse_reverse_segments(raw, segment_count)
     return "\n".join(
@@ -559,6 +587,24 @@ def _speech_chars(transcript_text):
     """量转写里的实际口播字数（剥掉 [0s-3s] 时间轴标记），过短≈无人声"""
     import re as _re
     return len(_re.sub(r"\[[^\]]*\]", "", transcript_text or "").strip())
+
+
+def _reverse_transcript_is_abnormal(transcript_text, duration):
+    """Reject implausibly dense or highly repetitive ASR before visual analysis."""
+    text = re.sub(r"\[[^\]]*\]", "", transcript_text or "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return False
+    try:
+        duration = max(1.0, float(duration or 0))
+    except (TypeError, ValueError):
+        duration = 1.0
+    if len(text) > max(120, int(duration * 12)):
+        return True
+    if len(text) < 80:
+        return False
+    shingles = [text[index:index + 8] for index in range(len(text) - 7)]
+    return bool(shingles) and len(set(shingles)) / float(len(shingles)) < 0.35
 
 
 def _format_transcript(segs):
