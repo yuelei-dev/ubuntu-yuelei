@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
-import os, json, time, base64, tempfile, subprocess, shutil
+import os, json, time, base64, tempfile, subprocess, shutil, math, re
 import urllib.request
 from contextlib import closing
 
@@ -95,13 +95,7 @@ def _do_breakdown(payload, info, url, mode=None):
         if det.get("images"):
             raise ValueError("该链接是图文笔记，不是视频，暂不支持拆解")
         raise ValueError("未找到视频下载地址，可能是私密或已删除")
-    duration = det.get("duration") or 30
-    try:
-        duration = int(float(duration))
-    except Exception:
-        duration = 30
-    if duration > 1000:
-        duration = max(1, round(duration / 1000.0))  # 热修(20260717)：tikhub 返回毫秒，统一转秒
+    duration = _normalize_duration_seconds(det.get("duration"))
     title = det.get("title") or det.get("desc") or ""
 
     job_id = payload.get("_job_id")
@@ -135,6 +129,8 @@ def _do_breakdown(payload, info, url, mode=None):
             script_text = _format_transcript(segs)
             if _speech_chars(script_text) < 8:
                 script_text = ""  # 热修(20260717)：实际口播字数过短≈无人声（纯音乐/歌舞），按无口播处理
+            elif is_reverse and _reverse_transcript_is_abnormal(script_text, duration):
+                script_text = ""
         except Exception:
             asr_failed = True
 
@@ -271,7 +267,190 @@ def _log_breakdown_parse_failure(attempt, raw, error):
     )
 
 
+def _normalize_duration_seconds(raw_duration):
+    """Normalize TikHub seconds/milliseconds without discarding sub-second precision."""
+    try:
+        duration = float(raw_duration or 30)
+    except (TypeError, ValueError):
+        duration = 30.0
+    if duration > 1000:
+        duration /= 1000.0
+    return max(0.001, round(duration, 3))
+
+
+def _format_timeline_second(seconds):
+    seconds = max(0.0, float(seconds or 0))
+    minutes = int(seconds // 60)
+    remainder = seconds - minutes * 60
+    text = ("%06.3f" % remainder).rstrip("0").rstrip(".")
+    if remainder < 10 and not text.startswith("0"):
+        text = "0" + text
+    return "%02d:%s" % (minutes, text)
+
+
+def _fixed_reverse_ranges(duration, max_segments=4):
+    """Build a gap-free timeline in code; the model never invents timestamps."""
+    duration = max(0.001, float(duration or 0))
+    segment_count = min(
+        max(1, int(max_segments or 1)),
+        max(1, int(math.ceil(duration / 3.0))),
+    )
+    boundaries = [
+        index * duration / segment_count
+        for index in range(segment_count + 1)
+    ]
+    return [
+        "[%s-%s]" % (
+            _format_timeline_second(boundaries[index]),
+            _format_timeline_second(boundaries[index + 1]),
+        )
+        for index in range(segment_count)
+    ]
+
+
+def _parse_reverse_segments(raw, expected_count):
+    values = None
+    parsed_json = False
+    try:
+        result = _parse_breakdown_json(raw)
+        parsed_json = True
+        values = result.get("segments") if isinstance(result, dict) else None
+    except ValueError:
+        pass
+    if parsed_json and not isinstance(values, list):
+        raise ValueError("反推结果缺少 segments 数组，请重试")
+    if parsed_json and len(values) != expected_count:
+        raise ValueError(
+            "反推结果段数错误：需要%d段，实际%d段，请重试"
+            % (expected_count, len(values))
+        )
+    if not parsed_json:
+        return _split_reverse_text(raw, expected_count)
+
+    segments = []
+    placeholders = {
+        "第一段画面描述", "第二段画面描述",
+        "第三段画面描述", "第四段画面描述",
+    }
+    for index, value in enumerate(values, 1):
+        if isinstance(value, dict):
+            missing = [
+                key for key, _label in _REVERSE_SEGMENT_FIELDS
+                if not str(value.get(key) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "反推结果第%d段缺少字段：%s，请重试"
+                    % (index, ", ".join(missing))
+                )
+            value = _compose_reverse_segment(value)
+        text = " ".join(str(value or "").replace("\r", "").split()).strip()
+        if not text:
+            raise ValueError("反推结果第%d段为空，请重试" % index)
+        if text in placeholders:
+            raise ValueError("反推结果第%d段内容不完整，请重试" % index)
+        segments.append(text)
+    return segments
+
+
+_REVERSE_SEGMENT_FIELDS = (
+    ("subject", "主体"),
+    ("scene", "场景"),
+    ("action", "动作"),
+    ("camera", "镜头"),
+    ("lighting", "光影"),
+    ("sound", "声音"),
+    ("continuity", "衔接"),
+)
+
+
+def _compose_reverse_segment(value):
+    """Turn a structured model segment into one executable Chinese prompt."""
+    parts = []
+    for key, label in _REVERSE_SEGMENT_FIELDS:
+        text = " ".join(str(value.get(key) or "").replace("\r", "").split()).strip()
+        if text:
+            parts.append("%s：%s" % (label, text.rstrip("；;。")))
+    if parts:
+        return "；".join(parts) + "。"
+    return value.get("description") or value.get("prompt") or ""
+
+
+def _validate_reverse_prompt_lengths(segments):
+    """Enforce the declared 500-800 character contract after local assembly."""
+    if not segments:
+        raise ValueError("反推结果为空，请重试")
+    minimum = int(math.ceil(500.0 / len(segments)))
+    maximum = int(math.ceil(800.0 / len(segments)))
+    lengths = [len(re.sub(r"\s+", "", segment or "")) for segment in segments]
+    for index, length in enumerate(lengths, 1):
+        if length < minimum:
+            raise ValueError(
+                "反推结果第%d段过于简略：至少%d字，实际%d字，请重试"
+                % (index, minimum, length)
+            )
+        if length > maximum:
+            raise ValueError(
+                "反推结果第%d段过长：最多%d字，实际%d字，请重试"
+                % (index, maximum, length)
+            )
+    total = sum(lengths)
+    if total < 500 or total > 800:
+        raise ValueError(
+            "反推结果总长度需为500-800字，实际%d字，请重试" % total
+        )
+    return segments
+
+
+def _split_reverse_text(text, expected_count):
+    """Deterministically recover one model response without another AI call."""
+    cleaned = _strip_json_code_fence(text)
+    cleaned = re.sub(r"^\s*(?:提示词|反推结果)\s*[:：]\s*", "", cleaned)
+    cleaned = re.sub(r"^\s*[\[{]\s*\"?segments\"?\s*[:：]\s*", "", cleaned)
+    cleaned = cleaned.strip().strip("`\"'[]{} \n")
+    if len(cleaned) < expected_count * 8:
+        raise ValueError("反推结果解析失败，请重试")
+
+    sentences = [
+        item.strip(" \t\r\n,，\"'")
+        for item in re.split(r"(?<=[。！？；])\s*|\n+", cleaned)
+        if item.strip(" \t\r\n,，\"'")
+    ]
+    if len(sentences) >= expected_count:
+        groups = []
+        start = 0
+        for index in range(expected_count):
+            remaining_groups = expected_count - index
+            remaining_items = len(sentences) - start
+            take = max(1, int(math.ceil(remaining_items / float(remaining_groups))))
+            groups.append("".join(sentences[start:start + take]))
+            start += take
+    else:
+        groups = []
+        for index in range(expected_count):
+            begin = round(index * len(cleaned) / float(expected_count))
+            end = round((index + 1) * len(cleaned) / float(expected_count))
+            groups.append(cleaned[begin:end].strip())
+
+    result = []
+    for index, group in enumerate(groups, 1):
+        group = re.sub(
+            r"^\s*(?:[-*]\s*|\d+[.)、]\s*)?"
+            r"(?:\[[^\]]+\]|\d+(?:\.\d+)?\s*[-至到]\s*\d+(?:\.\d+)?\s*秒)\s*[:：]?\s*",
+            "",
+            group,
+        ).strip()
+        if not group:
+            raise ValueError("反推结果第%d段为空，请重试" % index)
+        result.append(group)
+    return result
+
+
 def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
+    timeline_ranges = _fixed_reverse_ranges(duration)
+    segment_count = len(timeline_ranges)
+    segment_min_chars = int(math.ceil(500.0 / segment_count))
+    segment_max_chars = max(segment_min_chars, int(720.0 / segment_count))
     usermsg = (
         _breakdown_source_context(title, duration, platform, script_text) + "\n\n"
         "请基于关键帧和口播，反推出一条可直接用于视频模型生成同款视频的中文执行提示词。"
@@ -279,8 +458,9 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "景别转换、主体动作节点、构图、场景布局、道具位置、光线色调和节奏变化，不要泛化成另一条“同风格原创”视频。"
         "人物具体身份、面部和不可确认的品牌文字属于可替换元素，不得臆造；其余能从关键帧确认的视觉关系应尽量保持。"
         "输入的每张图是两个连续时间点组成的双帧图，左侧早于右侧，图片顺序代表时间推进。"
-        "必须按视频总时长写出连续时间轴，例如“0-2秒、2-5秒、5-8秒”，每段说明画面主体、动作起止、"
-        "景别、机位、运镜方向、构图变化及转场衔接，时间段应覆盖完整视频且前后动作连续。"
+        "时间轴由程序根据真实视频时长生成，你不要输出、计算或修改任何时间。"
+        "请严格按关键帧时间顺序输出 %d 段画面描述，每段说明画面主体、动作起止、"
+        "景别、机位、运镜方向、构图变化及转场衔接，前后动作必须连续。"
         "提示词还要具体写清六个层次：①主体至少 5 项（人物/产品的外观、身份、服装、状态和显著特征）"
         "②场景至少 5 项（环境、关键道具、前中后景和空间关系）"
         "③动作与时序至少 8 项（按起始—发展—结束描述人物的表情、视线、手势、肢体姿态、走位及与道具的互动，"
@@ -291,18 +471,28 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         "关键帧无法证明的动作不要写成原视频事实；仅可补充连接相邻关键帧所必需的过渡动作，并明确保持人物、"
         "场景、道具位置和镜头方向连续。提示词结尾增加约束：以随请求附带的参考关键帧为视觉依据，"
         "保持镜头顺序、动作节点和场景布局，不新增人物、道具、镜头或无关情节。"
-        "直接输出 1 条完整提示词，500-800 字，不要 JSON、不要标题、不要解释、不要 markdown 代码块。"
-    )
+        "全部描述合计 500-800 字，每段目标 %d-%d 个中文字符。严格只输出一个 JSON 对象，不要标题、解释或 markdown；"
+        "对象只能有 segments 一个字段，其值是对象数组。"
+        "segments 必须恰好包含 %d 个对象，不要在对象中写时间。每个对象必须包含 subject、scene、action、camera、"
+        "lighting、sound、continuity 七个字符串字段，分别填写主体、场景、连续动作、镜头、光影、声音和前后衔接。"
+        "每个字段必须直接填写基于关键帧观察到的真实内容；看不清或听不清时写“无可确认信息”，不得编造，不得使用模板占位内容。"
+    ) % (segment_count, segment_min_chars, segment_max_chars, segment_count)
     sysmsg = (
         "你是黄雀传媒资深短视频复刻编导。你擅长从连续关键帧中恢复镜头时间轴、动作节点与空间连续性，"
         "并写成视频生成模型可执行的中文提示词。"
-        "只输出提示词本身，不要任何多余内容。"
+        "严格只输出用户指定结构的 JSON 对象，不要任何多余内容。"
     )
     raw = _chat_multimodal(
-        sysmsg, usermsg, frames, temp=0.6,
-        max_tokens=1800, image_detail=None,
+        sysmsg, usermsg, frames, temp=0.1,
+        max_tokens=2400, image_detail=None,
     )
-    return _clean_reverse_prompt(raw)
+    segments = _validate_reverse_prompt_lengths(
+        _parse_reverse_segments(raw, segment_count)
+    )
+    return "\n".join(
+        timeline_range + " " + segment
+        for timeline_range, segment in zip(timeline_ranges, segments)
+    )
 
 
 def _clean_reverse_prompt(raw):
@@ -428,6 +618,24 @@ def _speech_chars(transcript_text):
     """量转写里的实际口播字数（剥掉 [0s-3s] 时间轴标记），过短≈无人声"""
     import re as _re
     return len(_re.sub(r"\[[^\]]*\]", "", transcript_text or "").strip())
+
+
+def _reverse_transcript_is_abnormal(transcript_text, duration):
+    """Reject implausibly dense or highly repetitive ASR before visual analysis."""
+    text = re.sub(r"\[[^\]]*\]", "", transcript_text or "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return False
+    try:
+        duration = max(1.0, float(duration or 0))
+    except (TypeError, ValueError):
+        duration = 1.0
+    if len(text) > max(120, int(duration * 12)):
+        return True
+    if len(text) < 80:
+        return False
+    shingles = [text[index:index + 8] for index in range(len(text) - 7)]
+    return bool(shingles) and len(set(shingles)) / float(len(shingles)) < 0.35
 
 
 def _format_transcript(segs):

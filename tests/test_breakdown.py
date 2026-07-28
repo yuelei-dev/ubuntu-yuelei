@@ -79,6 +79,20 @@ class BreakdownTests(unittest.TestCase):
         path.write_bytes(b"jpeg-test-data")
         return str(path)
 
+    def _detailed_reverse_objects(self, count=4):
+        result = []
+        for index in range(1, count + 1):
+            result.append({
+                "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
+                "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
+                "action": "人物迈步进入，抬臂转身，改变视线，最后减速收束",
+                "camera": "中景平视横向跟随，随后缓慢推进并在结尾拉远",
+                "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
+                "sound": "保留海浪环境声和舒缓背景音乐",
+                "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
+            })
+        return result
+
     def test_post_zhipu_uses_official_endpoint_key_json_and_timeout(self):
         captured = {}
         os.environ["REVERSE_ZHIPU_BASE"] = "https://open.bigmodel.cn/api/paas/v4/"
@@ -485,7 +499,9 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("跟随、推进、拉远、摇移或转场", src)
         self.assertIn("起始—发展—结束", src)
         self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
-        self.assertIn("必须按视频总时长写出连续时间轴", src)
+        self.assertIn("时间轴由程序根据真实视频时长生成", src)
+        self.assertIn("你不要输出、计算或修改任何时间", src)
+        self.assertIn("segments 必须恰好包含", src)
         self.assertIn("严格依据关键帧还原镜头出现顺序", src)
         self.assertIn("不要泛化成另一条“同风格原创”视频", src)
         self.assertIn("不新增人物、道具、镜头或无关情节", src)
@@ -544,7 +560,10 @@ class BreakdownTests(unittest.TestCase):
         ))
         thumb.close()
         calls = self._install_fake_env(
-            '```\n轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子\n```',
+            json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            ),
             transcript=None,
         )
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
@@ -565,13 +584,13 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["type"], "breakdown_reverse")
         self.assertEqual(result["source_platform"], "douyin")
-        self.assertIn("轻奢美容院场景", result["prompt"])
+        self.assertIn("白衣人物居中", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
         self.assertEqual(len(result["frame_thumbnails"]), 4)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
         self.assertIn("反推出一条可直接用于视频模型生成同款视频的中文执行提示词", calls["usermsg"])
-        self.assertIn("只输出提示词本身", calls["sysmsg"])
+        self.assertIn("严格只输出用户指定结构的 JSON 对象", calls["sysmsg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
     def test_breakdown_scenes_retries_once_when_parse_fails(self):
@@ -614,14 +633,202 @@ class BreakdownTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
             self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][4], {"max_tokens": 1800, "image_detail": None})
+        self.assertEqual(calls[0][3], 0.1)
+        self.assertEqual(calls[0][4], {"max_tokens": 2400, "image_detail": None})
+
+    def test_reverse_prompt_timeline_is_code_generated_and_gap_free(self):
+        calls = []
+
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((usermsg, temp, kwargs))
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "海边舞蹈", 11.434, "douyin", "", ["f1.jpg"]
+        )
+
+        lines = prompt.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[0].startswith("[00:00-00:02.858]"))
+        self.assertTrue(lines[-1].startswith("[00:08.575-00:11.434]"))
+        self.assertNotIn("00:11.434-00:11.434", prompt)
+        self.assertIn("不要输出、计算或修改任何时间", calls[0][0])
+        self.assertEqual(calls[0][1], 0.1)
+        self.assertEqual(calls[0][2], {"max_tokens": 2400, "image_detail": None})
+
+    def test_reverse_prompt_composes_structured_segment_fields(self):
+        structured = {
+            "segments": [
+                {
+                    "subject": "白衣人物位于画面左侧",
+                    "scene": "傍晚海滩与远处海平线",
+                    "action": "人物向右迈步并抬起双臂",
+                    "camera": "中景横向跟随",
+                    "lighting": "夕阳逆光形成暖色轮廓",
+                    "sound": "舒缓背景音乐",
+                    "continuity": "承接入场动作并转向下一段旋转",
+                }
+            ]
+        }
+        segments = self.breakdown._parse_reverse_segments(
+            json.dumps(structured, ensure_ascii=False), 1
+        )
+        self.assertEqual(len(segments), 1)
+        for label in ("主体：", "场景：", "动作：", "镜头：", "光影：", "声音：", "衔接："):
+            self.assertIn(label, segments[0])
+
+    def test_reverse_prompt_requests_structured_fields_and_larger_budget(self):
+        calls = []
+
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((usermsg, kwargs))
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        self.breakdown._reverse_prompt_from_frames(
+            "标题", 18, "douyin", "", ["f1.jpg"]
+        )
+        self.assertEqual(calls[0][1]["max_tokens"], 2400)
+        self.assertIn("每段目标 125-180 个中文字符", calls[0][0])
+        for field in ("subject", "scene", "action", "camera", "lighting", "sound", "continuity"):
+            self.assertIn(field, calls[0][0])
+
+    def test_reverse_prompt_scales_segment_length_for_short_video(self):
+        calls = []
+
+        def fake_chat_multimodal(sysmsg, usermsg, frames, **kwargs):
+            calls.append(usermsg)
+            segment = self._detailed_reverse_objects(1)[0]
+            segment = {key: value * 4 for key, value in segment.items()}
+            return json.dumps({"segments": [segment]}, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        self.breakdown._reverse_prompt_from_frames(
+            "短视频", 2.5, "douyin", "", ["f1.jpg"]
+        )
+        self.assertIn("每段目标 500-720 个中文字符", calls[0])
+
+    def test_reverse_transcript_filters_implausible_density_and_repetition(self):
+        self.assertTrue(
+            self.breakdown._reverse_transcript_is_abnormal("内容" * 100, 11.434)
+        )
+        self.assertTrue(
+            self.breakdown._reverse_transcript_is_abnormal("重复句子" * 30, 60)
+        )
+        self.assertFalse(
+            self.breakdown._reverse_transcript_is_abnormal(
+                "人物在海边缓慢走动，随后转身看向镜头。", 12
+            )
+        )
+
+    def test_reverse_prompt_rejects_wrong_segment_count_without_retry(self):
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            return '{"segments":["只有一段"]}'
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        with self.assertRaisesRegex(ValueError, "段数错误"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 11.434, "douyin", "", ["f1.jpg"]
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_reverse_prompt_recovers_plain_text_without_second_model_call(self):
+        plain = "\n".join(
+            self.breakdown._compose_reverse_segment(item)
+            for item in self._detailed_reverse_objects()
+        )
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            return plain
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "标题", 11.434, "douyin", "", ["f1.jpg"]
+        )
+        self.assertEqual(len(prompt.splitlines()), 4)
+        self.assertTrue(prompt.splitlines()[-1].startswith("[00:08.575-00:11.434]"))
+        self.assertEqual(len(calls), 1)
+
+    def test_reverse_prompt_rejects_placeholder_segments(self):
+        raw = json.dumps({
+            "segments": [
+                "第一段画面描述",
+                "第二段画面描述",
+                "第三段画面描述",
+                "第四段画面描述",
+            ]
+        }, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "内容不完整"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_reverse_prompt_rejects_long_structured_json_with_wrong_count(self):
+        one_long_segment = self._detailed_reverse_objects(1)[0]
+        one_long_segment = {
+            key: value * 4 for key, value in one_long_segment.items()
+        }
+        raw = json.dumps({"segments": [one_long_segment]}, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "需要4段，实际1段"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_reverse_prompt_rejects_missing_structured_field(self):
+        segments = self._detailed_reverse_objects()
+        segments[0].pop("camera")
+        raw = json.dumps({"segments": segments}, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "第1段缺少字段：camera"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_reverse_prompt_rejects_short_structured_output(self):
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            short = {
+                key: "画面细节" for key, _label in
+                self.breakdown._REVERSE_SEGMENT_FIELDS
+            }
+            return json.dumps({"segments": [short] * 4}, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        with self.assertRaisesRegex(ValueError, "第1段过于简略"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 11.434, "douyin", "", ["f1.jpg"]
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_duration_normalization_preserves_milliseconds(self):
+        self.assertEqual(
+            self.breakdown._normalize_duration_seconds(11434),
+            11.434,
+        )
+        self.assertEqual(
+            self.breakdown._normalize_duration_seconds(18.32),
+            18.32,
+        )
 
     def test_clean_reverse_prompt_does_not_truncate_long_output(self):
         raw = "画" * 850
         self.assertEqual(self.breakdown._clean_reverse_prompt(raw), raw)
 
     def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
-        calls = self._install_fake_env("反推结果", transcript=[])
+        calls = self._install_fake_env(
+            json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            ),
+            transcript=[],
+        )
 
         def fake_extract(path, count, duration, scale_width=512, min_frames=None):
             calls["extract_args"] = (count, scale_width, min_frames)
@@ -637,7 +844,10 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._pair_reverse_frames = fake_pair
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             calls["frames"] = list(frames)
-            return "反推结果"
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
         self.breakdown._chat_multimodal = fake_chat
         try:
             result = self.breakdown._do_breakdown(
@@ -1037,7 +1247,7 @@ class BreakdownTests(unittest.TestCase):
                     self.breakdown._validate_scene_breakdown(result)
 
     def test_do_breakdown_normalizes_millisecond_duration(self):
-        """tikhub 返回毫秒时长（18320），结果必须统一成秒（18）"""
+        """tikhub 返回毫秒时长（18320），结果必须统一成秒且保留小数精度。"""
         self._install_fake_env(
             '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎"}],"analysis":"ok"}'
         )
@@ -1053,7 +1263,7 @@ class BreakdownTests(unittest.TestCase):
             "https://example.test/post/ms",
         )
 
-        self.assertEqual(result["duration"], 18)
+        self.assertEqual(result["duration"], 18.32)
 
     def test_run_job_settles_batch_breakdown_refund(self):
         """run_job 必须对批量拆解结果结算退点（结算本体在 points.settle_breakdown_batch）"""
