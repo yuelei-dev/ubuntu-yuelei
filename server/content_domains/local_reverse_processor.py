@@ -20,6 +20,10 @@ _VIDEO_SECTION_MIN_CHARS = {
     "subject": 50, "scene": 50, "composition": 50, "action": 120,
     "lighting": 40, "style": 40, "parameters": 40,
 }
+_VIDEO_SECTION_MIN_ITEMS = {
+    "subject": 5, "scene": 5, "composition": 5, "action": 8,
+    "lighting": 4, "style": 4, "parameters": 6,
+}
 _VIDEO_TOTAL_MIN_CHARS = 500
 
 def _upload_path(payload):
@@ -113,6 +117,8 @@ def _validate_video_result(data, sections):
         value = sections.get(key, "")
         if _contains_placeholder(value) or len(value) < minimum:
             raise ValueError("反推结果%s过于简略，请重试" % dict(_SECTION_ORDER)[key])
+        if len(_detail_items(value)) < _VIDEO_SECTION_MIN_ITEMS[key]:
+            raise ValueError("反推结果%s细节不足，请重试" % dict(_SECTION_ORDER)[key])
     if sum(len(sections[key]) for key in _VIDEO_SECTION_MIN_CHARS) < _VIDEO_TOTAL_MIN_CHARS:
         raise ValueError("反推结果未达到详细度要求，请重试")
     return core_subject, evidence, timeline

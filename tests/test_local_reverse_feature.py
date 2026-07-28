@@ -186,6 +186,16 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
                 self.processor._structured_prompt(
                     "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
 
+    def test_video_result_rejects_long_but_undetailed_content(self):
+        sections = self._valid_video_data()
+        sections["subject"] = "画面始终展示同一个可见主体" * 8
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "主体细节不足"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
     def test_detail_items_accepts_chinese_sentence_punctuation(self):
         evidence = "开场展示闭合耳机盒。中段手指取出耳机！结尾人物完成佩戴？"
         timeline = "盒体静置。盒盖打开。手指靠近。取出耳机。移向耳部。完成佩戴。"
@@ -194,14 +204,18 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
 
     def test_video_result_requires_five_hundred_detail_chars(self):
         sections = self._valid_video_data()
+        def detailed_value(prefix, item_count, minimum):
+            value = "；".join("%s%d" % (prefix, index)
+                             for index in range(item_count))
+            return value + "甲" * max(0, minimum - len(value))
         sections.update({
-            "subject": "主" * 50,
-            "scene": "景" * 50,
-            "composition": "构" * 50,
-            "action": "动" * 120,
-            "lighting": "光" * 40,
-            "style": "风" * 40,
-            "parameters": "参" * 40,
+            "subject": detailed_value("主体特征", 5, 50),
+            "scene": detailed_value("场景关系", 5, 50),
+            "composition": detailed_value("镜头构图", 5, 50),
+            "action": detailed_value("连续动作节点", 8, 120),
+            "lighting": detailed_value("光影变化", 4, 40),
+            "style": detailed_value("风格质感", 4, 40),
+            "parameters": detailed_value("画幅设置", 6, 40),
         })
         response = __import__("json").dumps(sections, ensure_ascii=False)
         breakdown = importlib.import_module("content_domains.breakdown")
@@ -215,6 +229,12 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertTrue(self.processor._transcript_is_abnormal("重复句子" * 30, 60))
         self.assertFalse(self.processor._transcript_is_abnormal(
             "人物拿起耳机盒并完成佩戴。", 15))
+
+    def test_video_detail_count_contract_matches_prompt(self):
+        self.assertEqual(self.processor._VIDEO_SECTION_MIN_ITEMS, {
+            "subject": 5, "scene": 5, "composition": 5, "action": 8,
+            "lighting": 4, "style": 4, "parameters": 6,
+        })
 
     def test_reverse_overview_uses_all_eight_frames_in_time_order(self):
         frames = ["frame_%d.jpg" % i for i in range(1, 9)]
