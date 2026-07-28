@@ -116,6 +116,7 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertIn("产品必须是 core_subject 和 subject 的第一主体", prompt)
         self.assertIn('"subject_evidence" 写至少 3 个不同时间点的可见证据', prompt)
         self.assertIn('"timeline" 按总览图顺序写至少 6 个连续节点', prompt)
+        self.assertIn("时间值只保留 1 位小数（0.1 秒精度）", prompt)
         self.assertIn("七个字段合计写 500-800 个中文字符", prompt)
         self.assertIn("subject 写 70-100 字，至少 5 项可见细节", prompt)
         self.assertIn("scene 写 70-100 字，至少 5 项场景细节", prompt)
@@ -229,6 +230,11 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertTrue(self.processor._transcript_is_abnormal("重复句子" * 30, 60))
         self.assertFalse(self.processor._transcript_is_abnormal(
             "人物拿起耳机盒并完成佩戴。", 15))
+
+    def test_local_reverse_duration_uses_tenth_second_precision(self):
+        self.assertEqual(self.processor._duration_tenth(15.093), 15.1)
+        self.assertEqual(self.processor._duration_tenth("2.86"), 2.9)
+        self.assertEqual(self.processor._duration_tenth(None), 0.0)
 
     def test_video_detail_count_contract_matches_prompt(self):
         self.assertEqual(self.processor._VIDEO_SECTION_MIN_ITEMS, {

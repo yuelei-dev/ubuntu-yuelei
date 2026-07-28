@@ -92,6 +92,12 @@ def _contains_placeholder(value):
     return any(placeholder.replace(" ", "") in normalized
                for placeholder in _PLACEHOLDER_VALUES)
 
+def _duration_tenth(value):
+    try:
+        return round(max(0.0, float(value or 0)), 1)
+    except (TypeError, ValueError):
+        return 0.0
+
 def _transcript_is_abnormal(transcript_text, duration):
     """Ignore implausibly dense/repetitive ASR so it cannot override the frames."""
     import re
@@ -126,7 +132,8 @@ def _validate_video_result(data, sections):
 def _structured_prompt(media_type, title, duration, script_text, frames):
     from .breakdown import _chat_multimodal, _parse_breakdown_json
     context = "素材：%s\n类型：%s\n时长：%ss" % (
-        title, "本地图片" if media_type == "image" else "本地视频", duration or 0)
+        title, "本地图片" if media_type == "image" else "本地视频",
+        _duration_tenth(duration))
     if script_text:
         context += (
             "\n音频语义参考（低权重，仅用于判断主题；不得复述原句或输出口播稿）：\n"
@@ -143,6 +150,7 @@ def _structured_prompt(media_type, title, duration, script_text, frames):
 人物仅作为展示者或使用者，不得用后段出现的办公、咖啡馆等生活场景替代贯穿视频的产品主线。
 JSON 还必须包含三个非空内部字段："core_subject" 写唯一核心主体，"subject_evidence" 写至少 3 个不同时间点的可见证据，
 "timeline" 按总览图顺序写至少 6 个连续节点。subject 必须同时覆盖核心产品和关键人物，action 必须与 timeline 一致。
+timeline 如需标注时间，时间值只保留 1 位小数（0.1 秒精度），不得输出百分之一秒或千分之一秒。
 subject_evidence 和 timeline 可以输出 JSON 字符串数组，其余字段必须是字符串。所有值必须来自实际画面，禁止复制字段名或字段说明。
 七个字段合计写 500-800 个中文字符，每个字段都使用具体、可执行的视觉短语，不得用“氛围感强”“动作自然”“画面精美”等笼统表述：
 - subject 写 70-100 字，至少 5 项可见细节，包括人物/物体的外观、身份、服装、材质、状态和显著特征；
@@ -236,7 +244,8 @@ def gen_local_reverse(payload):
             "type": "breakdown_reverse", "source_type": media_type,
             "source_url": "", "source_title": title,
             "source_platform": "local_" + media_type,
-            "duration": duration, "sections": sections, "prompt": prompt,
+            "duration": _duration_tenth(duration),
+            "sections": sections, "prompt": prompt,
             "frame_count": len(frames), "frame_thumbnails": thumbs,
             "asr_failed": asr_failed,
         }
