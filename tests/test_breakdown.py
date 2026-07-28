@@ -80,13 +80,32 @@ class BreakdownTests(unittest.TestCase):
         return str(path)
 
     def _detailed_reverse_objects(self, count=4):
+        variants = [
+            (
+                "迈步进入画面，抬起右臂转身，视线转向镜头，最后侧身停住",
+                "中景平视横向跟随，人物转身时缓慢推进，动作结束后停稳",
+            ),
+            (
+                "双手从腰侧抬到肩部，向左跨步并连续旋转，最后背向镜头",
+                "全景低机位固定起拍，旋转阶段顺时针环绕，结尾轻微拉远",
+            ),
+            (
+                "低头整理衣袖后快速前行，抬眼看向远处，随后张开双臂减速",
+                "近景捕捉手部动作，再切中景侧向跟拍，并向海平线摇移",
+            ),
+            (
+                "沿浪线后退两步，身体前倾触碰水面，起身回望并挥手收束",
+                "俯拍交代浪花位置，下降到平视跟随，挥手时缓慢向后拉远",
+            ),
+        ]
         result = []
         for index in range(1, count + 1):
+            action, camera = variants[(index - 1) % len(variants)]
             result.append({
                 "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
                 "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
-                "action": "人物迈步进入，抬臂转身，改变视线，最后减速收束",
-                "camera": "中景平视横向跟随，随后缓慢推进并在结尾拉远",
+                "action": action,
+                "camera": camera,
                 "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
                 "sound": "保留海浪环境声和舒缓背景音乐",
                 "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
@@ -653,9 +672,9 @@ class BreakdownTests(unittest.TestCase):
 
         lines = prompt.splitlines()
         self.assertEqual(len(lines), 4)
-        self.assertTrue(lines[0].startswith("[00:00-00:02.858]"))
-        self.assertTrue(lines[-1].startswith("[00:08.575-00:11.434]"))
-        self.assertNotIn("00:11.434-00:11.434", prompt)
+        self.assertTrue(lines[0].startswith("[00:00.0-00:02.9]"))
+        self.assertTrue(lines[-1].startswith("[00:08.6-00:11.4]"))
+        self.assertNotIn("00:11.4-00:11.4", prompt)
         self.assertIn("不要输出、计算或修改任何时间", calls[0][0])
         self.assertEqual(calls[0][1], 0.1)
         self.assertEqual(calls[0][2], {"max_tokens": 2400, "image_detail": None})
@@ -758,7 +777,7 @@ class BreakdownTests(unittest.TestCase):
             "标题", 11.434, "douyin", "", ["f1.jpg"]
         )
         self.assertEqual(len(prompt.splitlines()), 4)
-        self.assertTrue(prompt.splitlines()[-1].startswith("[00:08.575-00:11.434]"))
+        self.assertTrue(prompt.splitlines()[-1].startswith("[00:08.6-00:11.4]"))
         self.assertEqual(len(calls), 1)
 
     def test_reverse_prompt_rejects_placeholder_segments(self):
@@ -806,6 +825,37 @@ class BreakdownTests(unittest.TestCase):
                 "标题", 11.434, "douyin", "", ["f1.jpg"]
             )
         self.assertEqual(len(calls), 1)
+
+    def test_reverse_prompt_rejects_identical_detailed_segments(self):
+        segment = self.breakdown._compose_reverse_segment(
+            self._detailed_reverse_objects(1)[0]
+        )
+        with self.assertRaisesRegex(ValueError, "第2段与第1段内容重复"):
+            self.breakdown._validate_reverse_prompt_lengths([segment] * 4)
+
+    def test_reverse_prompt_rejects_near_duplicate_detailed_segments(self):
+        objects = self._detailed_reverse_objects()
+        objects[1] = dict(objects[0])
+        objects[1]["action"] = objects[1]["action"].replace(
+            "迈步进入画面", "缓慢进入画面"
+        )
+        segments = [
+            self.breakdown._compose_reverse_segment(item)
+            for item in objects
+        ]
+        with self.assertRaisesRegex(ValueError, "第2段与第1段内容重复"):
+            self.breakdown._validate_reverse_prompt_lengths(segments)
+
+    def test_reverse_timeline_uses_tenth_second_precision(self):
+        self.assertEqual(
+            self.breakdown._fixed_reverse_ranges(11.434),
+            [
+                "[00:00.0-00:02.9]",
+                "[00:02.9-00:05.7]",
+                "[00:05.7-00:08.6]",
+                "[00:08.6-00:11.4]",
+            ],
+        )
 
     def test_duration_normalization_preserves_milliseconds(self):
         self.assertEqual(
