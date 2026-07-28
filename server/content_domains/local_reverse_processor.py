@@ -17,9 +17,10 @@ _PLACEHOLDER_VALUES = {
     "光影色彩", "视觉风格", "生成参数", "画幅、清晰度",
 }
 _VIDEO_SECTION_MIN_CHARS = {
-    "subject": 24, "scene": 24, "composition": 24, "action": 48,
-    "lighting": 18, "style": 18, "parameters": 18,
+    "subject": 50, "scene": 50, "composition": 50, "action": 120,
+    "lighting": 40, "style": 40, "parameters": 40,
 }
+_VIDEO_TOTAL_MIN_CHARS = 500
 
 def _upload_path(payload):
     root = (pathlib.Path(OUT_DIR) / "reverse_uploads").resolve()
@@ -82,6 +83,26 @@ def _detail_items(value):
     return [item.strip(" -—0123456789.、：:") for item in text.split("|")
             if item.strip(" -—0123456789.、：:")]
 
+def _contains_placeholder(value):
+    normalized = _model_text(value).replace(" ", "")
+    return any(placeholder.replace(" ", "") in normalized
+               for placeholder in _PLACEHOLDER_VALUES)
+
+def _transcript_is_abnormal(transcript_text, duration):
+    """Ignore implausibly dense/repetitive ASR so it cannot override the frames."""
+    import re
+    text = re.sub(r"\[[^\]]*\]", "", transcript_text or "")
+    text = re.sub(r"\s+", "", text)
+    if not text:
+        return False
+    duration = max(1.0, float(duration or 0))
+    if len(text) > max(120, int(duration * 12)):
+        return True
+    if len(text) < 80:
+        return False
+    shingles = [text[index:index + 8] for index in range(len(text) - 7)]
+    return bool(shingles) and len(set(shingles)) / float(len(shingles)) < 0.35
+
 def _validate_video_result(data, sections):
     core_subject = _model_text(data.get("core_subject"))
     evidence = _model_text(data.get("subject_evidence"))
@@ -90,9 +111,9 @@ def _validate_video_result(data, sections):
         raise ValueError("反推结果缺少核心主体判断，请重试")
     for key, minimum in _VIDEO_SECTION_MIN_CHARS.items():
         value = sections.get(key, "")
-        if value in _PLACEHOLDER_VALUES or len(value) < minimum:
+        if _contains_placeholder(value) or len(value) < minimum:
             raise ValueError("反推结果%s过于简略，请重试" % dict(_SECTION_ORDER)[key])
-    if sum(len(sections[key]) for key in _VIDEO_SECTION_MIN_CHARS) < 260:
+    if sum(len(sections[key]) for key in _VIDEO_SECTION_MIN_CHARS) < _VIDEO_TOTAL_MIN_CHARS:
         raise ValueError("反推结果未达到详细度要求，请重试")
     return core_subject, evidence, timeline
 
@@ -141,8 +162,8 @@ subject_evidence 和 timeline 可以输出 JSON 字符串数组，其余字段�
 只输出 JSON，不要 Markdown，不要解释。""" % required_keys + visual_rules
     raw = _chat_multimodal(
         "你是黄雀传媒提示词反推专家。忠实识别当前图片中的可见信息；禁止复制字段说明，所有字段必须填写具体识别结果。",
-        usermsg, frames, temp=0.25 if media_type == "video" else 0.45,
-        max_tokens=1800, image_detail="high")
+        usermsg, frames, temp=0.1 if media_type == "video" else 0.45,
+        max_tokens=2400 if media_type == "video" else 1800, image_detail="high")
     data = _parse_breakdown_json(raw)
     sections = {}
     for key, label in _SECTION_ORDER:
@@ -196,6 +217,8 @@ def gen_local_reverse(payload):
                 if isinstance(transcript, dict): transcript = transcript.get("text") or ""
                 script_text = _format_transcript(transcript)
                 if _speech_chars(script_text) < 8:
+                    script_text = ""
+                elif _transcript_is_abnormal(script_text, duration):
                     script_text = ""
             except Exception:
                 asr_failed = True

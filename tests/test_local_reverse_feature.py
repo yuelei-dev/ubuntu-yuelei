@@ -61,13 +61,13 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
             "subject_evidence": ["开场展示闭合耳机盒", "中段手指取出耳机", "结尾人物完成佩戴"],
             "timeline": ["耳机盒静置", "盒盖打开", "手指靠近耳机", "取出单只耳机",
                          "耳机移向人物耳部", "人物完成佩戴并进入使用场景"],
-            "subject": "透明磨砂保护壳包裹白色无线耳机盒，白色入耳式耳机为核心产品，年轻人物作为操作与佩戴演示者。",
-            "scene": "开场为冷灰色产品展示台，中段保持干净摄影背景，后段切入人物日常使用环境，桌面与背景陈设层次清楚。",
-            "composition": "先以居中特写突出闭合盒体，再切正面近景展示开盖结构，随后使用手部微距，最终转为人物耳部特写。",
-            "action": "盒体先保持闭合静置，随后盒盖向上打开；手指从画面上方进入并捏住耳机，将其平稳取出，再移向人物耳部，人物侧头完成佩戴，镜头跟随产品从盒内过渡到实际使用状态。",
-            "lighting": "冷灰背景使用顶部大面积柔光，产品边缘形成清晰轮廓高光；人物段保持柔和侧光，白色材质不过曝。",
-            "style": "写实商业产品广告风格，画面克制简洁，金属与透明材质清晰，剪辑节奏由静态展示逐步转入生活化使用。",
-            "parameters": "竖屏九比十六，四K清晰度，每秒三十帧，中长焦微距，浅景深，稳定推近与跟随运镜，保持产品外观一致。",
+            "subject": "透明磨砂保护壳包裹白色无线耳机盒，白色入耳式耳机为核心产品，年轻人物作为操作与佩戴演示者；盒体边缘圆润，开盖结构清楚，耳机表面具有细腻高光，人物手部和耳部始终服务于产品展示。",
+            "scene": "开场为冷灰色产品展示台，中段保持干净摄影背景，后段切入人物日常使用环境；桌面道具位于前景，耳机盒稳定处于中景视觉中心，背景陈设轻微虚化，空间层次随使用场景转换但不喧宾夺主。",
+            "composition": "先以居中特写突出闭合盒体，再切正面近景展示开盖结构，随后使用手部微距，最终转为人物耳部特写；镜头焦点跟随耳机移动，产品在关键画面保持中心或三分线位置，转场维持方向和尺度连续。",
+            "action": "盒体先保持闭合静置，镜头缓慢推近；盒盖随后向上打开，手指从画面上方进入并靠近耳机，拇指与食指捏住单只耳机并平稳取出；镜头跟随耳机离开盒体、横向移向人物耳部，人物略微侧头并抬手承接，完成佩戴后放下手臂，视线转向前方，最后以耳部近景和稳定使用状态收束。",
+            "lighting": "冷灰背景使用顶部大面积柔光，产品边缘形成清晰轮廓高光，透明外壳保留通透反射；人物段改用柔和侧光塑造面部层次，白色材质控制曝光，背景亮度低于主体。",
+            "style": "写实商业产品广告风格，画面克制简洁，金属、塑料与透明材质清晰，主色调保持冷白和浅灰；剪辑节奏由静态展示逐步转入生活化使用，整体呈现精致、可信且功能导向的成片观感。",
+            "parameters": "竖屏九比十六，四K清晰度，每秒三十帧，中长焦微距与浅景深，快门保持动作清楚；使用稳定推近、横向跟随和焦点转移，控制时长约十五秒，保持耳机盒、耳机外观及人物手部方向前后一致。",
         }
 
     def test_local_image_result_is_structured_and_upload_is_deleted(self):
@@ -124,8 +124,8 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         self.assertIn("lighting 写 55-80 字，至少 4 项光影细节", prompt)
         self.assertIn("style 写 55-80 字，至少 4 项风格细节", prompt)
         self.assertIn("parameters 写 55-80 字，至少 6 项可执行参数", prompt)
-        self.assertEqual(captured["kwargs"]["max_tokens"], 1800)
-        self.assertEqual(captured["kwargs"]["temp"], 0.25)
+        self.assertEqual(captured["kwargs"]["max_tokens"], 2400)
+        self.assertEqual(captured["kwargs"]["temp"], 0.1)
         self.assertNotIn("口播转写：", prompt)
         self.assertNotIn('"scene":"场景细节"', prompt)
         self.assertIn("不要输出示例、字段说明或占位词", prompt)
@@ -166,6 +166,16 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
                 self.processor._structured_prompt(
                     "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
 
+    def test_video_result_rejects_placeholder_embedded_in_other_text(self):
+        sections = self._valid_video_data()
+        sections["scene"] += "；场景细节"
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "场景过于简略"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
     def test_video_result_rejects_short_non_placeholder_content(self):
         sections = self._valid_video_data()
         sections["composition"] = "产品居中，固定镜头"
@@ -181,6 +191,30 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
         timeline = "盒体静置。盒盖打开。手指靠近。取出耳机。移向耳部。完成佩戴。"
         self.assertEqual(len(self.processor._detail_items(evidence)), 3)
         self.assertEqual(len(self.processor._detail_items(timeline)), 6)
+
+    def test_video_result_requires_five_hundred_detail_chars(self):
+        sections = self._valid_video_data()
+        sections.update({
+            "subject": "主" * 50,
+            "scene": "景" * 50,
+            "composition": "构" * 50,
+            "action": "动" * 120,
+            "lighting": "光" * 40,
+            "style": "风" * 40,
+            "parameters": "参" * 40,
+        })
+        response = __import__("json").dumps(sections, ensure_ascii=False)
+        breakdown = importlib.import_module("content_domains.breakdown")
+        with mock.patch.object(breakdown, "_chat_multimodal", return_value=response):
+            with self.assertRaisesRegex(ValueError, "未达到详细度要求"):
+                self.processor._structured_prompt(
+                    "video", "demo.mp4", 15, "", ["overview.jpg", "pair.jpg"])
+
+    def test_abnormal_transcript_filter(self):
+        self.assertTrue(self.processor._transcript_is_abnormal("内容" * 100, 15))
+        self.assertTrue(self.processor._transcript_is_abnormal("重复句子" * 30, 60))
+        self.assertFalse(self.processor._transcript_is_abnormal(
+            "人物拿起耳机盒并完成佩戴。", 15))
 
     def test_reverse_overview_uses_all_eight_frames_in_time_order(self):
         frames = ["frame_%d.jpg" % i for i in range(1, 9)]
@@ -255,7 +289,7 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
     def test_structured_sections_and_actions_are_present(self):
         for label in ("主体", "场景", "构图", "动作", "光影", "风格", "参数"):
             self.assertIn(label, self.processor)
-        self.assertIn("max_tokens=1800", self.processor)
+        self.assertIn("max_tokens=2400", self.processor)
         self.assertIn('id="bdReverseCopyBtn"', self.ui)
         self.assertIn('id="bdRemakeBtn"', self.ui)
         self.assertIn("正在读取音频语义（仅辅助）", self.ui)
