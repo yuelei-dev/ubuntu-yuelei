@@ -485,7 +485,9 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("跟随、推进、拉远、摇移或转场", src)
         self.assertIn("起始—发展—结束", src)
         self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
-        self.assertIn("必须按视频总时长写出连续时间轴", src)
+        self.assertIn("时间轴由程序根据真实视频时长生成", src)
+        self.assertIn("你不要输出、计算或修改任何时间", src)
+        self.assertIn("segments 必须恰好包含", src)
         self.assertIn("严格依据关键帧还原镜头出现顺序", src)
         self.assertIn("不要泛化成另一条“同风格原创”视频", src)
         self.assertIn("不新增人物、道具、镜头或无关情节", src)
@@ -544,7 +546,10 @@ class BreakdownTests(unittest.TestCase):
         ))
         thumb.close()
         calls = self._install_fake_env(
-            '```\n轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子\n```',
+            '{"segments":["轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子",'
+            '"主角转身展示精华瓶身，镜头平稳跟随，背景灯带形成层次并保持人物朝向连续",'
+            '"镜头切至手部与产品近景，主角完成开盖和涂抹动作，柔光强调瓶身与肌肤质感",'
+            '"镜头缓慢拉远，主角面向镜头完成收束动作，场景和道具位置保持一致"]}',
             transcript=None,
         )
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
@@ -614,14 +619,107 @@ class BreakdownTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
             self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][3], 0.1)
         self.assertEqual(calls[0][4], {"max_tokens": 1800, "image_detail": None})
+
+    def test_reverse_prompt_timeline_is_code_generated_and_gap_free(self):
+        calls = []
+
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((usermsg, temp, kwargs))
+            return json.dumps({
+                "segments": [
+                    "第一段依据关键帧描述人物从画面左侧进入海滩，镜头保持中景跟随并交代夕阳方向与环境层次。",
+                    "第二段人物面向海面完成抬手和转身动作，裙摆随风展开，镜头从中景缓慢推进到近景。",
+                    "第三段人物沿岸线连续旋转并改变视线方向，摄影机横向跟随，保持海平线和人物位置稳定。",
+                    "第四段人物减慢动作并在画面中央收束姿态，镜头逐渐拉远，以夕阳、海浪和人物背影结束。",
+                ]
+            }, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "海边舞蹈", 11.434, "douyin", "", ["f1.jpg"]
+        )
+
+        lines = prompt.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[0].startswith("[00:00-00:02.858]"))
+        self.assertTrue(lines[-1].startswith("[00:08.575-00:11.434]"))
+        self.assertNotIn("00:11.434-00:11.434", prompt)
+        self.assertIn("不要输出、计算或修改任何时间", calls[0][0])
+        self.assertEqual(calls[0][1], 0.1)
+        self.assertEqual(calls[0][2], {"max_tokens": 1800, "image_detail": None})
+
+    def test_reverse_prompt_rejects_wrong_segment_count_without_retry(self):
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            return '{"segments":["只有一段"]}'
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        with self.assertRaisesRegex(ValueError, "解析失败"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 11.434, "douyin", "", ["f1.jpg"]
+            )
+        self.assertEqual(len(calls), 1)
+
+    def test_reverse_prompt_recovers_plain_text_without_second_model_call(self):
+        plain = (
+            "人物从海滩左侧进入，镜头以中景跟随并交代夕阳和海浪。"
+            "人物抬手转身，裙摆随风展开，摄影机缓慢向前推进。"
+            "人物沿岸线旋转并改变视线，镜头横向移动保持主体居中。"
+            "人物逐渐减速并完成收束姿态，镜头拉远展示完整环境。"
+        )
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            return plain
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "标题", 11.434, "douyin", "", ["f1.jpg"]
+        )
+        self.assertEqual(len(prompt.splitlines()), 4)
+        self.assertTrue(prompt.splitlines()[-1].startswith("[00:08.575-00:11.434]"))
+        self.assertEqual(len(calls), 1)
+
+    def test_reverse_prompt_rejects_placeholder_segments(self):
+        raw = json.dumps({
+            "segments": [
+                "第一段画面描述",
+                "第二段画面描述",
+                "第三段画面描述",
+                "第四段画面描述",
+            ]
+        }, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "内容不完整"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_duration_normalization_preserves_milliseconds(self):
+        self.assertEqual(
+            self.breakdown._normalize_duration_seconds(11434),
+            11.434,
+        )
+        self.assertEqual(
+            self.breakdown._normalize_duration_seconds(18.32),
+            18.32,
+        )
 
     def test_clean_reverse_prompt_does_not_truncate_long_output(self):
         raw = "画" * 850
         self.assertEqual(self.breakdown._clean_reverse_prompt(raw), raw)
 
     def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
-        calls = self._install_fake_env("反推结果", transcript=[])
+        calls = self._install_fake_env(
+            '{"segments":['
+            '"第一段依据关键帧描述人物进入画面并保持稳定走位，镜头以中景跟随并交代场景空间关系",'
+            '"第二段人物完成转身抬手和视线变化，镜头缓慢推进并保持背景道具位置连续一致",'
+            '"第三段人物继续完成核心动作并与道具互动，摄影机横向跟随且维持相同光线方向",'
+            '"第四段人物逐渐减速并在画面中央完成收束，镜头缓慢拉远并保留环境氛围"]}',
+            transcript=[],
+        )
 
         def fake_extract(path, count, duration, scale_width=512, min_frames=None):
             calls["extract_args"] = (count, scale_width, min_frames)
@@ -637,7 +735,13 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._pair_reverse_frames = fake_pair
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             calls["frames"] = list(frames)
-            return "反推结果"
+            return (
+                '{"segments":['
+                '"第一段依据关键帧描述人物进入画面并保持稳定走位，镜头以中景跟随并交代场景空间关系",'
+                '"第二段人物完成转身抬手和视线变化，镜头缓慢推进并保持背景道具位置连续一致",'
+                '"第三段人物继续完成核心动作并与道具互动，摄影机横向跟随且维持相同光线方向",'
+                '"第四段人物逐渐减速并在画面中央完成收束，镜头缓慢拉远并保留环境氛围"]}'
+            )
         self.breakdown._chat_multimodal = fake_chat
         try:
             result = self.breakdown._do_breakdown(
@@ -1037,7 +1141,7 @@ class BreakdownTests(unittest.TestCase):
                     self.breakdown._validate_scene_breakdown(result)
 
     def test_do_breakdown_normalizes_millisecond_duration(self):
-        """tikhub 返回毫秒时长（18320），结果必须统一成秒（18）"""
+        """tikhub 返回毫秒时长（18320），结果必须统一成秒且保留小数精度。"""
         self._install_fake_env(
             '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎"}],"analysis":"ok"}'
         )
@@ -1053,7 +1157,7 @@ class BreakdownTests(unittest.TestCase):
             "https://example.test/post/ms",
         )
 
-        self.assertEqual(result["duration"], 18)
+        self.assertEqual(result["duration"], 18.32)
 
     def test_run_job_settles_batch_breakdown_refund(self):
         """run_job 必须对批量拆解结果结算退点（结算本体在 points.settle_breakdown_batch）"""
