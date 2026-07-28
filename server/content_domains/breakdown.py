@@ -310,13 +310,23 @@ def _fixed_reverse_ranges(duration, max_segments=4):
 
 def _parse_reverse_segments(raw, expected_count):
     values = None
+    parsed_json = False
     try:
         result = _parse_breakdown_json(raw)
+        parsed_json = True
         values = result.get("segments") if isinstance(result, dict) else None
     except ValueError:
         pass
-    if not isinstance(values, list):
-        values = []
+    if parsed_json and not isinstance(values, list):
+        raise ValueError("反推结果缺少 segments 数组，请重试")
+    if parsed_json and len(values) != expected_count:
+        raise ValueError(
+            "反推结果段数错误：需要%d段，实际%d段，请重试"
+            % (expected_count, len(values))
+        )
+    if not parsed_json:
+        return _split_reverse_text(raw, expected_count)
+
     segments = []
     placeholders = {
         "第一段画面描述", "第二段画面描述",
@@ -324,6 +334,15 @@ def _parse_reverse_segments(raw, expected_count):
     }
     for index, value in enumerate(values, 1):
         if isinstance(value, dict):
+            missing = [
+                key for key, _label in _REVERSE_SEGMENT_FIELDS
+                if not str(value.get(key) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "反推结果第%d段缺少字段：%s，请重试"
+                    % (index, ", ".join(missing))
+                )
             value = _compose_reverse_segment(value)
         text = " ".join(str(value or "").replace("\r", "").split()).strip()
         if not text:
@@ -331,23 +350,7 @@ def _parse_reverse_segments(raw, expected_count):
         if text in placeholders:
             raise ValueError("反推结果第%d段内容不完整，请重试" % index)
         segments.append(text)
-    if len(segments) == expected_count:
-        return segments
-
-    source_text = "\n".join(segments).strip()
-    if not source_text:
-        source_text = _strip_json_code_fence(raw)
-        quoted = re.findall(r'"((?:\\.|[^"\\])*)"', source_text)
-        quoted = [value for value in quoted if value != "segments"]
-        if quoted:
-            decoded = []
-            for value in quoted:
-                try:
-                    decoded.append(json.loads('"' + value + '"'))
-                except Exception:
-                    decoded.append(value)
-            source_text = "\n".join(decoded)
-    return _split_reverse_text(source_text, expected_count)
+    return segments
 
 
 _REVERSE_SEGMENT_FIELDS = (
@@ -371,6 +374,32 @@ def _compose_reverse_segment(value):
     if parts:
         return "；".join(parts) + "。"
     return value.get("description") or value.get("prompt") or ""
+
+
+def _validate_reverse_prompt_lengths(segments):
+    """Enforce the declared 500-800 character contract after local assembly."""
+    if not segments:
+        raise ValueError("反推结果为空，请重试")
+    minimum = int(math.ceil(500.0 / len(segments)))
+    maximum = int(math.ceil(800.0 / len(segments)))
+    lengths = [len(re.sub(r"\s+", "", segment or "")) for segment in segments]
+    for index, length in enumerate(lengths, 1):
+        if length < minimum:
+            raise ValueError(
+                "反推结果第%d段过于简略：至少%d字，实际%d字，请重试"
+                % (index, minimum, length)
+            )
+        if length > maximum:
+            raise ValueError(
+                "反推结果第%d段过长：最多%d字，实际%d字，请重试"
+                % (index, maximum, length)
+            )
+    total = sum(lengths)
+    if total < 500 or total > 800:
+        raise ValueError(
+            "反推结果总长度需为500-800字，实际%d字，请重试" % total
+        )
+    return segments
 
 
 def _split_reverse_text(text, expected_count):
@@ -457,7 +486,9 @@ def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
         sysmsg, usermsg, frames, temp=0.1,
         max_tokens=2400, image_detail=None,
     )
-    segments = _parse_reverse_segments(raw, segment_count)
+    segments = _validate_reverse_prompt_lengths(
+        _parse_reverse_segments(raw, segment_count)
+    )
     return "\n".join(
         timeline_range + " " + segment
         for timeline_range, segment in zip(timeline_ranges, segments)

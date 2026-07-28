@@ -79,6 +79,20 @@ class BreakdownTests(unittest.TestCase):
         path.write_bytes(b"jpeg-test-data")
         return str(path)
 
+    def _detailed_reverse_objects(self, count=4):
+        result = []
+        for index in range(1, count + 1):
+            result.append({
+                "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
+                "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
+                "action": "人物迈步进入，抬臂转身，改变视线，最后减速收束",
+                "camera": "中景平视横向跟随，随后缓慢推进并在结尾拉远",
+                "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
+                "sound": "保留海浪环境声和舒缓背景音乐",
+                "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
+            })
+        return result
+
     def test_post_zhipu_uses_official_endpoint_key_json_and_timeout(self):
         captured = {}
         os.environ["REVERSE_ZHIPU_BASE"] = "https://open.bigmodel.cn/api/paas/v4/"
@@ -546,10 +560,10 @@ class BreakdownTests(unittest.TestCase):
         ))
         thumb.close()
         calls = self._install_fake_env(
-            '{"segments":["轻奢美容院场景，主角手持精华产品，暖金柔光，近景推镜，突出肌肤通透感与活动钩子",'
-            '"主角转身展示精华瓶身，镜头平稳跟随，背景灯带形成层次并保持人物朝向连续",'
-            '"镜头切至手部与产品近景，主角完成开盖和涂抹动作，柔光强调瓶身与肌肤质感",'
-            '"镜头缓慢拉远，主角面向镜头完成收束动作，场景和道具位置保持一致"]}',
+            json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            ),
             transcript=None,
         )
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
@@ -570,7 +584,7 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["type"], "breakdown_reverse")
         self.assertEqual(result["source_platform"], "douyin")
-        self.assertIn("轻奢美容院场景", result["prompt"])
+        self.assertIn("白衣人物居中", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
         self.assertEqual(len(result["frame_thumbnails"]), 4)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
@@ -627,14 +641,10 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append((usermsg, temp, kwargs))
-            return json.dumps({
-                "segments": [
-                    "第一段依据关键帧描述人物从画面左侧进入海滩，镜头保持中景跟随并交代夕阳方向与环境层次。",
-                    "第二段人物面向海面完成抬手和转身动作，裙摆随风展开，镜头从中景缓慢推进到近景。",
-                    "第三段人物沿岸线连续旋转并改变视线方向，摄影机横向跟随，保持海平线和人物位置稳定。",
-                    "第四段人物减慢动作并在画面中央收束姿态，镜头逐渐拉远，以夕阳、海浪和人物背影结束。",
-                ]
-            }, ensure_ascii=False)
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         prompt = self.breakdown._reverse_prompt_from_frames(
@@ -676,16 +686,10 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append((usermsg, kwargs))
-            segment = {
-                "subject": "人物",
-                "scene": "海边",
-                "action": "连续行走",
-                "camera": "中景跟随",
-                "lighting": "夕阳逆光",
-                "sound": "背景音乐",
-                "continuity": "动作连续",
-            }
-            return json.dumps({"segments": [segment] * 4}, ensure_ascii=False)
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         self.breakdown._reverse_prompt_from_frames(
@@ -701,15 +705,8 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, **kwargs):
             calls.append(usermsg)
-            segment = {
-                "subject": "人物",
-                "scene": "室内",
-                "action": "抬手",
-                "camera": "近景",
-                "lighting": "柔光",
-                "sound": "无可确认信息",
-                "continuity": "单镜头连续动作",
-            }
+            segment = self._detailed_reverse_objects(1)[0]
+            segment = {key: value * 4 for key, value in segment.items()}
             return json.dumps({"segments": [segment]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
@@ -739,18 +736,16 @@ class BreakdownTests(unittest.TestCase):
             return '{"segments":["只有一段"]}'
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
-        with self.assertRaisesRegex(ValueError, "解析失败"):
+        with self.assertRaisesRegex(ValueError, "段数错误"):
             self.breakdown._reverse_prompt_from_frames(
                 "标题", 11.434, "douyin", "", ["f1.jpg"]
             )
         self.assertEqual(len(calls), 1)
 
     def test_reverse_prompt_recovers_plain_text_without_second_model_call(self):
-        plain = (
-            "人物从海滩左侧进入，镜头以中景跟随并交代夕阳和海浪。"
-            "人物抬手转身，裙摆随风展开，摄影机缓慢向前推进。"
-            "人物沿岸线旋转并改变视线，镜头横向移动保持主体居中。"
-            "人物逐渐减速并完成收束姿态，镜头拉远展示完整环境。"
+        plain = "\n".join(
+            self.breakdown._compose_reverse_segment(item)
+            for item in self._detailed_reverse_objects()
         )
         calls = []
 
@@ -778,6 +773,40 @@ class BreakdownTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "内容不完整"):
             self.breakdown._parse_reverse_segments(raw, 4)
 
+    def test_reverse_prompt_rejects_long_structured_json_with_wrong_count(self):
+        one_long_segment = self._detailed_reverse_objects(1)[0]
+        one_long_segment = {
+            key: value * 4 for key, value in one_long_segment.items()
+        }
+        raw = json.dumps({"segments": [one_long_segment]}, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "需要4段，实际1段"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_reverse_prompt_rejects_missing_structured_field(self):
+        segments = self._detailed_reverse_objects()
+        segments[0].pop("camera")
+        raw = json.dumps({"segments": segments}, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "第1段缺少字段：camera"):
+            self.breakdown._parse_reverse_segments(raw, 4)
+
+    def test_reverse_prompt_rejects_short_structured_output(self):
+        calls = []
+
+        def fake_chat_multimodal(*args, **kwargs):
+            calls.append(kwargs)
+            short = {
+                key: "画面细节" for key, _label in
+                self.breakdown._REVERSE_SEGMENT_FIELDS
+            }
+            return json.dumps({"segments": [short] * 4}, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        with self.assertRaisesRegex(ValueError, "第1段过于简略"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 11.434, "douyin", "", ["f1.jpg"]
+            )
+        self.assertEqual(len(calls), 1)
+
     def test_duration_normalization_preserves_milliseconds(self):
         self.assertEqual(
             self.breakdown._normalize_duration_seconds(11434),
@@ -794,11 +823,10 @@ class BreakdownTests(unittest.TestCase):
 
     def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
         calls = self._install_fake_env(
-            '{"segments":['
-            '"第一段依据关键帧描述人物进入画面并保持稳定走位，镜头以中景跟随并交代场景空间关系",'
-            '"第二段人物完成转身抬手和视线变化，镜头缓慢推进并保持背景道具位置连续一致",'
-            '"第三段人物继续完成核心动作并与道具互动，摄影机横向跟随且维持相同光线方向",'
-            '"第四段人物逐渐减速并在画面中央完成收束，镜头缓慢拉远并保留环境氛围"]}',
+            json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            ),
             transcript=[],
         )
 
@@ -816,12 +844,9 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._pair_reverse_frames = fake_pair
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             calls["frames"] = list(frames)
-            return (
-                '{"segments":['
-                '"第一段依据关键帧描述人物进入画面并保持稳定走位，镜头以中景跟随并交代场景空间关系",'
-                '"第二段人物完成转身抬手和视线变化，镜头缓慢推进并保持背景道具位置连续一致",'
-                '"第三段人物继续完成核心动作并与道具互动，摄影机横向跟随且维持相同光线方向",'
-                '"第四段人物逐渐减速并在画面中央完成收束，镜头缓慢拉远并保留环境氛围"]}'
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
             )
         self.breakdown._chat_multimodal = fake_chat
         try:
