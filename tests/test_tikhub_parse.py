@@ -7,7 +7,7 @@
   3. parse_link 对含链接 / 口令式无链接 / 小红书 / 视频号 的路由。
 运行：python3 -m pytest tests/test_tikhub_parse.py   或   python3 tests/test_tikhub_parse.py
 """
-import os, sys, re
+import io, os, sys, re, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 import tikhub
 
@@ -66,6 +66,71 @@ def test_parse_link_douyin_video_url_offline():
     info = tikhub.parse_link("快看 https://www.douyin.com/video/7654380745624879025 这条")
     assert info["platform"] == "douyin"
     assert info["id"] == "7654380745624879025"
+
+
+def test_dy_detail_keeps_unique_play_urls_in_priority_order():
+    original_get = tikhub._g
+    tikhub._g = lambda *args, **kwargs: {
+        "aweme_detail": {
+            "aweme_id": "7654380745624879025",
+            "video": {
+                "duration": 12000,
+                "play_addr": {
+                    "url_list": [
+                        "https://cdn-a.test/video.mp4",
+                        "https://cdn-b.test/video.mp4",
+                        "https://cdn-a.test/video.mp4",
+                    ],
+                },
+            },
+        },
+    }
+    try:
+        detail = tikhub.dy_detail("7654380745624879025")
+    finally:
+        tikhub._g = original_get
+
+    assert detail["play_url"] == "https://cdn-a.test/video.mp4"
+    assert detail["play_urls"] == [
+        "https://cdn-a.test/video.mp4",
+        "https://cdn-b.test/video.mp4",
+    ]
+
+
+def test_download_to_file_rejects_truncated_content_length():
+    class FakeResponse(io.BytesIO):
+        headers = {"Content-Length": "10"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+            return False
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            return FakeResponse(b"abc")
+
+    handle, destination = tempfile.mkstemp(suffix=".mp4")
+    os.close(handle)
+    original_opener = tikhub._OPENER
+    tikhub._OPENER = FakeOpener()
+    try:
+        try:
+            tikhub.download_to_file(
+                "https://cdn.test/truncated.mp4",
+                tikhub.time.time() + 30,
+                destination,
+            )
+        except ConnectionError as error:
+            assert "Content-Length=10" in str(error)
+            assert "实际=3" in str(error)
+        else:
+            raise AssertionError("截断响应不应被当作成功下载")
+    finally:
+        tikhub._OPENER = original_opener
+        os.unlink(destination)
 
 
 if __name__ == "__main__":

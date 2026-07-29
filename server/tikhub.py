@@ -123,6 +123,17 @@ def _url0(node):
         return node[0] if node else None
     return node
 
+def _urls(node):
+    if isinstance(node, dict):
+        values = node.get("url_list") or node.get("urlList") or []
+    elif isinstance(node, list):
+        values = node
+    else:
+        values = [node] if node else []
+    return list(dict.fromkeys(
+        value for value in values if isinstance(value, str) and value
+    ))
+
 def _tags_from_text(text):
     return re.findall(r"#([^#\s]{1,20})", text or "")
 
@@ -208,6 +219,8 @@ def dy_detail(id_or_url):
     desc = a.get("desc") or ""
     images = [u for u in (_url0(im) for im in (a.get("images") or [])) if u]
     is_img = bool(images) or a.get("aweme_type") in (68, 2)
+    play_node = vid.get("play_addr") or vid.get("play_addr_h264")
+    play_urls = _urls(play_node)
     sec = au.get("sec_uid") or au.get("uid")
     return {
         "platform": "douyin", "id": aid,
@@ -220,7 +233,8 @@ def dy_detail(id_or_url):
                   "share": stat.get("share_count"), "collect": stat.get("collect_count")},
         "cover": (images[0] if is_img and images else _url0(vid.get("cover"))),
         "images": images,
-        "play_url": None if is_img else _url0(vid.get("play_addr") or vid.get("play_addr_h264")),
+        "play_url": None if is_img else (play_urls[0] if play_urls else None),
+        "play_urls": [] if is_img else play_urls,
         "subtitle_url": None, "decode_key": None,
         "duration": vid.get("duration"), "publish_time": a.get("create_time"),
         "note_type": "image" if is_img else "video",
@@ -609,9 +623,13 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     got = 0
     with _OPENER.open(req, timeout=min(read_timeout, remain)) as r, open(dest_path, "wb") as f:
-        declared = r.headers.get("Content-Length")
-        if declared and int(declared) > max_bytes:
-            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (int(declared) / 1048576.0, max_bytes / 1048576.0))
+        declared_raw = r.headers.get("Content-Length")
+        try:
+            declared = int(declared_raw) if declared_raw else None
+        except (TypeError, ValueError):
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (declared / 1048576.0, max_bytes / 1048576.0))
         while True:
             if time.time() >= deadline_ts:
                 raise TimeoutError("下载超过预算（已下载 %.1fMB）" % (got / 1048576.0))
@@ -622,6 +640,10 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
             if got > max_bytes:
                 raise ValueError("文件超过上限 %.0fMB" % (max_bytes / 1048576.0))
             f.write(block)
+    if declared is not None and got < declared:
+        raise ConnectionError(
+            "下载响应截断：Content-Length=%d，实际=%d" % (declared, got)
+        )
     return got
 
 

@@ -191,3 +191,43 @@ def post_json(official_base, heygen_base, path, data, headers, log=None):
             if label != "heygen" and log:
                 log("[egress] %s via %s 连接阶段失败(未送达)，降级下一档: %s" % (path, label, str(e)[:120]))
     raise last if last is not None else RuntimeError("egress: 无可用通道")
+
+
+def post_json_idempotent(official_base, heygen_base, path, data, headers, log=None,
+                         max_attempts=2, timeout=None):
+    """POST an idempotent analysis request, retrying a broken read once.
+
+    Unlike media generation, analysis can be safely repeated within one paid
+    site job. Prefer the next usable route; with one route, retry it once.
+    """
+    available = channels(official_base, heygen_base)
+    if not available:
+        raise RuntimeError("egress: no available channel")
+    attempts = [channel for channel in available if _channel_usable(channel[2])]
+    if not attempts:
+        raise RuntimeError("egress: no available channel")
+    limit = max(1, int(max_attempts or 1))
+    while len(attempts) < limit:
+        attempts.append(attempts[-1])
+
+    last = None
+    for number, (label, base, proxy, channel_timeout) in enumerate(attempts[:limit], 1):
+        request = urllib.request.Request(
+            base + path, data=data, headers=headers, method="POST",
+        )
+        try:
+            request_timeout = timeout if timeout is not None else channel_timeout
+            with _opener(proxy).open(request, timeout=request_timeout) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            last = error
+            if 400 <= int(getattr(error, "code", 0) or 0) < 500:
+                raise
+        except Exception as error:
+            last = error
+        if log:
+            log(
+                "[egress] idempotent %s attempt %d/%d via %s failed: %s"
+                % (path, number, limit, label, str(last)[:120])
+            )
+    raise last if last is not None else RuntimeError("egress: request failed")

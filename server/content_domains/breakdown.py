@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
 import os, json, time, base64, tempfile, subprocess, shutil, math, re
-import urllib.request
+import http.client
+import urllib.error
 from contextlib import closing
 from difflib import SequenceMatcher
 
@@ -13,6 +14,14 @@ _UNSUPPORTED_PLATFORMS = {"channels", "weixin", "wechat"}
 _BREAKDOWN_MODE_SCENES = "scenes"
 _BREAKDOWN_MODE_REVERSE_PROMPT = "reverse_prompt"
 _BREAKDOWN_SUPPORTED_MODES = {_BREAKDOWN_MODE_SCENES, _BREAKDOWN_MODE_REVERSE_PROMPT}
+BREAKDOWN_DOWNLOAD_BUDGET = max(
+    30, int(os.environ.get("BREAKDOWN_DOWNLOAD_BUDGET", "180") or "180")
+)
+BREAKDOWN_MAX_DOWNLOAD_BYTES = max(
+    25 * 1024 * 1024,
+    int(os.environ.get("BREAKDOWN_MAX_DOWNLOAD_BYTES", str(200 * 1024 * 1024))
+        or str(200 * 1024 * 1024)),
+)
 
 
 def gen_breakdown(payload):
@@ -91,13 +100,6 @@ def _do_breakdown(payload, info, url, mode=None):
 
     mode = mode or _normalize_mode(payload)
     det = tikhub.detail(info["platform"], info["id"], info.get("note_type"))
-    play_url = det.get("play_url")
-    if not play_url:
-        if det.get("images"):
-            raise ValueError("该链接是图文笔记，不是视频，暂不支持拆解")
-        raise ValueError("未找到视频下载地址，可能是私密或已删除")
-    duration = _normalize_duration_seconds(det.get("duration"))
-    title = det.get("title") or det.get("desc") or ""
 
     job_id = payload.get("_job_id")
     _heartbeat(job_id, "downloading")
@@ -105,8 +107,9 @@ def _do_breakdown(payload, info, url, mode=None):
     frame_dir = None
     tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
     try:
-        dl_deadline = time.time() + 180
-        tikhub.download_to_file(play_url, dl_deadline, tmp_video.name)
+        det = _download_breakdown_video(tikhub, info, det, tmp_video.name)
+        duration = _normalize_duration_seconds(det.get("duration"))
+        title = det.get("title") or det.get("desc") or ""
 
         _heartbeat(job_id, "extracting_frames")
         is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
@@ -172,6 +175,88 @@ def _do_breakdown(payload, info, url, mode=None):
         if frame_dir:
             try: shutil.rmtree(frame_dir)
             except: pass
+
+
+def _download_breakdown_video(tikhub, info, detail, destination):
+    """Try alternate CDN URLs, then refresh video details once."""
+    current = detail
+    deadline = time.time() + BREAKDOWN_DOWNLOAD_BUDGET
+    retryable = (
+        TimeoutError,
+        ConnectionError,
+        urllib.error.URLError,
+        http.client.IncompleteRead,
+    )
+    last_error = None
+    budget_exhausted = False
+    for refresh_attempt in range(2):
+        if time.time() >= deadline:
+            last_error = TimeoutError("video download budget exhausted")
+            break
+        alternate_urls = current.get("play_urls")
+        if not isinstance(alternate_urls, (list, tuple)):
+            alternate_urls = []
+        play_urls = list(dict.fromkeys(
+            [candidate for candidate in alternate_urls if candidate]
+            + ([current.get("play_url")] if current.get("play_url") else [])
+        ))[:4]
+        if not play_urls:
+            if current.get("images"):
+                raise ValueError("该链接是图文笔记，不是视频，暂不支持拆解")
+            if refresh_attempt:
+                raise ValueError("未找到视频下载地址，可能是私密或已删除")
+            current = tikhub.detail(
+                info["platform"], info["id"], info.get("note_type"), fresh=True
+            )
+            continue
+        for play_index, play_url in enumerate(play_urls, 1):
+            if time.time() >= deadline:
+                last_error = TimeoutError("video download budget exhausted")
+                budget_exhausted = True
+                break
+            try:
+                downloaded_bytes = tikhub.download_to_file(
+                    play_url, deadline, destination,
+                    max_bytes=BREAKDOWN_MAX_DOWNLOAD_BYTES,
+                )
+                if not isinstance(downloaded_bytes, int) or downloaded_bytes <= 0:
+                    raise ConnectionError(
+                        "video download returned no complete bytes"
+                    )
+                current["play_url"] = play_url
+                return current
+            except ValueError as error:
+                last_error = error
+                if play_index >= len(play_urls):
+                    raise
+                print(
+                    "[breakdown] video URL %d/%d exceeded limit; trying alternate: %s"
+                    % (play_index, len(play_urls), str(error)[:160]),
+                    flush=True,
+                )
+            except retryable as error:
+                last_error = error
+                print(
+                    "[breakdown] video URL %d/%d failed: %s"
+                    % (play_index, len(play_urls), str(error)[:160]),
+                    flush=True,
+                )
+        if budget_exhausted:
+            break
+        if time.time() >= deadline:
+            last_error = TimeoutError("video download budget exhausted")
+            break
+        if refresh_attempt == 0:
+            current = tikhub.detail(
+                info["platform"], info["id"], info.get("note_type"), fresh=True
+            )
+    if isinstance(last_error, ValueError):
+        raise last_error
+    if last_error is not None:
+        raise TimeoutError(
+            "video download failed after alternate URLs and one detail refresh"
+        ) from last_error
+    raise RuntimeError("video download retry state is invalid")
 
 
 # ============ 辅助函数 ============
@@ -740,15 +825,15 @@ def _post_zhipu(body, api_key):
         "REVERSE_ZHIPU_BASE", "https://open.bigmodel.cn/api/paas/v4"
     ).rstrip("/")
     timeout = int(os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210)
-    req = urllib.request.Request(
-        base + "/chat/completions",
-        data=json.dumps(body, ensure_ascii=False).encode(),
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with egress._DIRECT.open(req, timeout=timeout) as response:
-            return json.loads(response.read())
+        return egress.post_json_idempotent(
+            base, base, "/chat/completions",
+            json.dumps(body, ensure_ascii=False).encode(),
+            {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+            log=lambda message: print("[breakdown] %s" % message, flush=True),
+            max_attempts=2,
+            timeout=timeout,
+        )
     except urllib.error.HTTPError as exc:
         try:
             detail = exc.read().decode("utf-8", "replace")
