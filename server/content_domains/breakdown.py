@@ -32,6 +32,8 @@ _REVERSE_STATIC_ACTION_MARKERS = (
     "姿态无变化",
     "没有动作变化",
     "没有姿态变化",
+    "未观察到明显动作变化",
+    "未见明显动作变化",
     "人物保持不动",
     "主体保持不动",
     "人物静止不动",
@@ -43,6 +45,31 @@ _REVERSE_STATIC_ACTION_MARKERS = (
     "画面无变化",
     "画面内容保持一致",
     "没有任何变化",
+)
+_REVERSE_MOTION_ACTION_MARKERS = (
+    "坐起", "起身", "抬起", "举起", "放下", "转身", "回头",
+    "伸出", "收回", "弯曲", "迈步", "走动", "移动", "前倾", "后仰",
+)
+_REVERSE_BACK_FACING_MARKERS = (
+    "背对镜头", "背向镜头", "后背朝向镜头",
+)
+_REVERSE_FACE_CLAIM_MARKERS = (
+    "表情", "神情", "微笑", "笑容", "眼神", "目光",
+    "闭眼", "睁眼", "皱眉",
+)
+_REVERSE_UNSUPPORTED_INFERENCE_MARKERS = (
+    "似乎", "仿佛", "感受风", "享受微风",
+    "阳光明媚", "绿草如茵",
+)
+_REVERSE_INVALID_SOUND_MARKERS = (
+    "未观察到声音", "从画面未观察到声音", "画面没有声音",
+    "画面无声音",
+)
+_REVERSE_NO_SPEECH_MARKERS = (
+    "未检测到可辨识语音", "未检测到可识别语音",
+)
+_REVERSE_UNRELIABLE_ORIENTATION_MARKERS = (
+    "面向树根", "朝向树根",
 )
 
 
@@ -692,6 +719,12 @@ def _reverse_segment_claims_static(entry):
     return any(marker in claim_text for marker in _REVERSE_STATIC_ACTION_MARKERS)
 
 
+def _reverse_segment_field_text(entry, *keys):
+    fields = entry.get("fields", {})
+    selected = keys or tuple(key for key, _label in _REVERSE_SEGMENT_FIELDS)
+    return " ".join(str(fields.get(key) or "") for key in selected).strip()
+
+
 def _validate_reverse_segment_evidence(
     entry, previous_entries, frame_paths, index, transcript=""
 ):
@@ -716,8 +749,70 @@ def _validate_reverse_segment_evidence(
     subject = fields.get("subject", "")
     action = fields.get("action", "")
     sound = fields.get("sound", "")
+    all_fields = _reverse_segment_field_text(entry)
+
+    if (
+        _reverse_segment_claims_static(entry)
+        and any(marker in action for marker in _REVERSE_MOTION_ACTION_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段动作与“无变化”自相矛盾，请重试" % index)
+
+    facing_text = _reverse_segment_field_text(entry, "subject", "action")
+    if (
+        any(marker in facing_text for marker in _REVERSE_BACK_FACING_MARKERS)
+        and any(marker in facing_text for marker in _REVERSE_FACE_CLAIM_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段描述了不可见的背面表情，请重试" % index)
+
+    unsupported = next(
+        (
+            marker for marker in _REVERSE_UNSUPPORTED_INFERENCE_MARKERS
+            if marker in all_fields
+        ),
+        None,
+    )
+    if unsupported:
+        raise ValueError(
+            "反推结果第%d段包含无证据主观推断“%s”，请重试"
+            % (index, unsupported)
+        )
+
+    unreliable_orientation = next(
+        (
+            marker for marker in _REVERSE_UNRELIABLE_ORIENTATION_MARKERS
+            if marker in all_fields
+        ),
+        None,
+    )
+    if unreliable_orientation:
+        raise ValueError(
+            "反推结果第%d段包含无可靠证据方位“%s”，请重试"
+            % (index, unreliable_orientation)
+        )
+
+    invalid_sound = next(
+        (
+            marker for marker in _REVERSE_INVALID_SOUND_MARKERS
+            if marker in sound
+        ),
+        None,
+    )
+    if invalid_sound:
+        raise ValueError("反推结果第%d段从画面推断声音，请重试" % index)
     if _compact_reverse_text(sound) and not str(transcript or "").strip():
         raise ValueError("反推结果第%d段声音缺少本段ASR证据，请重试" % index)
+    if (
+        str(transcript or "").strip()
+        and any(marker in sound for marker in _REVERSE_NO_SPEECH_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段声音与本段ASR自相矛盾，请重试" % index)
+
+    if "字幕" in all_fields and not re.search(
+        r"字幕[^“”\"]*[“\"]\s*[^“”\"]{1,80}\s*[”\"]",
+        all_fields,
+    ):
+        raise ValueError("反推结果第%d段字幕缺少可核验逐字内容，请重试" % index)
+
     if min(
         len(_compact_reverse_text(subject)),
         len(_compact_reverse_text(action)),
@@ -831,8 +926,14 @@ def _reverse_segment_messages(
         "随请求附带的图片只属于当前时间段，并按时间先后排列；至少包含两个原始时间点。"
         "只分析这些图片，不得借用其他时间段画面。逐帧比较主体位置、手臂手腕、身体姿态、视线、"
         "场景道具、遮挡、构图和光线的真实变化。只有相邻帧确实近乎一致时，action 才能写画面或姿态无变化；"
-        "存在细微动作也必须明确区分。不能从图片直接确认的身份、品牌、地点、情绪、运镜、光源或情节一律省略。"
-        "sound 只能填写上方当前时间段ASR能够证明的口播或声音；没有证据就留空。"
+        "存在坐起、抬手、转身等动作时绝不能同时写“未观察到明显动作变化”，细微动作也必须明确区分。"
+        "主体背对镜头或面部被遮挡时，不得描述表情、眼神或微笑。"
+        "不能从图片直接确认的身份、品牌、地点、情绪、运镜、光源、方位或情节一律省略；"
+        "不要写“似乎在感受风”“阳光明媚”“绿草如茵”等主观修辞，要改成可观察的姿态、光照或颜色事实。"
+        "不得写“面向树根”等无法由本段帧可靠证明的朝向。"
+        "sound 只能填写上方当前时间段ASR能够证明的口播或可辨识语音；没有证据就留空，"
+        "不得根据画面写“未观察到声音”。字幕或屏幕文字只有在本段图片清晰可读时才可逐字引用，"
+        "并用中文引号标出实际文字；看不清就省略。"
         "不要补写过渡动作，不要为了篇幅扩写，不设最低字数，宁可短也不能编造。"
         "只输出一个JSON对象：{\"segments\":[{\"subject\":\"\",\"scene\":\"\",\"action\":\"\","
         "\"camera\":\"\",\"lighting\":\"\",\"sound\":\"\",\"continuity\":\"\"}]}。"

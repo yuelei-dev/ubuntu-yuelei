@@ -114,6 +114,22 @@ class BreakdownTests(unittest.TestCase):
             })
         return result
 
+    def _reverse_entry(self, **overrides):
+        fields = {
+            "subject": "白衣人物位于画面中",
+            "scene": "树林背景",
+            "action": "抬起右手",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+        }
+        fields.update(overrides)
+        return {
+            "text": self.breakdown._compose_reverse_segment(fields),
+            "fields": fields,
+        }
+
     def test_download_breakdown_video_retries_empty_and_truncated_cdn(self):
         calls = []
 
@@ -634,6 +650,11 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("没有证据就留空", src)
         self.assertIn("不设最低字数", src)
         self.assertIn("宁可短也不能编造", src)
+        self.assertIn("背对镜头或面部被遮挡时，不得描述表情", src)
+        self.assertIn("未观察到明显动作变化", src)
+        self.assertIn("不得根据画面写“未观察到声音”", src)
+        self.assertIn("字幕或屏幕文字只有在本段图片清晰可读时", src)
+        self.assertIn("面向树根", src)
 
     def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
@@ -1098,9 +1119,76 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("上身角度发生偏转", prompt)
         self.assertIn("双臂举过头顶", prompt)
         self.assertIn("树干旁并被部分遮挡", prompt)
-        self.assertTrue(prompt.splitlines()[-1].startswith("[00:11.5-00:15.3]"))
+        self.assertEqual(
+            [line.split("] ", 1)[0] + "]" for line in prompt.splitlines()],
+            [
+                "[00:00.0-00:03.8]",
+                "[00:03.8-00:07.6]",
+                "[00:07.6-00:11.5]",
+                "[00:11.5-00:15.3]",
+            ],
+        )
         self.assertNotIn(duplicate_2["action"], calls[2][0])
         self.assertIn("不要沿用任何历史草稿", calls[2][0])
+
+    def test_regression_3248_rejects_motion_and_no_change_contradiction(self):
+        entry = self._reverse_entry(
+            scene="室内床铺",
+            action="人物在床上坐起，但未观察到明显动作变化",
+        )
+        with self.assertRaisesRegex(ValueError, "动作与“无变化”自相矛盾"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["bed-1.jpg", "bed-2.jpg"], 3
+            )
+
+    def test_regression_3248_rejects_hidden_face_expression(self):
+        entry = self._reverse_entry(
+            subject="白衣人物背对镜头",
+            action="人物保持背向，表情平静并带有微笑",
+        )
+        with self.assertRaisesRegex(ValueError, "不可见的背面表情"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["back-1.jpg", "back-2.jpg"], 1
+            )
+
+    def test_regression_3248_rejects_subjective_visual_inferences(self):
+        for phrase in ("似乎在感受风", "阳光明媚", "绿草如茵"):
+            with self.subTest(phrase=phrase):
+                entry = self._reverse_entry(scene="树林背景，" + phrase)
+                with self.assertRaisesRegex(ValueError, "无证据主观推断"):
+                    self.breakdown._validate_reverse_segment_evidence(
+                        entry, [], ["view-1.jpg", "view-2.jpg"], 1
+                    )
+
+    def test_regression_3248_rejects_sound_claim_inferred_from_image(self):
+        entry = self._reverse_entry(sound="未观察到声音")
+        with self.assertRaisesRegex(ValueError, "从画面推断声音"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["silent-1.jpg", "silent-2.jpg"], 1,
+                transcript="[0s-2s] 实际可辨识口播",
+            )
+
+    def test_regression_3248_rejects_unreliable_tree_root_orientation(self):
+        entry = self._reverse_entry(action="人物面向树根并抬起右手")
+        with self.assertRaisesRegex(ValueError, "无可靠证据方位"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["tree-1.jpg", "tree-2.jpg"], 4
+            )
+
+    def test_regression_3248_subtitle_requires_quoted_visible_text(self):
+        unsupported = self._reverse_entry(scene="画面字幕提示人物来到树林")
+        with self.assertRaisesRegex(ValueError, "字幕缺少可核验逐字内容"):
+            self.breakdown._validate_reverse_segment_evidence(
+                unsupported, [], ["caption-1.jpg", "caption-2.jpg"], 1
+            )
+
+        supported = self._reverse_entry(scene="画面字幕“来到树林”清晰可读")
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                supported, [], ["caption-1.jpg", "caption-2.jpg"], 1
+            ),
+            supported,
+        )
 
     def test_regression_5708_identical_segments_fail_after_frame_only_retry(self):
         """任务5708：不同画面生成相同正文时，重试也绝不放行。"""
