@@ -1,0 +1,779 @@
+{
+  "schema_version": 1,
+  "baseline_id": "test-production-behavior-20260729-031728",
+  "captured_at_utc": "2026-07-29T03:17:28Z",
+  "source": {
+    "production_runtime": [
+      "/home/ubuntu/content-api",
+      "/home/ubuntu/auth-service",
+      "/home/ubuntu/dl-service",
+      "/var/www/huangquechuanmei"
+    ],
+    "production_repository_commit": "473421bfd6d762cfcf0b114319939c35cfd8a3ef",
+    "yuelei_base_commit": "5f0ec4c63b311e4722832be7b6a2a18a9196e0d9",
+    "note": "Runtime files differed from the production repository commit; this records observed behavior, not correctness."
+  },
+  "exclusions": [
+    "environment files and production-only environment variables",
+    "databases and user data",
+    "uploads, generated output, caches, backups and logs",
+    "API, payment, COS, WeChat and model credentials",
+    "passwords, tokens and private keys",
+    "production domains, nginx configuration and TLS certificates",
+    "production stats.json"
+  ],
+  "known_baseline_issues": [
+    "Reverse prompt retries can relax duplicate and short-content validation.",
+    "The production behavior baseline contains known editor bugs and is not treated as a correct implementation."
+  ],
+  "synchronized_files": [
+    {
+      "source": "auth-service/auth_server.py",
+      "target": "server/auth_server.py",
+      "state_before": "different",
+      "sha256": "6e371ca512275cfcbdf6a77c7fa6b8a229e0a1d19bb5d402fc6b0582475e8123",
+      "source_sha256": "efe372f284826ffa2b482e09e3dfff19a04768ed59d116edc774ee9485aa36f1",
+      "sanitization": "removed production public-base default; deployment must set HQ_INVITE_PUBLIC_BASE_URL"
+    },
+    {
+      "source": "auth-service/invites.py",
+      "target": "server/invites.py",
+      "state_before": "missing",
+      "sha256": "96d9ab3007ba13906a389e28335a5183871df60d50c83b61c9d8c8fe1a71a0b1",
+      "source_sha256": "96d9ab3007ba13906a389e28335a5183871df60d50c83b61c9d8c8fe1a71a0b1"
+    },
+    {
+      "source": "auth-service/sync_virtual_pay_goods.py",
+      "target": "server/sync_virtual_pay_goods.py",
+      "state_before": "missing",
+      "sha256": "6c4d5fd26a71e8820ad40e12092b0b0acebcd7fe0e5c8378e3a3358022e7cbad",
+      "source_sha256": "5e722fe9abcbea1e747c7a1bf51a72bed7249c4f85b98e6bcb5ea269e071181f",
+      "sanitization": "removed production item URL default; deployment must set WX_VIRTUAL_PAY_ITEM_URL"
+    },
+    {
+      "source": "auth-service/wechat_subscribe.py",
+      "target": "server/wechat_subscribe.py",
+      "state_before": "missing",
+      "sha256": "cfc77ce80f77be842ad882fef6cbc0470546678548542521c441f00286d1eb66",
+      "source_sha256": "cfc77ce80f77be842ad882fef6cbc0470546678548542521c441f00286d1eb66"
+    },
+    {
+      "source": "auth-service/wechat_virtual_pay.py",
+      "target": "server/wechat_virtual_pay.py",
+      "state_before": "missing",
+      "sha256": "ee56bd5ea8ac1fa8fb32150316cc978a3e13f72eb8e1d890ae9c3849a6f6ead1",
+      "source_sha256": "ee56bd5ea8ac1fa8fb32150316cc978a3e13f72eb8e1d890ae9c3849a6f6ead1"
+    },
+    {
+      "source": "auth-service/wxpay.py",
+      "target": "server/wxpay.py",
+      "state_before": "different",
+      "sha256": "071dff9d179431918011b97a64e761906c662e7da64f75b13055d022d118726f",
+      "source_sha256": "071dff9d179431918011b97a64e761906c662e7da64f75b13055d022d118726f"
+    },
+    {
+      "source": "content-api/admin_api.py",
+      "target": "server/admin_api.py",
+      "state_before": "different",
+      "sha256": "4c3577ab1f07bdf8179f815ec1a19e5c81adfecd947c5e1d1573e0e2010296f2",
+      "source_sha256": "4c3577ab1f07bdf8179f815ec1a19e5c81adfecd947c5e1d1573e0e2010296f2"
+    },
+    {
+      "source": "content-api/func_names.py",
+      "target": "server/func_names.py",
+      "state_before": "different",
+      "sha256": "fcb645dfb2bc8f358fe355b54e49128336c5c3686f16b86c8a68c4c0316c3d8e",
+      "source_sha256": "fcb645dfb2bc8f358fe355b54e49128336c5c3686f16b86c8a68c4c0316c3d8e"
+    },
+    {
+      "source": "content-api/imggen_api.py",
+      "target": "server/imggen_api.py",
+      "state_before": "different",
+      "sha256": "0f4e98a0d67b29902b731180a9ea9ceffb7c2cc6d6844a3e298f0352022bec05",
+      "source_sha256": "0f4e98a0d67b29902b731180a9ea9ceffb7c2cc6d6844a3e298f0352022bec05"
+    },
+    {
+      "source": "content-api/leadgen_api.py",
+      "target": "server/leadgen_api.py",
+      "state_before": "different",
+      "sha256": "693c18a6a321c7f752dc4f796097357fb06c2ef7587d573803a7b7d46c7422bc",
+      "source_sha256": "693c18a6a321c7f752dc4f796097357fb06c2ef7587d573803a7b7d46c7422bc"
+    },
+    {
+      "source": "content-api/tikhub.py",
+      "target": "server/tikhub.py",
+      "state_before": "different",
+      "sha256": "67ccaf331ebef8cd5d684ce9b40f39daec771d72ab871c0e8f4818fbf58dabf7",
+      "source_sha256": "67ccaf331ebef8cd5d684ce9b40f39daec771d72ab871c0e8f4818fbf58dabf7"
+    },
+    {
+      "source": "content-api/content_domains/audio.py",
+      "target": "server/content_domains/audio.py",
+      "state_before": "different",
+      "sha256": "433851682966712b6b2e6aa503d1c051de7ed16110b6b4a9e725256bd1b35aec",
+      "source_sha256": "433851682966712b6b2e6aa503d1c051de7ed16110b6b4a9e725256bd1b35aec"
+    },
+    {
+      "source": "content-api/content_domains/breakdown.py",
+      "target": "server/content_domains/breakdown.py",
+      "state_before": "different",
+      "sha256": "ec1ffa18a69dba2945de4c5c5f875dc9e72cdcd224a8dec4266addebd90b0598",
+      "source_sha256": "ec1ffa18a69dba2945de4c5c5f875dc9e72cdcd224a8dec4266addebd90b0598"
+    },
+    {
+      "source": "content-api/content_domains/core.py",
+      "target": "server/content_domains/core.py",
+      "state_before": "different",
+      "sha256": "598f68f646882c536d5d5ec682df019a23f5637725bab02ee1e232562fb359fe",
+      "source_sha256": "598f68f646882c536d5d5ec682df019a23f5637725bab02ee1e232562fb359fe"
+    },
+    {
+      "source": "content-api/content_domains/cos.py",
+      "target": "server/content_domains/cos.py",
+      "state_before": "different",
+      "sha256": "ca25f63a6b40c5f7b781d4d3739aa1f360f51eadcbff395b771d107c2d636e0b",
+      "source_sha256": "ca25f63a6b40c5f7b781d4d3739aa1f360f51eadcbff395b771d107c2d636e0b"
+    },
+    {
+      "source": "content-api/content_domains/cosyvoice.py",
+      "target": "server/content_domains/cosyvoice.py",
+      "state_before": "different",
+      "sha256": "7b62bea497b25bce1f58f41e1800f4ef82f29f015f965db281af506b08ae33ca",
+      "source_sha256": "7b62bea497b25bce1f58f41e1800f4ef82f29f015f965db281af506b08ae33ca"
+    },
+    {
+      "source": "content-api/content_domains/digital_ip.py",
+      "target": "server/content_domains/digital_ip.py",
+      "state_before": "missing",
+      "sha256": "45cc5ad234e3fc95f9e77fd0796e1ae9ca1a133fbbb3cee0fc0d01df3c111618",
+      "source_sha256": "45cc5ad234e3fc95f9e77fd0796e1ae9ca1a133fbbb3cee0fc0d01df3c111618"
+    },
+    {
+      "source": "content-api/content_domains/egress.py",
+      "target": "server/content_domains/egress.py",
+      "state_before": "different",
+      "sha256": "102798fbdfc0e581bce1c254b426d6c78d1f2d77654a07a9812da69fe5dd2e79",
+      "source_sha256": "102798fbdfc0e581bce1c254b426d6c78d1f2d77654a07a9812da69fe5dd2e79"
+    },
+    {
+      "source": "content-api/content_domains/feature_flags.py",
+      "target": "server/content_domains/feature_flags.py",
+      "state_before": "different",
+      "sha256": "aa85e444ad633d265a767c2244c487450c90b91bc6edba65109f087154bc2da4",
+      "source_sha256": "aa85e444ad633d265a767c2244c487450c90b91bc6edba65109f087154bc2da4"
+    },
+    {
+      "source": "content-api/content_domains/history.py",
+      "target": "server/content_domains/history.py",
+      "state_before": "missing",
+      "sha256": "6387fb13a213f8d04ebf29b46cee6eb1d3f51278f5fe1ed03fa1ebf039ffaa8e",
+      "source_sha256": "6387fb13a213f8d04ebf29b46cee6eb1d3f51278f5fe1ed03fa1ebf039ffaa8e"
+    },
+    {
+      "source": "content-api/content_domains/image.py",
+      "target": "server/content_domains/image.py",
+      "state_before": "different",
+      "sha256": "6574483c4281b6a5bf556a982b0b1d67eb39a9d67704df4c37c91ef37abc1e02",
+      "source_sha256": "6574483c4281b6a5bf556a982b0b1d67eb39a9d67704df4c37c91ef37abc1e02"
+    },
+    {
+      "source": "content-api/content_domains/inspiration_likes.py",
+      "target": "server/content_domains/inspiration_likes.py",
+      "state_before": "missing",
+      "sha256": "9a3485e86e2f248e06997b88d7083735264319313ee929674c1e35c2ed4654f6",
+      "source_sha256": "9a3485e86e2f248e06997b88d7083735264319313ee929674c1e35c2ed4654f6"
+    },
+    {
+      "source": "content-api/content_domains/ip12_pdf.py",
+      "target": "server/content_domains/ip12_pdf.py",
+      "state_before": "missing",
+      "sha256": "488381d90d88c46c18e54451dd6bb36898ac6c5dc5bec5051a504d1bbc02c675",
+      "source_sha256": "c6d7571b2e29c37f336f84568b149df2ac0c2e61e469dc0adabff01b92171444",
+      "sanitization": "converted production-origin links to same-origin relative links"
+    },
+    {
+      "source": "content-api/content_domains/jobs_store.py",
+      "target": "server/content_domains/jobs_store.py",
+      "state_before": "different",
+      "sha256": "6d033307c2a8005b68172c72966cb0b2bdc2d2f6f50103bbce56704a8e3e2194",
+      "source_sha256": "6d033307c2a8005b68172c72966cb0b2bdc2d2f6f50103bbce56704a8e3e2194"
+    },
+    {
+      "source": "content-api/content_domains/miniprogram_security.py",
+      "target": "server/content_domains/miniprogram_security.py",
+      "state_before": "missing",
+      "sha256": "c730e96a83b57d1e0769ce43ca60d219bd85bd65a7db93753031f4da16abddbb",
+      "source_sha256": "c730e96a83b57d1e0769ce43ca60d219bd85bd65a7db93753031f4da16abddbb"
+    },
+    {
+      "source": "content-api/content_domains/notifications.py",
+      "target": "server/content_domains/notifications.py",
+      "state_before": "missing",
+      "sha256": "34ca2ee4009a31c979e554072c9e6788a03469e3073a555f8629336b2f23005c",
+      "source_sha256": "34ca2ee4009a31c979e554072c9e6788a03469e3073a555f8629336b2f23005c"
+    },
+    {
+      "source": "content-api/content_domains/points.py",
+      "target": "server/content_domains/points.py",
+      "state_before": "different",
+      "sha256": "aa1fe6e8bb4ccc5ab17ab37bba3bb25f4173e87a23e63147553d332840d5b4d6",
+      "source_sha256": "aa1fe6e8bb4ccc5ab17ab37bba3bb25f4173e87a23e63147553d332840d5b4d6"
+    },
+    {
+      "source": "content-api/content_domains/provider_keys.py",
+      "target": "server/content_domains/provider_keys.py",
+      "state_before": "missing",
+      "sha256": "f9971be048829274205e64beed54528440e44d6209a6af20021c0f758f7ce32a",
+      "source_sha256": "f9971be048829274205e64beed54528440e44d6209a6af20021c0f758f7ce32a"
+    },
+    {
+      "source": "content-api/content_domains/script_to_video.py",
+      "target": "server/content_domains/script_to_video.py",
+      "state_before": "different",
+      "sha256": "62ac884949f03c518c4eca1e9e735a773d1e360407e7c260becbbe98ce3c9760",
+      "source_sha256": "62ac884949f03c518c4eca1e9e735a773d1e360407e7c260becbbe98ce3c9760"
+    },
+    {
+      "source": "content-api/content_domains/short_drama.py",
+      "target": "server/content_domains/short_drama.py",
+      "state_before": "missing",
+      "sha256": "a62fe2089bd56172479c225af866635d445a258f60b2088f4dfde353aa9818f6",
+      "source_sha256": "a62fe2089bd56172479c225af866635d445a258f60b2088f4dfde353aa9818f6"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_alignment.py",
+      "target": "server/content_domains/short_drama_alignment.py",
+      "state_before": "missing",
+      "sha256": "b9a573e7b23fad194bb78db4b19b3b9912fa06daa42aec41dd260dc99f07000f",
+      "source_sha256": "b9a573e7b23fad194bb78db4b19b3b9912fa06daa42aec41dd260dc99f07000f"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly.py",
+      "target": "server/content_domains/short_drama_assembly.py",
+      "state_before": "missing",
+      "sha256": "a6c5755cad9c305dbd92d1fe1f566ec23f7706bf37d045b31a7269ea4bfea1df",
+      "source_sha256": "a6c5755cad9c305dbd92d1fe1f566ec23f7706bf37d045b31a7269ea4bfea1df"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_artifacts.py",
+      "target": "server/content_domains/short_drama_assembly_artifacts.py",
+      "state_before": "missing",
+      "sha256": "3e0534e9b164d133d6db3ee5106929ebfbb368383feac499561fbf753e323aa0",
+      "source_sha256": "3e0534e9b164d133d6db3ee5106929ebfbb368383feac499561fbf753e323aa0"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_audio.py",
+      "target": "server/content_domains/short_drama_assembly_audio.py",
+      "state_before": "missing",
+      "sha256": "141fbcd9cac66104e9248e3970c505e22b1a5d86b10a8db87f2f095c6f74de93",
+      "source_sha256": "141fbcd9cac66104e9248e3970c505e22b1a5d86b10a8db87f2f095c6f74de93"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_engine.py",
+      "target": "server/content_domains/short_drama_assembly_engine.py",
+      "state_before": "missing",
+      "sha256": "7d16832c6300ba267187ee9931aa88eae35de95d3800f6f1385f49cf66f6e653",
+      "source_sha256": "7d16832c6300ba267187ee9931aa88eae35de95d3800f6f1385f49cf66f6e653"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_plan.py",
+      "target": "server/content_domains/short_drama_assembly_plan.py",
+      "state_before": "missing",
+      "sha256": "ee133952ce551dbe18bc7ba6a66f1803d8eed3d2dfc33fc98faaded6c02e3bbe",
+      "source_sha256": "ee133952ce551dbe18bc7ba6a66f1803d8eed3d2dfc33fc98faaded6c02e3bbe"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_render.py",
+      "target": "server/content_domains/short_drama_assembly_render.py",
+      "state_before": "missing",
+      "sha256": "32e5a69659028e951fabd3fb29d8f0dc2425eedff176cb5fc6ceff6c6cf5982e",
+      "source_sha256": "32e5a69659028e951fabd3fb29d8f0dc2425eedff176cb5fc6ceff6c6cf5982e"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_assembly_subtitles.py",
+      "target": "server/content_domains/short_drama_assembly_subtitles.py",
+      "state_before": "missing",
+      "sha256": "d4e52768cfa25dfa0d07be9e8bb5d2d551929ec8b55ab6ba234628c3b56c34d9",
+      "source_sha256": "d4e52768cfa25dfa0d07be9e8bb5d2d551929ec8b55ab6ba234628c3b56c34d9"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_master_audio.py",
+      "target": "server/content_domains/short_drama_master_audio.py",
+      "state_before": "missing",
+      "sha256": "efa5e49fbeb0ddd58a598e849541782573c0603fd37a3e688e2f80c67f489608",
+      "source_sha256": "efa5e49fbeb0ddd58a598e849541782573c0603fd37a3e688e2f80c67f489608"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_media_sanitize.py",
+      "target": "server/content_domains/short_drama_media_sanitize.py",
+      "state_before": "missing",
+      "sha256": "d0130e301c084b01e5a5d587295aa59cf6e42e704be55d37cbaabfb17fc148cc",
+      "source_sha256": "d0130e301c084b01e5a5d587295aa59cf6e42e704be55d37cbaabfb17fc148cc"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_production.py",
+      "target": "server/content_domains/short_drama_production.py",
+      "state_before": "missing",
+      "sha256": "4e86814038891e214c47a480f98be7f2ec2177717fbce35158e97eceedf7f8cb",
+      "source_sha256": "4e86814038891e214c47a480f98be7f2ec2177717fbce35158e97eceedf7f8cb"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_prompt_compiler.py",
+      "target": "server/content_domains/short_drama_prompt_compiler.py",
+      "state_before": "missing",
+      "sha256": "5d79a1a2f0ef1b3df8ed00cd6eb68779aeff6dcc91ce629ff8fa611bf0368a82",
+      "source_sha256": "5d79a1a2f0ef1b3df8ed00cd6eb68779aeff6dcc91ce629ff8fa611bf0368a82"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_video.py",
+      "target": "server/content_domains/short_drama_video.py",
+      "state_before": "missing",
+      "sha256": "9dbff2cb96083f39d405375a93797603955c5a719716762f4b0bf07b0f9c3330",
+      "source_sha256": "9dbff2cb96083f39d405375a93797603955c5a719716762f4b0bf07b0f9c3330"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_visual_gate.py",
+      "target": "server/content_domains/short_drama_visual_gate.py",
+      "state_before": "missing",
+      "sha256": "6e8e19210d69a08440f1d5fbde9b7e1eaafe46275eaac0f069d9f3bbcd0b7748",
+      "source_sha256": "6e8e19210d69a08440f1d5fbde9b7e1eaafe46275eaac0f069d9f3bbcd0b7748"
+    },
+    {
+      "source": "content-api/content_domains/short_drama_voice.py",
+      "target": "server/content_domains/short_drama_voice.py",
+      "state_before": "missing",
+      "sha256": "358ce21668aeb0e3f98687f86a85de717dc333709b624bac133966c6175ed986",
+      "source_sha256": "358ce21668aeb0e3f98687f86a85de717dc333709b624bac133966c6175ed986"
+    },
+    {
+      "source": "content-api/content_domains/startup_recovery.py",
+      "target": "server/content_domains/startup_recovery.py",
+      "state_before": "missing",
+      "sha256": "f60f1689b9d86567c5b7bec603bd8516c23976bb5ffaecc88aa50152531f7a55",
+      "source_sha256": "f60f1689b9d86567c5b7bec603bd8516c23976bb5ffaecc88aa50152531f7a55"
+    },
+    {
+      "source": "content-api/content_domains/submission_idempotency.py",
+      "target": "server/content_domains/submission_idempotency.py",
+      "state_before": "different",
+      "sha256": "79bca20e2891ab5c30147bbe249322c57d9f00f737cbce2a5a30be08296feb3f",
+      "source_sha256": "79bca20e2891ab5c30147bbe249322c57d9f00f737cbce2a5a30be08296feb3f"
+    },
+    {
+      "source": "content-api/content_domains/text.py",
+      "target": "server/content_domains/text.py",
+      "state_before": "different",
+      "sha256": "9600f80505de2e17c2e2d6a03cbd2a7b1648f0084b3ba67d3da7ff823e5f1a47",
+      "source_sha256": "9600f80505de2e17c2e2d6a03cbd2a7b1648f0084b3ba67d3da7ff823e5f1a47"
+    },
+    {
+      "source": "content-api/content_domains/video.py",
+      "target": "server/content_domains/video.py",
+      "state_before": "different",
+      "sha256": "32f370203c1206a8b0226f62482743a743452072a0833bedec74ec74a7e1d774",
+      "source_sha256": "32f370203c1206a8b0226f62482743a743452072a0833bedec74ec74a7e1d774"
+    },
+    {
+      "source": "content-api/content_domains/video_gemini_omni.py",
+      "target": "server/content_domains/video_gemini_omni.py",
+      "state_before": "missing",
+      "sha256": "a8d52bf0625557315522f70c332ff29b4bf57ad75d288840e0c645753c637153",
+      "source_sha256": "a8d52bf0625557315522f70c332ff29b4bf57ad75d288840e0c645753c637153"
+    },
+    {
+      "source": "content-api/content_domains/video_openai.py",
+      "target": "server/content_domains/video_openai.py",
+      "state_before": "missing",
+      "sha256": "4157b1cf89ffd8078118c389d2d8dc691a173038bd31e9f76c90322e20d88af7",
+      "source_sha256": "4157b1cf89ffd8078118c389d2d8dc691a173038bd31e9f76c90322e20d88af7"
+    },
+    {
+      "source": "content-api/content_domains/video_openrouter.py",
+      "target": "server/content_domains/video_openrouter.py",
+      "state_before": "different",
+      "sha256": "8dbc8c73ea3f768a49b229a9b824fc73bebb7351597c56a807fc3762ecded987",
+      "source_sha256": "8dbc8c73ea3f768a49b229a9b824fc73bebb7351597c56a807fc3762ecded987"
+    },
+    {
+      "source": "content-api/content_domains/video_seedance.py",
+      "target": "server/content_domains/video_seedance.py",
+      "state_before": "missing",
+      "sha256": "e720a9232ed1b6da8fc9a8a4b6801801b914c3bf0ab19b9bb5d8fa40d727a027",
+      "source_sha256": "e720a9232ed1b6da8fc9a8a4b6801801b914c3bf0ab19b9bb5d8fa40d727a027"
+    },
+    {
+      "source": "content-api/content_domains/video_xai.py",
+      "target": "server/content_domains/video_xai.py",
+      "state_before": "different",
+      "sha256": "d5a89ee711d0f9cc3fe98491437103f4d367a228e57bb0daf1ba84788001d9d4",
+      "source_sha256": "d5a89ee711d0f9cc3fe98491437103f4d367a228e57bb0daf1ba84788001d9d4"
+    },
+    {
+      "source": "content-api/content_domains/wavespeed.py",
+      "target": "server/content_domains/wavespeed.py",
+      "state_before": "different",
+      "sha256": "dc604345ba91acb3cd4ce7f92eeffe3eefbdec66da9a8f29b211a9aa46bdaa46",
+      "source_sha256": "dc604345ba91acb3cd4ce7f92eeffe3eefbdec66da9a8f29b211a9aa46bdaa46"
+    },
+    {
+      "source": "dl-service/dl_service.py",
+      "target": "server/dl_service.py",
+      "state_before": "different",
+      "sha256": "3b41fd229bbb10a097cd16e4f640879be6cff6ccd8ac789a1461bce0016523da",
+      "source_sha256": "3b41fd229bbb10a097cd16e4f640879be6cff6ccd8ac789a1461bce0016523da"
+    },
+    {
+      "source": "www/huangquechuanmei/digital-ip-compare.html",
+      "target": "site/digital-ip-compare.html",
+      "state_before": "missing",
+      "sha256": "3945a57a00f315ea7ce0135f30183e9f2a99d4231074bec95eadfdbca9b50000",
+      "source_sha256": "3945a57a00f315ea7ce0135f30183e9f2a99d4231074bec95eadfdbca9b50000"
+    },
+    {
+      "source": "www/huangquechuanmei/login.html",
+      "target": "site/login.html",
+      "state_before": "different",
+      "sha256": "6373f9a2b3f866eec0c1cb6678293f4e910e29876ca0997f4c565616f1ba34a7",
+      "source_sha256": "6373f9a2b3f866eec0c1cb6678293f4e910e29876ca0997f4c565616f1ba34a7"
+    },
+    {
+      "source": "www/huangquechuanmei/register.html",
+      "target": "site/register.html",
+      "state_before": "missing",
+      "sha256": "7ffb3dbbf137f2f367b655bef4e1898fbc5adef259423b5600b4b5cf76d61682",
+      "source_sha256": "7ffb3dbbf137f2f367b655bef4e1898fbc5adef259423b5600b4b5cf76d61682"
+    },
+    {
+      "source": "www/huangquechuanmei/admin/index.html",
+      "target": "site/admin/index.html",
+      "state_before": "different",
+      "sha256": "924e7ed32a794b74018fc5726b2a5e2344908c854b8623ced681a365e0398900",
+      "source_sha256": "924e7ed32a794b74018fc5726b2a5e2344908c854b8623ced681a365e0398900"
+    },
+    {
+      "source": "www/huangquechuanmei/api-admin/index.html",
+      "target": "site/api-admin/index.html",
+      "state_before": "different",
+      "sha256": "d639b1722a568232cbf87a503df1b0ee9116741b7304ef80c0ea49a8f9115466",
+      "source_sha256": "d639b1722a568232cbf87a503df1b0ee9116741b7304ef80c0ea49a8f9115466"
+    },
+    {
+      "source": "www/huangquechuanmei/api-docs/openapi.json",
+      "target": "site/api-docs/openapi.json",
+      "state_before": "different",
+      "sha256": "3b5a1fbd40b23dcda37314c3abb21de4b77cc03d1055f692ad0ddbb788a63edb",
+      "source_sha256": "06dc8bde7b7208b3bafb984213b610bcbe085469477cd2bd6ae4e3f6452fa8e0",
+      "sanitization": "converted production server URL to same-origin root"
+    },
+    {
+      "source": "www/huangquechuanmei/assets/cloud/virtual-pay-item-200.png",
+      "target": "site/assets/cloud/virtual-pay-item-200.png",
+      "state_before": "missing",
+      "sha256": "bc24c107b83e1a6b47c7f4f55c7ba06c1c309b37c7fcd27b5e92f15d254956a3",
+      "source_sha256": "bc24c107b83e1a6b47c7f4f55c7ba06c1c309b37c7fcd27b5e92f15d254956a3"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/assets.html",
+      "target": "site/workbench/assets.html",
+      "state_before": "different",
+      "sha256": "1d9e3edf3f208713e2d00321c4809449800a078fef9d8f516aec43034fceb3ba",
+      "source_sha256": "1d9e3edf3f208713e2d00321c4809449800a078fef9d8f516aec43034fceb3ba"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/audio.html",
+      "target": "site/workbench/audio.html",
+      "state_before": "different",
+      "sha256": "d8a953d160542cf613ae17d6a69cd2ac5793ecd5aa95b01ec4d42cfd06c01b83",
+      "source_sha256": "d8a953d160542cf613ae17d6a69cd2ac5793ecd5aa95b01ec4d42cfd06c01b83"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/banana.html",
+      "target": "site/workbench/banana.html",
+      "state_before": "different",
+      "sha256": "2a35f2a17e960dcd1ce858645711048bc3988e0d5be3f14f77f0aca7582d4f1f",
+      "source_sha256": "5b511cc7ca6b73e40dee80f5e35b4513486a2dc39e1b04dfd51ba856584aa27a",
+      "sanitization": "replaced production-hostname feature gate with an explicit document data flag"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/bots.html",
+      "target": "site/workbench/bots.html",
+      "state_before": "different",
+      "sha256": "92e3d1d64a2cdadb2346660a794a45b8acda682cb09d4193e7c7795bbf847754",
+      "source_sha256": "92e3d1d64a2cdadb2346660a794a45b8acda682cb09d4193e7c7795bbf847754"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas.html",
+      "target": "site/workbench/canvas.html",
+      "state_before": "different",
+      "sha256": "0ef161e0cb45c7c84f14e904f8075b33dcb0a54261dfe4489f810a683c187d3e",
+      "source_sha256": "0ef161e0cb45c7c84f14e904f8075b33dcb0a54261dfe4489f810a683c187d3e"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/cloud-shell.js",
+      "target": "site/workbench/cloud-shell.js",
+      "state_before": "different",
+      "sha256": "141d98fcf0906ec650fb0ad4f1084c1580c8a662fe582531f18bc4a423a61fe7",
+      "source_sha256": "141d98fcf0906ec650fb0ad4f1084c1580c8a662fe582531f18bc4a423a61fe7"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/collect.html",
+      "target": "site/workbench/collect.html",
+      "state_before": "different",
+      "sha256": "26b8569bfe0cdeed5264a544288a743812773d8eaacddc18707b9b844e7cbaa5",
+      "source_sha256": "26b8569bfe0cdeed5264a544288a743812773d8eaacddc18707b9b844e7cbaa5"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/cost.html",
+      "target": "site/workbench/cost.html",
+      "state_before": "different",
+      "sha256": "4ad9f886a18acd902de222744cbc0b4242c1a9452709f278eb03fa004ba64fee",
+      "source_sha256": "4ad9f886a18acd902de222744cbc0b4242c1a9452709f278eb03fa004ba64fee"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/dashboard.html",
+      "target": "site/workbench/dashboard.html",
+      "state_before": "different",
+      "sha256": "147450832c44e89ce1a8f831f9ed3237754496414c095fed8a04e572eb504042",
+      "source_sha256": "147450832c44e89ce1a8f831f9ed3237754496414c095fed8a04e572eb504042"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/digital-ip-a.html",
+      "target": "site/workbench/digital-ip-a.html",
+      "state_before": "missing",
+      "sha256": "10e10d6e29f9286f2df6d09c794916407323f8ed8876b6626265a63624e6530f",
+      "source_sha256": "10e10d6e29f9286f2df6d09c794916407323f8ed8876b6626265a63624e6530f"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/digital-ip-b.html",
+      "target": "site/workbench/digital-ip-b.html",
+      "state_before": "missing",
+      "sha256": "752ac7135b624691f09ed66720cc75ed489db7084d13803020d388e0c72ed809",
+      "source_sha256": "752ac7135b624691f09ed66720cc75ed489db7084d13803020d388e0c72ed809"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/digital-ip-c.html",
+      "target": "site/workbench/digital-ip-c.html",
+      "state_before": "missing",
+      "sha256": "3c5c188a29bb187cdd22da27f1c7957c74af32a75fe6d9d0561ebda15521eb99",
+      "source_sha256": "3c5c188a29bb187cdd22da27f1c7957c74af32a75fe6d9d0561ebda15521eb99"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/digital-ip.html",
+      "target": "site/workbench/digital-ip.html",
+      "state_before": "missing",
+      "sha256": "00f037e62cceafa83c1419e52bda01b8006de2c578aeb0b86128f0af07913eab",
+      "source_sha256": "00f037e62cceafa83c1419e52bda01b8006de2c578aeb0b86128f0af07913eab"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/inspiration.html",
+      "target": "site/workbench/inspiration.html",
+      "state_before": "different",
+      "sha256": "df03b7d035f0375e241bbd8d28feeb5b065fdc4874344d07ec96fc7bfe830af8",
+      "source_sha256": "df03b7d035f0375e241bbd8d28feeb5b065fdc4874344d07ec96fc7bfe830af8"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/invite.html",
+      "target": "site/workbench/invite.html",
+      "state_before": "missing",
+      "sha256": "409b692899a8faa54de50ff3180368a3b8801d3dc8829e898874f279bee0249e",
+      "source_sha256": "409b692899a8faa54de50ff3180368a3b8801d3dc8829e898874f279bee0249e"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/ip12-report.html",
+      "target": "site/workbench/ip12-report.html",
+      "state_before": "missing",
+      "sha256": "d5710c943f9dae144f148b4be03408775b653ad04f2fb238423a142112ed5219",
+      "source_sha256": "d5710c943f9dae144f148b4be03408775b653ad04f2fb238423a142112ed5219"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/ip12.html",
+      "target": "site/workbench/ip12.html",
+      "state_before": "missing",
+      "sha256": "194289598efc31ad4d789213466bb5549fc5fa91c651f26d872ef10a699016e0",
+      "source_sha256": "194289598efc31ad4d789213466bb5549fc5fa91c651f26d872ef10a699016e0"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/leads.html",
+      "target": "site/workbench/leads.html",
+      "state_before": "different",
+      "sha256": "01d166efafd354e92c37f53d4f9a0d04011a103e34f2a4b9680871024db1700f",
+      "source_sha256": "01d166efafd354e92c37f53d4f9a0d04011a103e34f2a4b9680871024db1700f"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/recharge.html",
+      "target": "site/workbench/recharge.html",
+      "state_before": "different",
+      "sha256": "e45a6edf573edf3b0092216aee25133d4c18a844bc1d34cc6396f4615162318c",
+      "source_sha256": "e45a6edf573edf3b0092216aee25133d4c18a844bc1d34cc6396f4615162318c"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/script.html",
+      "target": "site/workbench/script.html",
+      "state_before": "different",
+      "sha256": "4a9f97eeb0ec6088383134aae3ebb8c096b73a5ee7cb781ab2c6be74794184a9",
+      "source_sha256": "4a9f97eeb0ec6088383134aae3ebb8c096b73a5ee7cb781ab2c6be74794184a9"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/settings.html",
+      "target": "site/workbench/settings.html",
+      "state_before": "different",
+      "sha256": "11f3cddefbee2656bf25bff423a2c0862bd74f74000ff5fa8c1a28be622d280c",
+      "source_sha256": "11f3cddefbee2656bf25bff423a2c0862bd74f74000ff5fa8c1a28be622d280c"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/tutorials.html",
+      "target": "site/workbench/tutorials.html",
+      "state_before": "different",
+      "sha256": "394caf77dd62694501ead5a9bf4da8fb25d07402c971c2c98ad90bf9658c8574",
+      "source_sha256": "394caf77dd62694501ead5a9bf4da8fb25d07402c971c2c98ad90bf9658c8574"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/video.html",
+      "target": "site/workbench/video.html",
+      "state_before": "different",
+      "sha256": "d9922a2361adc6707f33f646289566daa1482d864286df6d4b645b7c1f3dbce0",
+      "source_sha256": "d9922a2361adc6707f33f646289566daa1482d864286df6d4b645b7c1f3dbce0"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-api.js",
+      "target": "site/workbench/canvas/canvas-api.js",
+      "state_before": "missing",
+      "sha256": "1e786188682a6b0fa719104d966bc36c5fe8e7080eea6fc9cfb5a593d25fbeb1",
+      "source_sha256": "1e786188682a6b0fa719104d966bc36c5fe8e7080eea6fc9cfb5a593d25fbeb1"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-app.js",
+      "target": "site/workbench/canvas/canvas-app.js",
+      "state_before": "missing",
+      "sha256": "04c3dcc8e835e472895088e8b9345f22d026c0ab67406a7c5806401e15e7e889",
+      "source_sha256": "04c3dcc8e835e472895088e8b9345f22d026c0ab67406a7c5806401e15e7e889"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-export.js",
+      "target": "site/workbench/canvas/canvas-export.js",
+      "state_before": "missing",
+      "sha256": "7243fe51224db99982e67d0894d44664c5ed27a47bbec10be964a435340cfc10",
+      "source_sha256": "7243fe51224db99982e67d0894d44664c5ed27a47bbec10be964a435340cfc10"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-graph.js",
+      "target": "site/workbench/canvas/canvas-graph.js",
+      "state_before": "missing",
+      "sha256": "decc0dcf1cb31e001e0e17890468309106d541ab0e738eb8f51f45fa5c3854ef",
+      "source_sha256": "decc0dcf1cb31e001e0e17890468309106d541ab0e738eb8f51f45fa5c3854ef"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-assembly.css",
+      "target": "site/workbench/canvas/canvas-short-drama-assembly.css",
+      "state_before": "missing",
+      "sha256": "4352d929abc4797420fb73b516af187612f79c73f4f05d543949c747784953e9",
+      "source_sha256": "4352d929abc4797420fb73b516af187612f79c73f4f05d543949c747784953e9"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-assembly.js",
+      "target": "site/workbench/canvas/canvas-short-drama-assembly.js",
+      "state_before": "missing",
+      "sha256": "0b685dc1c97a1412889d22f3d14af78271025b512ca689c1d3b5a957d31c7e50",
+      "source_sha256": "0b685dc1c97a1412889d22f3d14af78271025b512ca689c1d3b5a957d31c7e50"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-production.css",
+      "target": "site/workbench/canvas/canvas-short-drama-production.css",
+      "state_before": "missing",
+      "sha256": "aa46a9c96a08238d5bab72e3df9a27558f8d4af87d42699e1799cf03c707e547",
+      "source_sha256": "aa46a9c96a08238d5bab72e3df9a27558f8d4af87d42699e1799cf03c707e547"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-production.js",
+      "target": "site/workbench/canvas/canvas-short-drama-production.js",
+      "state_before": "missing",
+      "sha256": "7d851afd974db2aba9baf93d32c1339cf34a3f69d1fe03b4fbe5318d2b4b8d61",
+      "source_sha256": "7d851afd974db2aba9baf93d32c1339cf34a3f69d1fe03b4fbe5318d2b4b8d61"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-video.css",
+      "target": "site/workbench/canvas/canvas-short-drama-video.css",
+      "state_before": "missing",
+      "sha256": "4858ef36694b9d5e276575d3c0dfa390f0259751a734eb4b56c9b9fb7c242492",
+      "source_sha256": "4858ef36694b9d5e276575d3c0dfa390f0259751a734eb4b56c9b9fb7c242492"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-video.js",
+      "target": "site/workbench/canvas/canvas-short-drama-video.js",
+      "state_before": "missing",
+      "sha256": "4046068297b1bd52b7abd780a607f7ec332af2110f968f484990cf2a58181cd9",
+      "source_sha256": "4046068297b1bd52b7abd780a607f7ec332af2110f968f484990cf2a58181cd9"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-voice.css",
+      "target": "site/workbench/canvas/canvas-short-drama-voice.css",
+      "state_before": "missing",
+      "sha256": "5ff01b312d90e4bc7ee384ab444ebc0360006f48734d39edcc2f1708e2a450a3",
+      "source_sha256": "5ff01b312d90e4bc7ee384ab444ebc0360006f48734d39edcc2f1708e2a450a3"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama-voice.js",
+      "target": "site/workbench/canvas/canvas-short-drama-voice.js",
+      "state_before": "missing",
+      "sha256": "d639fe78dc106e34e543bc740749ee25ac07a9a9f246799eda76b9a1b7bb5752",
+      "source_sha256": "d639fe78dc106e34e543bc740749ee25ac07a9a9f246799eda76b9a1b7bb5752"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama.css",
+      "target": "site/workbench/canvas/canvas-short-drama.css",
+      "state_before": "missing",
+      "sha256": "3ad76bb21ad3b5f0c41527288ab2c2c7012cef27b7aaf3322747336215ba8c1a",
+      "source_sha256": "3ad76bb21ad3b5f0c41527288ab2c2c7012cef27b7aaf3322747336215ba8c1a"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-short-drama.js",
+      "target": "site/workbench/canvas/canvas-short-drama.js",
+      "state_before": "missing",
+      "sha256": "d4c1684b2238e51a9f2404d37a35e9b99bc6f997c42d7e309c766d6c6f443d33",
+      "source_sha256": "d4c1684b2238e51a9f2404d37a35e9b99bc6f997c42d7e309c766d6c6f443d33"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-state.js",
+      "target": "site/workbench/canvas/canvas-state.js",
+      "state_before": "missing",
+      "sha256": "00121c79076f1939e1c935df6fa77a22dbbf69777f330dc69c414d7fe8d41377",
+      "source_sha256": "00121c79076f1939e1c935df6fa77a22dbbf69777f330dc69c414d7fe8d41377"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas-storage.js",
+      "target": "site/workbench/canvas/canvas-storage.js",
+      "state_before": "missing",
+      "sha256": "17efb41ae0aa3799a077205c05a368ce130ad5f798f75966d9295f24406b5fd6",
+      "source_sha256": "17efb41ae0aa3799a077205c05a368ce130ad5f798f75966d9295f24406b5fd6"
+    },
+    {
+      "source": "www/huangquechuanmei/workbench/canvas/canvas.css",
+      "target": "site/workbench/canvas/canvas.css",
+      "state_before": "missing",
+      "sha256": "61ffe941b7b710cee74669a3c8a6108d523ae489aca5e68c5f88001749ecb669",
+      "source_sha256": "61ffe941b7b710cee74669a3c8a6108d523ae489aca5e68c5f88001749ecb669"
+    }
+  ],
+  "sanitized_files": [
+    {
+      "target": "server/auth_server.py",
+      "reason": "removed production public-base default; deployment must set HQ_INVITE_PUBLIC_BASE_URL"
+    },
+    {
+      "target": "server/sync_virtual_pay_goods.py",
+      "reason": "removed production item URL default; deployment must set WX_VIRTUAL_PAY_ITEM_URL"
+    },
+    {
+      "target": "server/content_domains/ip12_pdf.py",
+      "reason": "converted production-origin links to same-origin relative links"
+    },
+    {
+      "target": "site/api-docs/openapi.json",
+      "reason": "converted production server URL to same-origin root"
+    },
+    {
+      "target": "site/workbench/banana.html",
+      "reason": "replaced production-hostname feature gate with an explicit document data flag"
+    }
+  ]
+}

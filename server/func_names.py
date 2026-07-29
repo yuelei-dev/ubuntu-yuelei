@@ -6,18 +6,18 @@
 运营在后台看到的名字，要能和用户在界面上点的那个按钮对上号。名字不是这里现编的 ——
 每一条都对着前端的实际标签抄：
 
-    site/workbench/video.html   data-function="talking"   → 数字人口播
+    site/workbench/video.html   data-function="talking"   → 数字化 IP
                                 data-function="motion"    → 动作模仿
                                 data-function="cinematic" → 电影化身
                                 data-function="tryon"     → 换装换背景
                                 data-function="grok"      → 果肉视频生成
-                                data-function="micro"     → 豆姐视频生成
-                                data-function="omni"      → 欧米视频生成
-    site/workbench/banana.html  data-engine="gpt"         → gpt-image-2
-                                data-engine="seedream"    → Seedream / Seedream Pro
+                                data-function="micro"     → Seedance 视频
+                                data-function="omni"      → Omni 视频
+    site/workbench/banana.html  data-engine="gpt"         → 黄雀引擎 2
+                                data-engine="seedream"    → 黄雀引擎 1 标准 / 黄雀引擎 1 Pro
                                 data-engine="xiaole"      → 果肉生图
                                 data-engine="zelong2"     → 泽龙2生图
-                                data-engine="banana"      → Nano Banana 2 / Nano Banana Pro
+                                data-engine="banana"      → 纳米香蕉 2 / 纳米香蕉 Pro
     各功能页的 <title>          → AI 配音 / 编导 · 文案脚本 / 内容爬取 / 获客
 
 改了前端的标签，就要同步改这里。
@@ -43,7 +43,7 @@
 """
 
 # 视频页的三个第三方渠道。名字取自 data-function 的标签。
-XIAOLE_CHANNELS = {"grok": "果肉视频生成", "micro": "豆姐视频生成", "omni": "欧米视频生成"}
+XIAOLE_CHANNELS = {"grok": "果肉视频生成", "micro": "Seedance 视频", "omni": "Omni 视频"}
 
 # 电影化身的三个玩法（#601）。老任务的 payload 里没有 cine_mode，回落到「电影化身」。
 CINEMATIC_MODES = {"motion": "动作模仿", "duo": "双人动作模仿", "open": "开放式生成"}
@@ -73,14 +73,14 @@ def _image_engine(payload):
     """
     model = str(payload.get("model") or "").strip().lower()
     if model == "nb2":
-        return "Nano Banana 2"
+        return "纳米香蕉 2"
     if model == "pro":
-        return "Nano Banana Pro"
+        return "纳米香蕉 Pro"
     provider = str(payload.get("provider") or "openai").strip().lower()
     if provider == "openai":
-        return "gpt-image-2"
+        return "黄雀引擎 2"
     if provider == "seedream":
-        return "Seedream Pro" if str(payload.get("variant") or "").lower() == "pro" else "Seedream"
+        return "黄雀引擎 1 Pro" if str(payload.get("variant") or "").lower() == "pro" else "黄雀引擎 1 标准"
     if provider == "xiaole":
         return "果肉生图"
     if provider == "zelong2":
@@ -106,9 +106,9 @@ def func_name(kind, payload=None):
     if kind == "video":
         mode = str(payload.get("mode") or "").strip().lower()
         if mode == "text":
-            return "数字人口播 · 文案"
+            return "数字化 IP · 文案"
         if mode == "audio":
-            return "数字人口播 · 音频"
+            return "数字化 IP · 音频"
         if mode == "motion":
             return "动作模仿"      # 去线路化(#594)后只走 WaveSpeed，不再有线路之分
         return "视频生成"
@@ -120,9 +120,13 @@ def func_name(kind, payload=None):
     if kind == "avatar":
         return "创建数字人形象"
 
+    if kind == "sora_video":
+        model = str(payload.get("model") or "sora-2").strip().lower()
+        return "Sora 2 Pro 视频" if model == "sora-2-pro" else "Sora 2 视频"
+
     if kind == "xiaole_video":
         return XIAOLE_CHANNELS.get(str(payload.get("channel") or "").strip().lower(),
-                                   "果肉/豆姐/欧米视频")
+                                   "果肉/Seedance/Omni 视频")
 
     if kind == "tryon":
         # 换装【仍然】有线路之分（线路一 RunningHub / 线路二 WaveSpeed），前端也还给用户选。
@@ -149,8 +153,9 @@ PATH_FUNCS = [
     ("/api/gen/video/assets", "视频 · 读历史"),
     ("/api/gen/video/avatars", "数字人形象 · 读列表"),
     ("/api/gen/video/avatar-", "数字人形象 · 改名/删除"),
-    ("/api/gen/video/batch", "数字人口播 · 批量提交"),
-    ("/api/gen/xiaole_video", "果肉/豆姐/欧米视频 · 提交"),
+    ("/api/gen/video/batch", "数字化 IP · 批量提交"),
+    ("/api/gen/sora_video", "Sora 2 限时测试 · 提交"),
+    ("/api/gen/xiaole_video", "果肉/Seedance/Omni 视频 · 提交"),
     ("/api/gen/cinematic", "电影化身 · 提交"),
     ("/api/gen/avatar", "创建数字人形象 · 提交"),
     ("/api/gen/image", "作图 · 提交"),
