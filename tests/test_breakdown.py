@@ -857,6 +857,91 @@ class BreakdownTests(unittest.TestCase):
             ],
         )
 
+    def test_reverse_single_call_acceptance_contract(self):
+        import re
+
+        calls = []
+
+        def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
+            return json.dumps(
+                {"segments": self._detailed_reverse_objects()},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "海边人物动作", 15.093, "local", "", [
+                "pair-1.jpg", "pair-2.jpg", "pair-3.jpg", "pair-4.jpg",
+            ],
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][2], [
+            "pair-1.jpg", "pair-2.jpg", "pair-3.jpg", "pair-4.jpg",
+        ])
+        self.assertEqual(calls[0][3], 0.1)
+        self.assertEqual(
+            calls[0][4],
+            {"max_tokens": 2400, "image_detail": None},
+        )
+        self.assertIn("不得臆造", calls[0][1])
+        self.assertIn("不新增人物、道具、镜头或无关情节", calls[0][1])
+
+        lines = prompt.splitlines()
+        self.assertEqual(len(lines), 4)
+        self.assertTrue(lines[0].startswith("[00:00.0-00:03.8]"))
+        self.assertTrue(lines[-1].startswith("[00:11.3-00:15.1]"))
+        bodies = [line.split("] ", 1)[1] for line in lines]
+        lengths = [len(re.sub(r"\s+", "", body)) for body in bodies]
+        self.assertTrue(all(125 <= length <= 200 for length in lengths))
+        self.assertTrue(500 <= sum(lengths) <= 800)
+        self.assertEqual(len(set(bodies)), 4)
+        for body in bodies:
+            for label in (
+                "主体：", "场景：", "动作：", "镜头：",
+                "光影：", "声音：", "衔接：",
+            ):
+                self.assertIn(label, body)
+
+    def test_reverse_single_call_contract_handles_ten_concurrent_jobs(self):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        response = json.dumps(
+            {"segments": self._detailed_reverse_objects()},
+            ensure_ascii=False,
+        )
+        lock = threading.Lock()
+        call_count = [0]
+
+        def fake_chat_multimodal(*args, **kwargs):
+            with lock:
+                call_count[0] += 1
+            return response
+
+        self.breakdown._chat_multimodal = fake_chat_multimodal
+
+        def reverse_one(index):
+            return self.breakdown._reverse_prompt_from_frames(
+                "并发任务%d" % index,
+                15.093,
+                "local",
+                "",
+                ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"],
+            )
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            prompts = list(executor.map(reverse_one, range(10)))
+
+        self.assertEqual(call_count[0], 10)
+        self.assertEqual(len(prompts), 10)
+        self.assertTrue(all(len(prompt.splitlines()) == 4 for prompt in prompts))
+        self.assertTrue(all(
+            prompt.splitlines()[-1].startswith("[00:11.3-00:15.1]")
+            for prompt in prompts
+        ))
+
     def test_duration_normalization_preserves_milliseconds(self):
         self.assertEqual(
             self.breakdown._normalize_duration_seconds(11434),
