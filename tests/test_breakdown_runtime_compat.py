@@ -265,6 +265,21 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
         self.assertNotIn("seedance-2.0-fast", self.script)
         self.assertNotIn("doubao-seedance-2-0-260128", self.script)
 
+    def test_local_upload_keeps_idempotency_key_until_valid_job_json(self):
+        block = self.script.split(
+            "function _submitLocalReverse(mediaType,file,btn){", 1
+        )[1].split("if(bdImagePick)", 1)[0]
+        parsed = (
+            "r.json().then(function(d){return {s:r.status,d:d};})"
+        )
+        confirmed = "_confirmSubmission(localPending);"
+        self.assertIn(parsed, block)
+        self.assertIn("if(!x.d.job_id)", block)
+        self.assertIn(confirmed, block)
+        self.assertLess(block.index(parsed), block.index(confirmed))
+        self.assertLess(block.index("if(!x.d.job_id)"), block.index(confirmed))
+        self.assertNotIn("if(response.ok)_confirmSubmission", block)
+
     def test_tikhub_retains_safe_length_and_truncation_contract(self):
         source = (self.root / "server/tikhub.py").read_text(encoding="utf-8")
         self.assertIn('declared_raw = r.headers.get("Content-Length")', source)
