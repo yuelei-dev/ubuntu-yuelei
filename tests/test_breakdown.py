@@ -111,6 +111,13 @@ class BreakdownTests(unittest.TestCase):
                 "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
                 "sound": "",
                 "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                    "camera": [1, 2],
+                    "lighting": [1, 2],
+                },
             })
         return result
 
@@ -128,7 +135,36 @@ class BreakdownTests(unittest.TestCase):
         return {
             "text": self.breakdown._compose_reverse_segment(fields),
             "fields": fields,
+            "evidence_frames": {
+                key: [1, 2]
+                for key in (
+                    "subject", "scene", "action", "camera", "lighting"
+                )
+                if fields.get(key)
+            },
         }
+
+    def _global_continuity(self):
+        facts = {
+            "subject_identity": "同一名白衣人物，黑色长发",
+            "wardrobe": "白色长衣，未见服装切换",
+            "recurring_scene_objects": "海滩、浪花与远处海平线",
+            "scene_style": "户外海边场景",
+            "camera_style": "以平视中景为主",
+            "lighting_style": "暖色逆光，轮廓高光",
+        }
+        evidence = {
+            key: [1, 3, 5, 7]
+            for key in facts
+        }
+        return {"facts": facts, "evidence_frames": evidence}
+
+    def _global_continuity_response(self):
+        data = self._global_continuity()
+        return json.dumps({
+            "global_facts": data["facts"],
+            "evidence_frames": data["evidence_frames"],
+        }, ensure_ascii=False)
 
     def test_download_breakdown_video_retries_empty_and_truncated_cdn(self):
         calls = []
@@ -723,7 +759,9 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_reverse_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             reverse_calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
-            item = objects[len(reverse_calls) - 1]
+            if len(frames) == 8:
+                return self._global_continuity_response()
+            item = objects[len(reverse_calls) - 2]
             return json.dumps({"segments": [item]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_reverse_chat
@@ -745,10 +783,20 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["frame_thumbnails"]), 4)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
-        self.assertEqual(len(reverse_calls), 4)
-        self.assertIn("只属于当前时间段", reverse_calls[0][1])
-        self.assertIn("准确性高于完整性和篇幅", reverse_calls[0][0])
-        self.assertEqual(reverse_calls[0][2], [thumb.name, thumb.name])
+        self.assertEqual(len(reverse_calls), 5)
+        self.assertEqual(reverse_calls[0][2], [thumb.name] * 8)
+        self.assertIn("只属于当前时间段", reverse_calls[1][1])
+        self.assertIn("准确性高于完整性和篇幅", reverse_calls[1][0])
+        self.assertEqual(reverse_calls[1][2], [thumb.name, thumb.name])
+        self.assertEqual(result["reference_frame_strategy"], "one_per_segment")
+        self.assertEqual(result["quality_score"]["total"], 100)
+        self.assertEqual(result["quality_contract"]["target_score"], 90)
+        self.assertEqual(len(result["segment_evidence"]), 4)
+        self.assertEqual(
+            result["segment_evidence"][0]["evidence_frames"]["action"],
+            [1, 2],
+        )
+        self.assertIn("全局连续性事实", result["prompt"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
     def test_breakdown_scenes_retries_once_when_parse_fails(self):
@@ -970,7 +1018,8 @@ class BreakdownTests(unittest.TestCase):
     def test_reverse_prompt_rejects_long_structured_json_with_wrong_count(self):
         one_long_segment = self._detailed_reverse_objects(1)[0]
         one_long_segment = {
-            key: value * 4 for key, value in one_long_segment.items()
+            key: (value * 4 if isinstance(value, str) else value)
+            for key, value in one_long_segment.items()
         }
         raw = json.dumps({"segments": [one_long_segment]}, ensure_ascii=False)
         with self.assertRaisesRegex(ValueError, "需要4段，实际1段"):
@@ -1311,6 +1360,7 @@ class BreakdownTests(unittest.TestCase):
             "text": "主体：白衣人物坐在树旁抬起右手；动作：白衣人物坐在树旁抬起右手。",
             "fields": {
                 "subject": "白衣人物坐在树旁抬起右手",
+                "scene": "树林背景",
                 "action": "白衣人物坐在树旁抬起右手",
             },
         }
@@ -1329,6 +1379,143 @@ class BreakdownTests(unittest.TestCase):
                 "[00:08.6-00:11.4]",
             ],
         )
+
+    def test_reverse_visual_semantic_rubric_is_auditable_hundred_points(self):
+        contract = self.breakdown._reverse_quality_contract()
+        self.assertEqual(contract["definition"], "visual_semantic_not_pixel")
+        self.assertEqual(
+            contract["score_scope"],
+            "source_evidence_coverage_not_generated_video_similarity",
+        )
+        self.assertEqual(contract["target_score"], 90)
+        self.assertTrue(contract["requires_reference_guidance"])
+        self.assertEqual(sum(contract["weights"].values()), 100)
+        self.assertEqual(
+            contract["critical_failures"],
+            ["subject", "scene", "action"],
+        )
+
+        entries = [
+            self._reverse_entry(
+                subject="白衣人物位于画面中部",
+                scene="海滩、浪花与海平线",
+                action="人物从左向右迈步",
+                camera="平视中景跟随",
+                lighting="暖色逆光",
+            )
+            for _index in range(4)
+        ]
+        score = self.breakdown._score_reverse_generation_coverage(
+            entries,
+            self._global_continuity(),
+            self.breakdown._reverse_segment_windows(15.267),
+        )
+        self.assertEqual(score["total"], 100)
+        self.assertEqual(score["parts"], {
+            "subject": 30,
+            "action_timing": 25,
+            "scene_composition": 20,
+            "camera_duration": 15,
+            "lighting_style": 10,
+        })
+
+    def test_reverse_global_facts_require_original_frame_evidence(self):
+        parsed = self.breakdown._parse_reverse_global_facts(
+            self._global_continuity_response(), 8
+        )
+        self.assertEqual(
+            parsed["facts"]["wardrobe"],
+            "白色长衣，未见服装切换",
+        )
+        self.assertEqual(parsed["evidence_frames"]["wardrobe"], [1, 3, 5, 7])
+
+        invalid = json.loads(self._global_continuity_response())
+        invalid["evidence_frames"]["wardrobe"] = []
+        with self.assertRaisesRegex(ValueError, "缺少原始帧编号"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(invalid, ensure_ascii=False), 8
+            )
+
+    def test_reverse_segment_receives_evidence_only_global_continuity(self):
+        _system, user = self.breakdown._reverse_segment_messages(
+            "标题", 15.267, "douyin", "", 2, 4,
+            "[00:03.8-00:07.6]",
+            retry=True,
+            global_continuity=self._global_continuity(),
+        )
+        self.assertIn("全片连续性事实（由全部原始帧独立提取，不是历史草稿）", user)
+        self.assertIn("同一名白衣人物，黑色长发", user)
+        self.assertIn("若当前帧显示变化，以当前帧为准", user)
+        self.assertIn("不要沿用任何历史草稿", user)
+        self.assertNotIn("上一轮输出", user)
+        self.assertIn('"evidence_frames"', user)
+        self.assertIn("action 必须同时引用首尾两帧", user)
+
+    def test_reverse_production_segment_requires_auditable_frame_indices(self):
+        raw = json.dumps({
+            "segments": [{
+                "subject": "白衣人物位于画面中央",
+                "scene": "海滩与远处海平线",
+                "action": "人物从左向右迈步",
+                "camera": "平视中景",
+                "lighting": "暖色逆光",
+                "sound": "",
+                "continuity": "",
+                "evidence_frames": {
+                    "subject": [1],
+                    "scene": [1],
+                    "action": [1],
+                    "camera": [1],
+                    "lighting": [1],
+                },
+            }],
+        }, ensure_ascii=False)
+        entry = self.breakdown._parse_reverse_segment_evidence(raw)
+        with self.assertRaisesRegex(ValueError, "动作时序必须同时引用"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+            )
+
+    def test_reverse_rejects_hollow_critical_generation_fields(self):
+        entry = self._reverse_entry(scene="场景细节")
+        with self.assertRaisesRegex(ValueError, "空洞占位内容"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+            )
+
+    def test_reverse_reference_frames_cover_every_segment_in_order(self):
+        self.assertEqual(
+            self.breakdown._reverse_reference_frames(
+                ["frame-%d.jpg" % index for index in range(1, 9)], 4
+            ),
+            ["frame-2.jpg", "frame-4.jpg", "frame-6.jpg", "frame-8.jpg"],
+        )
+
+    def test_reverse_downstream_generation_field_mapping_is_explicit(self):
+        root = Path(__file__).resolve().parents[1]
+        ui = (root / "site" / "workbench" / "script.html").read_text(
+            encoding="utf-8"
+        )
+        video = (root / "server" / "content_domains" / "video.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4)", ui)
+        self.assertIn("channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", ui)
+        self.assertIn("endpoint:'/api/gen/xiaole_video'", ui)
+        self.assertIn("cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt", ui)
+        self.assertIn("endpoint:'/api/gen/cinematic'", ui)
+        self.assertIn('"micro": "seedance-2.0-fast"', video)
+        self.assertIn('input_d["mode"] = "image_to_video"', video)
+        self.assertIn('input_d["duration_seconds"] = 10', video)
+        self.assertIn('"prompt": prompt or MOTION_PROMPT', video)
 
     def test_reverse_segment_scoped_acceptance_contract(self):
         calls = []
@@ -1461,8 +1648,10 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             reverse_calls.append(list(frames))
+            if len(frames) == 8:
+                return self._global_continuity_response()
             return json.dumps(
-                {"segments": [objects[len(reverse_calls) - 1]]},
+                {"segments": [objects[len(reverse_calls) - 2]]},
                 ensure_ascii=False,
             )
         self.breakdown._chat_multimodal = fake_chat
@@ -1481,6 +1670,8 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(calls["extract_args"], (8, 1024, 8, True))
         self.assertEqual(reverse_calls, [
+            ["f1.jpg", "f2.jpg", "f3.jpg", "f4.jpg",
+             "f5.jpg", "f6.jpg", "f7.jpg", "f8.jpg"],
             ["f1.jpg", "f2.jpg"],
             ["f3.jpg", "f4.jpg"],
             ["f5.jpg", "f6.jpg"],
