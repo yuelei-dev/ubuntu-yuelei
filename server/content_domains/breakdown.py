@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
-import os, json, time, base64, tempfile, subprocess, shutil, math, re
+import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.parse
 import http.client
 import urllib.error
 from contextlib import closing
@@ -125,11 +125,280 @@ _REVERSE_VISUAL_SEMANTIC_CONTRACT = {
 }
 
 
+_SUPPORTED_LINK_HOSTS = (
+    "douyin.com", "iesdouyin.com", "xiaohongshu.com", "xhslink.com",
+)
+_SHARE_URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+_UPLOAD_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _ensure_upload_table(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS breakdown_uploads(
+        token TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        suffix TEXT NOT NULL,
+        job_id INTEGER NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+    )""")
+
+
+def _upload_root():
+    from . import core
+    root = (core.OUT_DIR / "_breakdown_uploads").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _normalize_supported_link(value):
+    match = _SHARE_URL_RE.search(str(value or ""))
+    if not match:
+        raise ValueError("请粘贴抖音或小红书的完整 http(s) 分享链接")
+    url = match.group(0)
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme not in {"http", "https"} or not any(
+            host == suffix or host.endswith("." + suffix)
+            for suffix in _SUPPORTED_LINK_HOSTS):
+        raise ValueError("仅支持抖音或小红书公开视频链接")
+    return url
+
+
+def _resolved_link(url):
+    """Resolve a supported share URL before charging and validate its work ID."""
+    import tikhub
+
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = parsed.path or "/"
+    expected_platform = "xhs" if (
+        host == "xhslink.com" or host.endswith(".xhslink.com")
+        or host == "xiaohongshu.com" or host.endswith(".xiaohongshu.com")
+    ) else "douyin"
+
+    if expected_platform == "douyin":
+        direct = re.search(r"/video/(\d{15,21})(?:/|$)", path)
+        if direct:
+            info = {
+                "platform": "douyin",
+                "id": direct.group(1),
+                "note_type": "video",
+            }
+        elif not (
+                host == "v.douyin.com" or host.endswith(".v.douyin.com")):
+            raise ValueError("抖音链接缺少具体作品 ID")
+        else:
+            try:
+                info = tikhub.parse_link(url)
+            except Exception as exc:
+                raise ValueError("抖音短链无法解析，请确认链接公开且未失效") from exc
+    else:
+        direct = re.search(
+            r"/(?:explore|discovery/item|item)/([0-9a-fA-F]{16,64})(?:/|$)",
+            path,
+        )
+        if direct:
+            info = {
+                "platform": "xhs",
+                "id": direct.group(1),
+                "note_type": None,
+            }
+        elif not (host == "xhslink.com" or host.endswith(".xhslink.com")):
+            raise ValueError("小红书链接缺少具体笔记 ID")
+        else:
+            try:
+                info = tikhub.parse_link(url)
+            except Exception as exc:
+                raise ValueError("小红书短链无法解析，请确认链接公开且未失效") from exc
+
+    if not isinstance(info, dict):
+        raise ValueError("无法解析该视频链接，请确认链接公开且未失效")
+    platform = str(info.get("platform") or "").strip().lower()
+    work_id = str(info.get("id") or "").strip()
+    valid_id = (
+        platform == "douyin" and bool(re.fullmatch(r"\d{15,21}", work_id))
+    ) or (
+        platform == "xhs" and bool(re.fullmatch(r"[0-9a-fA-F]{16,64}", work_id))
+    )
+    if platform != expected_platform or not valid_id:
+        raise ValueError("无法解析该视频链接，请确认链接公开且未失效")
+    return {
+        "url": url,
+        "platform": platform,
+        "id": work_id,
+        "note_type": info.get("note_type"),
+    }
+
+
+def validate_breakdown_payload(payload):
+    """Validate and resolve public links before the job is charged or enqueued."""
+    if not isinstance(payload, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    if payload.get("local_path") or payload.get("local_media_path") or payload.get("upload_token"):
+        raise ValueError("本地素材只能通过专用上传接口提交")
+    body = dict(payload)
+    body.pop("_resolved_link", None)
+    body.pop("_resolved_links", None)
+    mode = str(body.get("mode") or _BREAKDOWN_MODE_SCENES).strip().lower()
+    if mode not in _BREAKDOWN_SUPPORTED_MODES:
+        raise ValueError("不支持的拆解模式")
+    raw_urls = body.get("urls")
+    if isinstance(raw_urls, list):
+        if not raw_urls:
+            raise ValueError("请至少提供一个视频链接")
+        if len(raw_urls) > 5:
+            raise ValueError("一次最多提交 5 条链接")
+        urls = [_normalize_supported_link(item) for item in raw_urls]
+        if mode == _BREAKDOWN_MODE_REVERSE_PROMPT and len(urls) != 1:
+            raise ValueError("提示词反推暂仅支持单条视频链接")
+        body.pop("url", None)
+        body["urls"] = urls
+        body["_resolved_links"] = [_resolved_link(url) for url in urls]
+    else:
+        body["url"] = _normalize_supported_link(body.get("url"))
+        body.pop("urls", None)
+        body["_resolved_link"] = _resolved_link(body["url"])
+    body["mode"] = mode
+    return body
+
+
+def handle_local_upload(handler, user):
+    """Validate a local upload, charge once, persist its token, and enqueue it."""
+    from . import core
+    _, points_domain, _ = core._domains()
+    paid_job_insert_error = getattr(core.jobs_store, "PaidJobInsertError", ())
+    try:
+        core.feature_flags.require_enabled("breakdown")
+    except core.feature_flags.FeatureDisabled as exc:
+        return handler._send(503, {"detail": str(exc)})
+    if core.is_shutting_down():
+        return handler._send(503, {
+            "detail": "服务正在更新，请稍后重试", "code": "shutting_down",
+            "retry_after_ms": 5000,
+        })
+
+    query = core.urllib.parse.parse_qs(core.urllib.parse.urlparse(handler.path).query)
+    media_type = str((query.get("media_type") or [""])[0]).strip().lower()
+    allowed = {
+        "image": {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"},
+        "video": {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"},
+    }
+    content_type = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    if media_type not in allowed or content_type not in allowed[media_type]:
+        return handler._send(415, {"detail": "仅支持 JPG/PNG/WEBP 图片或 MP4/MOV/WEBM 视频"})
+    try:
+        content_length = int(handler.headers.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        content_length = 0
+    maximum = 20 * 1024 * 1024 if media_type == "image" else 200 * 1024 * 1024
+    if content_length <= 0 or content_length > maximum:
+        return handler._send(413, {"detail": "图片最大 20MB，视频最大 200MB"})
+    active_jobs = core._user_active_job_count(user["username"])
+    if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
+        return handler._send(429, {
+            "detail": "当前生成任务较多，请完成后再提交", "code": "active_job_cap",
+            "active_jobs": active_jobs, "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
+            "retry_after_ms": 4000,
+        })
+
+    temp_path = ""
+    upload_token = __import__("uuid").uuid4().hex
+    suffix = allowed[media_type][content_type]
+    try:
+        root = _upload_root()
+        temp_path = str(root / (upload_token + suffix))
+        with open(temp_path, "xb") as uploaded:
+            remaining = content_length
+            while remaining:
+                chunk = handler.rfile.read(min(65536, remaining))
+                if not chunk:
+                    raise ValueError("上传文件读取不完整")
+                uploaded.write(chunk)
+                remaining -= len(chunk)
+        with open(temp_path, "rb") as uploaded:
+            signature = uploaded.read(16)
+        valid_signature = {
+            "image/jpeg": signature.startswith(b"\xff\xd8\xff"),
+            "image/png": signature.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/webp": signature.startswith(b"RIFF") and signature[8:12] == b"WEBP",
+            "video/mp4": len(signature) >= 12 and signature[4:8] == b"ftyp",
+            "video/quicktime": len(signature) >= 12 and signature[4:8] == b"ftyp",
+            "video/webm": signature.startswith(b"\x1a\x45\xdf\xa3"),
+        }[content_type]
+        if not valid_signature:
+            raise ValueError("文件内容与声明格式不一致")
+        body = {
+            "upload_token": upload_token,
+            "media_type": media_type,
+            "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
+        }
+        cost = points_domain.cost_of("breakdown", body)
+        with core._submission_lock:
+            with closing(core.jdb()) as connection:
+                _ensure_upload_table(connection)
+                connection.commit()
+
+            def record_upload(connection, job_id):
+                _ensure_upload_table(connection)
+                connection.execute(
+                    "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (upload_token, user["username"], suffix, job_id, int(time.time())),
+                )
+
+            job_id, points_left = core.jobs_store.create_paid_job(
+                core.jdb, points_domain.deduct_points, points_domain.refund_points,
+                "breakdown", user["username"], cost, body, core.SERVICE_OWNER,
+                before_commit=record_upload,
+            )
+            if not core.enqueue_job(job_id, "breakdown", _BREAKDOWN_MODE_REVERSE_PROMPT):
+                core._reject_pending_job(
+                    job_id, user["username"], cost, "任务队列已满，请稍后再试"
+                )
+                _remove_trusted_upload(
+                    upload_token, user["username"], job_id, temp_path
+                )
+                return handler._send(429, {
+                    "detail": "任务队列已满，请稍后再试", "code": "queue_full",
+                    "retry_after_ms": 4000,
+                })
+        return handler._send(
+            200, {"job_id": job_id, "cost": cost, "points_left": points_left}
+        )
+    except points_domain.AuthPointsError as exc:
+        _remove_upload(temp_path)
+        return handler._send(
+            exc.status if exc.status in (402, 403) else 502,
+            points_domain.public_error_body(exc, 20),
+        )
+    except paid_job_insert_error as exc:
+        _remove_upload(temp_path)
+        return handler._send(500, {
+            "detail": "任务创建失败，点数已退回",
+            "submission_ref": exc.submission_ref,
+        })
+    except Exception as exc:
+        _remove_upload(temp_path)
+        return handler._send(400, {"detail": str(exc)[:180]})
+
+
+def _remove_upload(path):
+    if path:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
+
 def gen_breakdown(payload):
     """下载视频 → 抽帧 → ASR → GPT-4o 多模态分析 → 分镜拆解。
     由 run_job 调用，走标准 job 生命周期（扣点/退点/reaper 全自动）。
     支持单个 url 或批量 urls（≤5 条，顺序处理）。"""
     import tikhub
+    upload_token = str((payload or {}).get("upload_token") or "").strip().lower()
+    if upload_token:
+        return _do_local_reverse(payload, upload_token)
+    if (payload or {}).get("local_path"):
+        raise ValueError("禁止提交服务器本地路径")
     if (payload or {}).get("local_media_path"):
         from .local_reverse_processor import gen_local_reverse
         return gen_local_reverse(payload)
@@ -149,7 +418,15 @@ def gen_breakdown(payload):
         raise ValueError("请粘贴抖音/小红书/视频号链接")
 
     # ① 解析链接
-    info = tikhub.parse_link(url)
+    resolved = payload.get("_resolved_link")
+    if isinstance(resolved, dict) and resolved.get("url") == url:
+        info = {
+            "platform": resolved.get("platform"),
+            "id": resolved.get("id"),
+            "note_type": resolved.get("note_type"),
+        }
+    else:
+        info = tikhub.parse_link(url)
     platform = (info.get("platform") or "").lower()
     if platform in _UNSUPPORTED_PLATFORMS:
         raise ValueError("视频号暂不支持拆解，请粘贴抖音/小红书链接")
@@ -173,10 +450,23 @@ def _do_batch_breakdown(payload, urls):
     job_id = payload.get("_job_id")
     results = []
     errors = []
+    resolved_links = payload.get("_resolved_links")
     for idx, url in enumerate(urls):
         _heartbeat(job_id, "batch_%d_%d" % (idx + 1, len(urls)))
         try:
-            info = tikhub.parse_link(url)
+            if (
+                isinstance(resolved_links, list)
+                and len(resolved_links) == len(urls)
+                and isinstance(resolved_links[idx], dict)
+                and resolved_links[idx].get("url") == url
+            ):
+                info = {
+                    "platform": resolved_links[idx].get("platform"),
+                    "id": resolved_links[idx].get("id"),
+                    "note_type": resolved_links[idx].get("note_type"),
+                }
+            else:
+                info = tikhub.parse_link(url)
             platform = (info.get("platform") or "").lower()
             if platform in _UNSUPPORTED_PLATFORMS:
                 errors.append({"url": url, "error": "视频号暂不支持"})
@@ -358,6 +648,201 @@ def _do_breakdown(payload, info, url, mode=None):
         if frame_dir:
             try: shutil.rmtree(frame_dir)
             except: pass
+
+
+def _do_local_reverse(payload, upload_token):
+    """Consume a trusted upload token through the same #139 reverse engine."""
+    media_type = str(payload.get("media_type") or "").strip().lower()
+    job_id = payload.get("_job_id")
+    username = str(payload.get("_username") or "").strip()
+    if media_type not in {"image", "video"}:
+        raise ValueError("不支持的本地素材类型")
+    if not _UPLOAD_TOKEN_RE.fullmatch(upload_token) or not username or not job_id:
+        raise ValueError("无效的上传凭证")
+    from . import core
+    with closing(core.jdb()) as connection:
+        _ensure_upload_table(connection)
+        row = connection.execute(
+            "SELECT suffix FROM breakdown_uploads"
+            " WHERE token=? AND username=? AND job_id=?",
+            (upload_token, username, int(job_id)),
+        ).fetchone()
+        connection.commit()
+    if not row:
+        raise ValueError("上传凭证不存在或不属于当前任务")
+    root = _upload_root()
+    candidate = (root / (upload_token + str(row["suffix"]))).resolve()
+    if candidate.parent != root or not candidate.is_file():
+        raise ValueError("上传文件不存在或已过期")
+    path = str(candidate)
+    frame_dir = None
+    try:
+        _heartbeat(job_id, "extracting_frames")
+        if media_type == "image":
+            # The reverse engine owns one auditable eight-frame bundle. For a
+            # still image those entries intentionally point to the same source.
+            frames = [path] * 8
+            duration = 0.0
+        else:
+            duration = _probe_duration(path)
+            if duration > 120.05:
+                raise ValueError("视频最长支持 2 分钟")
+            frame_dir, frames = _extract_frames(
+                path, 8, duration or 30,
+                scale_width=1024, min_frames=8, uniform=True,
+            )
+        _heartbeat(job_id, "analyzing")
+        return _reverse_result_from_frames(
+            payload,
+            frames,
+            source_url="",
+            title=os.path.basename(path),
+            platform="local",
+            duration=duration,
+        )
+    finally:
+        if frame_dir:
+            try:
+                shutil.rmtree(frame_dir)
+            except Exception:
+                pass
+        _remove_trusted_upload(upload_token, username, job_id, path)
+
+
+def _probe_duration(path):
+    try:
+        process = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", path,
+            ],
+            check=True,
+            timeout=20,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return max(0.0, float((process.stdout or "0").strip() or 0))
+    except Exception as exc:
+        raise ValueError("无法读取视频时长，请上传有效的视频文件") from exc
+
+
+def _remove_trusted_upload(token, username, job_id, path):
+    from . import core
+    try:
+        with closing(core.jdb()) as connection:
+            _ensure_upload_table(connection)
+            connection.execute(
+                "DELETE FROM breakdown_uploads"
+                " WHERE token=? AND username=? AND job_id=?",
+                (token, username, int(job_id)),
+            )
+            connection.commit()
+    finally:
+        root = _upload_root()
+        candidate = __import__("pathlib").Path(path).resolve()
+        if candidate.parent == root:
+            try:
+                candidate.unlink()
+            except Exception:
+                pass
+
+
+def _reverse_result_from_frames(
+    payload, frames, source_url="", title="", platform="", duration=0,
+    script_text="", asr_failed=False,
+):
+    """Run the audited reverse engine for a validated local upload."""
+    job_id = (payload or {}).get("_job_id")
+    analysis_deadline = time.monotonic() + BREAKDOWN_ANALYSIS_BUDGET
+    analysis_heartbeat = lambda: _heartbeat(job_id, "analyzing")
+    prompt_result = _reverse_prompt_from_frames(
+        title,
+        duration,
+        platform,
+        script_text,
+        frames,
+        return_details=True,
+        deadline=analysis_deadline,
+        heartbeat=analysis_heartbeat,
+    )
+    frame_bundle = _reverse_frame_bundle(
+        frames, len(prompt_result["windows"])
+    )
+    global_continuity = _reverse_global_facts_from_segments(
+        prompt_result["entries"],
+        frame_bundle["segment_model_source_indices"],
+        frame_count=len(frames),
+    )
+    prompt_result["prompt"] = _assemble_reverse_prompt(
+        prompt_result["entries"],
+        prompt_result["windows"],
+        global_continuity,
+    )
+    quality_score = _score_reverse_generation_coverage(
+        prompt_result["entries"],
+        global_continuity,
+        prompt_result["windows"],
+    )
+    target_score = _REVERSE_VISUAL_SEMANTIC_CONTRACT["target_score"]
+    if quality_score["total"] < target_score:
+        raise ValueError(
+            "反推结果生成要素覆盖度不足：%d分，至少需要%d分，请重试"
+            % (quality_score["total"], target_score)
+        )
+    frame_thumbnails = _frame_thumbnails(
+        frame_bundle["frames"], limit=len(frame_bundle["frames"])
+    )
+    if len(frame_thumbnails) != len(frame_bundle["frames"]):
+        raise ValueError("反推审计证据帧序列化失败，请重试")
+    segment_evidence = _reverse_segment_evidence_manifest(
+        prompt_result["entries"],
+        prompt_result["windows"],
+        frame_bundle["segment_source_indices"],
+        frame_bundle["segment_model_source_indices"],
+    )
+    call_budget = _reverse_analysis_call_budget(
+        len(prompt_result["windows"])
+    )
+    audit_sections = {
+        "frame_manifest": frame_bundle["manifest"],
+        "reference_thumbnail_indices": frame_bundle[
+            "reference_thumbnail_indices"
+        ],
+        "audit_thumbnail_indices": frame_bundle[
+            "audit_thumbnail_indices"
+        ],
+        "global_continuity": global_continuity,
+        "segment_evidence": segment_evidence,
+        "analysis_call_budget": call_budget,
+        "quality_contract": _reverse_quality_contract(),
+        "quality_score": quality_score,
+    }
+    return {
+        "type": "breakdown_reverse",
+        "source_url": source_url,
+        "source_title": title,
+        "source_platform": platform,
+        "duration": duration,
+        "prompt": prompt_result["prompt"],
+        "frame_count": len(frames or []),
+        "frame_thumbnails": frame_thumbnails,
+        "reference_frame_strategy": "explicit_indices_one_per_segment",
+        "reference_thumbnail_indices": frame_bundle[
+            "reference_thumbnail_indices"
+        ],
+        "audit_thumbnail_indices": frame_bundle[
+            "audit_thumbnail_indices"
+        ],
+        "frame_manifest": frame_bundle["manifest"],
+        "global_continuity": global_continuity,
+        "segment_evidence": segment_evidence,
+        "analysis_call_budget": call_budget,
+        "quality_contract": _reverse_quality_contract(),
+        "quality_score": quality_score,
+        "sections": {"reverse_audit": audit_sections},
+        "asr_failed": asr_failed,
+    }
 
 
 def _download_breakdown_video(tikhub, info, detail, destination):
