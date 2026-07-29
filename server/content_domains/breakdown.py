@@ -1202,7 +1202,7 @@ def _reverse_action_has_static_clause(action):
     if not action:
         return False
     boundary = r"[，,；;。.!！?？\n]"
-    clause_prefix = r"(?:(?:但|却|而|同时|仍然|仍|并且|并)\s*)?"
+    clause_prefix = r"(?:(?:但|却|而|同时|仍然|仍|并且|并)\s*)*"
     return any(
         re.search(
             r"(?:^|%s)\s*%s%s\s*(?=$|%s)"

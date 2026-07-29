@@ -1585,6 +1585,7 @@ class BreakdownTests(unittest.TestCase):
             "未见动作",
             "未观察到动作",
             "未发生动作",
+            "但仍无动作",
         ):
             with self.subTest(action=action):
                 self.assertTrue(
@@ -1633,6 +1634,7 @@ class BreakdownTests(unittest.TestCase):
         actions = (
             "没有明显动作变化，但人物从坐姿起身",
             "没有明显动作变化，但物体继续移动",
+            "圆形持续移动，但仍无动作",
         )
         for action in actions:
             with self.subTest(action=action):
