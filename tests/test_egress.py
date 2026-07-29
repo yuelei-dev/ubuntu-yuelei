@@ -200,6 +200,53 @@ class FailoverTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class IdempotentPostTests(unittest.TestCase):
+    def test_retries_transient_once_but_does_not_retry_4xx(self):
+        eg = _reload_egress(primary="", fallback="")
+        calls = []
+
+        class _Op:
+            def open(self, req, timeout=None):
+                calls.append((req.full_url, timeout))
+                if len(calls) == 1:
+                    raise TimeoutError("read timed out")
+                return _FakeResp(b'{"ok":1}')
+
+        with patch.object(eg, "_opener", return_value=_Op()):
+            out = eg.post_json_idempotent(
+                "https://official", "https://analysis", "/chat", b"{}", {},
+                max_attempts=2, timeout=123,
+            )
+
+        self.assertEqual(out, {"ok": 1})
+        self.assertEqual(calls, [
+            ("https://analysis/chat", 123),
+            ("https://analysis/chat", 123),
+        ])
+
+        import io
+
+        rejected_calls = []
+        rejected = urllib.error.HTTPError(
+            "https://analysis/chat", 400, "bad request", {},
+            io.BytesIO(b'{"error":"invalid"}'),
+        )
+
+        class _Op:
+            def open(self, req, timeout=None):
+                rejected_calls.append(req.full_url)
+                raise rejected
+
+        with patch.object(eg, "_opener", return_value=_Op()), \
+             self.assertRaises(urllib.error.HTTPError):
+            eg.post_json_idempotent(
+                "https://official", "https://analysis", "/chat", b"{}", {},
+                max_attempts=2,
+            )
+
+        self.assertEqual(rejected_calls, ["https://analysis/chat"])
+
+
 class ChannelPreflightTests(unittest.TestCase):
     """代理不可达时，整档跳过且一个字节都不发——最安全的降级。"""
 

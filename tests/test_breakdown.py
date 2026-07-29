@@ -112,6 +112,69 @@ class BreakdownTests(unittest.TestCase):
             })
         return result
 
+    def test_download_breakdown_video_uses_alternate_cdn(self):
+        calls = []
+
+        class FakeTikHub:
+            @staticmethod
+            def download_to_file(url, deadline, destination, max_bytes=None):
+                calls.append((url, destination, max_bytes))
+                if url.endswith("primary.mp4"):
+                    raise urllib.error.URLError(ConnectionResetError("reset"))
+
+        detail = {
+            "play_url": "https://cdn.test/primary.mp4",
+            "play_urls": [
+                "https://cdn.test/primary.mp4",
+                "https://cdn.test/backup.mp4",
+            ],
+        }
+        result = self.breakdown._download_breakdown_video(
+            FakeTikHub,
+            {"platform": "douyin", "id": "123"},
+            detail,
+            "video.mp4",
+        )
+
+        self.assertEqual([call[0] for call in calls], [
+            "https://cdn.test/primary.mp4",
+            "https://cdn.test/backup.mp4",
+        ])
+        self.assertEqual(calls[-1][2], self.breakdown.BREAKDOWN_MAX_DOWNLOAD_BYTES)
+        self.assertEqual(result["play_url"], "https://cdn.test/backup.mp4")
+
+    def test_download_breakdown_video_refreshes_details_once(self):
+        calls = {"download": [], "detail": []}
+
+        class FakeTikHub:
+            @staticmethod
+            def detail(platform, item_id, note_type=None, fresh=False):
+                calls["detail"].append((platform, item_id, note_type, fresh))
+                return {
+                    "play_url": "https://cdn.test/refreshed.mp4",
+                    "duration": 12,
+                }
+
+            @staticmethod
+            def download_to_file(url, deadline, destination, max_bytes=None):
+                calls["download"].append(url)
+                if url.endswith("expired.mp4"):
+                    raise TimeoutError("expired")
+
+        result = self.breakdown._download_breakdown_video(
+            FakeTikHub,
+            {"platform": "douyin", "id": "123", "note_type": "video"},
+            {"play_url": "https://cdn.test/expired.mp4"},
+            "video.mp4",
+        )
+
+        self.assertEqual(calls["download"], [
+            "https://cdn.test/expired.mp4",
+            "https://cdn.test/refreshed.mp4",
+        ])
+        self.assertEqual(calls["detail"], [("douyin", "123", "video", True)])
+        self.assertEqual(result["play_url"], "https://cdn.test/refreshed.mp4")
+
     def test_post_zhipu_uses_official_endpoint_key_json_and_timeout(self):
         captured = {}
         os.environ["REVERSE_ZHIPU_BASE"] = "https://open.bigmodel.cn/api/paas/v4/"
@@ -423,7 +486,7 @@ class BreakdownTests(unittest.TestCase):
                 }
 
             @staticmethod
-            def download_to_file(play_url, deadline, filename):
+            def download_to_file(play_url, deadline, filename, max_bytes=None):
                 calls["download"] = (play_url, filename)
 
             @staticmethod
@@ -1089,7 +1152,7 @@ class BreakdownTests(unittest.TestCase):
                 }
 
             @staticmethod
-            def download_to_file(play_url, deadline, filename):
+            def download_to_file(play_url, deadline, filename, max_bytes=None):
                 calls["download"] = (play_url, filename)
 
             @staticmethod
@@ -1226,7 +1289,7 @@ class BreakdownTests(unittest.TestCase):
                     "title": "测试视频",
                 }
             @staticmethod
-            def download_to_file(play_url, deadline, filename):
+            def download_to_file(play_url, deadline, filename, max_bytes=None):
                 pass
             @staticmethod
             def transcript(det, video_path=None):

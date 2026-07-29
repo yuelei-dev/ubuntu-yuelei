@@ -68,6 +68,35 @@ def test_parse_link_douyin_video_url_offline():
     assert info["id"] == "7654380745624879025"
 
 
+def test_dy_detail_keeps_unique_play_urls_in_priority_order():
+    original_get = tikhub._g
+    tikhub._g = lambda *args, **kwargs: {
+        "aweme_detail": {
+            "aweme_id": "7654380745624879025",
+            "video": {
+                "duration": 12000,
+                "play_addr": {
+                    "url_list": [
+                        "https://cdn-a.test/video.mp4",
+                        "https://cdn-b.test/video.mp4",
+                        "https://cdn-a.test/video.mp4",
+                    ],
+                },
+            },
+        },
+    }
+    try:
+        detail = tikhub.dy_detail("7654380745624879025")
+    finally:
+        tikhub._g = original_get
+
+    assert detail["play_url"] == "https://cdn-a.test/video.mp4"
+    assert detail["play_urls"] == [
+        "https://cdn-a.test/video.mp4",
+        "https://cdn-b.test/video.mp4",
+    ]
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     passed = 0
