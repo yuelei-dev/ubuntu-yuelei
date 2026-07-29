@@ -686,8 +686,27 @@
     setBreakdownStoryboard((bd&&bd.frame_thumbnails)||[]);
     syncModeUi();
   }
+  function reverseReferenceThumbnailIndices(bd){
+    bd=bd||{};
+    var audit=((bd.sections||{}).reverse_audit||{});
+    var indices=Array.isArray(bd.reference_thumbnail_indices)&&bd.reference_thumbnail_indices.length
+      ?bd.reference_thumbnail_indices
+      :(Array.isArray(audit.reference_thumbnail_indices)?audit.reference_thumbnail_indices:[]);
+    return indices.map(function(value){return Number(value);}).filter(function(value){
+      return Number.isInteger(value)&&value>=1;
+    });
+  }
+  function reverseReferenceImages(bd){
+    bd=bd||{};
+    var thumbs=Array.isArray(bd.frame_thumbnails)?bd.frame_thumbnails:[];
+    return reverseReferenceThumbnailIndices(bd).map(function(index){
+      return thumbs[index-1]||null;
+    }).filter(Boolean);
+  }
   function breakdownMetaFromResult(bd){
     bd=bd||{};
+    var isReverse=(bd.type==='breakdown_reverse');
+    var reverseRefs=isReverse?reverseReferenceImages(bd):[];
     return {
       type:bd.type||'breakdown',
       source_url:bd.source_url||'',
@@ -699,7 +718,8 @@
       prompt:(bd.prompt||''),
       source_type:bd.source_type||'',
       sections:bd.sections||null,
-      frame_thumbnails:(bd.frame_thumbnails||[]).slice(0,2)
+      frame_thumbnails:isReverse?reverseRefs:(bd.frame_thumbnails||[]).slice(0,2),
+      reference_thumbnail_indices:isReverse?reverseRefs.map(function(_value,index){return index+1;}):[]
     };
   }
   function isBreakdownHistoryMeta(meta){
@@ -1200,7 +1220,7 @@
         switchMode('breakdown');
         if(isReverse){
           switchBreakdownTool('reverse_prompt');
-          renderBreakdownReverse({type:'breakdown_reverse',source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,prompt:m.prompt||'',frame_thumbnails:m.frame_thumbnails||[]});
+          renderBreakdownReverse({type:'breakdown_reverse',source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,prompt:m.prompt||'',frame_thumbnails:m.frame_thumbnails||[],reference_thumbnail_indices:m.reference_thumbnail_indices||((((m.sections||{}).reverse_audit||{}).reference_thumbnail_indices)||[]),sections:m.sections||null});
         }else{
           switchBreakdownTool('scenes');
           renderBreakdown({source_url:m.source_url,source_title:m.source_title||heading,source_platform:m.source_platform,duration:m.duration,analysis:m.analysis||'',scenes:list,frame_thumbnails:m.frame_thumbnails||[]});
@@ -1516,7 +1536,7 @@
     if(isReverse){
       var prompt=reversePromptText();
       if(!prompt){ if(window.HQ&&window.HQ.toast) HQ.toast('请先完成提示词反推'); return; }
-      var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4);
+      var reverseRefs=reverseReferenceImages(lastBreakdownReverse);
       _showReverseVideoPicker(prompt,function(choice){
         if(choice.avatarId){
           var avatarPrompt='人物身份与面部必须以所选数字人形象为准；参考关键帧仅用于还原动作、镜头、构图、场景和节奏。'+prompt;

@@ -285,6 +285,9 @@ def _do_breakdown(payload, info, url, mode=None):
                 "reference_thumbnail_indices": frame_bundle[
                     "reference_thumbnail_indices"
                 ],
+                "audit_thumbnail_indices": frame_bundle[
+                    "audit_thumbnail_indices"
+                ],
                 "global_continuity": global_continuity,
                 "segment_evidence": segment_evidence,
                 "quality_contract": _reverse_quality_contract(),
@@ -298,12 +301,16 @@ def _do_breakdown(payload, info, url, mode=None):
                 "duration": duration,
                 "prompt": prompt_result["prompt"],
                 "frame_count": len(frames or []),
-                # First four are downstream refs [2,4,6,8]; remaining four
-                # preserve every source frame needed to audit the evidence.
+                # Consumers must use reference_thumbnail_indices. Short videos
+                # have fewer than four segments, so array position is not a
+                # safe implicit reference-image contract.
                 "frame_thumbnails": frame_thumbnails,
-                "reference_frame_strategy": "first_four_one_per_segment",
+                "reference_frame_strategy": "explicit_indices_one_per_segment",
                 "reference_thumbnail_indices": frame_bundle[
                     "reference_thumbnail_indices"
+                ],
+                "audit_thumbnail_indices": frame_bundle[
+                    "audit_thumbnail_indices"
                 ],
                 "frame_manifest": frame_bundle["manifest"],
                 "global_continuity": global_continuity,
@@ -607,7 +614,7 @@ def _group_reverse_frame_indices(frame_count, segment_count):
 
 
 def _reverse_frame_bundle(frames, segment_count):
-    """Put four downstream refs first, then retain all other audit frames."""
+    """Keep explicit downstream indexes separate from the audit-frame set."""
     ordered = list(frames or [])
     segment_source_indices = _group_reverse_frame_indices(
         len(ordered), segment_count
@@ -642,6 +649,9 @@ def _reverse_frame_bundle(frames, segment_count):
         "reference_thumbnail_indices": list(
             range(1, len(reference_source_indices) + 1)
         ),
+        "audit_thumbnail_indices": list(
+            range(len(reference_source_indices) + 1, len(source_order) + 1)
+        ),
         "segment_source_indices": segment_source_indices,
     }
 
@@ -675,7 +685,7 @@ def _reverse_segment_evidence_manifest(entries, windows, segment_source_indices)
     return result
 
 
-def _reverse_source_frame_segment(frame_index, frame_count, segment_count=4):
+def _reverse_source_frame_segment(frame_index, frame_count, segment_count):
     if frame_count <= 0 or segment_count <= 0:
         return 0
     return min(
@@ -829,7 +839,7 @@ def _compose_reverse_global_facts(global_continuity, include_evidence=False):
     return "；".join(parts)
 
 
-def _parse_reverse_global_facts(raw, frame_count):
+def _parse_reverse_global_facts(raw, frame_count, segment_count):
     parsed = _parse_breakdown_json(raw)
     facts = parsed.get("global_facts") if isinstance(parsed, dict) else None
     evidence = parsed.get("evidence_frames") if isinstance(parsed, dict) else None
@@ -864,7 +874,9 @@ def _parse_reverse_global_facts(raw, frame_count):
         if text:
             evidence_segments = {
                 _reverse_source_frame_segment(
-                    index, int(frame_count or 0), segment_count=4
+                    index,
+                    int(frame_count or 0),
+                    segment_count=max(1, int(segment_count or 1)),
                 )
                 for index in indices
             }
@@ -899,6 +911,7 @@ def _parse_reverse_global_facts(raw, frame_count):
         "facts": normalized_facts,
         "evidence_frames": normalized_evidence,
         "frame_count": int(frame_count or 0),
+        "segment_count": max(1, int(segment_count or 1)),
     }
 
 
@@ -909,11 +922,25 @@ def _reverse_global_facts_from_frames(
     ordered = list(frames or [])
     if len(ordered) < 8:
         raise ValueError("反推全局连续性至少需要8张原始帧")
+    segment_count = len(_reverse_segment_windows(duration))
+    if segment_count == 1:
+        # A single segment has no cross-segment continuity. Returning an
+        # explicit empty evidence object prevents the model from inventing it.
+        return {
+            "facts": {
+                key: "" for key, _label in _REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "evidence_frames": {
+                key: [] for key, _label in _REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "frame_count": len(ordered),
+            "segment_count": 1,
+        }
     usermsg = (
         "视频标题（仅作背景，不能代替画面证据）：%s\n"
         "视频总时长：%ss\n"
         "平台：%s\n\n"
-        "随请求附带的是按时间先后排列的%d张原视频帧，编号从1开始。"
+        "随请求附带的是按时间先后排列的%d张原视频帧，编号从1开始；全片实际分为%d个时间段。"
         "只提取跨时间段重复出现或稳定可确认的连续性事实：同一主体的可见外观、服装与随身物，"
         "重复场景和关键物，整体场景、镜头、光线与色调风格。发生变化时要明确列出变化，"
         "不得把不同人物或不同场景强行写成一致，不得推断身份、品牌、地点、情绪或不可见细节。"
@@ -928,6 +955,7 @@ def _reverse_global_facts_from_frames(
         str(duration),
         str(platform or ""),
         len(ordered),
+        segment_count,
         "\":\"\",\"".join(key for key, _label in _REVERSE_GLOBAL_FACT_FIELDS),
         "\":[],\"".join(key for key, _label in _REVERSE_GLOBAL_FACT_FIELDS),
     )
@@ -942,7 +970,9 @@ def _reverse_global_facts_from_frames(
         deadline=deadline,
         heartbeat=heartbeat,
     )
-    return _parse_reverse_global_facts(raw, len(ordered))
+    return _parse_reverse_global_facts(
+        raw, len(ordered), segment_count=segment_count
+    )
 
 
 def _compact_reverse_text(value):
@@ -1258,6 +1288,17 @@ def _validate_reverse_segment_evidence(
     if require_frame_evidence and _compact_reverse_text(continuity):
         continuity_indices = entry.get("continuity_evidence_frames") or []
         total_frames = int((global_continuity or {}).get("frame_count") or 8)
+        segment_count = int(
+            (global_continuity or {}).get("segment_count") or 0
+        )
+        if segment_count < 1:
+            raise ValueError(
+                "反推结果第%d段衔接缺少实际分段数量，请重试" % index
+            )
+        if segment_count == 1:
+            raise ValueError(
+                "反推结果第%d段是单段视频，不能编造跨段衔接，请重试" % index
+            )
         allowed_global_indices = {
             frame
             for indices in (
@@ -1278,7 +1319,9 @@ def _validate_reverse_segment_evidence(
                 % index
             )
         continuity_segments = {
-            _reverse_source_frame_segment(frame, total_frames, 4)
+            _reverse_source_frame_segment(
+                frame, total_frames, segment_count
+            )
             for frame in continuity_indices
         }
         if (
@@ -1482,6 +1525,23 @@ def _score_reverse_generation_coverage(entries, global_continuity, windows):
             for entry in (entries or [])
         )
     )
+    if expected == 1:
+        parts = {
+            "subject": 30 if evidence_complete("subject") else 0,
+            "action_timing": (
+                20 if evidence_complete("action") else 0
+            ) + 5,
+            "scene_composition": (
+                20 if evidence_complete("scene") else 0
+            ),
+            "camera_duration": (
+                10 if evidence_complete("camera") else 0
+            ) + 5,
+            "lighting_style": (
+                10 if evidence_complete("lighting") else 0
+            ),
+        }
+        return {"total": sum(parts.values()), "parts": parts}
     parts = {
         "subject": (
             (10 if _compact_reverse_text(facts.get("subject_identity", "")) else 0)

@@ -164,7 +164,12 @@ class BreakdownTests(unittest.TestCase):
             key: [1, 3, 5, 7]
             for key in facts
         }
-        return {"facts": facts, "evidence_frames": evidence}
+        return {
+            "facts": facts,
+            "evidence_frames": evidence,
+            "frame_count": 8,
+            "segment_count": 4,
+        }
 
     def _global_continuity_response(self):
         data = self._global_continuity()
@@ -798,9 +803,10 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(reverse_calls[1][2], [thumb.name, thumb.name])
         self.assertEqual(
             result["reference_frame_strategy"],
-            "first_four_one_per_segment",
+            "explicit_indices_one_per_segment",
         )
         self.assertEqual(result["reference_thumbnail_indices"], [1, 2, 3, 4])
+        self.assertEqual(result["audit_thumbnail_indices"], [5, 6, 7, 8])
         self.assertEqual(
             [item["source_frame_index"] for item in result["frame_manifest"]],
             [2, 4, 6, 8, 1, 3, 5, 7],
@@ -823,6 +829,10 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(
             result["sections"]["reverse_audit"]["frame_manifest"],
             result["frame_manifest"],
+        )
+        self.assertEqual(
+            result["sections"]["reverse_audit"]["audit_thumbnail_indices"],
+            [5, 6, 7, 8],
         )
         audit_sources = {
             item["source_frame_index"]
@@ -1465,7 +1475,7 @@ class BreakdownTests(unittest.TestCase):
 
     def test_reverse_global_facts_require_original_frame_evidence(self):
         parsed = self.breakdown._parse_reverse_global_facts(
-            self._global_continuity_response(), 8
+            self._global_continuity_response(), 8, 4
         )
         self.assertEqual(
             parsed["facts"]["wardrobe"],
@@ -1477,14 +1487,14 @@ class BreakdownTests(unittest.TestCase):
         invalid["evidence_frames"]["wardrobe"] = []
         with self.assertRaisesRegex(ValueError, "缺少原始帧编号"):
             self.breakdown._parse_reverse_global_facts(
-                json.dumps(invalid, ensure_ascii=False), 8
+                json.dumps(invalid, ensure_ascii=False), 8, 4
             )
 
         single_segment = json.loads(self._global_continuity_response())
         single_segment["evidence_frames"]["wardrobe"] = [1, 2]
         with self.assertRaisesRegex(ValueError, "至少两个不同时间段"):
             self.breakdown._parse_reverse_global_facts(
-                json.dumps(single_segment, ensure_ascii=False), 8
+                json.dumps(single_segment, ensure_ascii=False), 8, 4
             )
 
     def test_reverse_segment_receives_evidence_only_global_continuity(self):
@@ -1726,6 +1736,136 @@ class BreakdownTests(unittest.TestCase):
             set(range(1, 9)),
         )
 
+    def test_reverse_short_video_reference_indices_survive_persistence(self):
+        assets_store = importlib.import_module("content_domains.assets_store")
+        frames = ["frame-%d" % index for index in range(1, 9)]
+        cases = (
+            (2.0, [8]),
+            (5.0, [4, 8]),
+            (8.0, [3, 5, 8]),
+            (11.0, [2, 4, 6, 8]),
+        )
+        for duration, expected_sources in cases:
+            with self.subTest(duration=duration):
+                segment_count = len(
+                    self.breakdown._reverse_segment_windows(duration)
+                )
+                bundle = self.breakdown._reverse_frame_bundle(
+                    frames, segment_count
+                )
+                thumbnails = [
+                    "thumb-source-%d" % item["source_frame_index"]
+                    for item in bundle["manifest"]
+                ]
+                result = {
+                    "type": "breakdown_reverse",
+                    "prompt": "prompt",
+                    "frame_thumbnails": thumbnails,
+                    "sections": {
+                        "reverse_audit": {
+                            "reference_thumbnail_indices": bundle[
+                                "reference_thumbnail_indices"
+                            ],
+                            "audit_thumbnail_indices": bundle[
+                                "audit_thumbnail_indices"
+                            ],
+                            "frame_manifest": bundle["manifest"],
+                        },
+                    },
+                }
+                persisted = assets_store._project(
+                    "breakdown", result
+                )[3]
+                audit = persisted["sections"]["reverse_audit"]
+                selected = [
+                    persisted["frame_thumbnails"][index - 1]
+                    for index in audit["reference_thumbnail_indices"]
+                ]
+                self.assertEqual(
+                    selected,
+                    [
+                        "thumb-source-%d" % source
+                        for source in expected_sources
+                    ],
+                )
+                self.assertEqual(
+                    len(audit["reference_thumbnail_indices"]),
+                    segment_count,
+                )
+                self.assertTrue(
+                    set(audit["reference_thumbnail_indices"]).isdisjoint(
+                        audit["audit_thumbnail_indices"]
+                    )
+                )
+
+    def test_reverse_short_video_continuity_uses_actual_segment_count(self):
+        single = {
+            "facts": {
+                key: "" for key, _label
+                in self.breakdown._REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "evidence_frames": {
+                key: [] for key, _label
+                in self.breakdown._REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "frame_count": 8,
+            "segment_count": 1,
+        }
+        one_segment_entry = self._reverse_entry(
+            continuity="人物在本段保持白色服装"
+        )
+        one_segment_entry["continuity_evidence_frames"] = [1, 8]
+        with self.assertRaisesRegex(ValueError, "单段视频"):
+            self.breakdown._validate_reverse_segment_evidence(
+                one_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+                global_continuity=single,
+            )
+
+        two_segments = self._global_continuity()
+        two_segments["segment_count"] = 2
+        two_segments["evidence_frames"] = {
+            key: [1, 5] for key in two_segments["facts"]
+        }
+        second_segment_entry = self._reverse_entry(
+            continuity="白色服装在两个相邻时间段均可见"
+        )
+        second_segment_entry["continuity_evidence_frames"] = [1, 5]
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                second_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=two_segments,
+            ),
+            second_segment_entry,
+        )
+
+    def test_reverse_one_segment_skips_cross_segment_global_model_call(self):
+        self.breakdown._chat_multimodal = mock.Mock(
+            side_effect=AssertionError("single segment must not call global VLM")
+        )
+        continuity = self.breakdown._reverse_global_facts_from_frames(
+            "短视频", 2.0, "local", ["frame-%d" % i for i in range(1, 9)]
+        )
+        self.assertEqual(continuity["segment_count"], 1)
+        self.assertFalse(any(continuity["facts"].values()))
+        entry = self._reverse_entry(
+            camera="中景固定机位",
+            lighting="中性自然光",
+        )
+        score = self.breakdown._score_reverse_generation_coverage(
+            [entry],
+            continuity,
+            self.breakdown._reverse_segment_windows(2.0),
+        )
+        self.assertEqual(score["total"], 100)
+
     def test_reverse_downstream_generation_field_mapping_is_explicit(self):
         root = Path(__file__).resolve().parents[1]
         ui = (root / "site" / "workbench" / "script.html").read_text(
@@ -1734,7 +1874,18 @@ class BreakdownTests(unittest.TestCase):
         video = (root / "server" / "content_domains" / "video.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4)", ui)
+        self.assertIn(
+            "var reverseRefs=reverseReferenceImages(lastBreakdownReverse)",
+            ui,
+        )
+        self.assertNotIn(
+            "frame_thumbnails)||[]).slice(0,4)",
+            ui,
+        )
+        self.assertIn(
+            "reverse_audit||{}).reference_thumbnail_indices",
+            ui,
+        )
         self.assertIn("channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", ui)
         self.assertIn("endpoint:'/api/gen/xiaole_video'", ui)
         self.assertIn("cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt", ui)
