@@ -1,12 +1,15 @@
 import os
 import json
 import sqlite3
+import sys
 import tempfile
 import threading
 import urllib.error
 import urllib.request
 import unittest
 from http.server import ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
 
 
 class AuthPointsTests(unittest.TestCase):
@@ -75,6 +78,97 @@ class AuthPointsTests(unittest.TestCase):
         self.assertEqual(len(insufficient), 10)
         self.assertEqual(self.auth.get_points_row("fang")["points"], 0)
 
+    def test_transaction_key_survives_reload_and_deducts_once(self):
+        key = "breakdown-local-charge-101"
+        points, err, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 4, "job:breakdown",
+        )
+        self.assertIsNone(err)
+        self.assertFalse(replayed)
+        self.assertEqual(points["points"], 6)
+
+        import importlib
+        auth = importlib.reload(self.auth)
+        auth.DB = os.environ["HQ_TEST_AUTH_DB"]
+        auth.init_db()
+        points, err, replayed = auth.apply_points_transaction(
+            key, "fang", "deduct", 4, "job:breakdown",
+        )
+        self.assertIsNone(err)
+        self.assertTrue(replayed)
+        self.assertEqual(points["points"], 6)
+        self.assertEqual(auth.get_points_row("fang")["points"], 6)
+        connection = auth.db()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_audit"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
+
+    def test_concurrent_same_transaction_key_only_applies_once(self):
+        key = "breakdown-local-charge-102"
+        results = []
+        lock = threading.Lock()
+
+        def worker():
+            result = self.auth.apply_points_transaction(
+                key, "fang", "deduct", 3, "job:breakdown",
+            )
+            with lock:
+                results.append(result)
+
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 7)
+        self.assertEqual(sum(1 for _, err, _ in results if err is None), 20)
+        self.assertEqual(sum(1 for _, _, replayed in results if not replayed), 1)
+        connection = self.auth.db()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_transactions"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_audit"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
+
+    def test_transaction_key_conflict_and_rejected_result_are_stable(self):
+        key = "breakdown-local-charge-103"
+        points, err, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 99, "job:breakdown",
+        )
+        self.assertIsNone(points)
+        self.assertEqual(err, "insufficient")
+        self.assertFalse(replayed)
+        self.auth.refund_points("fang", 100, "top up")
+        points, err, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 99, "job:breakdown",
+        )
+        self.assertIsNone(points)
+        self.assertEqual(err, "insufficient")
+        self.assertTrue(replayed)
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 110)
+        _, err, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 1, "different amount",
+        )
+        self.assertEqual(err, "conflict")
+        self.assertTrue(replayed)
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 110)
+
     def test_http_points_endpoints_require_internal_token(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), self.auth.H)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -97,10 +191,106 @@ class AuthPointsTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=3) as r:
                 data = json.loads(r.read())
             self.assertEqual(data["points"], 6)
+
+            transaction_key = "breakdown-local-refund-104"
+            transaction_body = {
+                "username": "fang", "amount": 4,
+                "reason": "job#104", "transaction_key": transaction_key,
+            }
+            request = urllib.request.Request(
+                base + "/api/auth/points/refund",
+                data=json.dumps(transaction_body).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HQ-Internal-Token": "test-internal-token",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                first = json.loads(response.read())
+            request = urllib.request.Request(
+                base + "/api/auth/points/refund",
+                data=json.dumps(transaction_body).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HQ-Internal-Token": "test-internal-token",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                replay = json.loads(response.read())
+            self.assertFalse(first["replayed"])
+            self.assertTrue(replay["replayed"])
+            self.assertEqual(first["points"], 10)
+            self.assertEqual(replay["points"], 10)
+
+            conflict = urllib.request.Request(
+                base + "/api/auth/points/refund",
+                data=json.dumps({
+                    **transaction_body, "amount": 3,
+                }).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HQ-Internal-Token": "test-internal-token",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(conflict, timeout=3)
+            self.assertEqual(ctx.exception.code, 409)
+            conflict_body = json.loads(ctx.exception.read())
+            self.assertEqual(conflict_body["detail"], "transaction key conflict")
+            self.assertNotIn("username", conflict_body)
+
+            invalid = urllib.request.Request(
+                base + "/api/auth/points/deduct",
+                data=json.dumps({
+                    "username": "fang", "amount": 1,
+                    "transaction_key": "short",
+                }).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HQ-Internal-Token": "test-internal-token",
+                },
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(invalid, timeout=3)
+            self.assertEqual(ctx.exception.code, 400)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+    def test_points_client_only_sends_transaction_key_when_requested(self):
+        server = str(Path(__file__).resolve().parents[1] / "server")
+        if server not in sys.path:
+            sys.path.insert(0, server)
+        from content_domains import points as points_domain
+
+        calls = []
+        with mock.patch.object(
+            points_domain, "_auth_points_request",
+            side_effect=lambda path, payload=None, method="POST": (
+                calls.append((path, payload, method)) or {"points": 8}
+            ),
+        ):
+            self.assertEqual(
+                points_domain.deduct_points("fang", 2, "legacy"),
+                8,
+            )
+            self.assertEqual(
+                points_domain.refund_points(
+                    "fang", 2, "job#1",
+                    transaction_key="breakdown-local-refund-1",
+                ),
+                8,
+            )
+        self.assertNotIn("transaction_key", calls[0][1])
+        self.assertEqual(
+            calls[1][1]["transaction_key"],
+            "breakdown-local-refund-1",
+        )
 
     def test_login_sets_http_only_cookie_without_plaintext_token_body(self):
         self.auth.create_user("cookie_user", "secret123", 5)

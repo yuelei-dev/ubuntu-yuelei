@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # 黄雀 AI · 独立认证服务（零依赖，标准库）
 # 端口 127.0.0.1:8095，nginx 把 /api/auth/ 路由过来。与 leadgen(8090) 完全隔离。
-import sqlite3, hashlib, secrets, json, os, sys, time, urllib.parse
+import sqlite3, hashlib, secrets, json, os, re, sys, time, urllib.parse
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -102,6 +102,16 @@ def init_db():
         after_points INTEGER NOT NULL,
         reason TEXT,
         created_at INTEGER NOT NULL
+    )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS points_transactions(
+        transaction_key TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
     )""")
     # 任务扣点/退点接入审计后，这张表按任务量增长（原来只有人工加减点，几乎不涨）。
     # 按用户查流水是后台最常用的路径，没索引会随表全扫。
@@ -1075,6 +1085,7 @@ def get_points_row(username, c=None):
     return row
 
 SYSTEM_ACTOR = "system"   # points_audit.who_admin：非管理员操作（任务扣点/退点）用它，与人工加减点区分
+POINTS_TRANSACTION_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 
 
 def _write_audit(c, who_admin, username, delta, before, after, reason):
@@ -1156,6 +1167,105 @@ def refund_points(username, amount, reason=""):
         raise
     finally:
         c.close()
+
+
+def apply_points_transaction(transaction_key, username, kind, amount, reason=""):
+    """原子执行或重放一次内部点数交易。
+
+    余额、审计和交易结果在同一个 BEGIN IMMEDIATE 中提交。调用方即使没收到
+    HTTP 响应，也可以用同一 transaction_key 重放并取得原结果，而不会再次
+    改动余额。拒绝结果同样落盘，避免余额变化后同一键得到不同结论。
+    """
+    transaction_key = str(transaction_key or "").strip()
+    username = str(username or "").strip()
+    kind = str(kind or "").strip()
+    amount = int(amount or 0)
+    if not POINTS_TRANSACTION_KEY_RE.fullmatch(transaction_key):
+        raise ValueError("invalid transaction_key")
+    if kind not in {"deduct", "refund"}:
+        raise ValueError("invalid transaction kind")
+    if amount < 0:
+        raise ValueError("amount must be >= 0")
+    c = db()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        existing = c.execute(
+            "SELECT username,kind,amount,result_json FROM points_transactions"
+            " WHERE transaction_key=?",
+            (transaction_key,),
+        ).fetchone()
+        if existing:
+            if (
+                existing["username"] != username
+                or existing["kind"] != kind
+                or int(existing["amount"]) != amount
+            ):
+                c.commit()
+                return None, "conflict", True
+            stored = json.loads(existing["result_json"] or "{}")
+            c.commit()
+            return stored.get("points"), stored.get("error"), True
+
+        before_row = get_points_row(username, c)
+        public = None
+        error = None
+        status = "applied"
+        if not before_row:
+            error = "not_found"
+            status = "rejected"
+        else:
+            before = int(before_row["points"] or 0)
+            if kind == "deduct" and amount:
+                cur = c.execute(
+                    "UPDATE users SET points=points-?"
+                    " WHERE username=? AND points>=?",
+                    (amount, username, amount),
+                )
+                if cur.rowcount != 1:
+                    error = "insufficient"
+                    status = "rejected"
+            elif kind == "refund" and amount:
+                cur = c.execute(
+                    "UPDATE users SET points=points+? WHERE username=?",
+                    (amount, username),
+                )
+                if cur.rowcount != 1:
+                    error = "not_found"
+                    status = "rejected"
+            if error is None:
+                after_row = get_points_row(username, c)
+                if not after_row:
+                    error = "not_found"
+                    status = "rejected"
+                else:
+                    public = public_points(after_row)
+                    if amount:
+                        delta = -amount if kind == "deduct" else amount
+                        _write_audit(
+                            c, SYSTEM_ACTOR, username, delta, before,
+                            int(after_row["points"] or 0), reason,
+                        )
+
+        result = {"points": public, "error": error}
+        now = int(time.time())
+        c.execute(
+            "INSERT INTO points_transactions"
+            "(transaction_key,username,kind,amount,status,result_json,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (
+                transaction_key, username, kind, amount, status,
+                json.dumps(result, ensure_ascii=False, sort_keys=True),
+                now, now,
+            ),
+        )
+        c.commit()
+        return public, error, False
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
 
 def public_admin_user(row):
     return {
@@ -1718,7 +1828,39 @@ class H(BaseHTTPRequestHandler):
             if amount < 0:
                 return self._send(400, {"detail": "amount must be >= 0"})
             reason = str(d.get("reason") or "")   # 形如 job:collect#1354；老调用方不传就留空
+            transaction_key = str(d.get("transaction_key") or "").strip()
+            if transaction_key and not POINTS_TRANSACTION_KEY_RE.fullmatch(transaction_key):
+                return self._send(400, {
+                    "detail": "transaction_key 需为 16-128 位字母、数字或 . _ : -",
+                })
             try:
+                if transaction_key:
+                    kind = "deduct" if p.endswith("/deduct") else "refund"
+                    points, err, replayed = apply_points_transaction(
+                        transaction_key, username, kind, amount, reason,
+                    )
+                    if err == "conflict":
+                        return self._send(409, {
+                            "detail": "transaction key conflict",
+                            "replayed": False,
+                        })
+                    if err == "insufficient":
+                        return self._send(402, {
+                            "detail": "点数不足", "need": amount,
+                            "transaction_key": transaction_key,
+                            "replayed": replayed,
+                        })
+                    if err == "not_found":
+                        return self._send(404, {
+                            "detail": "user not found",
+                            "transaction_key": transaction_key,
+                            "replayed": replayed,
+                        })
+                    return self._send(200, {
+                        "ok": True, "points": points["points"], "user": points,
+                        "transaction_key": transaction_key,
+                        "replayed": replayed,
+                    })
                 if p.endswith("/deduct"):
                     points, err = deduct_points(username, amount, reason)
                     if err == "insufficient":

@@ -1136,6 +1136,7 @@
     if(status===401) return 'login';
     if(status===402) return 'points';
     if(data.code==='idempotency_conflict') return 'conflict';
+    if(status===202) return 'recover';
     if(data.code==='idempotency_in_progress'){
       return data.job_id?'resume_job':'recover';
     }
@@ -1145,28 +1146,30 @@
   }
   function _recoverLocalSubmissionJob(pending,btn){
     var attempts=0;
-    var earliest=Math.floor(Number(pending&&pending.createdAt||Date.now())/1000)-10;
     function check(){
       attempts++;
-      fetch('/api/gen/points/history?days=1&kind=breakdown&page=1&page_size=10',{
-        credentials:'same-origin',cache:'no-store'
+      fetch('/api/gen/breakdown/local-upload?action=status',{
+        method:'POST',credentials:'same-origin',cache:'no-store',
+        headers:{'Idempotency-Key':pending.key}
       }).then(_readApiResponse).then(function(response){
         if(response.s===401){ _localBusy(btn,false); if(window.HQ)HQ.login(); return; }
-        if(response.s>=400||response.validJson===false) throw new Error('任务恢复查询失败');
-        var items=Array.isArray(response.d&&response.d.items)?response.d.items:[];
-        var match=items.find(function(item){
-          return item&&item.kind==='breakdown'&&Number(item.created_at||0)>=earliest
-            &&['pending','running','done','error','failed'].indexOf(String(item.status||''))>=0;
-        });
-        if(match&&match.task_id){
-          _confirmSubmission(pending);
-          if(bdLocalStatus)bdLocalStatus.textContent='已恢复上传任务，正在查询…';
-          _pollLocalReverse(match.task_id,btn);
+        if(response.s===409&&response.d&&response.d.code==='idempotency_conflict'){
+          _confirmSubmission(pending); _localBusy(btn,false);
+          _localFail('提交凭证与当前任务冲突，已终止该凭证；请再次点击重新提交');
           return;
         }
-        if(attempts<10){ setTimeout(check,1000); return; }
+        if(response.d&&response.d.job_id&&response.s===200){
+          _confirmSubmission(pending);
+          if(bdLocalStatus)bdLocalStatus.textContent='已恢复上传任务，正在查询…';
+          _pollLocalReverse(response.d.job_id,btn);
+          return;
+        }
+        var unresolved=response.s===202||response.s===404
+          ||(response.d&&response.d.code==='idempotency_in_progress')
+          ||response.validJson===false;
+        if(unresolved&&attempts<10){ setTimeout(check,1000); return; }
         _localBusy(btn,false);
-        _localFail('请求仍在受理，已保留原提交凭证；再次点击会继续使用同一凭证确认');
+        _localFail('暂时无法精确确认任务，已保留原提交凭证；再次点击会继续使用同一凭证查询');
       }).catch(function(){
         if(attempts<10){ setTimeout(check,1000); return; }
         _localBusy(btn,false);

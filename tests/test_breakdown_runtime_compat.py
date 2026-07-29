@@ -295,6 +295,11 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
                 "d": {"code": "idempotency_conflict"},
                 "validJson": True,
             },
+            {
+                "s": 202,
+                "d": {"code": "idempotency_in_progress", "job_id": 9},
+                "validJson": True,
+            },
             {"s": 500, "d": {}, "validJson": True},
         ]
         probe = (
@@ -311,7 +316,7 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             json.loads(result.stdout),
             [
                 "job", "recover", "recover", "resume_job", "recover",
-                "conflict", "retry",
+                "conflict", "recover", "retry",
             ],
         )
 
@@ -344,11 +349,15 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             "function _recoverLocalSubmissionJob(pending,btn){", 1
         )[1].split("function _submitLocalReverse(", 1)[0]
         self.assertIn(
-            "/api/gen/points/history?days=1&kind=breakdown", recovery
+            "/api/gen/breakdown/local-upload?action=status", recovery
         )
-        self.assertIn("if(match&&match.task_id)", recovery)
+        self.assertIn("'Idempotency-Key':pending.key", recovery)
+        self.assertNotIn("/api/gen/points/history", recovery)
+        self.assertNotIn("items.find", recovery)
+        self.assertIn("response.s===202||response.s===404", recovery)
+        self.assertIn("response.s===200", recovery)
         self.assertIn("_confirmSubmission(pending)", recovery)
-        self.assertIn("_pollLocalReverse(match.task_id,btn)", recovery)
+        self.assertIn("_pollLocalReverse(response.d.job_id,btn)", recovery)
         self.assertIn("setTimeout(check,1000)", recovery)
 
     def test_tikhub_retains_safe_length_and_truncation_contract(self):

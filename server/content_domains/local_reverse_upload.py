@@ -71,7 +71,7 @@ def _job_payload(raw):
         return {}
     return payload if isinstance(payload, dict) else {}
 
-def _set_payment_state(jdb, job_id, state):
+def _set_payment_state(jdb, job_id, state, **fields):
     """Persist the local-upload payment intent before any terminal transition."""
     with closing(jdb()) as connection:
         row = connection.execute(
@@ -83,6 +83,7 @@ def _set_payment_state(jdb, job_id, state):
         payment = payload.get(_PAYMENT_FIELD)
         payment = dict(payment) if isinstance(payment, dict) else {}
         payment["state"] = str(state)
+        payment.update(fields)
         payload[_PAYMENT_FIELD] = payment
         updated = connection.execute(
             "UPDATE jobs SET payload=?,updated_at=? WHERE id=?",
@@ -99,53 +100,87 @@ def _find_idempotent_job(jdb, username, key):
     if not key:
         return None
     with closing(jdb()) as connection:
-        rows = connection.execute(
-            "SELECT id,payload FROM jobs"
+        row = connection.execute(
+            "SELECT id,username,cost,status,payload,error,owner FROM jobs"
             " WHERE username=? AND kind='breakdown'"
-            " ORDER BY id DESC LIMIT 50",
-            (username,),
-        ).fetchall()
-    for row in rows:
-        payment = _job_payload(row["payload"]).get(_PAYMENT_FIELD)
-        if isinstance(payment, dict) and payment.get("idempotency_key") == key:
-            return int(row["id"])
-    return None
+            " AND json_extract("
+            " CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,"
+            " '$._local_upload_payment.idempotency_key')=?"
+            " ORDER BY id DESC LIMIT 1",
+            (username, key),
+        ).fetchone()
+    return row
+
+def _payment_keys(job_id, upload_token=""):
+    job_id = int(job_id)
+    nonce = str(upload_token or "")[:16]
+    suffix = ("-%s" % nonce) if nonce else ""
+    return (
+        "breakdown-local-charge-%d%s" % (job_id, suffix),
+        "breakdown-local-refund-%d%s" % (job_id, suffix),
+    )
+
+def _payment_for_job(jdb, job_id):
+    with closing(jdb()) as connection:
+        row = connection.execute(
+            "SELECT payload FROM jobs WHERE id=?", (int(job_id),)
+        ).fetchone()
+    if not row:
+        return {}
+    payment = _job_payload(row["payload"]).get(_PAYMENT_FIELD)
+    return dict(payment) if isinstance(payment, dict) else {}
 
 def _refund_job_once(jdb, jobs_store, points_domain, job_id, username, cost):
+    payment = _payment_for_job(jdb, job_id)
+    refund_key = payment.get("refund_transaction_key") or _payment_keys(job_id)[1]
     def refund(target_username, amount):
         try:
             points_domain.refund_points(
-                target_username, amount, "job#%d" % int(job_id)
+                target_username, amount, "job#%d" % int(job_id),
+                transaction_key=refund_key,
             )
             return True
         except Exception:
             return False
-    return jobs_store.refund_once(
+    refunded = jobs_store.refund_once(
         jdb, int(job_id), username, int(cost), refund
     )
+    if refunded:
+        _set_payment_state(jdb, job_id, "refunded")
+    return refunded
 
 def reconcile_pending_refunds(jdb, jobs_store, points_domain, limit=50):
     """Retry only durable, paid local-upload refund intents."""
-    with closing(jdb()) as connection:
-        rows = connection.execute(
-            "SELECT id,username,cost,payload FROM jobs"
-            " WHERE kind='breakdown' AND status='error'"
-            " AND COALESCE(refunded,0)=0 ORDER BY id ASC LIMIT ?",
-            (max(1, int(limit)),),
-        ).fetchall()
+    remaining = max(1, int(limit))
+    cursor = 0
     reconciled = 0
-    for row in rows:
-        payment = _job_payload(row["payload"]).get(_PAYMENT_FIELD)
-        if not isinstance(payment, dict) or payment.get("state") != "refund_pending":
-            continue
-        if _refund_job_once(
-            jdb, jobs_store, points_domain, row["id"], row["username"],
-            row["cost"],
-        ):
-            _clear_idempotency(
-                jdb, row["username"], payment.get("idempotency_key")
-            )
-            reconciled += 1
+    while remaining > 0:
+        page_size = min(25, remaining)
+        with closing(jdb()) as connection:
+            rows = connection.execute(
+                "SELECT id,username,cost,payload FROM jobs"
+                " WHERE id>? AND kind='breakdown' AND status='error'"
+                " AND COALESCE(refunded,0)=0"
+                " AND json_extract("
+                " CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,"
+                " '$._local_upload_payment.state')='refund_pending'"
+                " ORDER BY id ASC LIMIT ?",
+                (cursor, page_size),
+            ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            cursor = int(row["id"])
+            payment = _job_payload(row["payload"]).get(_PAYMENT_FIELD)
+            if _refund_job_once(
+                jdb, jobs_store, points_domain, row["id"], row["username"],
+                row["cost"],
+            ):
+                _clear_idempotency(
+                    jdb, row["username"], payment.get("idempotency_key")
+                )
+                reconciled += 1
+        remaining -= len(rows)
     return reconciled
 
 def _reject_reserved_job(reject_pending_job, jdb, out_dir, token, username,
@@ -199,6 +234,164 @@ def _activate_reserved_job(jdb, job_id, reserved_owner, service_owner, payload,
             if updated.rowcount != 1:
                 raise RuntimeError("上传幂等记录已失效")
         connection.commit()
+
+def _binding_is_readable(jdb, out_dir, job_id, username, token):
+    from . import breakdown
+    root = _upload_root(out_dir)
+    with closing(jdb()) as connection:
+        breakdown._ensure_upload_table(connection)
+        row = connection.execute(
+            "SELECT suffix,path FROM breakdown_uploads"
+            " WHERE job_id=? AND username=? AND token=?",
+            (int(job_id), username, token),
+        ).fetchone()
+    if not row:
+        return False
+    expected = (root / (str(token) + str(row["suffix"] or ""))).resolve()
+    recorded = pathlib.Path(str(row["path"] or "")).resolve()
+    return expected.parent == root and recorded == expected and expected.is_file()
+
+def _continue_reserved_job(
+    jdb, jobs_store, points_domain, enqueue_job, reject_pending_job,
+    service_owner, out_dir, row, username, idem_key,
+):
+    """Replay the stable charge, then activate/enqueue or compensate exactly once."""
+    job_id = int(row["id"])
+    payload = _job_payload(row["payload"])
+    payment = payload.get(_PAYMENT_FIELD)
+    payment = dict(payment) if isinstance(payment, dict) else {}
+    token = str(payload.get("upload_token") or "")
+    reserved_owner = "%s:local-upload-reserved" % service_owner
+    if payment.get("idempotency_key") != idem_key or row["username"] != username:
+        return 404, {"detail": "未找到对应上传任务", "code": "idempotency_not_found"}
+    if str(row["status"]) in {"error", "failed"}:
+        return 200, {
+            "job_id": job_id, "status": "error",
+            "error": str(row["error"] or "上传任务失败"),
+        }
+    if str(row["status"]) in {"running", "done"}:
+        return 200, {"job_id": job_id, "status": str(row["status"])}
+    if row["owner"] == service_owner:
+        if not enqueue_job(job_id, "breakdown", "local_reverse"):
+            _reject_paid_job(
+                reject_pending_job, jdb, jobs_store, points_domain, out_dir,
+                token, username, job_id, idem_key,
+                "任务队列已满，请稍后再试",
+            )
+            return 429, {
+                "detail": "任务队列已满，请稍后再试",
+                "code": "queue_full", "retry_after_ms": 4000,
+            }
+        return 200, {
+            "job_id": job_id, "cost": UPLOAD_COST,
+            "points_left": int(points_domain.get_points(username) or 0),
+        }
+    if row["owner"] != reserved_owner:
+        return 409, {
+            "detail": "上传任务状态冲突", "code": "idempotency_conflict",
+        }
+
+    charge_key = payment.get("charge_transaction_key") or _payment_keys(job_id, token)[0]
+    refund_key = payment.get("refund_transaction_key") or _payment_keys(job_id, token)[1]
+    try:
+        points_left = points_domain.deduct_points(
+            username, UPLOAD_COST, "job:breakdown",
+            transaction_key=charge_key,
+        )
+    except Exception as error:
+        status = int(getattr(error, "status", 500) or 500)
+        if 400 <= status < 500:
+            _reject_reserved_job(
+                reject_pending_job, jdb, out_dir, token, username, job_id,
+                idem_key, "上传任务扣点被拒绝", "charge_rejected",
+            )
+            _clear_idempotency(jdb, username, idem_key)
+            response = {
+                "detail": getattr(error, "detail", "上传任务扣点被拒绝"),
+            }
+            if status == 402:
+                response["need"] = UPLOAD_COST
+            return status, response
+        return 202, {
+            "detail": "扣点结果正在确认，请稍后继续查询",
+            "code": "idempotency_in_progress",
+            "retry_after_ms": 1000,
+            "job_id": job_id,
+        }
+
+    payload[_PAYMENT_FIELD] = {
+        **payment,
+        "state": "charged",
+        "idempotency_key": idem_key,
+        "charge_transaction_key": charge_key,
+        "refund_transaction_key": refund_key,
+    }
+    try:
+        if not _set_payment_state(
+            jdb, job_id, "charged",
+            charge_transaction_key=charge_key,
+            refund_transaction_key=refund_key,
+        ):
+            raise RuntimeError("上传任务支付状态不存在")
+        if not _binding_is_readable(jdb, out_dir, job_id, username, token):
+            _reject_paid_job(
+                reject_pending_job, jdb, jobs_store, points_domain, out_dir,
+                token, username, job_id, idem_key, "上传文件已丢失",
+            )
+            return 500, {"detail": "上传文件已丢失，点数将自动退回"}
+        payload[_PAYMENT_FIELD]["state"] = "paid"
+        response = {
+            "job_id": job_id, "cost": UPLOAD_COST,
+            "points_left": points_left,
+        }
+        _activate_reserved_job(
+            jdb, job_id, reserved_owner, service_owner, payload,
+            username, idem_key, response,
+        )
+        if not enqueue_job(job_id, "breakdown", "local_reverse"):
+            _reject_paid_job(
+                reject_pending_job, jdb, jobs_store, points_domain, out_dir,
+                token, username, job_id, idem_key,
+                "任务队列已满，请稍后再试",
+            )
+            return 429, {
+                "detail": "任务队列已满，请稍后再试",
+                "code": "queue_full", "retry_after_ms": 4000,
+            }
+        return 200, response
+    except Exception:
+        _reject_paid_job(
+            reject_pending_job, jdb, jobs_store, points_domain, out_dir,
+            token, username, job_id, idem_key, "上传任务入队失败",
+        )
+        return 500, {"detail": "上传任务创建失败，请重试"}
+
+def _exact_status(
+    jdb, jobs_store, points_domain, enqueue_job, reject_pending_job,
+    service_owner, out_dir, username, idem_key,
+):
+    from . import submission_idempotency
+    row = _find_idempotent_job(jdb, username, idem_key)
+    if row:
+        return _continue_reserved_job(
+            jdb, jobs_store, points_domain, enqueue_job, reject_pending_job,
+            service_owner, out_dir, row, username, idem_key,
+        )
+    with closing(jdb()) as connection:
+        submission_idempotency.ensure_table(connection)
+        idem = connection.execute(
+            "SELECT response_json FROM submission_idempotency"
+            " WHERE username=? AND endpoint=? AND idem_key=?",
+            (username, UPLOAD_ENDPOINT, idem_key),
+        ).fetchone()
+    if not idem:
+        return 404, {
+            "detail": "未找到对应提交凭证", "code": "idempotency_not_found",
+        }
+    return 202, {
+        "detail": "上传请求正在建立任务",
+        "code": "idempotency_in_progress", "retry_after_ms": 1000,
+    }
 
 def cleanup_stale_uploads(jdb, out_dir):
     """Reap terminal/orphaned/missing upload bindings without touching live jobs."""
@@ -301,6 +494,15 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
     except Exception:
         pass
     query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+    action = str((query.get("action") or [""])[0]).lower()
+    if action == "status":
+        if not idem_key:
+            return handler._send(400, {"detail": "缺少 Idempotency-Key"})
+        status, response = _exact_status(
+            jdb, jobs_store, points_domain, enqueue_job, reject_pending_job,
+            service_owner, out_dir, user["username"], idem_key,
+        )
+        return handler._send(status, response)
     media_type = str((query.get("media_type") or [""])[0]).lower()
     content_type = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].lower()
     allowed = _IMAGE_EXT if media_type == "image" else _VIDEO_EXT if media_type == "video" else {}
@@ -328,8 +530,6 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
     path = (upload_dir / (upload_token + suffix)).resolve()
     job_id = None
     job_reserved = False
-    job_activated = False
-    deducted = False
     idem_started = False
     try:
         digest = _stream_body(handler, path, size)
@@ -363,11 +563,18 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
                 "detail": "相同上传正在受理，请稍后查询",
                 "code": "idempotency_in_progress", "retry_after_ms": 1000,
             }
-            processing_job_id = _find_idempotent_job(
+            processing_job = _find_idempotent_job(
                 jdb, user["username"], idem_key
             )
-            if processing_job_id is not None:
-                processing["job_id"] = processing_job_id
+            if processing_job is not None:
+                status, resumed = _continue_reserved_job(
+                    jdb, jobs_store, points_domain, enqueue_job,
+                    reject_pending_job, service_owner, out_dir,
+                    processing_job, user["username"], idem_key,
+                )
+                if status != 202:
+                    return handler._send(status, resumed)
+                processing["job_id"] = int(processing_job["id"])
             return handler._send(409, processing)
         idem_started = idem_state == "new"
         payload = {
@@ -376,7 +583,7 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
             "media_type": media_type,
             "source_title": title,
             _PAYMENT_FIELD: {
-                "state": "reserved",
+                "state": "charge_pending",
                 "idempotency_key": idem_key,
             },
         }
@@ -395,6 +602,15 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
                 ),
             )
             job_id = int(cur.lastrowid)
+            charge_key, refund_key = _payment_keys(job_id, upload_token)
+            payload[_PAYMENT_FIELD].update({
+                "charge_transaction_key": charge_key,
+                "refund_transaction_key": refund_key,
+            })
+            connection.execute(
+                "UPDATE jobs SET payload=? WHERE id=?",
+                (json.dumps(payload, ensure_ascii=False), job_id),
+            )
             connection.execute(
                 "INSERT INTO breakdown_uploads"
                 "(token,username,suffix,job_id,created_at,path,media_type)"
@@ -406,29 +622,14 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
             )
             connection.commit()
         job_reserved = True
-        points_left = points_domain.deduct_points(
-            user["username"], UPLOAD_COST, "job:breakdown"
+        row = _find_idempotent_job(jdb, user["username"], idem_key)
+        if not row:
+            raise RuntimeError("上传任务预留记录不存在")
+        status, response = _continue_reserved_job(
+            jdb, jobs_store, points_domain, enqueue_job, reject_pending_job,
+            service_owner, out_dir, row, user["username"], idem_key,
         )
-        deducted = True
-        payload[_PAYMENT_FIELD]["state"] = "paid"
-        response = {
-            "job_id": job_id, "cost": UPLOAD_COST,
-            "points_left": points_left,
-        }
-        _activate_reserved_job(
-            jdb, job_id, reserved_owner, service_owner, payload,
-            user["username"], idem_key, response,
-        )
-        job_activated = True
-        if not enqueue_job(job_id, "breakdown", "local_reverse"):
-            _reject_paid_job(
-                reject_pending_job, jdb, jobs_store, points_domain, out_dir,
-                upload_token, user["username"], job_id, idem_key,
-                "任务队列已满，请稍后再试",
-            )
-            return handler._send(429, {"detail": "任务队列已满，请稍后再试",
-                                       "code": "queue_full", "retry_after_ms": 4000})
-        return handler._send(200, response)
+        return handler._send(status, response)
     except ValueError as error:
         _remove(path)
         if idem_started:
@@ -438,26 +639,20 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
             )
         return handler._send(400, {"detail": str(error)})
     except Exception as error:
-        if job_reserved and deducted:
-            _reject_paid_job(
-                reject_pending_job, jdb, jobs_store, points_domain, out_dir,
-                upload_token, user["username"], job_id, idem_key,
-                "上传任务入队失败",
-            )
-        elif job_reserved:
-            _reject_reserved_job(
-                reject_pending_job, jdb, out_dir, upload_token,
-                user["username"], job_id, idem_key,
-                "上传任务扣点失败", "deduct_failed",
-            )
-            _clear_idempotency(jdb, user["username"], idem_key)
-        else:
+        if not job_reserved:
             _remove(path)
-        if idem_started and not job_activated and not deducted:
+        if idem_started and not job_reserved:
             submission_idempotency.abort(
                 jdb, user["username"], UPLOAD_ENDPOINT,
                 idem_key,
             )
+        if job_reserved:
+            return handler._send(202, {
+                "detail": "上传任务状态正在确认，请使用原提交凭证继续查询",
+                "code": "idempotency_in_progress",
+                "retry_after_ms": 1000,
+                "job_id": job_id,
+            })
         status = int(getattr(error, "status", 500) or 500)
         if status == 402:
             return handler._send(402, {"detail": getattr(error, "detail", "点数不足"), "need": UPLOAD_COST})

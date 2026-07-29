@@ -56,25 +56,42 @@ class _Points:
         self.cost_calls = []
         self.fail_deduct = False
         self.fail_refunds = 0
+        self.fail_after_deduct = 0
+        self.fail_after_refund = 0
+        self.transactions = {}
 
     def get_points(self, username):
         return self.balance
 
-    def deduct_points(self, username, amount, reason=""):
+    def deduct_points(self, username, amount, reason="", transaction_key=""):
+        if transaction_key in self.transactions:
+            return self.transactions[transaction_key]
         if self.fail_deduct:
             raise self.AuthPointsError(503, "deduct unavailable")
         if self.balance < amount:
             raise self.AuthPointsError(402, "点数不足")
         self.balance -= amount
         self.deductions.append((username, amount, reason))
+        if transaction_key:
+            self.transactions[transaction_key] = self.balance
+        if self.fail_after_deduct:
+            self.fail_after_deduct -= 1
+            raise self.AuthPointsError(502, "deduct response lost")
         return self.balance
 
-    def refund_points(self, username, amount, reason=""):
+    def refund_points(self, username, amount, reason="", transaction_key=""):
+        if transaction_key in self.transactions:
+            return self.transactions[transaction_key]
         if self.fail_refunds:
             self.fail_refunds -= 1
             raise self.AuthPointsError(503, "refund unavailable")
         self.balance += amount
         self.refunds.append((username, amount, reason))
+        if transaction_key:
+            self.transactions[transaction_key] = self.balance
+        if self.fail_after_refund:
+            self.fail_after_refund -= 1
+            raise self.AuthPointsError(502, "refund response lost")
         return self.balance
 
     def safe_refund_points(self, username, amount, reason=""):
@@ -147,6 +164,12 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
             self.image_body(), "image/jpeg", idem_key,
         )
 
+    def status_handler(self, idem_key="local-upload-1234"):
+        return _Handler(
+            "/api/gen/breakdown/local-upload?action=status",
+            b"", "application/json", idem_key,
+        )
+
     def patches(self, enqueue=None):
         stack = ExitStack()
         stack.enter_context(mock.patch.object(self.core, "jdb", self.jdb))
@@ -185,6 +208,12 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
 
     def submit_upload(self, handler=None, enqueue=None):
         handler = handler or self.upload_handler()
+        with self.patches(enqueue=enqueue):
+            result = self.core.H.do_POST(handler)
+        return handler, result
+
+    def query_status(self, handler=None, enqueue=None):
+        handler = handler or self.status_handler()
         with self.patches(enqueue=enqueue):
             result = self.core.H.do_POST(handler)
         return handler, result
@@ -269,7 +298,7 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
         observed = {}
         original_deduct = self.points.deduct_points
 
-        def inspect_then_deduct(username, amount, reason=""):
+        def inspect_then_deduct(username, amount, reason="", transaction_key=""):
             with closing(self.jdb()) as connection:
                 job = connection.execute("SELECT * FROM jobs").fetchone()
                 binding = connection.execute(
@@ -281,7 +310,9 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
                 "owner": job["owner"] if job else None,
                 "binding_job_id": binding["job_id"] if binding else None,
             })
-            return original_deduct(username, amount, reason)
+            return original_deduct(
+                username, amount, reason, transaction_key=transaction_key,
+            )
 
         with mock.patch.object(
             self.points, "deduct_points", side_effect=inspect_then_deduct
@@ -453,6 +484,10 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
         self.assertEqual(
             list((self.out_dir / "_breakdown_uploads").glob("*")), []
         )
+        _, recovered = self.query_status()
+        self.assertEqual(recovered[0], 200)
+        self.assertEqual(recovered[1]["job_id"], row["id"])
+        self.assertEqual(recovered[1]["status"], "error")
 
     def test_idempotent_replay_returns_same_job_without_second_charge(self):
         first, first_result = self.submit_upload()
@@ -476,7 +511,7 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
             len(list((self.out_dir / "_breakdown_uploads").glob("*"))), 1
         )
 
-    def test_idempotency_in_progress_returns_reserved_job_id(self):
+    def test_idempotency_in_progress_resumes_exact_job_without_second_charge(self):
         _, first_result = self.submit_upload()
         job_id = first_result[1]["job_id"]
         with closing(self.jdb()) as connection:
@@ -490,16 +525,8 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
             )
             connection.commit()
         _, second_result = self.submit_upload()
-        self.assertEqual(second_result[0], 409)
-        self.assertEqual(
-            second_result[1],
-            {
-                "detail": "相同上传正在受理，请稍后查询",
-                "code": "idempotency_in_progress",
-                "retry_after_ms": 1000,
-                "job_id": job_id,
-            },
-        )
+        self.assertEqual(second_result[0], 200)
+        self.assertEqual(second_result[1]["job_id"], job_id)
         self.assertEqual(len(self.points.deductions), 1)
 
     def test_idempotency_conflict_never_creates_or_charges_second_job(self):
@@ -552,30 +579,36 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
                 0,
             )
 
-    def test_deduct_failure_rejects_reserved_job_without_refund(self):
+    def test_ambiguous_deduct_failure_stays_reserved_and_resumes_same_key(self):
         self.points.fail_deduct = True
         _, result = self.submit_upload()
-        self.assertEqual(result[0], 500)
+        self.assertEqual(result[0], 202)
         with closing(self.jdb()) as connection:
             row = connection.execute("SELECT * FROM jobs").fetchone()
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM breakdown_uploads"
                 ).fetchone()[0],
-                0,
+                1,
             )
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) FROM submission_idempotency"
                 ).fetchone()[0],
-                0,
+                1,
             )
-        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["status"], "pending")
         self.assertEqual(row["refunded"], 0)
-        self.assertEqual(self.payment_state(row["id"]), "deduct_failed")
+        self.assertEqual(self.payment_state(row["id"]), "charge_pending")
         self.assertEqual(self.points.deductions, [])
         self.assertEqual(self.points.refunds, [])
         self.assertEqual(self.points.balance, 100)
+        self.points.fail_deduct = False
+        _, resumed = self.query_status()
+        self.assertEqual(resumed[0], 200)
+        self.assertEqual(resumed[1]["job_id"], row["id"])
+        self.assertEqual(len(self.points.deductions), 1)
+        self.assertEqual(self.points.balance, 80)
 
     def test_post_deduct_activation_failure_uses_persistent_refund_job(self):
         with mock.patch.object(
@@ -594,7 +627,7 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(row["status"], "error")
         self.assertEqual(row["refunded"], 1)
-        self.assertEqual(self.payment_state(row["id"]), "refund_pending")
+        self.assertEqual(self.payment_state(row["id"]), "refunded")
         self.assertEqual(len(self.points.deductions), 1)
         self.assertEqual(len(self.points.refunds), 1)
         self.assertEqual(self.points.balance, 100)
@@ -639,6 +672,116 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
             0,
         )
         self.assertEqual(len(self.points.refunds), 1)
+
+    def test_deduct_response_loss_replays_same_transaction_after_restart_path(self):
+        self.points.fail_after_deduct = 1
+        _, first = self.submit_upload()
+        self.assertEqual(first[0], 202)
+        row = self.job_row(first[1]["job_id"])
+        payment = json.loads(row["payload"])[
+            "_local_upload_payment"
+        ]
+        self.assertEqual(payment["state"], "charge_pending")
+        self.assertTrue(payment["charge_transaction_key"])
+        self.assertTrue(payment["refund_transaction_key"])
+        self.assertEqual(self.points.balance, 80)
+        self.assertEqual(len(self.points.deductions), 1)
+
+        _, resumed = self.query_status()
+        self.assertEqual(resumed[0], 200)
+        self.assertEqual(resumed[1]["job_id"], row["id"])
+        self.assertEqual(self.payment_state(row["id"]), "paid")
+        self.assertEqual(self.points.balance, 80)
+        self.assertEqual(len(self.points.deductions), 1)
+
+    def test_refund_response_loss_reconcile_replays_without_second_credit(self):
+        self.points.fail_after_refund = 1
+        _, result = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(result[0], 429)
+        with closing(self.jdb()) as connection:
+            row = connection.execute("SELECT * FROM jobs").fetchone()
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["refunded"], 0)
+        self.assertEqual(self.payment_state(row["id"]), "refund_pending")
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+        self.assertEqual(
+            self.local_upload.reconcile_pending_refunds(
+                self.jdb, self.jobs_store, self.points,
+            ),
+            1,
+        )
+        self.assertEqual(self.job_row(row["id"])["refunded"], 1)
+        self.assertEqual(self.payment_state(row["id"]), "refunded")
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_refund_scan_is_not_starved_by_one_hundred_unrelated_errors(self):
+        now = 123
+        with closing(self.jdb()) as connection:
+            for index in range(100):
+                connection.execute(
+                    "INSERT INTO jobs"
+                    "(kind,username,cost,status,payload,error,created_at,updated_at,refunded,owner)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "breakdown", "alice", 20, "error",
+                        (
+                            "not-json" if index % 2
+                            else json.dumps({"unrelated": index})
+                        ),
+                        "other", now, now, 0,
+                        self.core.SERVICE_OWNER,
+                    ),
+                )
+            connection.commit()
+        self.points.fail_refunds = 1
+        _, failed = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(failed[0], 429)
+        with closing(self.jdb()) as connection:
+            target = connection.execute(
+                "SELECT id FROM jobs"
+                " WHERE json_extract("
+                " CASE WHEN json_valid(payload) THEN payload ELSE '{}' END,"
+                " '$._local_upload_payment.state')"
+                "='refund_pending'"
+            ).fetchone()[0]
+        self.assertEqual(
+            self.local_upload.reconcile_pending_refunds(
+                self.jdb, self.jobs_store, self.points, limit=1,
+            ),
+            1,
+        )
+        self.assertEqual(self.job_row(target)["refunded"], 1)
+
+    def test_exact_status_never_selects_other_user_or_unrelated_job(self):
+        _, created = self.submit_upload()
+        job_id = created[1]["job_id"]
+        with self.patches(), mock.patch.object(
+            self.core, "verify", return_value={"username": "mallory"},
+        ):
+            cross_user = self.core.H.do_POST(self.status_handler())
+        self.assertEqual(cross_user[0], 404)
+        self.assertNotIn("job_id", cross_user[1])
+
+        missing = self.status_handler("local-upload-other-key")
+        _, missing_result = self.query_status(missing)
+        self.assertEqual(missing_result[0], 404)
+        self.assertNotIn("job_id", missing_result[1])
+        self.assertEqual(self.job_row(job_id)["username"], "alice")
+
+    def test_exact_status_returns_202_for_key_reserved_before_job(self):
+        key = "local-upload-status-pending"
+        state, _ = self.submission_idempotency.begin(
+            self.jdb, "alice", self.local_upload.UPLOAD_ENDPOINT, key,
+            {"media_type": "image"},
+        )
+        self.assertEqual(state, "new")
+        _, result = self.query_status(self.status_handler(key))
+        self.assertEqual(result[0], 202)
+        self.assertEqual(result[1]["code"], "idempotency_in_progress")
+        self.assertNotIn("job_id", result[1])
 
     def test_unresolved_refund_replay_cannot_charge_same_key_again(self):
         self.points.fail_refunds = 2
