@@ -1,0 +1,19 @@
+# The original 320-test runtime reconciliation diagnostic set.
+tests.test_breakdown
+tests.test_breakdown_content_compat
+tests.test_egress
+tests.test_imggen_reverse
+tests.test_jobs_store
+tests.test_job_heartbeat
+tests.test_local_reverse_feature
+tests.test_auth_points
+tests.test_points_audit
+tests.test_reverse_prompt_render
+tests.test_runtime_manifest
+tests.test_script_actions_ui
+tests.test_script_submission_guards
+tests.test_tikhub_asr
+tests.test_tikhub_channels
+tests.test_health_check
+tests.test_video_job_public_state
+tests.test_zhipu_copy

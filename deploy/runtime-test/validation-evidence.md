@@ -79,3 +79,59 @@ smaller follow-up PRs.
 - Production connection: not performed
 - Merge authorization: none
 - Recommended PR state: Draft / blocked pending independent gate review
+
+## Runtime/test gate follow-up
+
+PR #145 now has a dedicated gate that is selected only when the pull request
+base is `runtime/test`. The original `main` workflow keeps the same steps and
+commands for pushes and for pull requests whose base is not `runtime/test`.
+
+Blocking runtime suite:
+
+- previously established runtime contracts: 91/91
+- added gap contracts: 9/9
+- total: 100/100
+- added coverage:
+  - manifest source classifications and external-state exclusions
+  - key-only environment contract and sanitized service/Nginx references
+  - PR #141 link/upload ownership, eight-frame, GLM-only, SSIM/reference and
+    egress/TikHub compatibility through the existing compatibility contracts
+  - PR #142 live/history prompt rendering through the existing render contracts
+  - refund state `0 -> 2 -> 1` and concurrent idempotent financial effect
+  - runtime-only workflow routing and unchanged main workflow commands
+
+The six-service disposable-state smoke remains green: auth/content/dl/imggen/
+leadgen returned HTTP 200, admin preserved its unauthenticated HTTP 401
+contract, all child processes stopped, and paid model calls were zero.
+
+Resource-stamp refresh:
+
+- only `site/workbench/script.html` changed under `site/`
+- old SHA-256:
+  `e0e49d646299edfcb831eefad0b259664fc8df47c89b9cc39f9be2450aa85f23`
+- new SHA-256:
+  `b66cc86fef6f4bb5bf1d046da4331fe0f26cdbb0cbda262e836d6c96f81cf58a`
+- changed text: `cloud-shell.js?v=302ad2ce` to
+  `cloud-shell.js?v=642453c4`
+- normalized semantic SHA-256 before/after:
+  `27b6e0920a64215587f37d9a227b7004322ab8daad475b047441898e03717c73`
+- semantic diff after removing the cache stamp: zero
+
+Two independent release builds each contained 305 files. Their complete
+relative-path and SHA-256 maps were identical with zero extra, missing or
+mismatched files.
+
+## Structured diagnostics
+
+The diagnostic runner stores one record per test with test id, module, class,
+method, duration, status and complete traceback. It does not skip, delete or
+weaken a test.
+
+- preserved original 1,331-test log: 974 pass, 110 failure, 247 error
+- reconstructed original 320-test diagnostic: 170 pass, 3 failure, 147 error
+- current complete 1,331-test rerun is retained separately because environment
+  and order-sensitive legacy tests can produce a different distribution
+
+These diagnostics are non-blocking only for pull requests whose base is
+`runtime/test`. They remain fully executed and uploaded as artifacts. They do
+not change the behavior or assertions of the original main workflow.

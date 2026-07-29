@@ -1,0 +1,7 @@
+# 91 existing runtime contracts plus the runtime-only gap suite.
+tests.test_runtime_manifest
+tests.test_breakdown_content_compat
+tests.test_reverse_prompt_render
+tests.test_script_actions_ui
+tests.test_egress
+tests.test_runtime_test_gate
