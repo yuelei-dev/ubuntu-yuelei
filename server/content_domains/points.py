@@ -14,8 +14,8 @@ from .core import AUTH_BASE, AUTH_INTERNAL_TOKEN, COST, closing, jdb, json, urll
 #   ⚠ 已知缺口：1:1 高清 + 图生图 还要 +1024 image input token($8/M)，实为 ¥1.554 ≈ 16 点。
 # 其余引擎沿用原 8/12，待逐个测准后再调（Seedream 实际成本仅 2~6 点，偏高）。
 IMAGE_BASE_COST = {
-    "openai":   {"std": 20, "hd": 30},
-    "xiaole":   {"std": 8, "hd": 12},
+    "openai":   {"std": 20, "hd": 35},
+    "xiaole":   {"std": 12, "hd": 16},
     "zelong":   {"std": 8, "hd": 12},
     "zelong2":  {"std": 8, "hd": 12},
 }
@@ -25,6 +25,16 @@ _IMAGE_DEFAULT_COST = {"std": 8, "hd": 12}
 SEEDREAM_VARIANT_COST = {
     "std": {"std": 8,  "hd": 12},   # 5.0 标准
     "pro": {"std": 15, "hd": 20},   # 5.0 Pro
+}
+
+# Sora 2 限时 Beta 售价（点/秒）。官方标准价分别为 $0.10 / $0.30 / $0.50 / $0.70
+# 每秒；按 7.1 汇率与 1 元=10 点，裸成本约 7.1 / 21.3 / 35.5 / 49.7 点/秒。
+# 这里延续现有 Grok 30 点/秒约 4.2x 的安全垫，覆盖失败、存储、运维与汇率波动。
+SORA_VIDEO_RATE = {
+    ("sora-2", "720p"): 30,
+    ("sora-2-pro", "720p"): 90,
+    ("sora-2-pro", "1024p"): 150,
+    ("sora-2-pro", "1080p"): 210,
 }
 # 数量上限必须与 image.gen_image 里的 cap 逐字一致，否则按 N 扣点却只出 cap 张 = 超收。
 _IMAGE_CAP_2 = {"zelong", "zelong2", "xiaole", "seedream"}
@@ -56,13 +66,13 @@ def cost_of(kind, body):
         cnt = 1 if body.get("mask") else max(1, min(cap, int(body.get("count") or 1)))
         return base * cnt  # 质量基价 × 数量
     if kind == "cinematic":
-        # 电影化身：按成片秒数计费（单人动作模仿/开放式 3 点/秒，双人动作模仿 5 点/秒）。
+        # 电影化身按成片秒数计费；各玩法价格由 video.CINEMATIC_RATE_PER_SEC 管理。
         # 秒数在 validate_cinematic_payload 里已经落定成整数（「自适应」在那里就探测过参考视频），
         # 所以这里不存在「还不知道多长」的情况 —— 一次扣准，不需要预扣退差。
         from . import video as video_domain
         return video_domain.cinematic_cost(body)
     if kind == "video":
-        # 口播 10 点/秒 × 输出时长。这里算的是【预扣 hold】：audio 模式 ffprobe 拿精确时长扣准；
+        # 口播每 30 秒一档、每档 30 点。这里算的是【预扣 hold】：audio 模式 ffprobe 拿精确时长扣准；
         # text 模式 TTS 还没跑，按文本长度偏保守估算预扣，跑完由 run_job 按成片真实时长结算多退。
         from . import video as video_domain
         return video_domain.video_cost(body)
@@ -72,32 +82,55 @@ def cost_of(kind, body):
         return 40 if (has_clothes and has_bg) else 25  # 两段(换装+换背景)40/单段25
         # TODO: 上线前与 kongli 确认点数
     if kind == "xiaole_video":
-        # 果肉视频统一 30 点/秒 × 时长（kongli 2026-07-15）。此前是按 xAI 官方成本×汇率动态算/回滚线扁平 30。
-        # 编辑走 source_duration(上限 8.7s)，生成走 duration(上限 15s)；认不出时长兜底 10s。
+        # 果肉生成按模型与分辨率分别定价；参考图不额外收取用户点数。
         if body.get("operation") == "edit":
-            duration = min(8.7, float(body.get("source_duration") or 0.1))
-        else:
-            duration = min(15, int(body.get("duration") or 10))
-        return max(30, int(math.ceil(duration)) * 30)
+            raise ValueError("果肉视频编辑维护中")
+        duration = min(15, max(1, int(body.get("duration") or 10)))
+        if str(body.get("channel") or "grok").lower() != "grok":
+            # 泽龙测试期官方 Omni / Seedance 统一 30 点/秒；生产功能旗默认关闭。
+            return duration * 30
+        model = str(body.get("model") or "grok-imagine-video")
+        resolution = str(body.get("resolution") or "720p").lower()
+        rates = {
+            "grok-imagine-video": {"480p": 10, "720p": 12},
+            "grok-imagine-video-1.5": {"480p": 15, "720p": 25, "1080p": 44},
+        }
+        rate = (rates.get(model) or rates["grok-imagine-video"]).get(resolution)
+        if rate is None:
+            raise ValueError("%s 不支持分辨率 %s" % (model, resolution))
+        return duration * rate
+    if kind == "sora_video":
+        model = str(body.get("model") or "sora-2").strip().lower()
+        resolution = str(body.get("resolution") or "720p").strip().lower()
+        # 未知组合用最高档兜底；正常请求会在 validate_sora_video_payload 先被拒绝，
+        # 这里的目标是即使未来接线漏校验，也绝不能回落成 0 点免费送高价 Pro。
+        rate = SORA_VIDEO_RATE.get((model, resolution), max(SORA_VIDEO_RATE.values()))
+        try:
+            seconds = int(body.get("seconds") or 4)
+        except (TypeError, ValueError):
+            seconds = 4
+        seconds = max(4, min(12, seconds))
+        return rate * seconds
     if kind == "script_to_video":
-        # 提交前一次性冻结全部费用：数字人口播 + 没有命中用户资产的静态素材图。
-        # 原子预扣避免生成到一半才发现点数不足；cost_breakdown 会返回前端明细。
         style = (body.get("style") or "口播").strip()
         if style == "剧情":
             try:
                 duration = min(15, int(float(body.get("duration") or 10)))
             except (TypeError, ValueError):
                 duration = 10
-            return max(30, int(math.ceil(duration)) * 30)
+            return cost_of("xiaole_video", {
+                "channel": "grok",
+                "model": body.get("model") or "grok-imagine-video",
+                "resolution": body.get("resolution") or "720p",
+                "duration": max(1, int(math.ceil(duration))),
+            })
         from . import video as video_domain
         lines = [(s.get("line") or "").strip() for s in (body.get("scenes") or []) if isinstance(s, dict)]
-        text = "\n\n".join([l for l in lines if l])
-        talking = video_domain.video_cost({"text": text})
+        talking = video_domain.video_cost({"text": "\n\n".join(line for line in lines if line)})
         generated = max(0, min(8, int(body.get("material_generate_count") or 0)))
-        image_each = cost_of("image", {
+        images = generated * cost_of("image", {
             "provider": "openai", "quality": "standard", "count": 1,
         })
-        images = generated * image_each
         body["cost_breakdown"] = {
             "talking": talking,
             "material_images": images,
@@ -107,22 +140,15 @@ def cost_of(kind, body):
         }
         return talking + images
     if kind == "breakdown":
-        # 分镜拆解与提示词反推均按每个有效链接 20 点；批量上限 5 条 = 100 点。
         urls = body.get("urls")
         if isinstance(urls, list):
-            n = max(1, min(5, len([u for u in urls if isinstance(u, str) and u.strip()])))
-            return 20 * n
+            count = max(1, min(5, len([url for url in urls if isinstance(url, str) and url.strip()])))
+            return 20 * count
         return 20
     return COST.get(kind, 0)
 
-def breakdown_batch_refund(cost, total, failed):
-    """批量拆解的退点额：全灭全退；部分失败每个失败链接退 20 点。
 
-    定价是每个有效链接 20 点（见 cost_of 的 breakdown 分支），所以 k 条失败且至少 1 条
-    成功时退 20k —— 用户实付恰好等于成功链接数对应的价；一条都没成则全退，与单条拆解失败
-    走 error 全退保持一致。由 run_job 在抢到 done 终态后调用（每 job 至多一次），
-    失败条数取 len(result.errors) —— 视频号被跳过也记在 errors 里，同样退。
-    """
+def breakdown_batch_refund(cost, total, failed):
     try:
         cost, total, failed = int(cost or 0), int(total or 0), int(failed or 0)
     except (TypeError, ValueError):
@@ -130,24 +156,128 @@ def breakdown_batch_refund(cost, total, failed):
     if cost <= 0 or total <= 0 or failed <= 0:
         return 0
     failed = min(failed, total)
-    if failed >= total:
-        return cost
-    return min(cost, 20 * failed)
+    return cost if failed >= total else min(cost, 20 * failed)
+
 
 def settle_breakdown_batch(username, cost, result, job_id):
-    """run_job 的批量拆解结算钩子：只对 breakdown_batch 结果按失败条数退点。
+    if prepare_breakdown_batch_refund(username, cost, result, job_id):
+        return reconcile_breakdown_refund(job_id)
+    return None
 
-    调用时机与口播结算相同 —— run_job 抢到 done 终态之后（每 job 至多一次）。
-    吞异常：结算是次要副作用，退点接口故障不该影响已出结果的任务。
-    """
+
+def _ensure_breakdown_refund_table(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS breakdown_partial_refunds(
+        job_id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        transaction_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+    )""")
+
+
+def prepare_breakdown_batch_refund(username, cost, result, job_id):
+    """Persist partial-refund intent before the job is allowed to become done."""
+    if (result or {}).get("type") != "breakdown_batch":
+        return False
+    amount = breakdown_batch_refund(
+        cost, (result or {}).get("total"), len((result or {}).get("errors") or []))
+    if amount <= 0:
+        return False
+    job_id = int(job_id)
+    username = str(username or "")
+    key = "breakdown-partial-refund:%s:%s" % (job_id, username)
+    now = int(time.time())
+    with closing(jdb()) as connection:
+        _ensure_breakdown_refund_table(connection)
+        connection.execute(
+            """INSERT OR IGNORE INTO breakdown_partial_refunds(
+                job_id,username,amount,transaction_key,state,created_at,updated_at
+            ) VALUES(?,?,?,?,'pending',?,?)""",
+            (job_id, username, amount, key, now, now),
+        )
+        row = connection.execute(
+            "SELECT username,amount FROM breakdown_partial_refunds WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if not row or row["username"] != username or int(row["amount"]) != amount:
+            raise RuntimeError("批量拆解退款记录冲突")
+        connection.commit()
+    return True
+
+
+def cancel_breakdown_refund(job_id):
+    with closing(jdb()) as connection:
+        _ensure_breakdown_refund_table(connection)
+        connection.execute(
+            "UPDATE breakdown_partial_refunds SET state='cancelled',updated_at=?"
+            " WHERE job_id=? AND state='pending'",
+            (int(time.time()), int(job_id)),
+        )
+        connection.commit()
+
+
+def reconcile_breakdown_refund(job_id):
+    with closing(jdb()) as connection:
+        _ensure_breakdown_refund_table(connection)
+        row = connection.execute(
+            """SELECT r.*,j.status AS job_status
+               FROM breakdown_partial_refunds r
+               LEFT JOIN jobs j ON j.id=r.job_id WHERE r.job_id=?""",
+            (int(job_id),),
+        ).fetchone()
+    if not row or row["state"] != "pending":
+        return row["state"] if row else None
+    if row["job_status"] != "done":
+        if row["job_status"] in {"error", "failed"} or row["job_status"] is None:
+            cancel_breakdown_refund(job_id)
+            return "cancelled"
+        return "pending"
     try:
-        if (result or {}).get("type") != "breakdown_batch":
-            return
-        refund = breakdown_batch_refund(cost, (result or {}).get("total"), len((result or {}).get("errors") or []))
-        if refund:
-            safe_refund_points(username, refund, "job#%d 批量拆解失败退点" % job_id)
-    except Exception:
-        pass
+        refund_points(
+            row["username"], row["amount"],
+            "job#%d 批量拆解失败退点" % int(job_id),
+            transaction_key=row["transaction_key"],
+        )
+    except Exception as exc:
+        with closing(jdb()) as connection:
+            _ensure_breakdown_refund_table(connection)
+            connection.execute(
+                "UPDATE breakdown_partial_refunds SET attempts=attempts+1,last_error=?,updated_at=?"
+                " WHERE job_id=? AND state='pending'",
+                (str(exc)[:240], int(time.time()), int(job_id)),
+            )
+            connection.commit()
+        return "pending"
+    with closing(jdb()) as connection:
+        _ensure_breakdown_refund_table(connection)
+        connection.execute(
+            "UPDATE breakdown_partial_refunds SET state='refunded',attempts=attempts+1,"
+            " last_error=NULL,updated_at=? WHERE job_id=? AND state='pending'",
+            (int(time.time()), int(job_id)),
+        )
+        connection.commit()
+    return "refunded"
+
+
+def retry_breakdown_refunds(limit=100):
+    with closing(jdb()) as connection:
+        _ensure_breakdown_refund_table(connection)
+        rows = connection.execute(
+            "SELECT job_id FROM breakdown_partial_refunds WHERE state='pending'"
+            " ORDER BY updated_at ASC LIMIT ?",
+            (max(1, int(limit or 100)),),
+        ).fetchall()
+        connection.commit()
+    recovered = 0
+    for row in rows:
+        if reconcile_breakdown_refund(row["job_id"]) == "refunded":
+            recovered += 1
+    return recovered
+
 
 class AuthPointsError(Exception):
     def __init__(self, status, detail, data=None):
@@ -155,6 +285,18 @@ class AuthPointsError(Exception):
         self.status = status
         self.detail = detail
         self.data = data or {}
+
+
+def public_error_body(error, need=None):
+    body = {"detail": getattr(error, "detail", str(error))}
+    source = getattr(error, "data", {}) or {}
+    for key in ("code", "membership_url", "membership_enforcement_enabled"):
+        if source.get(key) is not None:
+            body[key] = source[key]
+    if need is not None and getattr(error, "status", 0) == 402:
+        body["need"] = need
+    return body
+
 
 def _auth_points_request(path, payload=None, method="POST"):
     if not AUTH_INTERNAL_TOKEN:
@@ -193,7 +335,7 @@ def get_points(username):
     except Exception:
         return 0
 
-def deduct_points(username, amount, reason=""):
+def deduct_points(username, amount, reason="", transaction_key=""):
     """预扣点。reason 落 points_audit，供对账。
 
     注意：三个服务都是「先扣点、后 INSERT jobs 行」，所以扣点这一刻还没有 job_id，
@@ -204,16 +346,21 @@ def deduct_points(username, amount, reason=""):
     amount = int(amount or 0)
     if amount <= 0:
         return get_points(username)
-    res = _auth_points_request("/api/auth/points/deduct",
-                               {"username": username, "amount": amount, "reason": reason})
+    payload = {"username": username, "amount": amount, "reason": reason}
+    if transaction_key:
+        payload["transaction_key"] = str(transaction_key)
+    res = _auth_points_request("/api/auth/points/deduct", payload)
     return int(res.get("points") or 0)
 
-def refund_points(username, amount, reason=""):
+def refund_points(username, amount, reason="", transaction_key=""):
     amount = int(amount or 0)
     if amount <= 0:
         return get_points(username)
+    payload = {"username": username, "amount": amount, "reason": reason}
+    if transaction_key:
+        payload["transaction_key"] = str(transaction_key)
     res = _auth_points_request("/api/auth/points/refund",
-                               {"username": username, "amount": amount, "reason": reason})
+                               payload)
     return int(res.get("points") or 0)
 
 def safe_refund_points(username, amount, reason=""):
@@ -287,7 +434,7 @@ def history(username, days=30, kind="", page=1, page_size=20):
     items = []
     for row in rows:
         payload = _job_payload(row["payload"])
-        refunded = bool(row["refunded"])
+        refunded = int(row["refunded"] or 0) == 1
         cost = int(row["cost"] or 0)
         items.append({
             "task_id": row["id"],
