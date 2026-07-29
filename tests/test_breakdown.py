@@ -1513,6 +1513,86 @@ class BreakdownTests(unittest.TestCase):
                     ["rectangle-first.jpg", "rectangle-last.jpg"],
                 )
 
+    def test_reverse_no_action_with_static_frames_calls_ssim_once(self):
+        entry = {
+            "text": "主体：白色矩形；场景：蓝色背景；动作：无动作。",
+            "fields": {
+                "subject": "白色矩形",
+                "scene": "蓝色背景",
+                "action": "无动作",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["static-first.jpg", "static-last.jpg"]
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ) as static_check:
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                frames,
+                1,
+                require_frame_evidence=True,
+            )
+        static_check.assert_called_once_with(frames)
+
+    def test_reverse_no_action_with_motion_frames_calls_ssim_once_and_fails(self):
+        entry = {
+            "text": "主体：白色矩形；场景：蓝色背景；动作：无动作。",
+            "fields": {
+                "subject": "白色矩形",
+                "scene": "蓝色背景",
+                "action": "无动作",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["motion-first.jpg", "motion-last.jpg"]
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=False
+        ) as static_check:
+            with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+                self.breakdown._validate_reverse_segment_evidence(
+                    entry,
+                    [],
+                    frames,
+                    1,
+                    require_frame_evidence=True,
+                )
+        static_check.assert_called_once_with(frames)
+
+    def test_reverse_explicit_no_action_synonyms_claim_static(self):
+        for action in (
+            "无动作",
+            "没有动作",
+            "未见动作",
+            "未观察到动作",
+            "未发生动作",
+        ):
+            with self.subTest(action=action):
+                self.assertTrue(
+                    self.breakdown._reverse_segment_claims_static(
+                        {"fields": {"action": action}}
+                    )
+                )
+
     def test_reverse_pure_abstract_frame_uses_evidence_backed_subject(self):
         segment = {
             "subject": "抽象画面，红色色块填满整个画面",
