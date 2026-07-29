@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
 import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.parse
+import hashlib
 import http.client
 import urllib.error
 from contextlib import closing
@@ -30,11 +31,15 @@ BREAKDOWN_ANALYSIS_BUDGET = max(
         int(os.environ.get("BREAKDOWN_ANALYSIS_BUDGET", "540") or "540"),
     ),
 )
-_REVERSE_MAX_SEGMENT_CHARS = 500
-_REVERSE_MAX_TOTAL_CHARS = 1600
+_REVERSE_MAX_SEGMENT_CHARS = 1200
+_REVERSE_MAX_TOTAL_CHARS = 4800
 _REVERSE_DUPLICATE_SEQUENCE_THRESHOLD = 0.80
 _REVERSE_DUPLICATE_SHINGLE_THRESHOLD = 0.70
 _REVERSE_STATIC_SSIM_THRESHOLD = 0.995
+# Deliberately conservative: ordinary motion must not be mislabeled as a cut.
+# A value below this only means the two sampled frames are visually
+# discontinuous enough that the model must represent them as separate shots.
+_REVERSE_HARD_CUT_SSIM_THRESHOLD = 0.35
 _REVERSE_STATIC_ACTION_MARKERS = (
     "动作无变化",
     "姿态无变化",
@@ -86,6 +91,29 @@ _REVERSE_NO_SPEECH_MARKERS = (
 _REVERSE_UNRELIABLE_ORIENTATION_MARKERS = (
     "面向树根", "朝向树根",
 )
+_REVERSE_INTERPRETIVE_ACTION_MARKERS = (
+    "整理", "调整", "检查", "寻找", "准备", "感受",
+)
+# A two-frame reverse request cannot independently establish these ambiguous
+# garment/accessory labels.  Treat them as unknown/generic unless a future
+# verifier supplies evidence independent from the model response itself.
+_REVERSE_AMBIGUOUS_ACCESSORY_MARKERS = (
+    "围巾", "披肩", "飘带",
+)
+_REVERSE_ATTRIBUTE_NEGATION_MARKERS = (
+    "未佩戴", "没有佩戴", "未穿", "没有穿", "未见", "没有", "不",
+)
+_REVERSE_ATTRIBUTE_TOKEN_GROUPS = (
+    (
+        "黑色", "白色", "灰色", "粉色", "红色", "橙色", "黄色",
+        "绿色", "蓝色", "紫色", "棕色", "金色", "银色",
+    ),
+    ("冷色", "暖色", "中性色"),
+    ("左侧", "右侧", "中央", "中间", "上方", "下方"),
+    ("俯视", "仰视", "平视"),
+    ("特写", "近景", "中景", "全景", "远景", "大远景"),
+    ("围巾", "披肩", "飘带", "卫衣", "连帽服", "长衣", "外套", "裙"),
+)
 _REVERSE_GLOBAL_FACT_FIELDS = (
     ("subject_identity", "主体身份与外观"),
     ("wardrobe", "服装与随身物"),
@@ -109,19 +137,102 @@ _REVERSE_FIXED_CONTINUITY_MARKERS = (
     "与上一段一致", "与前一段一致", "同上一段", "同前一段",
 )
 _REVERSE_MAX_GLOBAL_CHARS = 220
+_REVERSE_SLOT_STATUSES = {"observed", "unknown", "not_applicable"}
+_REVERSE_GENERATION_SLOT_GROUPS = {
+    "subject": (
+        "identity", "appearance", "wardrobe", "position_scale",
+    ),
+    "action": (
+        "motion_type", "start", "process", "end",
+        "direction_speed", "associated_object",
+    ),
+    "scene": (
+        "foreground", "midground", "background", "spatial_relationship",
+    ),
+    "camera": (
+        "shot_size", "camera_position", "viewing_angle",
+        "composition", "movement",
+    ),
+    "lighting": ("direction_brightness", "color_tone"),
+    "style": ("visual_style", "texture"),
+    "rhythm": ("pacing",),
+    "continuity": ("retained", "changed"),
+}
+_REVERSE_ALWAYS_APPLICABLE_SLOTS = {
+    "subject.identity",
+    "subject.appearance",
+    "subject.position_scale",
+    "action.motion_type",
+    "action.start",
+    "action.end",
+    "scene.background",
+    "scene.spatial_relationship",
+    "camera.shot_size",
+    "camera.camera_position",
+    "camera.viewing_angle",
+    "camera.composition",
+    "camera.movement",
+    "lighting.direction_brightness",
+    "lighting.color_tone",
+    "style.visual_style",
+    "style.texture",
+    "rhythm.pacing",
+}
+_REVERSE_GENERATION_SLOT_LABELS = {
+    "subject.identity": "主体身份类别",
+    "subject.appearance": "主体外观",
+    "subject.wardrobe": "服装与随身物",
+    "subject.position_scale": "主体位置与画面占比",
+    "action.motion_type": "动作类型",
+    "action.start": "动作起点",
+    "action.process": "动作过程",
+    "action.end": "动作终点",
+    "action.direction_speed": "动作方向与可见速度",
+    "action.associated_object": "动作关联物",
+    "scene.foreground": "前景",
+    "scene.midground": "中景环境",
+    "scene.background": "背景",
+    "scene.spatial_relationship": "空间关系",
+    "camera.shot_size": "景别",
+    "camera.camera_position": "机位",
+    "camera.viewing_angle": "视角",
+    "camera.composition": "构图",
+    "camera.movement": "可见运镜",
+    "lighting.direction_brightness": "光线方向与明暗",
+    "lighting.color_tone": "光线色调",
+    "style.visual_style": "视觉风格",
+    "style.texture": "画面材质",
+    "rhythm.pacing": "镜头节奏",
+    "continuity.retained": "连续性保留项",
+    "continuity.changed": "连续性变化项",
+}
 _REVERSE_VISUAL_SEMANTIC_CONTRACT = {
     "definition": "visual_semantic_not_pixel",
-    "score_scope": "source_evidence_coverage_not_generated_video_similarity",
+    "score_scope": "reverse_prompt_source_fidelity_and_generation_readiness",
     "target_score": 90,
-    "weights": {
-        "subject": 30,
-        "action_timing": 25,
-        "scene_composition": 20,
-        "camera_duration": 15,
-        "lighting_style": 10,
+    "components": {
+        "source_evidence_coverage": {
+            "target": 100,
+            "definition": "observed_slots_with_valid_source_frame_evidence",
+        },
+        "generation_readiness": {
+            "target": 90,
+            "definition": "observed_applicable_slots_over_all_applicable_slots",
+        },
+        "factual_consistency": {
+            "target": 100,
+            "definition": "no_hard_cut_merge_or_cross_field_evidence_conflict",
+        },
     },
-    "critical_failures": ("subject", "scene", "action"),
+    "critical_failures": (
+        "hard_cut_merged_as_action",
+        "unsupported_fact",
+        "subject_scene_action_error",
+    ),
+    "unknown_semantics": "unknown_is_not_ready_but_is_safer_than_invention",
+    "suggested_parameters_scope": "recommendation_not_observed_source_fact",
     "requires_reference_guidance": True,
+    "generated_video_similarity_claim": False,
 }
 
 
@@ -1187,8 +1298,23 @@ def _reverse_segment_evidence_manifest(
                 for index in local_indices
                 if 1 <= index <= len(model_source_indices)
             ]
+        slot_source_evidence = {}
+        for path in _reverse_generation_slot_paths():
+            local_indices = _reverse_generation_slot(
+                entry, path
+            ).get("evidence_frames") or []
+            slot_source_evidence[path] = [
+                model_source_indices[index - 1]
+                for index in local_indices
+                if 1 <= index <= len(model_source_indices)
+            ]
         result.append({
             "timeline": timeline,
+            "source_parameters": {
+                "scope": "measured_source_fact",
+                "timeline": timeline,
+                "duration_seconds": round(float(_end) - float(_start), 1),
+            },
             "segment_source_frames": list(source_indices),
             "local_to_source": {
                 str(index): source_index
@@ -1196,6 +1322,26 @@ def _reverse_segment_evidence_manifest(
             },
             "local_evidence_frames": entry.get("evidence_frames") or {},
             "source_evidence_frames": mapped,
+            "generation_structure": json.loads(json.dumps(
+                entry.get("generation") or {}, ensure_ascii=False
+            )),
+            "shot_boundary": json.loads(json.dumps(
+                entry.get("shot_boundary") or {}, ensure_ascii=False
+            )),
+            "shot_states": json.loads(json.dumps(
+                entry.get("shots") or [], ensure_ascii=False
+            )),
+            "generation_slot_source_evidence": slot_source_evidence,
+            "generation_suggestions": json.loads(json.dumps(
+                entry.get("generation_suggestions") or {},
+                ensure_ascii=False,
+            )),
+            "attempt_audit": json.loads(json.dumps(
+                entry.get("attempt_audit") or [], ensure_ascii=False
+            )),
+            "validation_summary": json.loads(json.dumps(
+                entry.get("validation_summary") or {}, ensure_ascii=False
+            )),
             "continuity_source_frames": entry.get(
                 "continuity_evidence_frames", []
             ),
@@ -1327,6 +1473,197 @@ _REVERSE_SEGMENT_FIELDS = (
     ("sound", "声音"),
     ("continuity", "衔接"),
 )
+
+
+def _reverse_generation_slot_paths():
+    return [
+        "%s.%s" % (group, key)
+        for group, keys in _REVERSE_GENERATION_SLOT_GROUPS.items()
+        for key in keys
+    ]
+
+
+def _reverse_normalize_indices(values, error_message):
+    if not isinstance(values, list):
+        raise ValueError(error_message)
+    result = []
+    for raw_index in values:
+        try:
+            frame_index = int(raw_index)
+        except (TypeError, ValueError):
+            raise ValueError(error_message)
+        if frame_index not in result:
+            result.append(frame_index)
+    return result
+
+
+def _reverse_parse_generation_structure(value):
+    raw_generation = value.get("generation")
+    if raw_generation in (None, ""):
+        return {}
+    if not isinstance(raw_generation, dict):
+        raise ValueError("反推结果 generation 必须是结构化对象，请重试")
+    generation = {}
+    for group, keys in _REVERSE_GENERATION_SLOT_GROUPS.items():
+        raw_group = raw_generation.get(group)
+        if not isinstance(raw_group, dict):
+            raise ValueError("反推结果 generation.%s 缺少结构化槽位，请重试" % group)
+        generation[group] = {}
+        for key in keys:
+            path = "%s.%s" % (group, key)
+            raw_slot = raw_group.get(key)
+            if not isinstance(raw_slot, dict):
+                raise ValueError("反推结果槽位 %s 格式错误，请重试" % path)
+            status = str(raw_slot.get("status") or "").strip().lower()
+            if status not in _REVERSE_SLOT_STATUSES:
+                raise ValueError(
+                    "反推结果槽位 %s 状态必须是 observed/unknown/not_applicable"
+                    % path
+                )
+            text = " ".join(
+                str(raw_slot.get("value") or "").replace("\r", "").split()
+            ).strip()
+            evidence = _reverse_normalize_indices(
+                raw_slot.get("evidence_frames") or [],
+                "反推结果槽位 %s 帧证据格式错误，请重试" % path,
+            )
+            if status == "observed" and not _compact_reverse_text(text):
+                raise ValueError("反推结果槽位 %s 标记 observed 但没有事实值" % path)
+            if status == "unknown":
+                text = "unknown"
+                evidence = []
+            if status == "not_applicable":
+                text = ""
+                evidence = []
+            generation[group][key] = {
+                "status": status,
+                "value": text,
+                "evidence_frames": evidence,
+            }
+    return generation
+
+
+def _reverse_parse_shot_structure(value):
+    raw_boundary = value.get("shot_boundary")
+    if raw_boundary in (None, ""):
+        boundary = {}
+    elif not isinstance(raw_boundary, dict):
+        raise ValueError("反推结果 shot_boundary 格式错误，请重试")
+    else:
+        boundary_type = str(raw_boundary.get("type") or "").strip().lower()
+        if boundary_type not in {"continuous", "hard_cut", "unknown"}:
+            raise ValueError(
+                "反推结果 shot_boundary.type 必须是 continuous/hard_cut/unknown"
+            )
+        boundary = {
+            "type": boundary_type,
+            "evidence_frames": _reverse_normalize_indices(
+                raw_boundary.get("evidence_frames") or [],
+                "反推结果镜头切换帧证据格式错误，请重试",
+            ),
+        }
+    raw_shots = value.get("shots")
+    if raw_shots in (None, ""):
+        return boundary, []
+    if not isinstance(raw_shots, list):
+        raise ValueError("反推结果 shots 必须是数组，请重试")
+    shots = []
+    for raw_shot in raw_shots:
+        if not isinstance(raw_shot, dict):
+            raise ValueError("反推结果镜头状态必须是结构化对象，请重试")
+        try:
+            frame = int(raw_shot.get("frame"))
+        except (TypeError, ValueError):
+            raise ValueError("反推结果镜头状态缺少局部帧编号，请重试")
+        shot = {"frame": frame}
+        for key in ("subject", "scene", "camera", "lighting", "style"):
+            shot[key] = " ".join(
+                str(raw_shot.get(key) or "").replace("\r", "").split()
+            ).strip()
+        shots.append(shot)
+    return boundary, shots
+
+
+def _reverse_generation_slot(entry, path):
+    group, key = path.split(".", 1)
+    return (
+        (entry.get("generation") or {}).get(group, {}).get(key)
+        or {"status": "unknown", "value": "unknown", "evidence_frames": []}
+    )
+
+
+def _reverse_generation_group_text(entry, group):
+    values = []
+    for key in _REVERSE_GENERATION_SLOT_GROUPS.get(group, ()):
+        path = "%s.%s" % (group, key)
+        slot = _reverse_generation_slot(entry, path)
+        if slot.get("status") == "observed":
+            text = str(slot.get("value") or "").strip()
+            if path == "action.motion_type":
+                text = {"dynamic": "动态", "static": "静止"}.get(text, text)
+            values.append(
+                "%s：%s" % (_REVERSE_GENERATION_SLOT_LABELS[path], text)
+            )
+    return "，".join(value for value in values if value)
+
+
+def _compose_reverse_generation_segment(entry, suggestion=None):
+    generation = entry.get("generation") or {}
+    if not generation:
+        return _compose_reverse_segment(entry.get("fields") or {})
+    boundary = (entry.get("shot_boundary") or {}).get("type")
+    parts = []
+    if boundary == "hard_cut":
+        shot_parts = []
+        for number, shot in enumerate(entry.get("shots") or [], 1):
+            details = []
+            for key, label in (
+                ("subject", "主体"),
+                ("scene", "场景"),
+                ("camera", "构图镜头"),
+                ("lighting", "光影色彩"),
+                ("style", "风格材质"),
+            ):
+                text = str(shot.get(key) or "").strip()
+                if text and text != "unknown":
+                    details.append("%s：%s" % (label, text.rstrip("；;。")))
+            shot_parts.append(
+                "镜头%s（局部帧%d）：%s"
+                % (
+                    "A" if number == 1 else "B",
+                    int(shot.get("frame") or number),
+                    "；".join(details),
+                )
+            )
+        parts.append("硬切；" + "；硬切至".join(shot_parts))
+    else:
+        group_labels = (
+            ("subject", "主体"),
+            ("action", "动作"),
+            ("scene", "场景"),
+            ("camera", "构图与镜头"),
+            ("lighting", "光影色彩"),
+            ("style", "风格材质"),
+            ("rhythm", "节奏"),
+        )
+        for group, label in group_labels:
+            text = _reverse_generation_group_text(entry, group)
+            if text:
+                parts.append("%s：%s" % (label, text.rstrip("；;。")))
+    unknown_labels = [
+        _REVERSE_GENERATION_SLOT_LABELS[path]
+        for path in _reverse_generation_slot_paths()
+        if _reverse_generation_slot(entry, path).get("status") == "unknown"
+    ]
+    if unknown_labels:
+        parts.append("证据不足（unknown）：%s" % "、".join(unknown_labels))
+    if suggestion:
+        parts.append(
+            "生成建议（非源画面事实）：时长%.1f秒，保持源画幅，"
+            "按本段参考帧顺序，高提示词遵循度"
+            % float(suggestion.get("duration_seconds") or 0)
+        )
+    return "；".join(parts) + "。"
 
 
 def _compose_reverse_segment(value):
@@ -1467,6 +1804,91 @@ def _reverse_global_facts_from_segments(
     if len(source_groups) != segment_count:
         raise ValueError("反推全局连续性缺少分段原始帧映射，请重试")
 
+    if all(entry.get("generation") for entry in entries):
+        global_slot_map = {
+            "subject_identity": (
+                "subject.identity", "subject.appearance",
+            ),
+            "wardrobe": ("subject.wardrobe",),
+            "recurring_scene_objects": (
+                "scene.foreground", "scene.midground", "scene.background",
+            ),
+            "scene_style": ("style.visual_style", "style.texture"),
+            "camera_style": (
+                "camera.shot_size", "camera.viewing_angle",
+                "camera.composition",
+            ),
+            "lighting_style": (
+                "lighting.direction_brightness", "lighting.color_tone",
+            ),
+        }
+        changes = {}
+        for global_key, paths in global_slot_map.items():
+            retained_parts = []
+            retained_evidence = []
+            for path in paths:
+                slots = [
+                    _reverse_generation_slot(entry, path)
+                    for entry in entries
+                ]
+                if (
+                    all(slot.get("status") == "observed" for slot in slots)
+                    and all(
+                        _reverse_continuity_attribute_equivalent(
+                            path,
+                            slots[0].get("value"),
+                            slot.get("value"),
+                        )
+                        for slot in slots[1:]
+                    )
+                ):
+                    retained_parts.append(
+                        "%s：%s"
+                        % (
+                            _REVERSE_GENERATION_SLOT_LABELS[path],
+                            slots[0].get("value"),
+                        )
+                    )
+                    for slot, source_indices in zip(slots, source_groups):
+                        for local_index in slot.get("evidence_frames") or []:
+                            if 1 <= local_index <= len(source_indices):
+                                source_index = source_indices[local_index - 1]
+                                if source_index not in retained_evidence:
+                                    retained_evidence.append(source_index)
+                else:
+                    per_segment = []
+                    for segment_index, (slot, source_indices) in enumerate(
+                        zip(slots, source_groups), 1
+                    ):
+                        if slot.get("status") != "observed":
+                            continue
+                        evidence_frames = [
+                            source_indices[local_index - 1]
+                            for local_index in slot.get("evidence_frames") or []
+                            if 1 <= local_index <= len(source_indices)
+                        ]
+                        per_segment.append({
+                            "segment_index": segment_index,
+                            "attribute": path,
+                            "text": slot.get("value"),
+                            "evidence_frames": evidence_frames,
+                        })
+                    if per_segment:
+                        changes.setdefault(global_key, []).extend(per_segment)
+            if retained_parts and len({
+                _reverse_source_frame_segment(
+                    frame, int(frame_count or 0), segment_count
+                )
+                for frame in retained_evidence
+            }) >= 2:
+                empty["facts"][global_key] = "，".join(retained_parts)
+                empty["evidence_frames"][global_key] = retained_evidence
+        empty["changes"] = changes
+        empty["aggregation"] = (
+            "deterministic_normalized_validated_attribute_intersection"
+        )
+        return empty
+
     field_map = {
         "subject_identity": "subject",
         "recurring_scene_objects": "scene",
@@ -1560,6 +1982,28 @@ def _reverse_shingle_jaccard(left, right, size=8):
 
 
 def _reverse_segments_are_duplicate(current, previous):
+    if current.get("generation") and previous.get("generation"):
+        discriminators = (
+            "subject.identity",
+            "subject.position_scale",
+            "action.start",
+            "action.process",
+            "action.end",
+            "scene.background",
+            "camera.shot_size",
+            "camera.movement",
+        )
+        for path in discriminators:
+            current_slot = _reverse_generation_slot(current, path)
+            previous_slot = _reverse_generation_slot(previous, path)
+            if (
+                current_slot.get("status") == "observed"
+                and previous_slot.get("status") == "observed"
+                and not _reverse_attribute_equivalent(
+                    current_slot.get("value"), previous_slot.get("value")
+                )
+            ):
+                return False
     current_text = current.get("text", "")
     previous_text = previous.get("text", "")
     current_compact = _compact_reverse_text(current_text)
@@ -1606,12 +2050,33 @@ def _parse_reverse_segment_evidence(raw):
     value = values[0]
     if not isinstance(value, dict):
         raise ValueError("反推结果本段必须是结构化对象，请重试")
+    generation = _reverse_parse_generation_structure(value)
+    shot_boundary, shots = _reverse_parse_shot_structure(value)
     fields = {
         key: " ".join(
             str(value.get(key) or "").replace("\r", "").split()
         ).strip()
         for key, _label in _REVERSE_SEGMENT_FIELDS
     }
+    if generation:
+        fields.update({
+            "subject": _reverse_generation_group_text(
+                {"generation": generation}, "subject"
+            ),
+            "scene": _reverse_generation_group_text(
+                {"generation": generation}, "scene"
+            ),
+            "action": _reverse_generation_group_text(
+                {"generation": generation}, "action"
+            ),
+            "camera": _reverse_generation_group_text(
+                {"generation": generation}, "camera"
+            ),
+            "lighting": _reverse_generation_group_text(
+                {"generation": generation}, "lighting"
+            ),
+            "continuity": "",
+        })
     raw_evidence = value.get("evidence_frames") or {}
     if raw_evidence and not isinstance(raw_evidence, dict):
         raise ValueError("反推结果本段帧证据格式错误，请重试")
@@ -1629,6 +2094,19 @@ def _parse_reverse_segment_evidence(raw):
             if frame_index not in normalized:
                 normalized.append(frame_index)
         evidence_frames[key] = normalized
+    if generation:
+        for key in _REVERSE_FRAME_EVIDENCE_FIELDS:
+            group = "lighting" if key == "lighting" else key
+            if group not in generation:
+                continue
+            derived = []
+            for slot in generation[group].values():
+                if slot.get("status") != "observed":
+                    continue
+                for frame_index in slot.get("evidence_frames") or []:
+                    if frame_index not in derived:
+                        derived.append(frame_index)
+            evidence_frames[key] = derived
     continuity_evidence_frames = value.get("continuity_evidence_frames") or []
     if not isinstance(continuity_evidence_frames, list):
         raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
@@ -1640,7 +2118,16 @@ def _parse_reverse_segment_evidence(raw):
             raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
         if frame_index not in normalized_continuity_evidence:
             normalized_continuity_evidence.append(frame_index)
-    text = _compose_reverse_segment(fields)
+    parsed_entry = {
+        "fields": fields,
+        "generation": generation,
+        "shot_boundary": shot_boundary,
+        "shots": shots,
+    }
+    text = (
+        _compose_reverse_generation_segment(parsed_entry)
+        if generation else _compose_reverse_segment(fields)
+    )
     text = str(text or "").strip()
     if not text:
         raise ValueError(
@@ -1649,9 +2136,34 @@ def _parse_reverse_segment_evidence(raw):
     return {
         "text": text,
         "fields": fields,
+        "generation": generation,
+        "shot_boundary": shot_boundary,
+        "shots": shots,
         "evidence_frames": evidence_frames,
         "continuity_evidence_frames": normalized_continuity_evidence,
     }
+
+
+def _reverse_frame_pair_ssim(left, right):
+    """Return an auditable pair similarity, or None when ffmpeg cannot prove it."""
+    try:
+        completed = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "info",
+                "-i", left, "-i", right,
+                "-lavfi", "[0:v][1:v]ssim",
+                "-f", "null", "-",
+            ],
+            check=True,
+            timeout=20,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    detail = completed.stderr.decode("utf-8", "replace")
+    matches = re.findall(r"\bAll:([0-9.]+)", detail)
+    return float(matches[-1]) if matches else None
 
 
 def _frames_are_effectively_static(frame_paths):
@@ -1659,27 +2171,14 @@ def _frames_are_effectively_static(frame_paths):
     ordered = list(frame_paths or [])
     if len(ordered) < 2:
         return False
-    for left, right in zip(ordered, ordered[1:]):
-        try:
-            completed = subprocess.run(
-                [
-                    "ffmpeg", "-hide_banner", "-loglevel", "info",
-                    "-i", left, "-i", right,
-                    "-lavfi", "[0:v][1:v]ssim",
-                    "-f", "null", "-",
-                ],
-                check=True,
-                timeout=20,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            return False
-        detail = completed.stderr.decode("utf-8", "replace")
-        matches = re.findall(r"\bAll:([0-9.]+)", detail)
-        if not matches or float(matches[-1]) < _REVERSE_STATIC_SSIM_THRESHOLD:
-            return False
-    return True
+    return all(
+        similarity is not None
+        and similarity >= _REVERSE_STATIC_SSIM_THRESHOLD
+        for similarity in (
+            _reverse_frame_pair_ssim(left, right)
+            for left, right in zip(ordered, ordered[1:])
+        )
+    )
 
 
 def _reverse_action_has_static_clause(action):
@@ -1728,9 +2227,330 @@ def _reverse_sound_matches_transcript(sound, transcript):
     return sound_text in transcript_text
 
 
+def _reverse_attribute_equivalent(left, right):
+    left_compact = _compact_reverse_text(left)
+    right_compact = _compact_reverse_text(right)
+    if not left_compact or not right_compact:
+        return False
+    left_negated = any(
+        marker in left_compact for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    right_negated = any(
+        marker in right_compact for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    if left_negated != right_negated:
+        return False
+    if left_compact in right_compact or right_compact in left_compact:
+        return True
+    return SequenceMatcher(None, left_compact, right_compact).ratio() >= 0.72
+
+
+def _reverse_normalize_attribute_value(value):
+    compact = _compact_reverse_text(value)
+    replacements = (
+        ("连帽上衣", "连帽服"),
+        ("连帽衫", "连帽服"),
+        ("位于画面中间", "位于画面中央"),
+        ("画面正中", "画面中央"),
+        ("一名", ""),
+        ("一位", ""),
+        ("的", ""),
+    )
+    for source, target in replacements:
+        compact = compact.replace(source, target)
+    return compact
+
+
+def _reverse_continuity_attribute_equivalent(path, left, right):
+    """Compare normalized observable attributes, never sentence similarity alone."""
+    left_normalized = _reverse_normalize_attribute_value(left)
+    right_normalized = _reverse_normalize_attribute_value(right)
+    if not left_normalized or not right_normalized:
+        return False
+
+    left_negated = any(
+        marker in left_normalized
+        for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    right_negated = any(
+        marker in right_normalized
+        for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    if left_negated != right_negated:
+        return False
+
+    for group in _REVERSE_ATTRIBUTE_TOKEN_GROUPS:
+        left_tokens = {token for token in group if token in left_normalized}
+        right_tokens = {token for token in group if token in right_normalized}
+        if left_tokens or right_tokens:
+            if left_tokens != right_tokens:
+                return False
+
+    if left_normalized == right_normalized:
+        return True
+    # The remaining fuzzy allowance is only for wording around already-equal
+    # critical tokens; it cannot override negation, color, garment, position,
+    # shot-size or viewing-angle conflicts above.
+    return (
+        left_normalized in right_normalized
+        or right_normalized in left_normalized
+        or SequenceMatcher(
+            None, left_normalized, right_normalized
+        ).ratio() >= 0.82
+    )
+
+
+def _reverse_validate_generation_structure(
+    entry, frame_paths, index, pair_ssim=None
+):
+    generation = entry.get("generation") or {}
+    if not generation:
+        raise ValueError(
+            "反推结果第%d段缺少可生成的 generation 槽位结构，请重试" % index
+        )
+    frame_count = len(frame_paths or [])
+    boundary = entry.get("shot_boundary") or {}
+    boundary_type = boundary.get("type")
+    if boundary_type == "unknown":
+        raise ValueError("反推结果第%d段无法确认是否存在镜头切换，请重试" % index)
+    if boundary_type not in {"continuous", "hard_cut"}:
+        raise ValueError("反推结果第%d段缺少镜头连续/硬切判定，请重试" % index)
+    if set(boundary.get("evidence_frames") or []) != {1, frame_count}:
+        raise ValueError(
+            "反推结果第%d段镜头切换判定必须引用本段首尾帧，请重试" % index
+        )
+    if (
+        pair_ssim is not None
+        and pair_ssim <= _REVERSE_HARD_CUT_SSIM_THRESHOLD
+        and boundary_type != "hard_cut"
+    ):
+        raise ValueError(
+            "反推结果第%d段首尾帧存在硬切，不能合并为同一动作，请重试" % index
+        )
+    if (
+        pair_ssim is not None
+        and pair_ssim >= _REVERSE_STATIC_SSIM_THRESHOLD
+        and boundary_type == "hard_cut"
+    ):
+        raise ValueError("反推结果第%d段静止双帧被误判为硬切，请重试" % index)
+
+    shots = entry.get("shots") or []
+    if len(shots) != 2 or [shot.get("frame") for shot in shots] != [1, frame_count]:
+        raise ValueError(
+            "反推结果第%d段必须分别保存首尾帧的可生成镜头状态，请重试" % index
+        )
+    for shot_number, shot in enumerate(shots, 1):
+        for key in ("subject", "scene", "camera", "lighting", "style"):
+            if not str(shot.get(key) or "").strip():
+                raise ValueError(
+                    "反推结果第%d段镜头%d缺少%s状态，请重试"
+                    % (index, shot_number, key)
+                )
+
+    applicable = []
+    ready = []
+    observed = []
+    evidenced = []
+    for path in _reverse_generation_slot_paths():
+        slot = _reverse_generation_slot(entry, path)
+        status = slot.get("status")
+        if (
+            path in _REVERSE_ALWAYS_APPLICABLE_SLOTS
+            and boundary_type != "hard_cut"
+            and status == "not_applicable"
+        ):
+            raise ValueError(
+                "反推结果第%d段必需槽位%s不能标记not_applicable"
+                % (index, path)
+            )
+        if boundary_type == "hard_cut" and path.startswith("action."):
+            if status != "not_applicable":
+                raise ValueError(
+                    "反推结果第%d段硬切两侧不能编造成同一连续动作，请重试" % index
+                )
+            continue
+        if status == "not_applicable":
+            continue
+        applicable.append(path)
+        if status == "observed":
+            ready.append(path)
+            observed.append(path)
+            evidence = slot.get("evidence_frames") or []
+            if (
+                evidence
+                and all(1 <= frame <= frame_count for frame in evidence)
+            ):
+                evidenced.append(path)
+            else:
+                raise ValueError(
+                    "反推结果第%d段槽位%s缺少有效帧证据，请重试"
+                    % (index, path)
+                )
+
+    readiness = int(round(100.0 * len(ready) / max(1, len(applicable))))
+    if readiness < 90:
+        raise ValueError(
+            "反推结果第%d段生成就绪槽位仅%d%%，至少需要90%%；"
+            "证据不足应写unknown而非编造，但本段仍不足以生成同款"
+            % (index, readiness)
+        )
+
+    motion_type = _reverse_generation_slot(
+        entry, "action.motion_type"
+    ).get("value", "")
+    if boundary_type == "continuous":
+        if motion_type not in {"dynamic", "static"}:
+            raise ValueError(
+                "反推结果第%d段 action.motion_type 必须明确为dynamic或static"
+                % index
+            )
+        start = _reverse_generation_slot(entry, "action.start")
+        end = _reverse_generation_slot(entry, "action.end")
+        motion = _reverse_generation_slot(entry, "action.motion_type")
+        if (
+            1 not in (start.get("evidence_frames") or [])
+            or frame_count not in (end.get("evidence_frames") or [])
+            or not {1, frame_count}.issubset(
+                set(motion.get("evidence_frames") or [])
+            )
+        ):
+            raise ValueError(
+                "反推结果第%d段动作起点必须引用首帧、终点必须引用尾帧，"
+                "动作类型必须同时引用首尾帧"
+                % index
+            )
+        if motion_type == "dynamic":
+            for path in ("action.process", "action.direction_speed"):
+                if _reverse_generation_slot(
+                    entry, path
+                ).get("status") == "not_applicable":
+                    raise ValueError(
+                        "反推结果第%d段动态动作槽位%s不能标记not_applicable"
+                        % (index, path)
+                    )
+            if (
+                start.get("status") != "observed"
+                or end.get("status") != "observed"
+                or _reverse_attribute_equivalent(
+                    start.get("value"), end.get("value")
+                )
+            ):
+                raise ValueError(
+                    "反推结果第%d段动态动作必须给出可区分的首尾状态，请重试"
+                    % index
+                )
+        elif not _frames_are_effectively_static(frame_paths):
+            raise ValueError("反推结果第%d段无静止画面证据，请重试" % index)
+
+    identity = _reverse_generation_slot(
+        entry, "subject.identity"
+    ).get("value", "")
+    if (
+        any(marker in identity for marker in ("人物", "女性", "男性", "男孩", "女孩"))
+        and _reverse_generation_slot(
+            entry, "subject.wardrobe"
+        ).get("status") == "not_applicable"
+    ):
+        raise ValueError(
+            "反推结果第%d段人物服装槽位不能标记not_applicable；"
+            "无法确认时必须写unknown"
+            % index
+        )
+
+    observed_generation_text = " ".join(
+        str(_reverse_generation_slot(entry, path).get("value") or "")
+        for path in _reverse_generation_slot_paths()
+        if _reverse_generation_slot(entry, path).get("status") == "observed"
+    )
+    shot_state_text = " ".join(
+        str(shot.get(key) or "")
+        for shot in shots
+        for key in ("subject", "scene", "camera", "lighting", "style")
+    )
+    ambiguous_accessory = next(
+        (
+            marker for marker in _REVERSE_AMBIGUOUS_ACCESSORY_MARKERS
+            if marker in observed_generation_text or marker in shot_state_text
+        ),
+        None,
+    )
+    if ambiguous_accessory:
+        raise ValueError(
+            "反推结果第%d段把双帧无法独立核验的织物写成“%s”；"
+            "同一次模型响应中的重复描述不能自证事实，必须改写为unknown或可见中性形状"
+            % (index, ambiguous_accessory)
+        )
+
+    associated = _reverse_generation_slot(
+        entry, "action.associated_object"
+    )
+    process_value = _reverse_generation_slot(
+        entry, "action.process"
+    ).get("value", "")
+    interpretive_action = next(
+        (
+            marker for marker in _REVERSE_INTERPRETIVE_ACTION_MARKERS
+            if marker in process_value
+        ),
+        None,
+    )
+    if interpretive_action:
+        raise ValueError(
+            "反推结果第%d段动作包含双帧不能证明的意图词“%s”；"
+            "不得把手部变化臆写为整理卫衣等动作，只能写首尾可见位移"
+            % (index, interpretive_action)
+        )
+    if associated.get("status") == "observed":
+        supporting_text = " ".join([
+            _reverse_generation_slot(
+                entry, "subject.wardrobe"
+            ).get("value", ""),
+            _reverse_generation_slot(
+                entry, "subject.appearance"
+            ).get("value", ""),
+        ] + [str(shot.get("subject") or "") for shot in shots])
+        if not _reverse_attribute_equivalent(
+            associated.get("value"), supporting_text
+        ):
+            raise ValueError(
+                "反推结果第%d段动作关联物无法由主体外观/服装和首尾镜头共同证明，"
+                "不得把织物臆认为围巾等具体物件"
+                % index
+            )
+
+    factual_checks = (
+        "shot_boundary_matches_pair_evidence",
+        "shot_states_have_local_frame_evidence",
+        "observed_slots_have_local_frame_evidence",
+        "action_start_end_match_first_last_frames",
+        "static_claim_requires_ssim",
+        "no_ambiguous_accessory_self_corroboration",
+        "no_interpretive_action_from_sparse_frames",
+    )
+    passed_factual_checks = list(factual_checks)
+    factual_consistency = int(round(
+        100.0 * len(passed_factual_checks) / max(1, len(factual_checks))
+    ))
+    return {
+        "applicable_slots": len(applicable),
+        "ready_slots": len(ready),
+        "observed_slots": len(observed),
+        "evidenced_slots": len(evidenced),
+        "generation_readiness": readiness,
+        "source_evidence_coverage": int(round(
+            100.0 * len(evidenced) / max(1, len(observed))
+        )),
+        "factual_consistency": factual_consistency,
+        "factual_consistency_checks": passed_factual_checks,
+        "shot_boundary": boundary_type,
+        "pair_ssim": pair_ssim,
+    }
+
+
 def _validate_reverse_segment_evidence(
     entry, previous_entries, frame_paths, index, transcript="",
     require_frame_evidence=False, global_continuity=None,
+    require_generation_readiness=False, pair_ssim=None,
 ):
     text = entry.get("text", "")
     compact = _compact_reverse_text(text)
@@ -1745,6 +2565,11 @@ def _validate_reverse_segment_evidence(
     fields = entry.get("fields", {})
     missing_critical_fields = []
     for key, label in (("subject", "主体"), ("scene", "场景"), ("action", "动作")):
+        if (
+            key == "action"
+            and (entry.get("shot_boundary") or {}).get("type") == "hard_cut"
+        ):
+            continue
         compact_field = _compact_reverse_text(fields.get(key, ""))
         if not compact_field:
             missing_critical_fields.append("%s（%s）" % (key, label))
@@ -1778,7 +2603,11 @@ def _validate_reverse_segment_evidence(
                     "反推结果第%d段帧证据超出本段原始帧范围，请重试" % index
                 )
         action_evidence = set(evidence_frames.get("action") or [])
-        if frame_count >= 2 and not {1, frame_count}.issubset(action_evidence):
+        if (
+            (entry.get("shot_boundary") or {}).get("type") != "hard_cut"
+            and frame_count >= 2
+            and not {1, frame_count}.issubset(action_evidence)
+        ):
             raise ValueError(
                 "反推结果第%d段动作时序必须同时引用本段首尾原始帧，请重试"
                 % index
@@ -1941,6 +2770,11 @@ def _validate_reverse_segment_evidence(
     ):
         raise ValueError("反推结果第%d段无静止画面证据，请重试" % index)
 
+    if require_generation_readiness:
+        entry["validation_summary"] = _reverse_validate_generation_structure(
+            entry, frame_paths, index, pair_ssim=pair_ssim
+        )
+
     for previous_index, previous in enumerate(previous_entries, 1):
         if _reverse_segments_are_duplicate(entry, previous):
             raise ValueError(
@@ -1950,7 +2784,7 @@ def _validate_reverse_segment_evidence(
     return entry
 
 
-def _validate_reverse_prompt_lengths(segments):
+def _validate_reverse_prompt_lengths(segments, check_duplicates=True):
     """Keep a generous output cap and strict duplicate guard; no minimum length."""
     if not segments:
         raise ValueError("反推结果为空，请重试")
@@ -1961,14 +2795,15 @@ def _validate_reverse_prompt_lengths(segments):
                 "反推结果第%d段过长：最多%d字，实际%d字，请重试"
                 % (index, _REVERSE_MAX_SEGMENT_CHARS, length)
             )
-    entries = [{"text": segment, "fields": {}} for segment in segments]
-    for index, entry in enumerate(entries):
-        for previous_index, previous in enumerate(entries[:index]):
-            if _reverse_segments_are_duplicate(entry, previous):
-                raise ValueError(
-                    "反推结果第%d段与第%d段内容重复，请重试"
-                    % (index + 1, previous_index + 1)
-                )
+    if check_duplicates:
+        entries = [{"text": segment, "fields": {}} for segment in segments]
+        for index, entry in enumerate(entries):
+            for previous_index, previous in enumerate(entries[:index]):
+                if _reverse_segments_are_duplicate(entry, previous):
+                    raise ValueError(
+                        "反推结果第%d段与第%d段内容重复，请重试"
+                        % (index + 1, previous_index + 1)
+                    )
     total = sum(lengths)
     if total > _REVERSE_MAX_TOTAL_CHARS:
         raise ValueError(
@@ -2022,9 +2857,17 @@ def _split_reverse_text(text, expected_count):
     return result
 
 
+def _reverse_generation_schema_template():
+    slot = {"status": "", "value": "", "evidence_frames": []}
+    return {
+        group: {key: dict(slot) for key in keys}
+        for group, keys in _REVERSE_GENERATION_SLOT_GROUPS.items()
+    }
+
+
 def _reverse_segment_messages(
     title, duration, platform, transcript, index, segment_count, timeline_range,
-    retry=False, retry_error=None,
+    retry=False, retry_error=None, pair_ssim=None,
 ):
     retry_note = ""
     if retry:
@@ -2035,12 +2878,50 @@ def _reverse_segment_messages(
             "非人物主体同样必须填写，禁止返回全空JSON。"
             % str(retry_error or "输出未通过结构与证据校验")
         )
+    cut_hint = ""
+    if pair_ssim is not None and pair_ssim <= _REVERSE_HARD_CUT_SSIM_THRESHOLD:
+        cut_hint = (
+            "代码像素预检发现首尾帧强不连续（SSIM=%.3f），本段必须标记hard_cut，"
+            "分别描述镜头A和镜头B，所有action槽位标记not_applicable；"
+            "绝不能把两侧主体编成同一连续动作。\n"
+            % pair_ssim
+        )
+    schema = {
+        "segments": [{
+            "shot_boundary": {
+                "type": "continuous|hard_cut|unknown",
+                "evidence_frames": [1, 2],
+            },
+            "shots": [
+                {
+                    "frame": 1,
+                    "subject": "",
+                    "scene": "",
+                    "camera": "",
+                    "lighting": "",
+                    "style": "",
+                },
+                {
+                    "frame": 2,
+                    "subject": "",
+                    "scene": "",
+                    "camera": "",
+                    "lighting": "",
+                    "style": "",
+                },
+            ],
+            "generation": _reverse_generation_schema_template(),
+            "sound": "",
+            "continuity_evidence_frames": [],
+        }],
+    }
     usermsg = (
         "视频标题（仅作背景，不能代替画面证据）：%s\n"
         "视频总时长：%ss\n"
         "平台：%s\n"
         "当前时间段：第%d/%d段 %s\n"
         "当前时间段ASR证据：%s\n\n"
+        "%s"
         "本次先做隔离分段取证；跨段连续性将在全部分段通过校验后由代码确定性归纳。"
         "不得引用其他时间段、历史草稿或臆造跨段事实。\n\n"
         "%s"
@@ -2065,22 +2946,26 @@ def _reverse_segment_messages(
         "静态非人物画面也必须形成可生成提示词：若首尾两帧中的主体位置、形状和画面确实一致，"
         "action 应准确写“主体保持静止，未观察到位置或形态变化”，并引用局部帧1、2；"
         "不得为填充 action 编造移动、变形或运镜。"
-        "subject 写可见外观、服装（如适用）、主体在画面中的位置与可确认连续性；"
-        "scene 写关键环境、道具及前中后景关系；action 按双帧时间顺序写动作节点、方向和位移；"
-        "camera 写景别、构图、机位和可见运镜；lighting 写可见光线方向、明暗和色调；"
-        "隔离分段阶段 continuity 与 continuity_evidence_frames 必须留空；"
-        "不得写“与上一段保持一致”“承接上一段”等固定衔接句。"
-        "无法确认的非关键细节留空，但主体、场景、动作三个关键字段必须是当前帧可证明的具体事实，"
-        "不得用“主体细节”“场景信息”“动作自然”等空洞字段模板代替。"
-        "只输出一个JSON对象：{\"segments\":[{\"subject\":\"\",\"scene\":\"\",\"action\":\"\","
-        "\"camera\":\"\",\"lighting\":\"\",\"sound\":\"\",\"continuity\":\"\","
-        "\"evidence_frames\":{\"subject\":[1],\"scene\":[1],\"action\":[1,2],"
-        "\"camera\":[1,2],\"lighting\":[1]},"
-        "\"continuity_evidence_frames\":[]}]}。"
-        "evidence_frames 使用本请求图片的局部编号1、2；每个非空画面字段必须列出能直接证明它的帧，"
-        "action 必须同时引用首尾两帧以证明动作顺序。"
-        "segments 必须只有当前这一段；camera、lighting、sound 可以在无证据时留空，"
-        "subject、scene、action 不可留空且必须有当前图片证据；不要输出时间码、解释或markdown。"
+        "先判定shot_boundary：continuous表示同一镜头连续变化，hard_cut表示两个不同镜头；"
+        "必须引用局部帧1、2。shots必须分别保存首帧和尾帧的主体、场景、景别机位构图、光影色彩、"
+        "风格材质；无法确认的项明确写unknown，不得把一侧事实复制到另一侧。\n"
+        "generation每个槽位都是{status,value,evidence_frames}："
+        "status只能是observed、unknown、not_applicable。observed必须有可直接证明该值的局部帧；"
+        "unknown表示证据不足，value写unknown且不带帧；not_applicable只用于画面确实不适用的槽位。"
+        "unknown不会冒充生成就绪，不能为了达到90%%把猜测标为observed。"
+        "主体身份类别不等于真人姓名；只写人物/动物/物体等可见类别。"
+        "服装、关联物件必须用可见中性名称；本链路没有独立物件检测器，围巾、披肩、飘带等易混淆配饰"
+        "一律写unknown或可观察的中性形状（如“长条织物”），不得让同一次回答中的多个字段互相自证。"
+        "整理、调整、检查、寻找、准备、感受等意图词无法由两个端点帧证明，一律改写为首尾可见位置或姿态变化。"
+        "动作必须拆成起点、过程、终点、方向与可见速度；两帧不能证明过程或精确速度时写unknown。"
+        "dynamic必须给出不同的首尾状态；static只有双帧近乎一致时可用。"
+        "hard_cut时两侧不是同一动作，所有action槽位必须not_applicable，分别依靠shots描述。"
+        "scene必须区分前景、中景、背景和空间关系；camera必须区分景别、机位、视角、构图和可见运镜；"
+        "lighting/style/rhythm分别记录光线色调、风格材质和镜头节奏。"
+        "continuity槽位在隔离分析阶段标记not_applicable，代码稍后只从规范化已验证属性聚合。"
+        "不要输出生成建议参数，代码会将建议与源事实分开生成。"
+        "sound仍只能与本段ASR逐字匹配；无证据留空。"
+        "只输出以下结构的一个JSON对象，不要时间码、解释或markdown：%s"
     ) % (
         str(title or ""),
         str(duration),
@@ -2089,7 +2974,9 @@ def _reverse_segment_messages(
         segment_count,
         timeline_range,
         transcript or "（无可确认的本段口播或声音）",
+        cut_hint,
         retry_note,
+        json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
     )
     sysmsg = (
         "你是短视频画面证据分析员。准确性高于完整性和篇幅；只写当前时间段原始帧或ASR能证明的事实。"
@@ -2099,7 +2986,43 @@ def _reverse_segment_messages(
 
 
 def _score_reverse_generation_coverage(entries, global_continuity, windows):
-    """Score evidence coverage only; this is not an end-to-end similarity claim."""
+    """Keep source evidence, generation readiness and consistency independent."""
+    entries = list(entries or [])
+    if entries and all(entry.get("generation") for entry in entries):
+        segment_scores = []
+        for index, entry in enumerate(entries, 1):
+            summary = dict(entry.get("validation_summary") or {})
+            if not summary:
+                raise ValueError(
+                    "反推结果第%d段缺少生成就绪校验摘要，请重试" % index
+                )
+            segment_scores.append({
+                "segment_index": index,
+                **summary,
+            })
+        source_score = min(
+            score["source_evidence_coverage"] for score in segment_scores
+        )
+        readiness_score = min(
+            score["generation_readiness"] for score in segment_scores
+        )
+        consistency_score = min(
+            score["factual_consistency"] for score in segment_scores
+        )
+        components = {
+            "source_evidence_coverage": source_score,
+            "generation_readiness": readiness_score,
+            "factual_consistency": consistency_score,
+        }
+        return {
+            "total": min(components.values()),
+            "components": components,
+            "segment_scores": segment_scores,
+            "generated_video_similarity_claim": False,
+        }
+
+    # Compatibility for direct helper callers. Production reverse requests
+    # require the structured path before this scorer is reached.
     fields = [entry.get("fields", {}) for entry in (entries or [])]
     expected = len(windows or [])
     complete = lambda key: (
@@ -2125,13 +3048,38 @@ def _score_reverse_generation_coverage(entries, global_continuity, windows):
         ) + (5 if expected else 0),
         "lighting_style": 10 if evidence_complete("lighting") else 0,
     }
-    return {"total": sum(parts.values()), "parts": parts}
+    total = sum(parts.values())
+    return {
+        "total": total,
+        "parts": parts,
+        "components": {
+            "source_evidence_coverage": total,
+            "generation_readiness": 0,
+            "factual_consistency": 0,
+        },
+        "legacy_unstructured": True,
+        "generated_video_similarity_claim": False,
+    }
 
 
 def _assemble_reverse_prompt(entries, windows, global_continuity=None):
-    segments = _validate_reverse_prompt_lengths([
-        entry["text"] for entry in entries
-    ])
+    raw_segments = []
+    for entry, (start, end, _timeline_range) in zip(entries, windows):
+        if entry.get("generation"):
+            suggestion = {
+                "scope": "recommendation_not_observed_source_fact",
+                "duration_seconds": round(float(end) - float(start), 1),
+                "reference_local_frames": [1, 2],
+            }
+            entry["generation_suggestions"] = suggestion
+            entry["text"] = _compose_reverse_generation_segment(
+                entry, suggestion=suggestion
+            )
+        raw_segments.append(entry["text"])
+    segments = _validate_reverse_prompt_lengths(
+        raw_segments,
+        check_duplicates=not all(entry.get("generation") for entry in entries),
+    )
     global_facts = _compose_reverse_global_facts(global_continuity)
     lines = []
     for index, ((_start, _end, timeline_range), segment) in enumerate(
@@ -2165,6 +3113,18 @@ def _reverse_analysis_call_budget(segment_count):
     }
 
 
+def _reverse_response_hash(raw):
+    return hashlib.sha256(
+        str(raw or "").encode("utf-8", "replace")
+    ).hexdigest()
+
+
+def _reverse_validation_audit_summary(error):
+    text = " ".join(str(error or "").replace("\r", "").split()).strip()
+    text = re.sub(r"https?://\S+", "[redacted-url]", text)
+    return text[:240] or "validation_failed"
+
+
 def _reverse_prompt_from_frames(
     title, duration, platform, script_text, frames,
     return_details=False, deadline=None, heartbeat=None,
@@ -2173,12 +3133,18 @@ def _reverse_prompt_from_frames(
     segment_count = len(windows)
     frame_groups = _reverse_model_frame_groups(frames, segment_count)
     entries = []
+    strict_generation = bool(return_details)
 
     for index, ((start, end, timeline_range), frame_group) in enumerate(
         zip(windows, frame_groups), 1
     ):
         transcript = _segment_transcript(script_text, start, end)
         retry_error = None
+        attempt_audit = []
+        pair_ssim = (
+            _reverse_frame_pair_ssim(frame_group[0], frame_group[-1])
+            if strict_generation else None
+        )
         for attempt in range(2):
             sysmsg, usermsg = _reverse_segment_messages(
                 title,
@@ -2190,6 +3156,7 @@ def _reverse_prompt_from_frames(
                 timeline_range,
                 retry=bool(attempt),
                 retry_error=retry_error,
+                pair_ssim=pair_ssim,
             )
             if deadline is None and heartbeat is None:
                 raw = _reverse_chat_multimodal(
@@ -2197,7 +3164,7 @@ def _reverse_prompt_from_frames(
                     usermsg,
                     frame_group,
                     temp=0.1,
-                    max_tokens=900,
+                    max_tokens=2000 if strict_generation else 900,
                     image_detail=None,
                 )
             else:
@@ -2206,7 +3173,7 @@ def _reverse_prompt_from_frames(
                     usermsg,
                     frame_group,
                     temp=0.1,
-                    max_tokens=900,
+                    max_tokens=2000 if strict_generation else 900,
                     image_detail=None,
                     deadline=deadline,
                     heartbeat=heartbeat,
@@ -2220,10 +3187,24 @@ def _reverse_prompt_from_frames(
                     index,
                     transcript=transcript,
                     require_frame_evidence=True,
+                    require_generation_readiness=strict_generation,
+                    pair_ssim=pair_ssim,
                 )
+                attempt_audit.append({
+                    "attempt": attempt + 1,
+                    "response_sha256": _reverse_response_hash(raw),
+                    "validation": "accepted",
+                })
+                entry["attempt_audit"] = attempt_audit
                 break
             except ValueError as error:
                 retry_error = error
+                attempt_audit.append({
+                    "attempt": attempt + 1,
+                    "response_sha256": _reverse_response_hash(raw),
+                    "validation": "rejected",
+                    "summary": _reverse_validation_audit_summary(error),
+                })
                 _log_breakdown_parse_failure(
                     "reverse-segment-%d-attempt-%d" % (index, attempt + 1),
                     raw,

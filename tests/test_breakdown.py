@@ -36,6 +36,7 @@ class BreakdownTests(unittest.TestCase):
         self.orig_heartbeat = self.breakdown._heartbeat
         self.orig_extract_frames = self.breakdown._extract_frames
         self.orig_pair_reverse_frames = getattr(self.breakdown, "_pair_reverse_frames", None)
+        self.orig_reverse_frame_pair_ssim = self.breakdown._reverse_frame_pair_ssim
         self.orig_chat_multimodal = self.breakdown._chat_multimodal
         self.orig_tempfile = self.breakdown.tempfile.NamedTemporaryFile
         self.orig_tikhub = sys.modules.get("tikhub")
@@ -53,6 +54,7 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._extract_frames = self.orig_extract_frames
         if self.orig_pair_reverse_frames is not None:
             self.breakdown._pair_reverse_frames = self.orig_pair_reverse_frames
+        self.breakdown._reverse_frame_pair_ssim = self.orig_reverse_frame_pair_ssim
         self.breakdown._chat_multimodal = self.orig_chat_multimodal
         self.breakdown.tempfile.NamedTemporaryFile = self.orig_tempfile
         if self.orig_tikhub is None:
@@ -92,7 +94,7 @@ class BreakdownTests(unittest.TestCase):
                 "全景低机位固定起拍，旋转阶段顺时针环绕，结尾轻微拉远",
             ),
             (
-                "低头整理衣袖后快速前行，抬眼看向远处，随后张开双臂减速",
+                "双手从胸前下移后快速前行，头部转向远处，随后张开双臂减速",
                 "近景捕捉手部动作，再切中景侧向跟拍，并向海平线摇移",
             ),
             (
@@ -103,7 +105,7 @@ class BreakdownTests(unittest.TestCase):
         result = []
         for index in range(1, count + 1):
             action, camera = variants[(index - 1) % len(variants)]
-            result.append({
+            item = {
                 "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
                 "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
                 "action": action,
@@ -119,8 +121,177 @@ class BreakdownTests(unittest.TestCase):
                     "lighting": [1, 2],
                 },
                 "continuity_evidence_frames": [],
-            })
+            }
+            item.update(self._generation_ready_structure(
+                index=index,
+                action=action,
+                camera=camera,
+            ))
+            result.append(item)
         return result
+
+    def _generation_ready_structure(
+        self, index=1, action="抬起右手", camera="平视中景", static=False
+    ):
+        observed = lambda value, frames=(1, 2): {
+            "status": "observed",
+            "value": value,
+            "evidence_frames": list(frames),
+        }
+        not_applicable = lambda: {
+            "status": "not_applicable",
+            "value": "",
+            "evidence_frames": [],
+        }
+        start = "双手位于身体两侧"
+        end = "右手抬至肩部上方"
+        motion_type = "static" if static else "dynamic"
+        if static:
+            start = end = "主体位置和形态保持一致"
+        return {
+            "shot_boundary": {
+                "type": "continuous",
+                "evidence_frames": [1, 2],
+            },
+            "shots": [
+                {
+                    "frame": 1,
+                    "subject": "白衣人物位于画面中央",
+                    "scene": "海滩、浪花和海平线",
+                    "camera": camera,
+                    "lighting": "暖色逆光",
+                    "style": "写实电影质感",
+                },
+                {
+                    "frame": 2,
+                    "subject": "白衣人物仍位于画面中央",
+                    "scene": "海滩、浪花和海平线",
+                    "camera": camera,
+                    "lighting": "暖色逆光",
+                    "style": "写实电影质感",
+                },
+            ],
+            "generation": {
+                "subject": {
+                    "identity": observed("人物"),
+                    "appearance": observed("黑色长发、白色长衣"),
+                    "wardrobe": observed("白色长衣"),
+                    "position_scale": observed("画面中央，约占画面高度二分之一"),
+                },
+                "action": {
+                    "motion_type": observed(motion_type),
+                    "start": observed(start, (1,)),
+                    "process": observed(action),
+                    "end": observed(end, (2,)),
+                    "direction_speed": observed("手臂向上移动，速度无法精确确认"),
+                    "associated_object": not_applicable(),
+                },
+                "scene": {
+                    "foreground": observed("近处浅色浪花"),
+                    "midground": observed("人物和湿润沙面"),
+                    "background": observed("海平线与低空云层"),
+                    "spatial_relationship": observed("人物位于浪花前方、海平线下方"),
+                },
+                "camera": {
+                    "shot_size": observed("中景"),
+                    "camera_position": observed("与人物胸部近似等高"),
+                    "viewing_angle": observed("平视"),
+                    "composition": observed("主体居中，海平线位于画面上部"),
+                    "movement": observed(camera),
+                },
+                "lighting": {
+                    "direction_brightness": observed("逆光，主体轮廓较亮"),
+                    "color_tone": observed("暖橙色高光与冷色天空"),
+                },
+                "style": {
+                    "visual_style": observed("写实电影画面"),
+                    "texture": observed("柔和高光、细腻沙面"),
+                },
+                "rhythm": {
+                    "pacing": observed("本段持续约四秒，动作连续"),
+                },
+                "continuity": {
+                    "retained": not_applicable(),
+                    "changed": not_applicable(),
+                },
+            },
+        }
+
+    def _generation_entry(self, index=1, **structure_overrides):
+        item = {
+            "sound": "",
+            "continuity": "",
+            "continuity_evidence_frames": [],
+        }
+        structure = self._generation_ready_structure(index=index)
+        structure.update(structure_overrides)
+        item.update(structure)
+        return self.breakdown._parse_reverse_segment_evidence(
+            json.dumps({"segments": [item]}, ensure_ascii=False)
+        )
+
+    def _hard_cut_entry(self):
+        item = self._generation_ready_structure(index=1)
+        item["shot_boundary"] = {
+            "type": "hard_cut",
+            "evidence_frames": [1, 2],
+        }
+        item["shots"] = [
+            {
+                "frame": 1,
+                "subject": "无人物，石桥占据画面中央",
+                "scene": "夜间古镇建筑和河面",
+                "camera": "高机位大远景",
+                "lighting": "暖色灯笼点亮冷色夜景",
+                "style": "写实夜景",
+            },
+            {
+                "frame": 2,
+                "subject": "粉色连帽上衣女性位于画面中央",
+                "scene": "夜间木质栏杆和灯笼",
+                "camera": "平视中景",
+                "lighting": "暖色灯笼照亮人物",
+                "style": "写实电影夜景",
+            },
+        ]
+        observed = lambda value, frames=(1, 2): {
+            "status": "observed",
+            "value": value,
+            "evidence_frames": list(frames),
+        }
+        item["generation"]["subject"] = {
+            "identity": observed("镜头A为石桥，镜头B为人物"),
+            "appearance": observed("石桥与粉色上衣黑色长发女性"),
+            "wardrobe": observed("镜头B女性穿粉色连帽上衣", (2,)),
+            "position_scale": observed("镜头A桥为大远景，镜头B人物为中景"),
+        }
+        item["generation"]["scene"] = {
+            "foreground": observed("镜头B木质栏杆", (2,)),
+            "midground": observed("镜头A石桥、镜头B女性"),
+            "background": observed("古镇建筑、夜空与灯笼"),
+            "spatial_relationship": observed("首帧为桥梁远景，尾帧硬切至人物中景"),
+        }
+        item["generation"]["camera"] = {
+            "shot_size": observed("大远景硬切至中景"),
+            "camera_position": observed("高机位硬切至人物等高机位"),
+            "viewing_angle": observed("俯视硬切至平视"),
+            "composition": observed("桥居中硬切至人物居中"),
+            "movement": observed("镜头切换，无法证明连续运镜"),
+        }
+        for key in item["generation"]["action"]:
+            item["generation"]["action"][key] = {
+                "status": "not_applicable",
+                "value": "",
+                "evidence_frames": [],
+            }
+        item.update({
+            "sound": "",
+            "continuity": "",
+            "continuity_evidence_frames": [],
+        })
+        return self.breakdown._parse_reverse_segment_evidence(
+            json.dumps({"segments": [item]}, ensure_ascii=False)
+        )
 
     def _reverse_entry(self, **overrides):
         fields = {
@@ -704,7 +875,10 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("纯色背景", src)
         self.assertIn("不能把主要实体只塞进 scene", src)
         self.assertIn("主体保持静止，未观察到位置或形态变化", src)
-        self.assertIn("subject、scene、action 不可留空", src)
+        self.assertIn("generation每个槽位", src)
+        self.assertIn("unknown不会冒充生成就绪", src)
+        self.assertIn("不得让同一次回答中的多个字段互相自证", src)
+        self.assertIn("意图词无法由两个端点帧证明", src)
 
     def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
@@ -712,7 +886,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("_reverse_model_frame_groups", src)
         self.assertIn("_reverse_chat_multimodal", src)
         self.assertIn("frame_group", src)
-        self.assertIn("max_tokens=900", src)
+        self.assertIn("max_tokens=2000 if strict_generation else 900", src)
         self.assertNotIn("allow_duplicates", src)
         retry_src = inspect.getsource(self.breakdown._reverse_segment_messages)
         self.assertIn("不要沿用任何历史草稿", retry_src)
@@ -791,7 +965,8 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(result["type"], "breakdown_reverse")
         self.assertEqual(result["source_platform"], "douyin")
-        self.assertIn("白衣人物居中", result["prompt"])
+        self.assertIn("黑色长发、白色长衣", result["prompt"])
+        self.assertIn("生成建议（非源画面事实）", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
         self.assertEqual(len(result["frame_thumbnails"]), 8)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
@@ -2010,14 +2185,26 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(contract["definition"], "visual_semantic_not_pixel")
         self.assertEqual(
             contract["score_scope"],
-            "source_evidence_coverage_not_generated_video_similarity",
+            "reverse_prompt_source_fidelity_and_generation_readiness",
         )
         self.assertEqual(contract["target_score"], 90)
         self.assertTrue(contract["requires_reference_guidance"])
-        self.assertEqual(sum(contract["weights"].values()), 100)
+        self.assertEqual(
+            set(contract["components"]),
+            {
+                "source_evidence_coverage",
+                "generation_readiness",
+                "factual_consistency",
+            },
+        )
+        self.assertFalse(contract["generated_video_similarity_claim"])
         self.assertEqual(
             contract["critical_failures"],
-            ["subject", "scene", "action"],
+            [
+                "hard_cut_merged_as_action",
+                "unsupported_fact",
+                "subject_scene_action_error",
+            ],
         )
 
         entries = [
@@ -2043,6 +2230,445 @@ class BreakdownTests(unittest.TestCase):
             "camera_duration": 15,
             "lighting_style": 10,
         })
+
+    def test_task_3258_hard_cut_cannot_be_merged_into_one_action(self):
+        continuous = self._generation_entry()
+        with self.assertRaisesRegex(ValueError, "存在硬切.*不能合并"):
+            self.breakdown._validate_reverse_segment_evidence(
+                continuous,
+                [],
+                ["bridge.jpg", "woman.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.20,
+            )
+
+        hard_cut = self._hard_cut_entry()
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            hard_cut,
+            [],
+            ["bridge.jpg", "woman.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.20,
+        )
+        self.assertEqual(
+            validated["validation_summary"]["shot_boundary"], "hard_cut"
+        )
+        prompt = self.breakdown._assemble_reverse_prompt(
+            [validated], self.breakdown._reverse_segment_windows(2.5)
+        )
+        self.assertIn("镜头A", prompt)
+        self.assertIn("硬切至镜头B", prompt)
+        self.assertIn("石桥", prompt)
+        self.assertIn("粉色连帽上衣女性", prompt)
+        self.assertNotIn("桥上有人行走", prompt)
+
+    def test_task_3258_rejects_scarf_guess_and_unsupported_wardrobe_action(self):
+        scarf = self._generation_entry()
+        scarf["generation"]["action"]["associated_object"] = {
+            "status": "observed",
+            "value": "围巾",
+            "evidence_frames": [1, 2],
+        }
+        with self.assertRaisesRegex(ValueError, "同一次模型响应中的重复描述不能自证事实"):
+            self.breakdown._validate_reverse_segment_evidence(
+                scarf,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
+        self_consistent_scarf = self._generation_entry()
+        self_consistent_scarf["generation"]["subject"]["appearance"]["value"] = (
+            "黑色长发女性，颈部有粉色围巾"
+        )
+        self_consistent_scarf["generation"]["subject"]["wardrobe"]["value"] = (
+            "粉色连帽上衣和粉色围巾"
+        )
+        self_consistent_scarf["generation"]["action"]["associated_object"] = {
+            "status": "observed",
+            "value": "粉色围巾",
+            "evidence_frames": [1, 2],
+        }
+        for shot in self_consistent_scarf["shots"]:
+            shot["subject"] = "粉色连帽上衣女性佩戴粉色围巾"
+        with self.assertRaisesRegex(ValueError, "重复描述不能自证事实"):
+            self.breakdown._validate_reverse_segment_evidence(
+                self_consistent_scarf,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
+        wardrobe_story = self._generation_entry()
+        wardrobe_story["generation"]["action"]["process"] = {
+            "status": "observed",
+            "value": "女性正在整理粉色卫衣",
+            "evidence_frames": [1, 2],
+        }
+        with self.assertRaisesRegex(ValueError, "不得把手部变化臆写为整理卫衣"):
+            self.breakdown._validate_reverse_segment_evidence(
+                wardrobe_story,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
+    def test_generation_readiness_counts_unknown_but_excludes_not_applicable(self):
+        ready = self._generation_entry()
+        for path in (
+            "camera.camera_position",
+            "camera.movement",
+            "style.texture",
+        ):
+            group, key = path.split(".")
+            ready["generation"][group][key] = {
+                "status": "unknown",
+                "value": "unknown",
+                "evidence_frames": [],
+            }
+        with self.assertRaisesRegex(ValueError, "生成就绪槽位仅87%"):
+            self.breakdown._validate_reverse_segment_evidence(
+                ready,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
+        one_unknown = self._generation_entry()
+        one_unknown["generation"]["camera"]["movement"] = {
+            "status": "unknown",
+            "value": "unknown",
+            "evidence_frames": [],
+        }
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            one_unknown,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.80,
+        )
+        self.assertGreaterEqual(
+            validated["validation_summary"]["generation_readiness"], 90
+        )
+        self.assertEqual(
+            one_unknown["generation"]["camera"]["movement"]["value"], "unknown"
+        )
+
+    def test_dynamic_and_static_generation_contracts_use_first_last_and_ssim(self):
+        dynamic = self._generation_entry()
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            dynamic,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.80,
+        )
+        self.assertEqual(
+            validated["generation"]["action"]["start"]["evidence_frames"], [1]
+        )
+        self.assertEqual(
+            validated["generation"]["action"]["end"]["evidence_frames"], [2]
+        )
+
+        static_item = self._generation_ready_structure(static=True)
+        static_entry = self.breakdown._parse_reverse_segment_evidence(
+            json.dumps({"segments": [static_item]}, ensure_ascii=False)
+        )
+        self.breakdown._reverse_frame_pair_ssim = lambda _left, _right: 0.998
+        self.breakdown._validate_reverse_segment_evidence(
+            static_entry,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.998,
+        )
+        self.breakdown._reverse_frame_pair_ssim = lambda _left, _right: 0.70
+        with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+            self.breakdown._validate_reverse_segment_evidence(
+                static_entry,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.70,
+            )
+
+    def test_structured_quality_scores_three_components_not_nonempty_fields(self):
+        entries = []
+        processes = [
+            "右臂从腰侧向上抬至头部旁",
+            "人物从画面左侧横向移动到右侧",
+            "双手从面部前方下降到胸前",
+            "身体顺时针旋转并展开裙摆",
+        ]
+        for index in range(1, 5):
+            entry = self._generation_entry(index=index)
+            entry["generation"]["action"]["process"]["value"] = (
+                processes[index - 1]
+            )
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                entries,
+                ["first.jpg", "last.jpg"],
+                index,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+            entries.append(entry)
+        score = self.breakdown._score_reverse_generation_coverage(
+            entries,
+            self._global_continuity(),
+            self.breakdown._reverse_segment_windows(15.093),
+        )
+        self.assertEqual(score["components"], {
+            "source_evidence_coverage": 100,
+            "generation_readiness": 100,
+            "factual_consistency": 100,
+        })
+        self.assertFalse(score["generated_video_similarity_claim"])
+        self.assertEqual(len(score["segment_scores"]), 4)
+
+    def test_normalized_attribute_continuity_does_not_require_full_sentence_match(self):
+        first = self._generation_entry(index=1)
+        second = self._generation_entry(index=2)
+        first["generation"]["subject"]["appearance"]["value"] = "一名黑色长发女性"
+        second["generation"]["subject"]["appearance"]["value"] = "黑色长发的女性"
+        first["generation"]["subject"]["wardrobe"]["value"] = "粉色连帽上衣"
+        second["generation"]["subject"]["wardrobe"]["value"] = "粉色连帽衫"
+        continuity = self.breakdown._reverse_global_facts_from_segments(
+            [first, second], [[1, 2], [3, 4]], 4
+        )
+        self.assertEqual(
+            continuity["aggregation"],
+            "deterministic_normalized_validated_attribute_intersection",
+        )
+        self.assertIn(
+            "黑色长发女性", continuity["facts"]["subject_identity"]
+        )
+        self.assertIn("粉色连帽", continuity["facts"]["wardrobe"])
+        self.assertEqual(
+            set(continuity["evidence_frames"]["wardrobe"]), {1, 2, 3, 4}
+        )
+
+    def test_normalized_continuity_rejects_negation_color_and_garment_conflicts(self):
+        cases = (
+            ("佩戴围巾", "未佩戴围巾"),
+            ("粉色连帽上衣", "白色连帽衫"),
+            ("粉色连帽上衣", "粉色长裙"),
+        )
+        for first_value, second_value in cases:
+            with self.subTest(first=first_value, second=second_value):
+                first = self._generation_entry(index=1)
+                second = self._generation_entry(index=2)
+                first["generation"]["subject"]["wardrobe"]["value"] = first_value
+                second["generation"]["subject"]["wardrobe"]["value"] = second_value
+                continuity = self.breakdown._reverse_global_facts_from_segments(
+                    [first, second], [[1, 2], [3, 4]], 4
+                )
+                self.assertEqual(continuity["facts"]["wardrobe"], "")
+                self.assertEqual(
+                    [item["text"] for item in continuity["changes"]["wardrobe"]],
+                    [first_value, second_value],
+                )
+
+    def test_factual_consistency_score_records_deterministic_checks(self):
+        entry = self._generation_entry()
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            entry,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.80,
+        )
+        summary = validated["validation_summary"]
+        self.assertEqual(summary["factual_consistency"], 100)
+        self.assertEqual(
+            set(summary["factual_consistency_checks"]),
+            {
+                "shot_boundary_matches_pair_evidence",
+                "shot_states_have_local_frame_evidence",
+                "observed_slots_have_local_frame_evidence",
+                "action_start_end_match_first_last_frames",
+                "static_claim_requires_ssim",
+                "no_ambiguous_accessory_self_corroboration",
+                "no_interpretive_action_from_sparse_frames",
+            },
+        )
+
+    def test_attempt_audit_persists_hash_attempt_and_validation_without_raw(self):
+        invalid = self._generation_ready_structure()
+        for key in ("camera_position", "movement"):
+            invalid["generation"]["camera"][key] = {
+                "status": "unknown",
+                "value": "unknown",
+                "evidence_frames": [],
+            }
+        invalid["generation"]["style"]["texture"] = {
+            "status": "unknown",
+            "value": "unknown",
+            "evidence_frames": [],
+        }
+        valid = self._generation_ready_structure()
+        responses = [invalid, valid]
+        calls = []
+
+        def fake_chat(_system, _user, frames, **kwargs):
+            calls.append((list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        self.breakdown._reverse_frame_pair_ssim = lambda _left, _right: 0.80
+        details = self.breakdown._reverse_prompt_from_frames(
+            "审计样本",
+            2.5,
+            "local",
+            "",
+            ["first.jpg", "last.jpg"],
+            return_details=True,
+        )
+        audit = details["entries"][0]["attempt_audit"]
+        self.assertEqual(
+            [item["validation"] for item in audit], ["rejected", "accepted"]
+        )
+        self.assertEqual([item["attempt"] for item in audit], [1, 2])
+        self.assertTrue(all(len(item["response_sha256"]) == 64 for item in audit))
+        self.assertNotIn("raw", json.dumps(audit))
+        bundle = self.breakdown._reverse_frame_bundle(
+            ["first.jpg", "last.jpg"], 1
+        )
+        details["prompt"] = self.breakdown._assemble_reverse_prompt(
+            details["entries"], details["windows"]
+        )
+        manifest = self.breakdown._reverse_segment_evidence_manifest(
+            details["entries"],
+            details["windows"],
+            bundle["segment_source_indices"],
+            bundle["segment_model_source_indices"],
+        )
+        self.assertEqual(manifest[0]["attempt_audit"], audit)
+        self.assertIn("generation_structure", manifest[0])
+        self.assertIn("validation_summary", manifest[0])
+        self.assertEqual(
+            manifest[0]["generation_suggestions"]["scope"],
+            "recommendation_not_observed_source_fact",
+        )
+        self.assertEqual(
+            manifest[0]["source_parameters"]["scope"],
+            "measured_source_fact",
+        )
+
+    def test_strict_one_to_four_segments_keep_two_images_glm_only_and_no_fallback(self):
+        for duration, expected_segments in (
+            (2.5, 1),
+            (5.0, 2),
+            (8.0, 3),
+            (11.0, 4),
+        ):
+            with self.subTest(duration=duration):
+                objects = self._detailed_reverse_objects(expected_segments)
+                calls = []
+
+                def fake_chat(_system, _user, frames, **kwargs):
+                    calls.append((list(frames), kwargs))
+                    return json.dumps(
+                        {"segments": [objects[len(calls) - 1]]},
+                        ensure_ascii=False,
+                    )
+
+                self.breakdown._chat_multimodal = fake_chat
+                self.breakdown._reverse_frame_pair_ssim = (
+                    lambda _left, _right: 0.80
+                )
+                details = self.breakdown._reverse_prompt_from_frames(
+                    "严格分段合同",
+                    duration,
+                    "local",
+                    "",
+                    ["frame-%d.jpg" % index for index in range(1, 9)],
+                    return_details=True,
+                )
+                self.assertEqual(len(details["entries"]), expected_segments)
+                self.assertEqual(len(calls), expected_segments)
+                self.assertTrue(all(len(call[0]) == 2 for call in calls))
+                self.assertTrue(all(
+                    call[1]["model"] == "glm-4v-plus"
+                    and call[1]["provider"] == "zhipu"
+                    and call[1]["allow_provider_fallback"] is False
+                    and call[1]["max_tokens"] == 2000
+                    for call in calls
+                ))
+
+    def test_task_3258_old_flat_response_cannot_score_or_escape_on_retry(self):
+        old_segment = {
+            "subject": "桥",
+            "scene": "夜晚古镇，有灯笼和建筑",
+            "action": "桥上有人行走",
+            "camera": "俯视角度",
+            "lighting": "灯笼光线",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        calls = []
+
+        def fake_chat(_system, user, frames, **kwargs):
+            calls.append((user, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [old_segment]}, ensure_ascii=False
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        self.breakdown._reverse_frame_pair_ssim = (
+            lambda _left, _right: 0.20
+        )
+        with self.assertRaisesRegex(ValueError, "缺少可生成的 generation"):
+            self.breakdown._reverse_prompt_from_frames(
+                "3258",
+                2.5,
+                "local",
+                "",
+                ["bridge.jpg", "woman.jpg"],
+                return_details=True,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call[1] == ["bridge.jpg", "woman.jpg"] for call in calls))
+        self.assertIn("必须标记hard_cut", calls[0][0])
+        self.assertIn("不要沿用任何历史草稿", calls[1][0])
 
     def test_reverse_global_facts_require_original_frame_evidence(self):
         parsed = self.breakdown._parse_reverse_global_facts(
@@ -2079,8 +2705,8 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("不要沿用任何历史草稿", user)
         self.assertNotIn("上一轮输出", user)
         self.assertIn('"evidence_frames"', user)
-        self.assertIn("action 必须同时引用首尾两帧", user)
-        self.assertIn("continuity_evidence_frames 必须留空", user)
+        self.assertIn("dynamic必须给出不同的首尾状态", user)
+        self.assertIn("continuity槽位在隔离分析阶段标记not_applicable", user)
         self.assertNotIn("同一名白衣人物，黑色长发", user)
         self.assertTrue(_system)
         entry = self._reverse_entry()
@@ -2876,8 +3502,8 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(set(bodies)), 4)
         for body in bodies:
             for label in (
-                "主体：", "场景：", "动作：", "镜头：",
-                "光影：",
+                "主体：", "场景：", "动作：", "构图与镜头：",
+                "光影色彩：", "风格材质：", "节奏：",
             ):
                 self.assertIn(label, body)
             self.assertNotIn("衔接：", body)
