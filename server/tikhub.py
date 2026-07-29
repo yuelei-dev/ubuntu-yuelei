@@ -623,9 +623,13 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     got = 0
     with _OPENER.open(req, timeout=min(read_timeout, remain)) as r, open(dest_path, "wb") as f:
-        declared = r.headers.get("Content-Length")
-        if declared and int(declared) > max_bytes:
-            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (int(declared) / 1048576.0, max_bytes / 1048576.0))
+        declared_raw = r.headers.get("Content-Length")
+        try:
+            declared = int(declared_raw) if declared_raw else None
+        except (TypeError, ValueError):
+            declared = None
+        if declared is not None and declared > max_bytes:
+            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (declared / 1048576.0, max_bytes / 1048576.0))
         while True:
             if time.time() >= deadline_ts:
                 raise TimeoutError("下载超过预算（已下载 %.1fMB）" % (got / 1048576.0))
@@ -636,6 +640,10 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
             if got > max_bytes:
                 raise ValueError("文件超过上限 %.0fMB" % (max_bytes / 1048576.0))
             f.write(block)
+    if declared is not None and got < declared:
+        raise ConnectionError(
+            "下载响应截断：Content-Length=%d，实际=%d" % (declared, got)
+        )
     return got
 
 

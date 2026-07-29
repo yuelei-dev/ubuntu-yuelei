@@ -180,6 +180,7 @@ def _do_breakdown(payload, info, url, mode=None):
 def _download_breakdown_video(tikhub, info, detail, destination):
     """Try alternate CDN URLs, then refresh video details once."""
     current = detail
+    deadline = time.time() + BREAKDOWN_DOWNLOAD_BUDGET
     retryable = (
         TimeoutError,
         ConnectionError,
@@ -187,7 +188,11 @@ def _download_breakdown_video(tikhub, info, detail, destination):
         http.client.IncompleteRead,
     )
     last_error = None
+    budget_exhausted = False
     for refresh_attempt in range(2):
+        if time.time() >= deadline:
+            last_error = TimeoutError("video download budget exhausted")
+            break
         alternate_urls = current.get("play_urls")
         if not isinstance(alternate_urls, (list, tuple)):
             alternate_urls = []
@@ -205,11 +210,19 @@ def _download_breakdown_video(tikhub, info, detail, destination):
             )
             continue
         for play_index, play_url in enumerate(play_urls, 1):
+            if time.time() >= deadline:
+                last_error = TimeoutError("video download budget exhausted")
+                budget_exhausted = True
+                break
             try:
-                tikhub.download_to_file(
-                    play_url, time.time() + BREAKDOWN_DOWNLOAD_BUDGET, destination,
+                downloaded_bytes = tikhub.download_to_file(
+                    play_url, deadline, destination,
                     max_bytes=BREAKDOWN_MAX_DOWNLOAD_BYTES,
                 )
+                if not isinstance(downloaded_bytes, int) or downloaded_bytes <= 0:
+                    raise ConnectionError(
+                        "video download returned no complete bytes"
+                    )
                 current["play_url"] = play_url
                 return current
             except ValueError as error:
@@ -228,6 +241,11 @@ def _download_breakdown_video(tikhub, info, detail, destination):
                     % (play_index, len(play_urls), str(error)[:160]),
                     flush=True,
                 )
+        if budget_exhausted:
+            break
+        if time.time() >= deadline:
+            last_error = TimeoutError("video download budget exhausted")
+            break
         if refresh_attempt == 0:
             current = tikhub.detail(
                 info["platform"], info["id"], info.get("note_type"), fresh=True

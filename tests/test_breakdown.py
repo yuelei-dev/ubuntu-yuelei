@@ -11,6 +11,7 @@ import unittest
 import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 
 _ROUTING_ENV = (
@@ -112,20 +113,26 @@ class BreakdownTests(unittest.TestCase):
             })
         return result
 
-    def test_download_breakdown_video_uses_alternate_cdn(self):
+    def test_download_breakdown_video_retries_empty_and_truncated_cdn(self):
         calls = []
 
         class FakeTikHub:
             @staticmethod
             def download_to_file(url, deadline, destination, max_bytes=None):
-                calls.append((url, destination, max_bytes))
-                if url.endswith("primary.mp4"):
-                    raise urllib.error.URLError(ConnectionResetError("reset"))
+                calls.append((url, deadline, destination, max_bytes))
+                if url.endswith("empty.mp4"):
+                    return 0
+                if url.endswith("truncated.mp4"):
+                    raise ConnectionError(
+                        "下载响应截断：Content-Length=100，实际=20"
+                    )
+                return 20
 
         detail = {
-            "play_url": "https://cdn.test/primary.mp4",
+            "play_url": "https://cdn.test/empty.mp4",
             "play_urls": [
-                "https://cdn.test/primary.mp4",
+                "https://cdn.test/empty.mp4",
+                "https://cdn.test/truncated.mp4",
                 "https://cdn.test/backup.mp4",
             ],
         }
@@ -137,13 +144,15 @@ class BreakdownTests(unittest.TestCase):
         )
 
         self.assertEqual([call[0] for call in calls], [
-            "https://cdn.test/primary.mp4",
+            "https://cdn.test/empty.mp4",
+            "https://cdn.test/truncated.mp4",
             "https://cdn.test/backup.mp4",
         ])
-        self.assertEqual(calls[-1][2], self.breakdown.BREAKDOWN_MAX_DOWNLOAD_BYTES)
+        self.assertEqual(len({call[1] for call in calls}), 1)
+        self.assertEqual(calls[-1][3], self.breakdown.BREAKDOWN_MAX_DOWNLOAD_BYTES)
         self.assertEqual(result["play_url"], "https://cdn.test/backup.mp4")
 
-    def test_download_breakdown_video_refreshes_details_once(self):
+    def test_download_breakdown_video_refreshes_once_and_honors_total_budget(self):
         calls = {"download": [], "detail": []}
 
         class FakeTikHub:
@@ -157,9 +166,10 @@ class BreakdownTests(unittest.TestCase):
 
             @staticmethod
             def download_to_file(url, deadline, destination, max_bytes=None):
-                calls["download"].append(url)
+                calls["download"].append((url, deadline))
                 if url.endswith("expired.mp4"):
                     raise TimeoutError("expired")
+                return 20
 
         result = self.breakdown._download_breakdown_video(
             FakeTikHub,
@@ -168,12 +178,52 @@ class BreakdownTests(unittest.TestCase):
             "video.mp4",
         )
 
-        self.assertEqual(calls["download"], [
+        self.assertEqual([call[0] for call in calls["download"]], [
             "https://cdn.test/expired.mp4",
             "https://cdn.test/refreshed.mp4",
         ])
+        self.assertEqual(len({call[1] for call in calls["download"]}), 1)
         self.assertEqual(calls["detail"], [("douyin", "123", "video", True)])
         self.assertEqual(result["play_url"], "https://cdn.test/refreshed.mp4")
+
+        exhausted_calls = {"download": [], "detail": []}
+
+        class ExhaustedTikHub:
+            @staticmethod
+            def detail(platform, item_id, note_type=None, fresh=False):
+                exhausted_calls["detail"].append(fresh)
+                return {"play_url": "https://cdn.test/refreshed.mp4"}
+
+            @staticmethod
+            def download_to_file(url, deadline, destination, max_bytes=None):
+                exhausted_calls["download"].append((url, deadline))
+                raise TimeoutError("first CDN consumed the total budget")
+
+        with patch.object(
+            self.breakdown.time, "time", side_effect=[100.0, 100.0, 100.0, 281.0]
+        ), self.assertRaisesRegex(TimeoutError, "alternate URLs"):
+            self.breakdown._download_breakdown_video(
+                ExhaustedTikHub,
+                {"platform": "douyin", "id": "123", "note_type": "video"},
+                {
+                    "play_url": "https://cdn.test/first.mp4",
+                    "play_urls": [
+                        "https://cdn.test/first.mp4",
+                        "https://cdn.test/must-not-start.mp4",
+                    ],
+                },
+                "video.mp4",
+            )
+
+        self.assertEqual(
+            [call[0] for call in exhausted_calls["download"]],
+            ["https://cdn.test/first.mp4"],
+        )
+        self.assertEqual(
+            exhausted_calls["download"][0][1],
+            100.0 + self.breakdown.BREAKDOWN_DOWNLOAD_BUDGET,
+        )
+        self.assertEqual(exhausted_calls["detail"], [])
 
     def test_post_zhipu_uses_official_endpoint_key_json_and_timeout(self):
         captured = {}
@@ -488,6 +538,7 @@ class BreakdownTests(unittest.TestCase):
             @staticmethod
             def download_to_file(play_url, deadline, filename, max_bytes=None):
                 calls["download"] = (play_url, filename)
+                return 1
 
             @staticmethod
             def transcript(det, video_path=None):
@@ -1154,6 +1205,7 @@ class BreakdownTests(unittest.TestCase):
             @staticmethod
             def download_to_file(play_url, deadline, filename, max_bytes=None):
                 calls["download"] = (play_url, filename)
+                return 1
 
             @staticmethod
             def transcript(det, video_path=None):
@@ -1290,7 +1342,7 @@ class BreakdownTests(unittest.TestCase):
                 }
             @staticmethod
             def download_to_file(play_url, deadline, filename, max_bytes=None):
-                pass
+                return 1
             @staticmethod
             def transcript(det, video_path=None):
                 return [{"start": 0, "end": 3, "text": "测试文案"}]
