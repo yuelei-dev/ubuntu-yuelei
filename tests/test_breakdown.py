@@ -230,6 +230,61 @@ class BreakdownTests(unittest.TestCase):
             json.dumps({"segments": [item]}, ensure_ascii=False)
         )
 
+    def _compact_generation_response(self, item):
+        status_codes = {
+            "observed": "o",
+            "unknown": "u",
+            "not_applicable": "n",
+        }
+
+        def evidence_mask(frames):
+            return sum(
+                bit for frame, bit in ((1, 1), (2, 2))
+                if frame in (frames or [])
+            )
+
+        boundary = item["shot_boundary"]
+        boundary_codes = {
+            "continuous": "c",
+            "hard_cut": "h",
+            "unknown": "u",
+        }
+        slots = []
+        for path in self.breakdown._reverse_generation_slot_paths():
+            group, key = path.split(".", 1)
+            slot = item["generation"][group][key]
+            status = slot["status"]
+            slots.append([
+                status_codes[status],
+                slot["value"] if status == "observed" else "",
+                (
+                    evidence_mask(slot.get("evidence_frames"))
+                    if status == "observed" else 0
+                ),
+            ])
+        compact = {
+            "segments": [{
+                "b": [
+                    boundary_codes[boundary["type"]],
+                    evidence_mask(boundary["evidence_frames"]),
+                ],
+                "shots": [
+                    [
+                        shot["frame"],
+                        shot["subject"],
+                        shot["scene"],
+                        shot["camera"],
+                        shot["lighting"],
+                        shot["style"],
+                    ]
+                    for shot in item["shots"]
+                ],
+                "slots": slots,
+                "sound": item.get("sound", ""),
+            }],
+        }
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
     def _hard_cut_entry(self):
         item = self._generation_ready_structure(index=1)
         item["shot_boundary"] = {
@@ -875,7 +930,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("纯色背景", src)
         self.assertIn("不能把主要实体只塞进 scene", src)
         self.assertIn("主体保持静止，未观察到位置或形态变化", src)
-        self.assertIn("generation每个槽位", src)
+        self.assertIn("slots必须严格按下列顺序", src)
         self.assertIn("unknown不会冒充生成就绪", src)
         self.assertIn("不得让同一次回答中的多个字段互相自证", src)
         self.assertIn("意图词无法由两个端点帧证明", src)
@@ -949,7 +1004,7 @@ class BreakdownTests(unittest.TestCase):
         def fake_reverse_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             reverse_calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
             item = objects[len(reverse_calls) - 1]
-            return json.dumps({"segments": [item]}, ensure_ascii=False)
+            return self._compact_generation_response(item)
 
         self.breakdown._chat_multimodal = fake_reverse_chat
 
@@ -2540,9 +2595,8 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat(_system, _user, frames, **kwargs):
             calls.append((list(frames), kwargs))
-            return json.dumps(
-                {"segments": [responses[len(calls) - 1]]},
-                ensure_ascii=False,
+            return self._compact_generation_response(
+                responses[len(calls) - 1]
             )
 
         self.breakdown._chat_multimodal = fake_chat
@@ -2599,9 +2653,8 @@ class BreakdownTests(unittest.TestCase):
 
                 def fake_chat(_system, _user, frames, **kwargs):
                     calls.append((list(frames), kwargs))
-                    return json.dumps(
-                        {"segments": [objects[len(calls) - 1]]},
-                        ensure_ascii=False,
+                    return self._compact_generation_response(
+                        objects[len(calls) - 1]
                     )
 
                 self.breakdown._chat_multimodal = fake_chat
@@ -2626,6 +2679,151 @@ class BreakdownTests(unittest.TestCase):
                     and call[1]["max_tokens"] == 2000
                     for call in calls
                 ))
+
+    def test_compact_wire_response_is_bounded_complete_and_generation_ready(self):
+        item = self._generation_ready_structure()
+        raw = self._compact_generation_response(item)
+        self.assertLessEqual(
+            len(raw), self.breakdown._REVERSE_COMPACT_RESPONSE_MAX_CHARS
+        )
+        self.assertLess(len(raw), 1000)
+        entry = self.breakdown._parse_reverse_segment_evidence(
+            raw, require_compact=True
+        )
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            entry,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.80,
+        )
+        self.assertEqual(
+            validated["validation_summary"]["generation_readiness"], 100
+        )
+        self.assertEqual(
+            len([
+                slot
+                for group in validated["generation"].values()
+                for slot in group.values()
+            ]),
+            len(self.breakdown._reverse_generation_slot_paths()),
+        )
+
+    def test_real_shape_long_and_truncated_outputs_are_strictly_rejected(self):
+        prefix = (
+            '{"segments":[{"b":["h",3],"shots":'
+            '[[1,"桥梁","古镇河面","高机位远景","冷暖对比","写实"],'
+            '[2,"粉色连帽服人物","木栏杆","平视中景","暖光","写实"]],'
+            '"slots":'
+        )
+        attempt_one = prefix + ('["o","可见事实",3],' * 300)
+        attempt_two = prefix + ('["o","另一可见事实",3],' * 260)
+        self.assertGreaterEqual(len(attempt_one), 4126)
+        self.assertGreaterEqual(len(attempt_two), 4064)
+        for raw in (attempt_one[:4126], attempt_two[:4064]):
+            with self.assertRaisesRegex(ValueError, "拒绝截断或失控输出"):
+                self.breakdown._parse_reverse_segment_evidence(
+                    raw, require_compact=True
+                )
+
+        complete = self._compact_generation_response(
+            self._generation_ready_structure()
+        )
+        with self.assertRaisesRegex(ValueError, "不是完整根JSON"):
+            self.breakdown._parse_reverse_segment_evidence(
+                complete[:-1], require_compact=True
+            )
+
+    def test_real_shape_truncation_retries_once_without_fallback_or_guessing(self):
+        prefix = '{"segments":[{"b":["h",3],"shots":'
+        responses = [
+            (prefix + ('["o","可见事实",3],' * 330))[:4126],
+            (prefix + ('["o","另一事实",3],' * 330))[:4064],
+        ]
+        calls = []
+
+        def fake_chat(_system, _user, frames, **kwargs):
+            calls.append((list(frames), kwargs))
+            return responses[len(calls) - 1]
+
+        self.breakdown._chat_multimodal = fake_chat
+        self.breakdown._reverse_frame_pair_ssim = lambda _left, _right: 0.20
+        with self.assertRaisesRegex(ValueError, "拒绝截断或失控输出"):
+            self.breakdown._reverse_prompt_from_frames(
+                "真实截断形态",
+                2.5,
+                "local",
+                "",
+                ["bridge.jpg", "woman.jpg"],
+                return_details=True,
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(len(frames) == 2 for frames, _kwargs in calls))
+        self.assertTrue(all(
+            kwargs["provider"] == "zhipu"
+            and kwargs["model"] == "glm-4v-plus"
+            and kwargs["allow_provider_fallback"] is False
+            and kwargs["max_tokens"] == 2000
+            for _frames, kwargs in calls
+        ))
+
+    def test_compact_wire_limits_slot_count_and_value_lengths(self):
+        item = self._generation_ready_structure()
+        parsed = json.loads(self._compact_generation_response(item))
+        parsed["segments"][0]["slots"].pop()
+        with self.assertRaisesRegex(ValueError, "slots数量错误"):
+            self.breakdown._parse_reverse_segment_evidence(
+                json.dumps(parsed, ensure_ascii=False, separators=(",", ":")),
+                require_compact=True,
+            )
+
+        parsed = json.loads(self._compact_generation_response(item))
+        parsed["segments"][0]["slots"][0][1] = "主" * 49
+        with self.assertRaisesRegex(ValueError, "超过紧凑协议上限48字符"):
+            self.breakdown._parse_reverse_segment_evidence(
+                json.dumps(parsed, ensure_ascii=False, separators=(",", ":")),
+                require_compact=True,
+            )
+
+    def test_service_assembles_detailed_hard_cut_prompt_from_compact_facts(self):
+        raw = self._compact_generation_response(
+            json.loads(json.dumps(
+                self._hard_cut_entry(), ensure_ascii=False
+            ))
+        )
+        entry = self.breakdown._parse_reverse_segment_evidence(
+            raw, require_compact=True
+        )
+        entry = self.breakdown._validate_reverse_segment_evidence(
+            entry,
+            [],
+            ["bridge.jpg", "woman.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.20,
+        )
+        prompt = self.breakdown._assemble_reverse_prompt(
+            [entry], self.breakdown._reverse_segment_windows(2.5)
+        )
+        for expected in (
+            "[00:00.0-00:02.5]",
+            "镜头A",
+            "硬切至镜头B",
+            "石桥",
+            "粉色连帽上衣女性",
+            "主体复现要点",
+            "场景空间",
+            "构图与镜头",
+            "光影色彩",
+            "风格材质",
+            "节奏",
+            "生成建议（非源画面事实）",
+        ):
+            self.assertIn(expected, prompt)
+        self.assertNotIn("桥上有人行走", prompt)
 
     def test_task_3258_old_flat_response_cannot_score_or_escape_on_retry(self):
         old_segment = {
@@ -2656,7 +2854,7 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._reverse_frame_pair_ssim = (
             lambda _left, _right: 0.20
         )
-        with self.assertRaisesRegex(ValueError, "缺少可生成的 generation"):
+        with self.assertRaisesRegex(ValueError, "紧凑segment"):
             self.breakdown._reverse_prompt_from_frames(
                 "3258",
                 2.5,
@@ -2704,9 +2902,9 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("跨段连续性将在全部分段通过校验后由代码确定性归纳", user)
         self.assertIn("不要沿用任何历史草稿", user)
         self.assertNotIn("上一轮输出", user)
-        self.assertIn('"evidence_frames"', user)
+        self.assertIn("证据位", user)
         self.assertIn("dynamic必须给出不同的首尾状态", user)
-        self.assertIn("continuity槽位在隔离分析阶段标记not_applicable", user)
+        self.assertIn("continuity两个槽位在隔离分析阶段标记n", user)
         self.assertNotIn("同一名白衣人物，黑色长发", user)
         self.assertTrue(_system)
         entry = self._reverse_entry()
@@ -3595,9 +3793,8 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             reverse_calls.append(list(frames))
-            return json.dumps(
-                {"segments": [objects[len(reverse_calls) - 1]]},
-                ensure_ascii=False,
+            return self._compact_generation_response(
+                objects[len(reverse_calls) - 1]
             )
         self.breakdown._chat_multimodal = fake_chat
         try:

@@ -31,8 +31,12 @@ BREAKDOWN_ANALYSIS_BUDGET = max(
         int(os.environ.get("BREAKDOWN_ANALYSIS_BUDGET", "540") or "540"),
     ),
 )
-_REVERSE_MAX_SEGMENT_CHARS = 1200
-_REVERSE_MAX_TOTAL_CHARS = 4800
+_REVERSE_MAX_SEGMENT_CHARS = 1800
+_REVERSE_MAX_TOTAL_CHARS = 7200
+_REVERSE_COMPACT_RESPONSE_MAX_CHARS = 3000
+_REVERSE_COMPACT_SLOT_VALUE_MAX_CHARS = 48
+_REVERSE_COMPACT_SHOT_VALUE_MAX_CHARS = 72
+_REVERSE_COMPACT_SOUND_MAX_CHARS = 120
 _REVERSE_DUPLICATE_SEQUENCE_THRESHOLD = 0.80
 _REVERSE_DUPLICATE_SHINGLE_THRESHOLD = 0.70
 _REVERSE_STATIC_SSIM_THRESHOLD = 0.995
@@ -1636,6 +1640,17 @@ def _compose_reverse_generation_segment(entry, suggestion=None):
                 )
             )
         parts.append("硬切；" + "；硬切至".join(shot_parts))
+        for group, label in (
+            ("subject", "主体复现要点"),
+            ("scene", "场景空间"),
+            ("camera", "构图与镜头"),
+            ("lighting", "光影色彩"),
+            ("style", "风格材质"),
+            ("rhythm", "节奏"),
+        ):
+            text = _reverse_generation_group_text(entry, group)
+            if text:
+                parts.append("%s：%s" % (label, text.rstrip("；;。")))
     else:
         group_labels = (
             ("subject", "主体"),
@@ -2036,10 +2051,162 @@ def _reverse_segments_are_duplicate(current, previous):
     return False
 
 
-def _parse_reverse_segment_evidence(raw):
+def _reverse_compact_evidence_frames(raw_mask, label):
+    try:
+        mask = int(raw_mask)
+    except (TypeError, ValueError):
+        raise ValueError("%s证据位必须是0到3的整数" % label)
+    if mask not in {0, 1, 2, 3}:
+        raise ValueError("%s证据位必须是0到3的整数" % label)
+    return [frame for bit, frame in ((1, 1), (2, 2)) if mask & bit]
+
+
+def _reverse_compact_text(value, label, max_chars, allow_empty=False):
+    if not isinstance(value, str):
+        raise ValueError("%s必须是字符串" % label)
+    text = " ".join(value.replace("\r", "").split()).strip()
+    if not text and not allow_empty:
+        raise ValueError("%s不能为空" % label)
+    if len(text) > max_chars:
+        raise ValueError(
+            "%s超过紧凑协议上限%d字符，请缩短为可观察事实"
+            % (label, max_chars)
+        )
+    return text
+
+
+def _reverse_expand_compact_response(raw):
+    """Strictly expand the bounded wire format; never salvage truncated JSON."""
+    text = str(raw or "").strip()
+    if len(text) > _REVERSE_COMPACT_RESPONSE_MAX_CHARS:
+        raise ValueError(
+            "反推紧凑响应超过%d字符，拒绝截断或失控输出"
+            % _REVERSE_COMPACT_RESPONSE_MAX_CHARS
+        )
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        raise ValueError("反推紧凑响应不是完整根JSON，拒绝截断内容")
+    if not isinstance(parsed, dict) or set(parsed) != {"segments"}:
+        raise ValueError("反推紧凑响应根对象必须且只能包含segments")
+    values = parsed.get("segments")
+    if not isinstance(values, list) or len(values) != 1:
+        raise ValueError("反推紧凑响应必须包含且只包含1个segment")
+    compact = values[0]
+    if not isinstance(compact, dict) or set(compact) != {
+        "b", "shots", "slots", "sound",
+    }:
+        raise ValueError(
+            "反推紧凑segment必须且只能包含b/shots/slots/sound"
+        )
+
+    raw_boundary = compact["b"]
+    if not isinstance(raw_boundary, list) or len(raw_boundary) != 2:
+        raise ValueError("反推紧凑b必须是[镜头类型,证据位]")
+    boundary_codes = {"c": "continuous", "h": "hard_cut", "u": "unknown"}
+    boundary_type = boundary_codes.get(
+        str(raw_boundary[0] or "").strip().lower()
+    )
+    if not boundary_type:
+        raise ValueError("反推紧凑镜头类型只能是c/h/u")
+    boundary_frames = _reverse_compact_evidence_frames(
+        raw_boundary[1], "反推紧凑镜头类型"
+    )
+    if boundary_frames != [1, 2]:
+        raise ValueError("反推紧凑镜头类型必须引用首尾双帧")
+
+    raw_shots = compact["shots"]
+    if not isinstance(raw_shots, list) or len(raw_shots) != 2:
+        raise ValueError("反推紧凑shots必须严格包含首尾2个镜头状态")
+    shots = []
+    for expected_frame, raw_shot in enumerate(raw_shots, 1):
+        if not isinstance(raw_shot, list) or len(raw_shot) != 6:
+            raise ValueError(
+                "反推紧凑shots每项必须是[帧,主体,场景,镜头,光影,风格]"
+            )
+        try:
+            frame = int(raw_shot[0])
+        except (TypeError, ValueError):
+            raise ValueError("反推紧凑shots帧编号格式错误")
+        if frame != expected_frame:
+            raise ValueError("反推紧凑shots必须按局部帧1、2排列")
+        shot = {"frame": frame}
+        for key, raw_value in zip(
+            ("subject", "scene", "camera", "lighting", "style"),
+            raw_shot[1:],
+        ):
+            shot[key] = _reverse_compact_text(
+                raw_value,
+                "反推紧凑shots.%s" % key,
+                _REVERSE_COMPACT_SHOT_VALUE_MAX_CHARS,
+            )
+        shots.append(shot)
+
+    paths = _reverse_generation_slot_paths()
+    raw_slots = compact["slots"]
+    if not isinstance(raw_slots, list) or len(raw_slots) != len(paths):
+        raise ValueError(
+            "反推紧凑slots数量错误：必须按固定顺序提供%d项" % len(paths)
+        )
+    status_codes = {"o": "observed", "u": "unknown", "n": "not_applicable"}
+    generation = {
+        group: {} for group in _REVERSE_GENERATION_SLOT_GROUPS
+    }
+    for path, raw_slot in zip(paths, raw_slots):
+        if not isinstance(raw_slot, list) or len(raw_slot) != 3:
+            raise ValueError(
+                "反推紧凑槽位%s必须是[状态,事实值,证据位]" % path
+            )
+        status = status_codes.get(str(raw_slot[0] or "").strip().lower())
+        if not status:
+            raise ValueError("反推紧凑槽位%s状态只能是o/u/n" % path)
+        value = _reverse_compact_text(
+            raw_slot[1],
+            "反推紧凑槽位%s" % path,
+            _REVERSE_COMPACT_SLOT_VALUE_MAX_CHARS,
+            allow_empty=status != "observed",
+        )
+        evidence = _reverse_compact_evidence_frames(
+            raw_slot[2], "反推紧凑槽位%s" % path
+        )
+        if status == "observed" and not evidence:
+            raise ValueError("反推紧凑槽位%s为o时必须有帧证据" % path)
+        if status != "observed" and (value or evidence):
+            raise ValueError("反推紧凑槽位%s为u/n时值必须为空且证据位为0" % path)
+        group, key = path.split(".", 1)
+        generation[group][key] = {
+            "status": status,
+            "value": value,
+            "evidence_frames": evidence,
+        }
+
+    sound = _reverse_compact_text(
+        compact["sound"],
+        "反推紧凑sound",
+        _REVERSE_COMPACT_SOUND_MAX_CHARS,
+        allow_empty=True,
+    )
+    return {
+        "segments": [{
+            "shot_boundary": {
+                "type": boundary_type,
+                "evidence_frames": boundary_frames,
+            },
+            "shots": shots,
+            "generation": generation,
+            "sound": sound,
+            "continuity_evidence_frames": [],
+        }],
+    }
+
+
+def _parse_reverse_segment_evidence(raw, require_compact=False):
     """Parse one segment while preserving fields used by evidence validation."""
     fields = {}
-    parsed = _parse_breakdown_json(raw)
+    parsed = (
+        _reverse_expand_compact_response(raw)
+        if require_compact else _parse_breakdown_json(raw)
+    )
     values = parsed.get("segments") if isinstance(parsed, dict) else None
     if not isinstance(values, list):
         raise ValueError("反推结果缺少 segments 数组，请重试")
@@ -2857,14 +3024,6 @@ def _split_reverse_text(text, expected_count):
     return result
 
 
-def _reverse_generation_schema_template():
-    slot = {"status": "", "value": "", "evidence_frames": []}
-    return {
-        group: {key: dict(slot) for key in keys}
-        for group, keys in _REVERSE_GENERATION_SLOT_GROUPS.items()
-    }
-
-
 def _reverse_segment_messages(
     title, duration, platform, transcript, index, segment_count, timeline_range,
     retry=False, retry_error=None, pair_ssim=None,
@@ -2882,37 +3041,24 @@ def _reverse_segment_messages(
     if pair_ssim is not None and pair_ssim <= _REVERSE_HARD_CUT_SSIM_THRESHOLD:
         cut_hint = (
             "代码像素预检发现首尾帧强不连续（SSIM=%.3f），本段必须标记hard_cut，"
-            "分别描述镜头A和镜头B，所有action槽位标记not_applicable；"
+            "分别描述镜头A和镜头B，action对应的6个slots全部标记n；"
             "绝不能把两侧主体编成同一连续动作。\n"
             % pair_ssim
         )
-    schema = {
+    compact_slot_order = ",".join(_reverse_generation_slot_paths())
+    compact_example = {
         "segments": [{
-            "shot_boundary": {
-                "type": "continuous|hard_cut|unknown",
-                "evidence_frames": [1, 2],
-            },
+            "b": ["c", 3],
             "shots": [
-                {
-                    "frame": 1,
-                    "subject": "",
-                    "scene": "",
-                    "camera": "",
-                    "lighting": "",
-                    "style": "",
-                },
-                {
-                    "frame": 2,
-                    "subject": "",
-                    "scene": "",
-                    "camera": "",
-                    "lighting": "",
-                    "style": "",
-                },
+                [1, "主体", "场景", "镜头", "光影", "风格"],
+                [2, "主体", "场景", "镜头", "光影", "风格"],
             ],
-            "generation": _reverse_generation_schema_template(),
+            "slots": [
+                ["o", "可观察事实", 3],
+                ["u", "", 0],
+                ["n", "", 0],
+            ],
             "sound": "",
-            "continuity_evidence_frames": [],
         }],
     }
     usermsg = (
@@ -2946,12 +3092,13 @@ def _reverse_segment_messages(
         "静态非人物画面也必须形成可生成提示词：若首尾两帧中的主体位置、形状和画面确实一致，"
         "action 应准确写“主体保持静止，未观察到位置或形态变化”，并引用局部帧1、2；"
         "不得为填充 action 编造移动、变形或运镜。"
-        "先判定shot_boundary：continuous表示同一镜头连续变化，hard_cut表示两个不同镜头；"
-        "必须引用局部帧1、2。shots必须分别保存首帧和尾帧的主体、场景、景别机位构图、光影色彩、"
-        "风格材质；无法确认的项明确写unknown，不得把一侧事实复制到另一侧。\n"
-        "generation每个槽位都是{status,value,evidence_frames}："
-        "status只能是observed、unknown、not_applicable。observed必须有可直接证明该值的局部帧；"
-        "unknown表示证据不足，value写unknown且不带帧；not_applicable只用于画面确实不适用的槽位。"
+        "使用紧凑传输协议，不要输出最终prompt，服务端会基于验证后的事实确定性组装。"
+        "根对象只能含segments且数组只能有1项；segment只能含b/shots/slots/sound，总响应不得超过%d字符。"
+        "b=[类型,证据位]：c=同镜头连续，h=硬切，u=无法确认，证据位必须3（1=帧1、2=帧2、3=双帧）。"
+        "shots严格两项，每项=[帧号,主体,场景,镜头,光影,风格]，单个文字值最多%d字符；"
+        "无法确认写unknown，不得把一侧事实复制到另一侧。"
+        "slots必须严格按下列顺序输出%d项，每项=[状态,事实值,证据位]，单个事实最多%d字符：%s。"
+        "状态o=observed且必须给非空事实与1/2/3证据位；u=unknown、n=not_applicable时事实必须空字符串且证据位0。"
         "unknown不会冒充生成就绪，不能为了达到90%%把猜测标为observed。"
         "主体身份类别不等于真人姓名；只写人物/动物/物体等可见类别。"
         "服装、关联物件必须用可见中性名称；本链路没有独立物件检测器，围巾、披肩、飘带等易混淆配饰"
@@ -2959,13 +3106,14 @@ def _reverse_segment_messages(
         "整理、调整、检查、寻找、准备、感受等意图词无法由两个端点帧证明，一律改写为首尾可见位置或姿态变化。"
         "动作必须拆成起点、过程、终点、方向与可见速度；两帧不能证明过程或精确速度时写unknown。"
         "dynamic必须给出不同的首尾状态；static只有双帧近乎一致时可用。"
-        "hard_cut时两侧不是同一动作，所有action槽位必须not_applicable，分别依靠shots描述。"
+        "hard_cut时两侧不是同一动作，action对应6个slots必须为n，分别依靠shots描述。"
         "scene必须区分前景、中景、背景和空间关系；camera必须区分景别、机位、视角、构图和可见运镜；"
         "lighting/style/rhythm分别记录光线色调、风格材质和镜头节奏。"
-        "continuity槽位在隔离分析阶段标记not_applicable，代码稍后只从规范化已验证属性聚合。"
+        "continuity两个槽位在隔离分析阶段标记n，代码稍后只从规范化已验证属性聚合。"
         "不要输出生成建议参数，代码会将建议与源事实分开生成。"
         "sound仍只能与本段ASR逐字匹配；无证据留空。"
-        "只输出以下结构的一个JSON对象，不要时间码、解释或markdown：%s"
+        "只输出一个完整可由标准JSON解析器读取的根对象，不要markdown、解释、额外键或尾随文字。"
+        "结构示意（slots示意仅3项，实际必须输出上述完整%d项）：%s"
     ) % (
         str(title or ""),
         str(duration),
@@ -2976,7 +3124,13 @@ def _reverse_segment_messages(
         transcript or "（无可确认的本段口播或声音）",
         cut_hint,
         retry_note,
-        json.dumps(schema, ensure_ascii=False, separators=(",", ":")),
+        _REVERSE_COMPACT_RESPONSE_MAX_CHARS,
+        _REVERSE_COMPACT_SHOT_VALUE_MAX_CHARS,
+        len(_reverse_generation_slot_paths()),
+        _REVERSE_COMPACT_SLOT_VALUE_MAX_CHARS,
+        compact_slot_order,
+        len(_reverse_generation_slot_paths()),
+        json.dumps(compact_example, ensure_ascii=False, separators=(",", ":")),
     )
     sysmsg = (
         "你是短视频画面证据分析员。准确性高于完整性和篇幅；只写当前时间段原始帧或ASR能证明的事实。"
@@ -3179,7 +3333,9 @@ def _reverse_prompt_from_frames(
                     heartbeat=heartbeat,
                 )
             try:
-                entry = _parse_reverse_segment_evidence(raw)
+                entry = _parse_reverse_segment_evidence(
+                    raw, require_compact=strict_generation
+                )
                 _validate_reverse_segment_evidence(
                     entry,
                     entries,
