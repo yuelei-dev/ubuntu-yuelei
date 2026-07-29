@@ -877,7 +877,8 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("主体保持静止，未观察到位置或形态变化", src)
         self.assertIn("generation每个槽位", src)
         self.assertIn("unknown不会冒充生成就绪", src)
-        self.assertIn("不得擅自认定为围巾", src)
+        self.assertIn("不得让同一次回答中的多个字段互相自证", src)
+        self.assertIn("意图词无法由两个端点帧证明", src)
 
     def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
@@ -2272,9 +2273,34 @@ class BreakdownTests(unittest.TestCase):
             "value": "围巾",
             "evidence_frames": [1, 2],
         }
-        with self.assertRaisesRegex(ValueError, "不得把织物臆认为围巾"):
+        with self.assertRaisesRegex(ValueError, "同一次模型响应中的重复描述不能自证事实"):
             self.breakdown._validate_reverse_segment_evidence(
                 scarf,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
+        self_consistent_scarf = self._generation_entry()
+        self_consistent_scarf["generation"]["subject"]["appearance"]["value"] = (
+            "黑色长发女性，颈部有粉色围巾"
+        )
+        self_consistent_scarf["generation"]["subject"]["wardrobe"]["value"] = (
+            "粉色连帽上衣和粉色围巾"
+        )
+        self_consistent_scarf["generation"]["action"]["associated_object"] = {
+            "status": "observed",
+            "value": "粉色围巾",
+            "evidence_frames": [1, 2],
+        }
+        for shot in self_consistent_scarf["shots"]:
+            shot["subject"] = "粉色连帽上衣女性佩戴粉色围巾"
+        with self.assertRaisesRegex(ValueError, "重复描述不能自证事实"):
+            self.breakdown._validate_reverse_segment_evidence(
+                self_consistent_scarf,
                 [],
                 ["first.jpg", "last.jpg"],
                 1,
@@ -2446,6 +2472,53 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("粉色连帽", continuity["facts"]["wardrobe"])
         self.assertEqual(
             set(continuity["evidence_frames"]["wardrobe"]), {1, 2, 3, 4}
+        )
+
+    def test_normalized_continuity_rejects_negation_color_and_garment_conflicts(self):
+        cases = (
+            ("佩戴围巾", "未佩戴围巾"),
+            ("粉色连帽上衣", "白色连帽衫"),
+            ("粉色连帽上衣", "粉色长裙"),
+        )
+        for first_value, second_value in cases:
+            with self.subTest(first=first_value, second=second_value):
+                first = self._generation_entry(index=1)
+                second = self._generation_entry(index=2)
+                first["generation"]["subject"]["wardrobe"]["value"] = first_value
+                second["generation"]["subject"]["wardrobe"]["value"] = second_value
+                continuity = self.breakdown._reverse_global_facts_from_segments(
+                    [first, second], [[1, 2], [3, 4]], 4
+                )
+                self.assertEqual(continuity["facts"]["wardrobe"], "")
+                self.assertEqual(
+                    [item["text"] for item in continuity["changes"]["wardrobe"]],
+                    [first_value, second_value],
+                )
+
+    def test_factual_consistency_score_records_deterministic_checks(self):
+        entry = self._generation_entry()
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            entry,
+            [],
+            ["first.jpg", "last.jpg"],
+            1,
+            require_frame_evidence=True,
+            require_generation_readiness=True,
+            pair_ssim=0.80,
+        )
+        summary = validated["validation_summary"]
+        self.assertEqual(summary["factual_consistency"], 100)
+        self.assertEqual(
+            set(summary["factual_consistency_checks"]),
+            {
+                "shot_boundary_matches_pair_evidence",
+                "shot_states_have_local_frame_evidence",
+                "observed_slots_have_local_frame_evidence",
+                "action_start_end_match_first_last_frames",
+                "static_claim_requires_ssim",
+                "no_ambiguous_accessory_self_corroboration",
+                "no_interpretive_action_from_sparse_frames",
+            },
         )
 
     def test_attempt_audit_persists_hash_attempt_and_validation_without_raw(self):

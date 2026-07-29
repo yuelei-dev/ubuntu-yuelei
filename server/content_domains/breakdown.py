@@ -94,6 +94,26 @@ _REVERSE_UNRELIABLE_ORIENTATION_MARKERS = (
 _REVERSE_INTERPRETIVE_ACTION_MARKERS = (
     "整理", "调整", "检查", "寻找", "准备", "感受",
 )
+# A two-frame reverse request cannot independently establish these ambiguous
+# garment/accessory labels.  Treat them as unknown/generic unless a future
+# verifier supplies evidence independent from the model response itself.
+_REVERSE_AMBIGUOUS_ACCESSORY_MARKERS = (
+    "围巾", "披肩", "飘带",
+)
+_REVERSE_ATTRIBUTE_NEGATION_MARKERS = (
+    "未佩戴", "没有佩戴", "未穿", "没有穿", "未见", "没有", "不",
+)
+_REVERSE_ATTRIBUTE_TOKEN_GROUPS = (
+    (
+        "黑色", "白色", "灰色", "粉色", "红色", "橙色", "黄色",
+        "绿色", "蓝色", "紫色", "棕色", "金色", "银色",
+    ),
+    ("冷色", "暖色", "中性色"),
+    ("左侧", "右侧", "中央", "中间", "上方", "下方"),
+    ("俯视", "仰视", "平视"),
+    ("特写", "近景", "中景", "全景", "远景", "大远景"),
+    ("围巾", "披肩", "飘带", "卫衣", "连帽服", "长衣", "外套", "裙"),
+)
 _REVERSE_GLOBAL_FACT_FIELDS = (
     ("subject_identity", "主体身份与外观"),
     ("wardrobe", "服装与随身物"),
@@ -1814,8 +1834,10 @@ def _reverse_global_facts_from_segments(
                 if (
                     all(slot.get("status") == "observed" for slot in slots)
                     and all(
-                        _reverse_attribute_equivalent(
-                            slots[0].get("value"), slot.get("value")
+                        _reverse_continuity_attribute_equivalent(
+                            path,
+                            slots[0].get("value"),
+                            slot.get("value"),
                         )
                         for slot in slots[1:]
                     )
@@ -2210,9 +2232,72 @@ def _reverse_attribute_equivalent(left, right):
     right_compact = _compact_reverse_text(right)
     if not left_compact or not right_compact:
         return False
+    left_negated = any(
+        marker in left_compact for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    right_negated = any(
+        marker in right_compact for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    if left_negated != right_negated:
+        return False
     if left_compact in right_compact or right_compact in left_compact:
         return True
     return SequenceMatcher(None, left_compact, right_compact).ratio() >= 0.72
+
+
+def _reverse_normalize_attribute_value(value):
+    compact = _compact_reverse_text(value)
+    replacements = (
+        ("连帽上衣", "连帽服"),
+        ("连帽衫", "连帽服"),
+        ("位于画面中间", "位于画面中央"),
+        ("画面正中", "画面中央"),
+        ("一名", ""),
+        ("一位", ""),
+        ("的", ""),
+    )
+    for source, target in replacements:
+        compact = compact.replace(source, target)
+    return compact
+
+
+def _reverse_continuity_attribute_equivalent(path, left, right):
+    """Compare normalized observable attributes, never sentence similarity alone."""
+    left_normalized = _reverse_normalize_attribute_value(left)
+    right_normalized = _reverse_normalize_attribute_value(right)
+    if not left_normalized or not right_normalized:
+        return False
+
+    left_negated = any(
+        marker in left_normalized
+        for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    right_negated = any(
+        marker in right_normalized
+        for marker in _REVERSE_ATTRIBUTE_NEGATION_MARKERS
+    )
+    if left_negated != right_negated:
+        return False
+
+    for group in _REVERSE_ATTRIBUTE_TOKEN_GROUPS:
+        left_tokens = {token for token in group if token in left_normalized}
+        right_tokens = {token for token in group if token in right_normalized}
+        if left_tokens or right_tokens:
+            if left_tokens != right_tokens:
+                return False
+
+    if left_normalized == right_normalized:
+        return True
+    # The remaining fuzzy allowance is only for wording around already-equal
+    # critical tokens; it cannot override negation, color, garment, position,
+    # shot-size or viewing-angle conflicts above.
+    return (
+        left_normalized in right_normalized
+        or right_normalized in left_normalized
+        or SequenceMatcher(
+            None, left_normalized, right_normalized
+        ).ratio() >= 0.82
+    )
 
 
 def _reverse_validate_generation_structure(
@@ -2372,20 +2457,48 @@ def _reverse_validate_generation_structure(
             % index
         )
 
+    observed_generation_text = " ".join(
+        str(_reverse_generation_slot(entry, path).get("value") or "")
+        for path in _reverse_generation_slot_paths()
+        if _reverse_generation_slot(entry, path).get("status") == "observed"
+    )
+    shot_state_text = " ".join(
+        str(shot.get(key) or "")
+        for shot in shots
+        for key in ("subject", "scene", "camera", "lighting", "style")
+    )
+    ambiguous_accessory = next(
+        (
+            marker for marker in _REVERSE_AMBIGUOUS_ACCESSORY_MARKERS
+            if marker in observed_generation_text or marker in shot_state_text
+        ),
+        None,
+    )
+    if ambiguous_accessory:
+        raise ValueError(
+            "反推结果第%d段把双帧无法独立核验的织物写成“%s”；"
+            "同一次模型响应中的重复描述不能自证事实，必须改写为unknown或可见中性形状"
+            % (index, ambiguous_accessory)
+        )
+
     associated = _reverse_generation_slot(
         entry, "action.associated_object"
     )
     process_value = _reverse_generation_slot(
         entry, "action.process"
     ).get("value", "")
-    if (
-        any(marker in process_value for marker in _REVERSE_INTERPRETIVE_ACTION_MARKERS)
-        and associated.get("status") != "observed"
-    ):
+    interpretive_action = next(
+        (
+            marker for marker in _REVERSE_INTERPRETIVE_ACTION_MARKERS
+            if marker in process_value
+        ),
+        None,
+    )
+    if interpretive_action:
         raise ValueError(
-            "反推结果第%d段动作包含情节化解释但缺少可核验关联物；"
-            "不得把手部变化臆写为整理卫衣等动作"
-            % index
+            "反推结果第%d段动作包含双帧不能证明的意图词“%s”；"
+            "不得把手部变化臆写为整理卫衣等动作，只能写首尾可见位移"
+            % (index, interpretive_action)
         )
     if associated.get("status") == "observed":
         supporting_text = " ".join([
@@ -2405,6 +2518,19 @@ def _reverse_validate_generation_structure(
                 % index
             )
 
+    factual_checks = (
+        "shot_boundary_matches_pair_evidence",
+        "shot_states_have_local_frame_evidence",
+        "observed_slots_have_local_frame_evidence",
+        "action_start_end_match_first_last_frames",
+        "static_claim_requires_ssim",
+        "no_ambiguous_accessory_self_corroboration",
+        "no_interpretive_action_from_sparse_frames",
+    )
+    passed_factual_checks = list(factual_checks)
+    factual_consistency = int(round(
+        100.0 * len(passed_factual_checks) / max(1, len(factual_checks))
+    ))
     return {
         "applicable_slots": len(applicable),
         "ready_slots": len(ready),
@@ -2414,7 +2540,8 @@ def _reverse_validate_generation_structure(
         "source_evidence_coverage": int(round(
             100.0 * len(evidenced) / max(1, len(observed))
         )),
-        "factual_consistency": 100,
+        "factual_consistency": factual_consistency,
+        "factual_consistency_checks": passed_factual_checks,
         "shot_boundary": boundary_type,
         "pair_ssim": pair_ssim,
     }
@@ -2827,8 +2954,10 @@ def _reverse_segment_messages(
         "unknown表示证据不足，value写unknown且不带帧；not_applicable只用于画面确实不适用的槽位。"
         "unknown不会冒充生成就绪，不能为了达到90%%把猜测标为observed。"
         "主体身份类别不等于真人姓名；只写人物/动物/物体等可见类别。"
-        "服装、关联物件必须用可见中性名称；无法区分围巾、衣袖、飘带或普通织物时写unknown或“长条织物”，"
-        "不得擅自认定为围巾。动作必须拆成起点、过程、终点、方向与可见速度；两帧不能证明过程或精确速度时写unknown。"
+        "服装、关联物件必须用可见中性名称；本链路没有独立物件检测器，围巾、披肩、飘带等易混淆配饰"
+        "一律写unknown或可观察的中性形状（如“长条织物”），不得让同一次回答中的多个字段互相自证。"
+        "整理、调整、检查、寻找、准备、感受等意图词无法由两个端点帧证明，一律改写为首尾可见位置或姿态变化。"
+        "动作必须拆成起点、过程、终点、方向与可见速度；两帧不能证明过程或精确速度时写unknown。"
         "dynamic必须给出不同的首尾状态；static只有双帧近乎一致时可用。"
         "hard_cut时两侧不是同一动作，所有action槽位必须not_applicable，分别依靠shots描述。"
         "scene必须区分前景、中景、背景和空间关系；camera必须区分景别、机位、视角、构图和可见运镜；"
