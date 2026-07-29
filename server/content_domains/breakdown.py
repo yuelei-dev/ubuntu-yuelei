@@ -397,7 +397,9 @@ def gen_breakdown(payload):
     upload_token = str((payload or {}).get("upload_token") or "").strip().lower()
     if upload_token:
         return _do_local_reverse(payload, upload_token)
-    if (payload or {}).get("local_path") or (payload or {}).get("local_media_path"):
+    if (payload or {}).get("local_media_path"):
+        return _do_legacy_local_reverse(payload)
+    if (payload or {}).get("local_path"):
         raise ValueError("禁止提交服务器本地路径")
 
     mode = _normalize_mode(payload)
@@ -672,6 +674,72 @@ def _do_local_reverse(payload, upload_token):
     if candidate.parent != root or not candidate.is_file():
         raise ValueError("上传文件不存在或已过期")
     path = str(candidate)
+
+    def cleanup():
+        _remove_trusted_upload(upload_token, username, job_id, path)
+
+    return _run_local_reverse_path(
+        payload,
+        path,
+        media_type,
+        title=os.path.basename(path),
+        cleanup=cleanup,
+    )
+
+
+def _do_legacy_local_reverse(payload):
+    """Bridge main's trusted local-upload queue ABI into the #139 engine.
+
+    Public JSON submissions still reject ``local_media_path``. This path is
+    accepted only for a claimed job whose file is an immediate child of the
+    server-owned ``reverse_uploads`` directory created by
+    ``local_reverse_upload.handle_post``.
+    """
+    from . import core
+    import pathlib
+
+    job_id = (payload or {}).get("_job_id")
+    username = str((payload or {}).get("_username") or "").strip()
+    media_type = str((payload or {}).get("local_media_type") or "").strip().lower()
+    if not job_id or not username or media_type not in {"image", "video"}:
+        raise ValueError("无效的本地上传任务")
+    root = (pathlib.Path(core.OUT_DIR) / "reverse_uploads").resolve()
+    candidate = pathlib.Path(
+        str((payload or {}).get("local_media_path") or "")
+    ).resolve()
+    if candidate.parent != root or not candidate.is_file():
+        raise ValueError("本地素材已失效，请重新上传")
+    title = str((payload or {}).get("source_title") or candidate.name)[:120]
+    duration = None
+    if media_type == "video":
+        try:
+            duration = float((payload or {}).get("duration"))
+        except (TypeError, ValueError):
+            duration = None
+        if duration is None or duration <= 0 or duration > 120.05:
+            raise ValueError("本地视频时长无效")
+
+    def cleanup():
+        try:
+            candidate.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+
+    return _run_local_reverse_path(
+        payload,
+        str(candidate),
+        media_type,
+        title=title,
+        duration=duration,
+        cleanup=cleanup,
+    )
+
+
+def _run_local_reverse_path(
+    payload, path, media_type, title="", duration=None, cleanup=None
+):
+    """Analyze one already-validated server-owned upload and always clean it."""
+    job_id = (payload or {}).get("_job_id")
     frame_dir = None
     try:
         _heartbeat(job_id, "extracting_frames")
@@ -681,7 +749,7 @@ def _do_local_reverse(payload, upload_token):
             frames = [path] * 8
             duration = 0.0
         else:
-            duration = _probe_duration(path)
+            duration = _probe_duration(path) if duration is None else float(duration)
             if duration > 120.05:
                 raise ValueError("视频最长支持 2 分钟")
             frame_dir, frames = _extract_frames(
@@ -693,7 +761,7 @@ def _do_local_reverse(payload, upload_token):
             payload,
             frames,
             source_url="",
-            title=os.path.basename(path),
+            title=title or os.path.basename(path),
             platform="local",
             duration=duration,
         )
@@ -703,7 +771,8 @@ def _do_local_reverse(payload, upload_token):
                 shutil.rmtree(frame_dir)
             except Exception:
                 pass
-        _remove_trusted_upload(upload_token, username, job_id, path)
+        if cleanup:
+            cleanup()
 
 
 def _probe_duration(path):

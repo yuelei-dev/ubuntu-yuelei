@@ -91,6 +91,20 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             self.assertEqual(self.breakdown.gen_breakdown(payload), {"ok": True})
         local.assert_called_once_with(payload, "a" * 32)
 
+    def test_main_local_upload_queue_abi_dispatches_to_same_engine(self):
+        payload = {
+            "mode": "local_reverse",
+            "local_media_path": "server-owned-upload.mp4",
+            "local_media_type": "video",
+            "_username": "alice",
+            "_job_id": 8,
+        }
+        with mock.patch.object(
+            self.breakdown, "_do_legacy_local_reverse", return_value={"ok": True}
+        ) as local:
+            self.assertEqual(self.breakdown.gen_breakdown(payload), {"ok": True})
+        local.assert_called_once_with(payload)
+
     def test_resolved_link_is_reused_without_second_parse(self):
         payload = {
             "url": "https://www.douyin.com/video/1234567890123456789",
@@ -219,6 +233,72 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             model_frames = reverse.call_args.args[1]
             self.assertEqual(len(model_frames), 8)
             self.assertEqual(set(model_frames), {str(source)})
+
+    def test_main_legacy_local_upload_is_confined_and_uses_reverse_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upload_root = root / "reverse_uploads"
+            upload_root.mkdir()
+            source = upload_root / "trusted.jpg"
+            source.write_bytes(b"\xff\xd8\xfftest")
+            payload = {
+                "mode": "local_reverse",
+                "local_media_path": str(source),
+                "local_media_type": "image",
+                "source_title": "white-card.jpg",
+                "_username": "alice",
+                "_job_id": 43,
+            }
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(self.core, "OUT_DIR", root))
+                reverse = stack.enter_context(mock.patch.object(
+                    self.breakdown,
+                    "_reverse_result_from_frames",
+                    return_value={"type": "breakdown_reverse"},
+                ))
+                stack.enter_context(mock.patch.object(
+                    self.breakdown, "_heartbeat"
+                ))
+                result = self.breakdown.gen_breakdown(payload)
+            self.assertEqual(result["type"], "breakdown_reverse")
+            model_frames = reverse.call_args.args[1]
+            self.assertEqual(len(model_frames), 8)
+            self.assertEqual(set(model_frames), {str(source)})
+            self.assertEqual(reverse.call_args.kwargs["title"], "white-card.jpg")
+            self.assertFalse(source.exists())
+
+    def test_main_legacy_local_upload_rejects_paths_outside_owned_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "reverse_uploads").mkdir()
+            outside = root / "outside.jpg"
+            outside.write_bytes(b"\xff\xd8\xfftest")
+            with mock.patch.object(self.core, "OUT_DIR", root):
+                with self.assertRaisesRegex(ValueError, "本地素材已失效"):
+                    self.breakdown.gen_breakdown({
+                        "mode": "local_reverse",
+                        "local_media_path": str(outside),
+                        "local_media_type": "image",
+                        "_username": "alice",
+                        "_job_id": 44,
+                    })
+            self.assertTrue(outside.exists())
+
+    def test_main_http_upload_route_and_worker_payload_have_compat_bridge(self):
+        core_source = (
+            self.root / "server/content_domains/core.py"
+        ).read_text(encoding="utf-8")
+        upload_source = (
+            self.root / "server/content_domains/local_reverse_upload.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'p == "/api/gen/breakdown/local-upload"', core_source
+        )
+        self.assertIn('"local_media_path": str(path)', upload_source)
+        self.assertIn(
+            "/api/gen/breakdown/local-upload?media_type=", self.script
+        )
+        self.assertTrue(callable(self.breakdown._do_legacy_local_reverse))
 
     def test_local_upload_charges_twenty_enqueues_and_persists_owner(self):
         class FakePoints:
