@@ -1370,6 +1370,9 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
+                elif kind == "breakdown":
+                    from . import breakdown
+                    body = breakdown.validate_breakdown_payload(body)
                 elif kind == "script_to_video": from . import script_to_video as script_to_video_domain; body = script_to_video_domain.prepare_script_to_video_payload(body, user["username"])
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"} else ""
             except ValueError as e:

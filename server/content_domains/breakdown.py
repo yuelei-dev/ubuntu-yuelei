@@ -140,6 +140,17 @@ def _ensure_upload_table(connection):
         job_id INTEGER NOT NULL UNIQUE,
         created_at INTEGER NOT NULL
     )""")
+    columns = {
+        row[1] for row in connection.execute(
+            "PRAGMA table_info(breakdown_uploads)"
+        ).fetchall()
+    }
+    if "path" not in columns:
+        connection.execute("ALTER TABLE breakdown_uploads ADD COLUMN path TEXT")
+    if "media_type" not in columns:
+        connection.execute(
+            "ALTER TABLE breakdown_uploads ADD COLUMN media_type TEXT"
+        )
 
 
 def _upload_root():
@@ -233,7 +244,11 @@ def validate_breakdown_payload(payload):
     """Validate and resolve public links before the job is charged or enqueued."""
     if not isinstance(payload, dict):
         raise ValueError("请求体必须是 JSON 对象")
-    if payload.get("local_path") or payload.get("local_media_path") or payload.get("upload_token"):
+    private_fields = {
+        "local_path", "local_media_path", "local_media_type", "upload_token",
+        "_username", "_job_id", "_trusted_local_upload",
+    }
+    if any(field in payload for field in private_fields):
         raise ValueError("本地素材只能通过专用上传接口提交")
     body = dict(payload)
     body.pop("_resolved_link", None)
@@ -262,131 +277,24 @@ def validate_breakdown_payload(payload):
 
 
 def handle_local_upload(handler, user):
-    """Validate a local upload, charge once, persist its token, and enqueue it."""
-    from . import core
+    """Use the runtime's real paid-upload handler from either core route ABI."""
+    from . import core, local_reverse_upload
     _, points_domain, _ = core._domains()
-    paid_job_insert_error = getattr(core.jobs_store, "PaidJobInsertError", ())
-    try:
-        core.feature_flags.require_enabled("breakdown")
-    except core.feature_flags.FeatureDisabled as exc:
-        return handler._send(503, {"detail": str(exc)})
-    if core.is_shutting_down():
-        return handler._send(503, {
-            "detail": "服务正在更新，请稍后重试", "code": "shutting_down",
-            "retry_after_ms": 5000,
-        })
-
-    query = core.urllib.parse.parse_qs(core.urllib.parse.urlparse(handler.path).query)
-    media_type = str((query.get("media_type") or [""])[0]).strip().lower()
-    allowed = {
-        "image": {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"},
-        "video": {"video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm"},
-    }
-    content_type = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-    if media_type not in allowed or content_type not in allowed[media_type]:
-        return handler._send(415, {"detail": "仅支持 JPG/PNG/WEBP 图片或 MP4/MOV/WEBM 视频"})
-    try:
-        content_length = int(handler.headers.get("Content-Length") or 0)
-    except (TypeError, ValueError):
-        content_length = 0
-    maximum = 20 * 1024 * 1024 if media_type == "image" else 200 * 1024 * 1024
-    if content_length <= 0 or content_length > maximum:
-        return handler._send(413, {"detail": "图片最大 20MB，视频最大 200MB"})
-    active_jobs = core._user_active_job_count(user["username"])
-    if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
-        return handler._send(429, {
-            "detail": "当前生成任务较多，请完成后再提交", "code": "active_job_cap",
-            "active_jobs": active_jobs, "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
-            "retry_after_ms": 4000,
-        })
-
-    temp_path = ""
-    upload_token = __import__("uuid").uuid4().hex
-    suffix = allowed[media_type][content_type]
-    try:
-        root = _upload_root()
-        temp_path = str(root / (upload_token + suffix))
-        with open(temp_path, "xb") as uploaded:
-            remaining = content_length
-            while remaining:
-                chunk = handler.rfile.read(min(65536, remaining))
-                if not chunk:
-                    raise ValueError("上传文件读取不完整")
-                uploaded.write(chunk)
-                remaining -= len(chunk)
-        with open(temp_path, "rb") as uploaded:
-            signature = uploaded.read(16)
-        valid_signature = {
-            "image/jpeg": signature.startswith(b"\xff\xd8\xff"),
-            "image/png": signature.startswith(b"\x89PNG\r\n\x1a\n"),
-            "image/webp": signature.startswith(b"RIFF") and signature[8:12] == b"WEBP",
-            "video/mp4": len(signature) >= 12 and signature[4:8] == b"ftyp",
-            "video/quicktime": len(signature) >= 12 and signature[4:8] == b"ftyp",
-            "video/webm": signature.startswith(b"\x1a\x45\xdf\xa3"),
-        }[content_type]
-        if not valid_signature:
-            raise ValueError("文件内容与声明格式不一致")
-        body = {
-            "upload_token": upload_token,
-            "media_type": media_type,
-            "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
-        }
-        cost = points_domain.cost_of("breakdown", body)
-        with core._submission_lock:
-            with closing(core.jdb()) as connection:
-                _ensure_upload_table(connection)
-                connection.commit()
-
-            def record_upload(connection, job_id):
-                _ensure_upload_table(connection)
-                connection.execute(
-                    "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (upload_token, user["username"], suffix, job_id, int(time.time())),
-                )
-
-            job_id, points_left = core.jobs_store.create_paid_job(
-                core.jdb, points_domain.deduct_points, points_domain.refund_points,
-                "breakdown", user["username"], cost, body, core.SERVICE_OWNER,
-                before_commit=record_upload,
-            )
-            if not core.enqueue_job(job_id, "breakdown", _BREAKDOWN_MODE_REVERSE_PROMPT):
-                core._reject_pending_job(
-                    job_id, user["username"], cost, "任务队列已满，请稍后再试"
-                )
-                _remove_trusted_upload(
-                    upload_token, user["username"], job_id, temp_path
-                )
-                return handler._send(429, {
-                    "detail": "任务队列已满，请稍后再试", "code": "queue_full",
-                    "retry_after_ms": 4000,
-                })
-        return handler._send(
-            200, {"job_id": job_id, "cost": cost, "points_left": points_left}
-        )
-    except points_domain.AuthPointsError as exc:
-        _remove_upload(temp_path)
-        return handler._send(
-            exc.status if exc.status in (402, 403) else 502,
-            points_domain.public_error_body(exc, 20),
-        )
-    except paid_job_insert_error as exc:
-        _remove_upload(temp_path)
-        return handler._send(500, {
-            "detail": "任务创建失败，点数已退回",
-            "submission_ref": exc.submission_ref,
-        })
-    except Exception as exc:
-        _remove_upload(temp_path)
-        return handler._send(400, {"detail": str(exc)[:180]})
-
-
-def _remove_upload(path):
-    if path:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
+    return local_reverse_upload.handle_post(
+        handler,
+        verify=lambda _token: user,
+        points_domain=points_domain,
+        jdb=core.jdb,
+        jobs_store=core.jobs_store,
+        enqueue_job=core.enqueue_job,
+        reject_pending_job=core._reject_pending_job,
+        service_owner=core.SERVICE_OWNER,
+        out_dir=core.OUT_DIR,
+        is_shutting_down=core.is_shutting_down,
+        user_active_job_count=core._user_active_job_count,
+        max_user_active_jobs=core.MAX_USER_ACTIVE_JOBS,
+        must_change_password=core._must_change_password,
+    )
 
 
 def gen_breakdown(payload):
@@ -397,9 +305,11 @@ def gen_breakdown(payload):
     upload_token = str((payload or {}).get("upload_token") or "").strip().lower()
     if upload_token:
         return _do_local_reverse(payload, upload_token)
-    if (payload or {}).get("local_media_path"):
-        return _do_legacy_local_reverse(payload)
-    if (payload or {}).get("local_path"):
+    if (
+        (payload or {}).get("local_path")
+        or (payload or {}).get("local_media_path")
+        or (payload or {}).get("local_media_type")
+    ):
         raise ValueError("禁止提交服务器本地路径")
 
     mode = _normalize_mode(payload)
@@ -662,7 +572,7 @@ def _do_local_reverse(payload, upload_token):
     with closing(core.jdb()) as connection:
         _ensure_upload_table(connection)
         row = connection.execute(
-            "SELECT suffix FROM breakdown_uploads"
+            "SELECT suffix,path,media_type FROM breakdown_uploads"
             " WHERE token=? AND username=? AND job_id=?",
             (upload_token, username, int(job_id)),
         ).fetchone()
@@ -670,8 +580,20 @@ def _do_local_reverse(payload, upload_token):
     if not row:
         raise ValueError("上传凭证不存在或不属于当前任务")
     root = _upload_root()
-    candidate = (root / (upload_token + str(row["suffix"]))).resolve()
-    if candidate.parent != root or not candidate.is_file():
+    expected = (root / (upload_token + str(row["suffix"]))).resolve()
+    candidate = __import__("pathlib").Path(
+        str(row["path"] or expected)
+    ).resolve()
+    bound_media_type = str(row["media_type"] or media_type).strip().lower()
+    if (
+        candidate != expected
+        or candidate.parent != root
+        or bound_media_type != media_type
+    ):
+        _remove_trusted_upload(upload_token, username, job_id, str(expected))
+        raise ValueError("上传凭证与本地素材不匹配")
+    if not candidate.is_file():
+        _remove_trusted_upload(upload_token, username, job_id, str(candidate))
         raise ValueError("上传文件不存在或已过期")
     path = str(candidate)
 
@@ -682,59 +604,9 @@ def _do_local_reverse(payload, upload_token):
         payload,
         path,
         media_type,
-        title=os.path.basename(path),
+        title=str(payload.get("source_title") or os.path.basename(path))[:120],
         cleanup=cleanup,
     )
-
-
-def _do_legacy_local_reverse(payload):
-    """Bridge main's trusted local-upload queue ABI into the #139 engine.
-
-    Public JSON submissions still reject ``local_media_path``. This path is
-    accepted only for a claimed job whose file is an immediate child of the
-    server-owned ``reverse_uploads`` directory created by
-    ``local_reverse_upload.handle_post``.
-    """
-    from . import core
-    import pathlib
-
-    job_id = (payload or {}).get("_job_id")
-    username = str((payload or {}).get("_username") or "").strip()
-    media_type = str((payload or {}).get("local_media_type") or "").strip().lower()
-    if not job_id or not username or media_type not in {"image", "video"}:
-        raise ValueError("无效的本地上传任务")
-    root = (pathlib.Path(core.OUT_DIR) / "reverse_uploads").resolve()
-    candidate = pathlib.Path(
-        str((payload or {}).get("local_media_path") or "")
-    ).resolve()
-    if candidate.parent != root or not candidate.is_file():
-        raise ValueError("本地素材已失效，请重新上传")
-    title = str((payload or {}).get("source_title") or candidate.name)[:120]
-    duration = None
-    if media_type == "video":
-        try:
-            duration = float((payload or {}).get("duration"))
-        except (TypeError, ValueError):
-            duration = None
-        if duration is None or duration <= 0 or duration > 120.05:
-            raise ValueError("本地视频时长无效")
-
-    def cleanup():
-        try:
-            candidate.unlink()
-        except (FileNotFoundError, OSError):
-            pass
-
-    return _run_local_reverse_path(
-        payload,
-        str(candidate),
-        media_type,
-        title=title,
-        duration=duration,
-        cleanup=cleanup,
-    )
-
-
 def _run_local_reverse_path(
     payload, path, media_type, title="", duration=None, cleanup=None
 ):

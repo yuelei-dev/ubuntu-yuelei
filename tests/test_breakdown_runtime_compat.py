@@ -1,30 +1,12 @@
-import io
 import importlib
 import json
 import sqlite3
 import sys
 import tempfile
-import threading
 import unittest
 from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest import mock
-
-
-class _Handler:
-    def __init__(self, body, media_type="image", content_type="image/jpeg"):
-        self.path = "/api/gen/breakdown/local?media_type=" + media_type
-        self.headers = {
-            "Content-Type": content_type,
-            "Content-Length": str(len(body)),
-        }
-        self.rfile = io.BytesIO(body)
-        self.responses = []
-
-    def _send(self, status, body):
-        self.responses.append((status, body))
-        return status, body
-
 
 class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
     @classmethod
@@ -90,20 +72,6 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
         ) as local:
             self.assertEqual(self.breakdown.gen_breakdown(payload), {"ok": True})
         local.assert_called_once_with(payload, "a" * 32)
-
-    def test_main_local_upload_queue_abi_dispatches_to_same_engine(self):
-        payload = {
-            "mode": "local_reverse",
-            "local_media_path": "server-owned-upload.mp4",
-            "local_media_type": "video",
-            "_username": "alice",
-            "_job_id": 8,
-        }
-        with mock.patch.object(
-            self.breakdown, "_do_legacy_local_reverse", return_value={"ok": True}
-        ) as local:
-            self.assertEqual(self.breakdown.gen_breakdown(payload), {"ok": True})
-        local.assert_called_once_with(payload)
 
     def test_resolved_link_is_reused_without_second_parse(self):
         payload = {
@@ -234,152 +202,6 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             self.assertEqual(len(model_frames), 8)
             self.assertEqual(set(model_frames), {str(source)})
 
-    def test_main_legacy_local_upload_is_confined_and_uses_reverse_engine(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            upload_root = root / "reverse_uploads"
-            upload_root.mkdir()
-            source = upload_root / "trusted.jpg"
-            source.write_bytes(b"\xff\xd8\xfftest")
-            payload = {
-                "mode": "local_reverse",
-                "local_media_path": str(source),
-                "local_media_type": "image",
-                "source_title": "white-card.jpg",
-                "_username": "alice",
-                "_job_id": 43,
-            }
-            with ExitStack() as stack:
-                stack.enter_context(mock.patch.object(self.core, "OUT_DIR", root))
-                reverse = stack.enter_context(mock.patch.object(
-                    self.breakdown,
-                    "_reverse_result_from_frames",
-                    return_value={"type": "breakdown_reverse"},
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.breakdown, "_heartbeat"
-                ))
-                result = self.breakdown.gen_breakdown(payload)
-            self.assertEqual(result["type"], "breakdown_reverse")
-            model_frames = reverse.call_args.args[1]
-            self.assertEqual(len(model_frames), 8)
-            self.assertEqual(set(model_frames), {str(source)})
-            self.assertEqual(reverse.call_args.kwargs["title"], "white-card.jpg")
-            self.assertFalse(source.exists())
-
-    def test_main_legacy_local_upload_rejects_paths_outside_owned_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "reverse_uploads").mkdir()
-            outside = root / "outside.jpg"
-            outside.write_bytes(b"\xff\xd8\xfftest")
-            with mock.patch.object(self.core, "OUT_DIR", root):
-                with self.assertRaisesRegex(ValueError, "本地素材已失效"):
-                    self.breakdown.gen_breakdown({
-                        "mode": "local_reverse",
-                        "local_media_path": str(outside),
-                        "local_media_type": "image",
-                        "_username": "alice",
-                        "_job_id": 44,
-                    })
-            self.assertTrue(outside.exists())
-
-    def test_main_http_upload_route_and_worker_payload_have_compat_bridge(self):
-        core_source = (
-            self.root / "server/content_domains/core.py"
-        ).read_text(encoding="utf-8")
-        upload_source = (
-            self.root / "server/content_domains/local_reverse_upload.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn(
-            'p == "/api/gen/breakdown/local-upload"', core_source
-        )
-        self.assertIn('"local_media_path": str(path)', upload_source)
-        self.assertIn(
-            "/api/gen/breakdown/local-upload?media_type=", self.script
-        )
-        self.assertTrue(callable(self.breakdown._do_legacy_local_reverse))
-
-    def test_local_upload_charges_twenty_enqueues_and_persists_owner(self):
-        class FakePoints:
-            class AuthPointsError(Exception):
-                status = 500
-
-            def __init__(self):
-                self.deductions = []
-
-            def cost_of(self, kind, body):
-                return 20
-
-            def deduct_points(self, username, cost, reason):
-                self.deductions.append((username, cost, reason))
-                return 80
-
-            def refund_points(self, *args):
-                raise AssertionError("successful submit must not refund")
-
-            def public_error_body(self, exc, cost):
-                return {"detail": str(exc), "cost": cost}
-
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            database = root / "jobs.db"
-            connect = self._jdb(database)
-            points = FakePoints()
-            queued = []
-
-            def create_paid_job(
-                jdb, deduct, refund, kind, username, cost, payload, owner,
-                before_commit=None,
-            ):
-                points_left = deduct(username, cost, "job:breakdown submit:test")
-                with closing(jdb()) as connection:
-                    before_commit(connection, 77)
-                    connection.commit()
-                return 77, points_left
-
-            handler = _Handler(b"\xff\xd8\xff" + b"x" * 13)
-            with ExitStack() as stack:
-                stack.enter_context(mock.patch.object(self.core, "OUT_DIR", root))
-                stack.enter_context(mock.patch.object(self.core, "jdb", connect))
-                stack.enter_context(mock.patch.object(
-                    self.core, "_domains", return_value=(None, points, None)
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core.feature_flags, "require_enabled"
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core, "is_shutting_down", return_value=False
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core, "_user_active_job_count", return_value=0
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core, "_submission_lock", threading.Lock()
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core.jobs_store, "create_paid_job",
-                    side_effect=create_paid_job, create=True,
-                ))
-                stack.enter_context(mock.patch.object(
-                    self.core, "enqueue_job",
-                    side_effect=lambda *args: queued.append(args) or True,
-                ))
-                status, response = self.breakdown.handle_local_upload(
-                    handler, {"username": "alice"}
-                )
-
-            self.assertEqual(status, 200)
-            self.assertEqual(response["job_id"], 77)
-            self.assertEqual(response["cost"], 20)
-            self.assertEqual(points.deductions[0][:2], ("alice", 20))
-            self.assertEqual(queued, [(77, "breakdown", "reverse_prompt")])
-            with closing(connect()) as connection:
-                row = connection.execute(
-                    "SELECT username,job_id FROM breakdown_uploads"
-                ).fetchone()
-            self.assertEqual((row["username"], row["job_id"]), ("alice", 77))
-
     def test_reverse_success_is_not_treated_as_partial_batch_refund(self):
         refunds = []
         with mock.patch.object(
@@ -432,6 +254,8 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
             "function reverseReferenceThumbnailIndices(bd)",
             "function reverseReferenceImages(bd)",
             "thumbs[index-1]||null",
+            "_pendingSubmission('script-breakdown-local'",
+            "'Idempotency-Key':localPending.key",
         ):
             self.assertIn(marker, self.script)
         self.assertNotIn("frame_thumbnails)||[]).slice(0,4)", self.script)

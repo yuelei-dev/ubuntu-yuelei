@@ -54,7 +54,9 @@ class ContentDomainTests(unittest.TestCase):
         #   真实点数计算 talking_actual_cost 在 video.py），门禁上调到 1675。
         # 一键成片对齐(#P0)：队列路由（口播池）+ 运行闸计数同属 core 队列/限流基础设施；
         #   批量拆解退点结算逻辑在 points.settle_breakdown_batch，core 只留 2 行接线，门禁上调到 1680。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1680)
+        # The breakdown compatibility gate adds one submission-validation hunk
+        # before charging; core must otherwise remain a thin router.
+        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1685)
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，

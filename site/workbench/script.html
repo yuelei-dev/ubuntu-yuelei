@@ -1137,9 +1137,17 @@
     durationCheck.then(_localPointsCheck).then(function(){
       if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
       if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
+      var localPending=_pendingSubmission('script-breakdown-local',{
+        mediaType:mediaType,name:file.name,size:file.size,
+        type:mime,lastModified:Number(file.lastModified||0)
+      });
       return fetch('/api/gen/breakdown/local-upload?media_type='+mediaType,{
         method:'POST',credentials:'same-origin',
-        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name)},body:file
+        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name),
+          'Idempotency-Key':localPending.key},body:file
+      }).then(function(response){
+        if(response.ok)_confirmSubmission(localPending);
+        return response;
       });
     }).then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});}).then(function(x){
       if(x.s===401){_localBusy(btn,false);if(window.HQ)HQ.login();return;}

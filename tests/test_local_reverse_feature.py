@@ -322,8 +322,12 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertNotIn("正在转写视频口播", self.ui)
 
     def test_standard_paid_job_and_refund_flow_is_reused(self):
-        self.assertIn("jobs_store.create_paid_job", (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8"))
-        self.assertIn("reject_pending_job", (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8"))
+        upload = (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8")
+        self.assertNotIn("jobs_store.create_paid_job", upload)
+        self.assertIn("points_domain.deduct_points", upload)
+        self.assertIn("INSERT INTO jobs", upload)
+        self.assertIn("INSERT INTO breakdown_uploads", upload)
+        self.assertIn("reject_pending_job", upload)
         self.assertIn('if p == "/api/gen/breakdown/local-upload"', self.core)
         self.assertIn('"source_type": r.get("source_type")', self.assets)
         self.assertIn('"sections": r.get("sections")', self.assets)
