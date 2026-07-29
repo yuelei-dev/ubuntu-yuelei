@@ -22,6 +22,107 @@ BREAKDOWN_MAX_DOWNLOAD_BYTES = max(
     int(os.environ.get("BREAKDOWN_MAX_DOWNLOAD_BYTES", str(200 * 1024 * 1024))
         or str(200 * 1024 * 1024)),
 )
+# breakdown reaper grace is 600s. Keep one absolute analysis budget below it.
+BREAKDOWN_ANALYSIS_BUDGET = max(
+    60,
+    min(
+        540,
+        int(os.environ.get("BREAKDOWN_ANALYSIS_BUDGET", "540") or "540"),
+    ),
+)
+_REVERSE_MAX_SEGMENT_CHARS = 500
+_REVERSE_MAX_TOTAL_CHARS = 1600
+_REVERSE_DUPLICATE_SEQUENCE_THRESHOLD = 0.80
+_REVERSE_DUPLICATE_SHINGLE_THRESHOLD = 0.70
+_REVERSE_STATIC_SSIM_THRESHOLD = 0.995
+_REVERSE_STATIC_ACTION_MARKERS = (
+    "动作无变化",
+    "姿态无变化",
+    "没有动作变化",
+    "没有明显动作变化",
+    "没有姿态变化",
+    "未观察到明显动作变化",
+    "未见明显动作变化",
+    "人物保持不动",
+    "主体保持不动",
+    "人物静止不动",
+    "主体静止不动",
+    "保持同一姿态",
+    "保持原有姿态",
+    "画面完全静止",
+    "画面没有变化",
+    "画面无变化",
+    "画面内容保持一致",
+    "没有任何变化",
+    "主体保持静止，未观察到位置或形态变化",
+    "无动作",
+    "没有动作",
+    "未见动作",
+    "未观察到动作",
+    "未发生动作",
+)
+_REVERSE_MOTION_ACTION_MARKERS = (
+    "坐起", "起身", "抬起", "举起", "放下", "转身", "回头",
+    "伸出", "收回", "弯曲", "迈步", "走动", "移动", "前倾", "后仰",
+)
+_REVERSE_BACK_FACING_MARKERS = (
+    "背对镜头", "背向镜头", "后背朝向镜头",
+)
+_REVERSE_FACE_CLAIM_MARKERS = (
+    "表情", "神情", "微笑", "笑容", "眼神", "目光",
+    "闭眼", "睁眼", "皱眉",
+)
+_REVERSE_UNSUPPORTED_INFERENCE_MARKERS = (
+    "似乎", "仿佛", "感受风", "享受微风",
+    "阳光明媚", "绿草如茵",
+)
+_REVERSE_INVALID_SOUND_MARKERS = (
+    "未观察到声音", "从画面未观察到声音", "画面没有声音",
+    "画面无声音",
+)
+_REVERSE_NO_SPEECH_MARKERS = (
+    "未检测到可辨识语音", "未检测到可识别语音",
+)
+_REVERSE_UNRELIABLE_ORIENTATION_MARKERS = (
+    "面向树根", "朝向树根",
+)
+_REVERSE_GLOBAL_FACT_FIELDS = (
+    ("subject_identity", "主体身份与外观"),
+    ("wardrobe", "服装与随身物"),
+    ("recurring_scene_objects", "重复场景与关键物"),
+    ("scene_style", "场景风格"),
+    ("camera_style", "镜头风格"),
+    ("lighting_style", "光线与色调"),
+)
+_REVERSE_FRAME_EVIDENCE_FIELDS = (
+    "subject", "scene", "action", "camera", "lighting",
+)
+_REVERSE_EMPTY_PLACEHOLDER_VALUES = {
+    "主体", "主体信息", "主体细节", "场景", "场景信息", "场景细节",
+    "动作", "动作信息", "动作细节", "动作自然", "无法确认", "不确定",
+    "无可确认信息", "未识别", "未知",
+}
+_REVERSE_FIXED_CONTINUITY_MARKERS = (
+    "与上一段保持一致", "与前一段保持一致",
+    "保持与上一段一致", "保持与前一段一致",
+    "承接上一段", "承接前一段", "延续上一段", "延续前一段",
+    "与上一段一致", "与前一段一致", "同上一段", "同前一段",
+)
+_REVERSE_MAX_GLOBAL_CHARS = 220
+_REVERSE_VISUAL_SEMANTIC_CONTRACT = {
+    "definition": "visual_semantic_not_pixel",
+    "score_scope": "source_evidence_coverage_not_generated_video_similarity",
+    "target_score": 90,
+    "weights": {
+        "subject": 30,
+        "action_timing": 25,
+        "scene_composition": 20,
+        "camera_duration": 15,
+        "lighting_style": 10,
+    },
+    "critical_failures": ("subject", "scene", "action"),
+    "requires_reference_guidance": True,
+}
 
 
 def gen_breakdown(payload):
@@ -117,13 +218,13 @@ def _do_breakdown(payload, info, url, mode=None):
         if is_reverse:
             frame_dir, frames = _extract_frames(
                 tmp_video.name, frame_count, duration,
-                scale_width=1024, min_frames=8,
+                scale_width=1024, min_frames=8, uniform=True,
             )
         else:
             frame_dir, frames = _extract_frames(
                 tmp_video.name, frame_count, duration, scale_width=512,
             )
-        model_frames = _pair_reverse_frames(frame_dir, frames) if is_reverse else frames
+        model_frames = frames
 
         script_text = ""
         asr_failed = False
@@ -140,18 +241,100 @@ def _do_breakdown(payload, info, url, mode=None):
 
         _heartbeat(job_id, "analyzing")
         platform = info.get("platform", "")
-        frame_thumbnails = _frame_thumbnails(frames)
         if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
-            prompt = _reverse_prompt_from_frames(title, duration, platform, script_text, model_frames)
+            analysis_deadline = time.monotonic() + BREAKDOWN_ANALYSIS_BUDGET
+            analysis_heartbeat = lambda: _heartbeat(job_id, "analyzing")
+            prompt_result = _reverse_prompt_from_frames(
+                title,
+                duration,
+                platform,
+                script_text,
+                model_frames,
+                return_details=True,
+                deadline=analysis_deadline,
+                heartbeat=analysis_heartbeat,
+            )
+            frame_bundle = _reverse_frame_bundle(
+                frames, len(prompt_result["windows"])
+            )
+            global_continuity = _reverse_global_facts_from_segments(
+                prompt_result["entries"],
+                frame_bundle["segment_model_source_indices"],
+                frame_count=len(frames),
+            )
+            prompt_result["prompt"] = _assemble_reverse_prompt(
+                prompt_result["entries"],
+                prompt_result["windows"],
+                global_continuity,
+            )
+            quality_score = _score_reverse_generation_coverage(
+                prompt_result["entries"],
+                global_continuity,
+                prompt_result["windows"],
+            )
+            target_score = _REVERSE_VISUAL_SEMANTIC_CONTRACT["target_score"]
+            if quality_score["total"] < target_score:
+                raise ValueError(
+                    "反推结果生成要素覆盖度不足：%d分，至少需要%d分，请重试"
+                    % (quality_score["total"], target_score)
+                )
+            frame_thumbnails = _frame_thumbnails(
+                frame_bundle["frames"], limit=len(frame_bundle["frames"])
+            )
+            if len(frame_thumbnails) != len(frame_bundle["frames"]):
+                raise ValueError("反推审计证据帧序列化失败，请重试")
+            segment_evidence = _reverse_segment_evidence_manifest(
+                prompt_result["entries"],
+                prompt_result["windows"],
+                frame_bundle["segment_source_indices"],
+                frame_bundle["segment_model_source_indices"],
+            )
+            call_budget = _reverse_analysis_call_budget(
+                len(prompt_result["windows"])
+            )
+            audit_sections = {
+                "frame_manifest": frame_bundle["manifest"],
+                "reference_thumbnail_indices": frame_bundle[
+                    "reference_thumbnail_indices"
+                ],
+                "audit_thumbnail_indices": frame_bundle[
+                    "audit_thumbnail_indices"
+                ],
+                "global_continuity": global_continuity,
+                "segment_evidence": segment_evidence,
+                "analysis_call_budget": call_budget,
+                "quality_contract": _reverse_quality_contract(),
+                "quality_score": quality_score,
+            }
             return {
                 "type": "breakdown_reverse",
                 "source_url": url,
                 "source_title": title,
                 "source_platform": platform,
                 "duration": duration,
-                "prompt": prompt,
+                "prompt": prompt_result["prompt"],
                 "frame_count": len(frames or []),
+                # Consumers must use reference_thumbnail_indices. Short videos
+                # have fewer than four segments, so array position is not a
+                # safe implicit reference-image contract.
                 "frame_thumbnails": frame_thumbnails,
+                "reference_frame_strategy": "explicit_indices_one_per_segment",
+                "reference_thumbnail_indices": frame_bundle[
+                    "reference_thumbnail_indices"
+                ],
+                "audit_thumbnail_indices": frame_bundle[
+                    "audit_thumbnail_indices"
+                ],
+                "frame_manifest": frame_bundle["manifest"],
+                "global_continuity": global_continuity,
+                "segment_evidence": segment_evidence,
+                "analysis_call_budget": call_budget,
+                "quality_contract": _reverse_quality_contract(),
+                "quality_score": quality_score,
+                # assets_store already persists sections and frame_thumbnails;
+                # keeping the audit manifest here prevents cleanup from
+                # leaving evidence numbers without their encoded source frame.
+                "sections": {"reverse_audit": audit_sections},
                 "asr_failed": asr_failed,
             }
 
@@ -166,7 +349,7 @@ def _do_breakdown(payload, info, url, mode=None):
             "scenes": result.get("scenes", []),
             "analysis": result.get("analysis", ""),
             "asr_failed": asr_failed,
-            "frame_thumbnails": frame_thumbnails,
+            "frame_thumbnails": _frame_thumbnails(frames),
         }
     finally:
         if tmp_video:
@@ -370,8 +553,8 @@ def _format_timeline_second(seconds):
     return "%02d:%04.1f" % (minutes, remainder_tenths / 10.0)
 
 
-def _fixed_reverse_ranges(duration, max_segments=4):
-    """Build a gap-free timeline in code; the model never invents timestamps."""
+def _reverse_segment_windows(duration, max_segments=4):
+    """Build gap-free numeric windows; model prompts and output share these bounds."""
     duration = max(0.001, float(duration or 0))
     segment_count = min(
         max(1, int(max_segments or 1)),
@@ -382,12 +565,236 @@ def _fixed_reverse_ranges(duration, max_segments=4):
         for index in range(segment_count + 1)
     ]
     return [
-        "[%s-%s]" % (
-            _format_timeline_second(boundaries[index]),
-            _format_timeline_second(boundaries[index + 1]),
+        (
+            boundaries[index],
+            boundaries[index + 1],
+            "[%s-%s]" % (
+                _format_timeline_second(boundaries[index]),
+                _format_timeline_second(boundaries[index + 1]),
+            ),
         )
         for index in range(segment_count)
     ]
+
+
+def _fixed_reverse_ranges(duration, max_segments=4):
+    """Build a gap-free timeline in code; the model never invents timestamps."""
+    return [
+        label
+        for _start, _end, label in _reverse_segment_windows(
+            duration, max_segments=max_segments
+        )
+    ]
+
+
+def _group_reverse_frames(frames, segment_count):
+    """Partition all audit frames by the single authoritative segment mapping."""
+    ordered = list(frames or [])
+    segment_count = max(1, int(segment_count or 1))
+    if len(ordered) < segment_count * 2:
+        raise ValueError(
+            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
+            % (segment_count, segment_count * 2)
+        )
+    groups = []
+    for index in range(segment_count):
+        start = int(round(index * len(ordered) / float(segment_count)))
+        end = int(round((index + 1) * len(ordered) / float(segment_count)))
+        group = ordered[start:end]
+        if len(group) < 2:
+            raise ValueError("反推第%d段缺少多帧证据" % (index + 1))
+        groups.append(group)
+    return groups
+
+
+def _reverse_model_frame_groups(frames, segment_count):
+    """Select only the first/last frame in each segment for the VLM request."""
+    result = []
+    for group in _group_reverse_frames(frames, segment_count):
+        result.append([group[0], group[-1]])
+    return result
+
+
+def _reverse_reference_frames(frames, segment_count):
+    """Return one chronological source frame per segment for downstream generation."""
+    return [
+        group[-1]
+        for group in _group_reverse_frames(frames, segment_count)
+    ]
+
+
+def _group_reverse_frame_indices(frame_count, segment_count):
+    frame_count = max(0, int(frame_count or 0))
+    segment_count = max(1, int(segment_count or 1))
+    return [
+        list(range(
+            int(round(index * frame_count / float(segment_count))) + 1,
+            int(round((index + 1) * frame_count / float(segment_count))) + 1,
+        ))
+        for index in range(segment_count)
+    ]
+
+
+def _reverse_frame_bundle(frames, segment_count):
+    """Keep explicit downstream indexes separate from the audit-frame set."""
+    ordered = list(frames or [])
+    segment_source_indices = _group_reverse_frame_indices(
+        len(ordered), segment_count
+    )
+    segment_model_source_indices = [
+        [indices[0], indices[-1]]
+        for indices in segment_source_indices
+    ]
+    reference_source_indices = [
+        indices[-1] for indices in segment_source_indices if indices
+    ]
+    remaining_source_indices = [
+        index for index in range(1, len(ordered) + 1)
+        if index not in reference_source_indices
+    ]
+    source_order = reference_source_indices + remaining_source_indices
+    location = {}
+    for segment_index, indices in enumerate(segment_source_indices, 1):
+        for local_index, source_index in enumerate(indices, 1):
+            location[source_index] = (segment_index, local_index)
+    manifest = []
+    for thumbnail_index, source_index in enumerate(source_order, 1):
+        segment_index, local_index = location[source_index]
+        manifest.append({
+            "thumbnail_index": thumbnail_index,
+            "source_frame_index": source_index,
+            "segment_index": segment_index,
+            "segment_local_index": local_index,
+            "downstream_reference": (
+                source_index in reference_source_indices
+            ),
+        })
+    return {
+        "frames": [ordered[index - 1] for index in source_order],
+        "manifest": manifest,
+        "reference_thumbnail_indices": list(
+            range(1, len(reference_source_indices) + 1)
+        ),
+        "audit_thumbnail_indices": list(
+            range(len(reference_source_indices) + 1, len(source_order) + 1)
+        ),
+        "segment_source_indices": segment_source_indices,
+        "segment_model_source_indices": segment_model_source_indices,
+    }
+
+
+def _reverse_segment_evidence_manifest(
+    entries, windows, segment_source_indices, segment_model_source_indices
+):
+    result = []
+    for entry, (_start, _end, timeline), source_indices, model_source_indices in zip(
+        entries or [],
+        windows or [],
+        segment_source_indices or [],
+        segment_model_source_indices or [],
+    ):
+        mapped = {}
+        for key, local_indices in (
+            entry.get("evidence_frames") or {}
+        ).items():
+            mapped[key] = [
+                model_source_indices[index - 1]
+                for index in local_indices
+                if 1 <= index <= len(model_source_indices)
+            ]
+        result.append({
+            "timeline": timeline,
+            "segment_source_frames": list(source_indices),
+            "local_to_source": {
+                str(index): source_index
+                for index, source_index in enumerate(model_source_indices, 1)
+            },
+            "local_evidence_frames": entry.get("evidence_frames") or {},
+            "source_evidence_frames": mapped,
+            "continuity_source_frames": entry.get(
+                "continuity_evidence_frames", []
+            ),
+        })
+    return result
+
+
+def _reverse_source_frame_segment(frame_index, frame_count, segment_count):
+    frame_count = int(frame_count or 0)
+    segment_count = int(segment_count or 0)
+    try:
+        frame_index = int(frame_index)
+    except (TypeError, ValueError):
+        return 0
+    if frame_count <= 0 or segment_count <= 0:
+        return 0
+    for index, source_indices in enumerate(
+        _group_reverse_frame_indices(frame_count, segment_count), 1
+    ):
+        if frame_index in source_indices:
+            return index
+    return 0
+
+
+def _clock_to_seconds(value):
+    text = str(value or "").strip().replace(",", ".")
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            return (
+                float(parts[0]) * 3600
+                + float(parts[1]) * 60
+                + float(parts[2])
+            )
+        return float(text.rstrip("sS"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _segment_transcript(script_text, start, end):
+    """Keep only ASR lines whose timestamps overlap the current visual segment."""
+    text = str(script_text or "").replace("\r", "").strip()
+    if not text:
+        return ""
+    matches = []
+    bracket_pattern = re.compile(
+        r"^\s*\[\s*([0-9:.]+)\s*[sS]?\s*[-–—至到]\s*"
+        r"([0-9:.]+)\s*[sS]?\s*\]\s*(.*?)\s*$"
+    )
+    srt_pattern = re.compile(
+        r"^\s*([0-9:,\.]+)\s*-->\s*([0-9:,\.]+)\s*$"
+    )
+    lines = text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        bracket = bracket_pattern.match(line)
+        if bracket:
+            item_start = _clock_to_seconds(bracket.group(1))
+            item_end = _clock_to_seconds(bracket.group(2))
+            spoken = bracket.group(3).strip()
+        else:
+            srt = srt_pattern.match(line)
+            if not srt:
+                index += 1
+                continue
+            item_start = _clock_to_seconds(srt.group(1))
+            item_end = _clock_to_seconds(srt.group(2))
+            spoken_lines = []
+            index += 1
+            while index < len(lines) and lines[index].strip():
+                spoken_lines.append(lines[index].strip())
+                index += 1
+            spoken = " ".join(spoken_lines).strip()
+        if (
+            item_start is not None
+            and item_end is not None
+            and spoken
+            and item_end > float(start)
+            and item_start < float(end)
+        ):
+            matches.append(spoken)
+        index += 1
+    return "\n".join(dict.fromkeys(matches))
 
 
 def _parse_reverse_segments(raw, expected_count):
@@ -416,15 +823,6 @@ def _parse_reverse_segments(raw, expected_count):
     }
     for index, value in enumerate(values, 1):
         if isinstance(value, dict):
-            missing = [
-                key for key, _label in _REVERSE_SEGMENT_FIELDS
-                if not str(value.get(key) or "").strip()
-            ]
-            if missing:
-                raise ValueError(
-                    "反推结果第%d段缺少字段：%s，请重试"
-                    % (index, ", ".join(missing))
-                )
             value = _compose_reverse_segment(value)
         text = " ".join(str(value or "").replace("\r", "").split()).strip()
         if not text:
@@ -458,44 +856,639 @@ def _compose_reverse_segment(value):
     return value.get("description") or value.get("prompt") or ""
 
 
+def _reverse_quality_contract():
+    """Return an isolated, JSON-safe copy of the auditable 100-point rubric."""
+    return json.loads(json.dumps(
+        _REVERSE_VISUAL_SEMANTIC_CONTRACT, ensure_ascii=False
+    ))
+
+
+def _compose_reverse_global_facts(global_continuity, include_evidence=False):
+    facts = (global_continuity or {}).get("facts") or {}
+    evidence = (global_continuity or {}).get("evidence_frames") or {}
+    parts = []
+    for key, label in _REVERSE_GLOBAL_FACT_FIELDS:
+        text = " ".join(str(facts.get(key) or "").replace("\r", "").split()).strip()
+        if text:
+            part = "%s：%s" % (label, text.rstrip("；;。"))
+            if include_evidence:
+                indices = evidence.get(key) or []
+                part += "（证据原始帧：%s）" % "、".join(
+                    str(index) for index in indices
+                )
+            parts.append(part)
+    return "；".join(parts)
+
+
+def _parse_reverse_global_facts(raw, frame_count, segment_count):
+    parsed = _parse_breakdown_json(raw)
+    facts = parsed.get("global_facts") if isinstance(parsed, dict) else None
+    evidence = parsed.get("evidence_frames") if isinstance(parsed, dict) else None
+    if not isinstance(facts, dict) or not isinstance(evidence, dict):
+        raise ValueError("反推全局连续性缺少事实或帧证据，请重试")
+
+    normalized_facts = {}
+    normalized_evidence = {}
+    for key, _label in _REVERSE_GLOBAL_FACT_FIELDS:
+        text = " ".join(str(facts.get(key) or "").replace("\r", "").split()).strip()
+        normalized_facts[key] = text
+        if _compact_reverse_text(text) in {
+            _compact_reverse_text(value)
+            for value in _REVERSE_EMPTY_PLACEHOLDER_VALUES
+        }:
+            raise ValueError("反推全局连续性包含空洞占位内容，请重试")
+        raw_indices = evidence.get(key) or []
+        if not isinstance(raw_indices, list):
+            raise ValueError("反推全局连续性帧证据格式错误，请重试")
+        indices = []
+        for value in raw_indices:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                raise ValueError("反推全局连续性帧证据格式错误，请重试")
+            if index < 1 or index > int(frame_count or 0):
+                raise ValueError("反推全局连续性帧证据超出关键帧范围，请重试")
+            if index not in indices:
+                indices.append(index)
+        if text and not indices:
+            raise ValueError("反推全局连续性事实缺少原始帧编号，请重试")
+        if text:
+            evidence_segments = {
+                _reverse_source_frame_segment(
+                    index,
+                    int(frame_count or 0),
+                    segment_count=max(1, int(segment_count or 1)),
+                )
+                for index in indices
+            }
+            evidence_segments.discard(0)
+            if len(evidence_segments) < 2:
+                raise ValueError(
+                    "反推全局连续性事实必须覆盖至少两个不同时间段，请重试"
+                )
+        normalized_evidence[key] = indices
+
+    all_facts = " ".join(normalized_facts.values())
+    compact = _compact_reverse_text(all_facts)
+    if not compact:
+        raise ValueError("反推全局连续性事实为空，请重试")
+    if len(compact) > _REVERSE_MAX_GLOBAL_CHARS:
+        raise ValueError(
+            "反推全局连续性事实过长：最多%d字，实际%d字，请重试"
+            % (_REVERSE_MAX_GLOBAL_CHARS, len(compact))
+        )
+    unsupported = next(
+        (
+            marker for marker in _REVERSE_UNSUPPORTED_INFERENCE_MARKERS
+            if marker in all_facts
+        ),
+        None,
+    )
+    if unsupported:
+        raise ValueError(
+            "反推全局连续性包含无证据主观推断“%s”，请重试" % unsupported
+        )
+    return {
+        "facts": normalized_facts,
+        "evidence_frames": normalized_evidence,
+        "frame_count": int(frame_count or 0),
+        "segment_count": max(1, int(segment_count or 1)),
+    }
+
+
+def _reverse_global_facts_from_segments(
+    entries, segment_model_source_indices, frame_count
+):
+    """Deterministically aggregate only facts already validated per segment."""
+    entries = list(entries or [])
+    source_groups = list(segment_model_source_indices or [])
+    segment_count = len(entries)
+    empty = {
+        "facts": {
+            key: "" for key, _label in _REVERSE_GLOBAL_FACT_FIELDS
+        },
+        "evidence_frames": {
+            key: [] for key, _label in _REVERSE_GLOBAL_FACT_FIELDS
+        },
+        "changes": {},
+        "frame_count": int(frame_count or 0),
+        "segment_count": segment_count,
+        "aggregation": "deterministic_validated_segment_intersection",
+        "model_calls": 0,
+        "image_count": 0,
+    }
+    if segment_count <= 1:
+        return empty
+    if len(source_groups) != segment_count:
+        raise ValueError("反推全局连续性缺少分段原始帧映射，请重试")
+
+    field_map = {
+        "subject_identity": "subject",
+        "recurring_scene_objects": "scene",
+        "camera_style": "camera",
+        "lighting_style": "lighting",
+    }
+    field_values = {}
+    field_evidence = {}
+    for segment_key in ("subject", "scene", "action", "camera", "lighting"):
+        field_values[segment_key] = [
+            str(entry.get("fields", {}).get(segment_key) or "").strip()
+            for entry in entries
+        ]
+        field_evidence[segment_key] = []
+        for entry, source_indices in zip(entries, source_groups):
+            field_evidence[segment_key].append([
+                source_indices[index - 1]
+                for index in (
+                    entry.get("evidence_frames", {}).get(segment_key) or []
+                )
+                if 1 <= index <= len(source_indices)
+            ])
+
+    for global_key, segment_key in field_map.items():
+        values = field_values[segment_key]
+        compact_values = [_compact_reverse_text(value) for value in values]
+        evidence_by_segment = field_evidence[segment_key]
+        if (
+            all(compact_values)
+            and len(set(compact_values)) == 1
+            and all(evidence_by_segment)
+        ):
+            empty["facts"][global_key] = values[0]
+            empty["evidence_frames"][global_key] = list(dict.fromkeys(
+                frame
+                for segment_frames in evidence_by_segment
+                for frame in segment_frames
+            ))
+    changes = {}
+    for segment_key in ("subject", "scene", "action", "camera", "lighting"):
+        values = field_values[segment_key]
+        compact_values = [_compact_reverse_text(value) for value in values]
+        if all(compact_values) and len(set(compact_values)) == 1:
+            continue
+        changes[segment_key] = [
+            {
+                "segment_index": index,
+                "text": value,
+                "evidence_frames": evidence_frames,
+            }
+            for index, (value, evidence_frames) in enumerate(
+                zip(values, field_evidence[segment_key]), 1
+            )
+            if _compact_reverse_text(value) and evidence_frames
+        ]
+    empty["changes"] = {
+        key: values for key, values in changes.items() if values
+    }
+    return empty
+
+
+def _compact_reverse_text(value):
+    return re.sub(r"[\W_]+", "", str(value or "")).lower()
+
+
+def _reverse_text_similarity(left, right):
+    left_compact = _compact_reverse_text(left)
+    right_compact = _compact_reverse_text(right)
+    if not left_compact or not right_compact:
+        return 0.0
+    return SequenceMatcher(
+        None, left_compact, right_compact, autojunk=False,
+    ).ratio()
+
+
+def _reverse_shingle_jaccard(left, right, size=8):
+    left_compact = _compact_reverse_text(left)
+    right_compact = _compact_reverse_text(right)
+    if min(len(left_compact), len(right_compact)) < size:
+        return 0.0
+    left_set = {
+        left_compact[index:index + size]
+        for index in range(len(left_compact) - size + 1)
+    }
+    right_set = {
+        right_compact[index:index + size]
+        for index in range(len(right_compact) - size + 1)
+    }
+    union = left_set | right_set
+    return len(left_set & right_set) / float(len(union)) if union else 0.0
+
+
+def _reverse_segments_are_duplicate(current, previous):
+    current_text = current.get("text", "")
+    previous_text = previous.get("text", "")
+    current_compact = _compact_reverse_text(current_text)
+    previous_compact = _compact_reverse_text(previous_text)
+    if not current_compact or not previous_compact:
+        return False
+    if current_compact == previous_compact:
+        return True
+    if min(len(current_compact), len(previous_compact)) >= 40:
+        if (
+            _reverse_text_similarity(current_text, previous_text)
+            >= _REVERSE_DUPLICATE_SEQUENCE_THRESHOLD
+        ):
+            return True
+        if (
+            _reverse_shingle_jaccard(current_text, previous_text)
+            >= _REVERSE_DUPLICATE_SHINGLE_THRESHOLD
+        ):
+            return True
+
+    current_action = current.get("fields", {}).get("action", "")
+    previous_action = previous.get("fields", {}).get("action", "")
+    if min(
+        len(_compact_reverse_text(current_action)),
+        len(_compact_reverse_text(previous_action)),
+    ) >= 12 and _reverse_text_similarity(
+        current_action, previous_action
+    ) >= 0.85:
+        return True
+    return False
+
+
+def _parse_reverse_segment_evidence(raw):
+    """Parse one segment while preserving fields used by evidence validation."""
+    fields = {}
+    parsed = _parse_breakdown_json(raw)
+    values = parsed.get("segments") if isinstance(parsed, dict) else None
+    if not isinstance(values, list):
+        raise ValueError("反推结果缺少 segments 数组，请重试")
+    if len(values) != 1:
+        raise ValueError(
+            "单段反推结果段数错误：需要1段，实际%d段，请重试" % len(values)
+        )
+    value = values[0]
+    if not isinstance(value, dict):
+        raise ValueError("反推结果本段必须是结构化对象，请重试")
+    fields = {
+        key: " ".join(
+            str(value.get(key) or "").replace("\r", "").split()
+        ).strip()
+        for key, _label in _REVERSE_SEGMENT_FIELDS
+    }
+    raw_evidence = value.get("evidence_frames") or {}
+    if raw_evidence and not isinstance(raw_evidence, dict):
+        raise ValueError("反推结果本段帧证据格式错误，请重试")
+    evidence_frames = {}
+    for key in _REVERSE_FRAME_EVIDENCE_FIELDS:
+        indices = raw_evidence.get(key) or []
+        if not isinstance(indices, list):
+            raise ValueError("反推结果本段帧证据格式错误，请重试")
+        normalized = []
+        for raw_index in indices:
+            try:
+                frame_index = int(raw_index)
+            except (TypeError, ValueError):
+                raise ValueError("反推结果本段帧证据格式错误，请重试")
+            if frame_index not in normalized:
+                normalized.append(frame_index)
+        evidence_frames[key] = normalized
+    continuity_evidence_frames = value.get("continuity_evidence_frames") or []
+    if not isinstance(continuity_evidence_frames, list):
+        raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
+    normalized_continuity_evidence = []
+    for raw_index in continuity_evidence_frames:
+        try:
+            frame_index = int(raw_index)
+        except (TypeError, ValueError):
+            raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
+        if frame_index not in normalized_continuity_evidence:
+            normalized_continuity_evidence.append(frame_index)
+    text = _compose_reverse_segment(fields)
+    text = str(text or "").strip()
+    if not text:
+        raise ValueError(
+            "反推结果本段为空，缺少 subject、scene、action，请重试"
+        )
+    return {
+        "text": text,
+        "fields": fields,
+        "evidence_frames": evidence_frames,
+        "continuity_evidence_frames": normalized_continuity_evidence,
+    }
+
+
+def _frames_are_effectively_static(frame_paths):
+    """Return True only when every adjacent source frame is visually near-identical."""
+    ordered = list(frame_paths or [])
+    if len(ordered) < 2:
+        return False
+    for left, right in zip(ordered, ordered[1:]):
+        try:
+            completed = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "info",
+                    "-i", left, "-i", right,
+                    "-lavfi", "[0:v][1:v]ssim",
+                    "-f", "null", "-",
+                ],
+                check=True,
+                timeout=20,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return False
+        detail = completed.stderr.decode("utf-8", "replace")
+        matches = re.findall(r"\bAll:([0-9.]+)", detail)
+        if not matches or float(matches[-1]) < _REVERSE_STATIC_SSIM_THRESHOLD:
+            return False
+    return True
+
+
+def _reverse_action_has_static_clause(action):
+    action = str(action or "").strip()
+    if not action:
+        return False
+    boundary = r"[，,；;。.!！?？\n]"
+    clause_prefix = r"(?:(?:但|却|而|同时|仍然|仍|并且|并)\s*)*"
+    return any(
+        re.search(
+            r"(?:^|%s)\s*%s%s\s*(?=$|%s)"
+            % (boundary, clause_prefix, re.escape(marker), boundary),
+            action,
+        )
+        for marker in _REVERSE_STATIC_ACTION_MARKERS
+    )
+
+
+def _reverse_segment_claims_static(entry):
+    action = str(entry.get("fields", {}).get("action") or "")
+    return (
+        _reverse_action_has_static_clause(action)
+        and not any(marker in action for marker in _REVERSE_MOTION_ACTION_MARKERS)
+    )
+
+
+def _reverse_segment_field_text(entry, *keys):
+    fields = entry.get("fields", {})
+    selected = keys or tuple(key for key, _label in _REVERSE_SEGMENT_FIELDS)
+    return " ".join(str(fields.get(key) or "") for key in selected).strip()
+
+
+def _reverse_sound_matches_transcript(sound, transcript):
+    sound_text = _compact_reverse_text(sound)
+    transcript_text = _compact_reverse_text(transcript)
+    if not sound_text or not transcript_text:
+        return False
+    for marker in (
+        "人物口播", "人物说出", "人物说", "口播内容", "语音内容",
+        "台词内容", "口播", "语音", "台词", "说出",
+        "女声说", "男声说", "有人说", "人物", "女声", "男声", "说",
+    ):
+        sound_text = sound_text.replace(_compact_reverse_text(marker), "")
+    if len(sound_text) < 2:
+        return False
+    return sound_text in transcript_text
+
+
+def _validate_reverse_segment_evidence(
+    entry, previous_entries, frame_paths, index, transcript="",
+    require_frame_evidence=False, global_continuity=None,
+):
+    text = entry.get("text", "")
+    compact = _compact_reverse_text(text)
+    if not compact:
+        raise ValueError("反推结果第%d段为空，请重试" % index)
+    if len(compact) > _REVERSE_MAX_SEGMENT_CHARS:
+        raise ValueError(
+            "反推结果第%d段过长：最多%d字，实际%d字，请重试"
+            % (index, _REVERSE_MAX_SEGMENT_CHARS, len(compact))
+        )
+
+    fields = entry.get("fields", {})
+    missing_critical_fields = []
+    for key, label in (("subject", "主体"), ("scene", "场景"), ("action", "动作")):
+        compact_field = _compact_reverse_text(fields.get(key, ""))
+        if not compact_field:
+            missing_critical_fields.append("%s（%s）" % (key, label))
+            continue
+        if compact_field in {
+            _compact_reverse_text(value)
+            for value in _REVERSE_EMPTY_PLACEHOLDER_VALUES
+        }:
+            raise ValueError(
+                "反推结果第%d段关键%s是空洞占位内容，请重试" % (index, label)
+            )
+    if missing_critical_fields:
+        raise ValueError(
+            "反推结果第%d段缺少可生成的关键字段：%s，请重试"
+            % (index, "、".join(missing_critical_fields))
+        )
+    if require_frame_evidence:
+        evidence_frames = entry.get("evidence_frames") or {}
+        frame_count = len(frame_paths or [])
+        for key in _REVERSE_FRAME_EVIDENCE_FIELDS:
+            if not _compact_reverse_text(fields.get(key, "")):
+                continue
+            indices = evidence_frames.get(key) or []
+            if not indices:
+                raise ValueError(
+                    "反推结果第%d段%s缺少本段原始帧证据，请重试"
+                    % (index, dict(_REVERSE_SEGMENT_FIELDS)[key])
+                )
+            if any(frame < 1 or frame > frame_count for frame in indices):
+                raise ValueError(
+                    "反推结果第%d段帧证据超出本段原始帧范围，请重试" % index
+                )
+        action_evidence = set(evidence_frames.get("action") or [])
+        if frame_count >= 2 and not {1, frame_count}.issubset(action_evidence):
+            raise ValueError(
+                "反推结果第%d段动作时序必须同时引用本段首尾原始帧，请重试"
+                % index
+            )
+
+    subject = fields.get("subject", "")
+    action = fields.get("action", "")
+    sound = fields.get("sound", "")
+    continuity = fields.get("continuity", "")
+    all_fields = _reverse_segment_field_text(entry)
+
+    if (
+        _reverse_action_has_static_clause(action)
+        and any(marker in action for marker in _REVERSE_MOTION_ACTION_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段动作与“无变化”自相矛盾，请重试" % index)
+
+    facing_text = _reverse_segment_field_text(entry, "subject", "action")
+    if (
+        any(marker in facing_text for marker in _REVERSE_BACK_FACING_MARKERS)
+        and any(marker in facing_text for marker in _REVERSE_FACE_CLAIM_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段描述了不可见的背面表情，请重试" % index)
+
+    unsupported = next(
+        (
+            marker for marker in _REVERSE_UNSUPPORTED_INFERENCE_MARKERS
+            if marker in all_fields
+        ),
+        None,
+    )
+    if unsupported:
+        raise ValueError(
+            "反推结果第%d段包含无证据主观推断“%s”，请重试"
+            % (index, unsupported)
+        )
+
+    unreliable_orientation = next(
+        (
+            marker for marker in _REVERSE_UNRELIABLE_ORIENTATION_MARKERS
+            if marker in all_fields
+        ),
+        None,
+    )
+    if unreliable_orientation:
+        raise ValueError(
+            "反推结果第%d段包含无可靠证据方位“%s”，请重试"
+            % (index, unreliable_orientation)
+        )
+
+    invalid_sound = next(
+        (
+            marker for marker in _REVERSE_INVALID_SOUND_MARKERS
+            if marker in sound
+        ),
+        None,
+    )
+    if invalid_sound:
+        raise ValueError("反推结果第%d段从画面推断声音，请重试" % index)
+    if _compact_reverse_text(sound) and not str(transcript or "").strip():
+        raise ValueError("反推结果第%d段声音缺少本段ASR证据，请重试" % index)
+    if (
+        _compact_reverse_text(sound)
+        and not _reverse_sound_matches_transcript(sound, transcript)
+    ):
+        raise ValueError("反推结果第%d段声音与本段ASR内容不匹配，请重试" % index)
+    if (
+        str(transcript or "").strip()
+        and any(marker in sound for marker in _REVERSE_NO_SPEECH_MARKERS)
+    ):
+        raise ValueError("反推结果第%d段声音与本段ASR自相矛盾，请重试" % index)
+
+    fixed_continuity = next(
+        (
+            marker for marker in _REVERSE_FIXED_CONTINUITY_MARKERS
+            if marker in continuity
+        ),
+        None,
+    )
+    if fixed_continuity:
+        raise ValueError(
+            "反推结果第%d段使用固定衔接文字“%s”，请重试"
+            % (index, fixed_continuity)
+        )
+    if not global_continuity and (
+        _compact_reverse_text(continuity)
+        or entry.get("continuity_evidence_frames")
+    ):
+        raise ValueError(
+            "反推结果第%d段不能在隔离分段分析中编造跨段衔接，请重试"
+            % index
+        )
+    if require_frame_evidence and _compact_reverse_text(continuity):
+        continuity_indices = entry.get("continuity_evidence_frames") or []
+        total_frames = int((global_continuity or {}).get("frame_count") or 8)
+        segment_count = int(
+            (global_continuity or {}).get("segment_count") or 0
+        )
+        if segment_count < 1:
+            raise ValueError(
+                "反推结果第%d段衔接缺少实际分段数量，请重试" % index
+            )
+        if segment_count == 1:
+            raise ValueError(
+                "反推结果第%d段是单段视频，不能编造跨段衔接，请重试" % index
+            )
+        allowed_global_indices = {
+            frame
+            for indices in (
+                (global_continuity or {}).get("evidence_frames") or {}
+            ).values()
+            for frame in indices
+        }
+        if (
+            not continuity_indices
+            or any(
+                frame < 1 or frame > total_frames
+                for frame in continuity_indices
+            )
+            or not set(continuity_indices).issubset(allowed_global_indices)
+        ):
+            raise ValueError(
+                "反推结果第%d段衔接缺少可核验的全局原始帧证据，请重试"
+                % index
+            )
+        continuity_segments = {
+            _reverse_source_frame_segment(
+                frame, total_frames, segment_count
+            )
+            for frame in continuity_indices
+        }
+        if (
+            index not in continuity_segments
+            or len(continuity_segments) < 2
+            or not any(
+                abs(segment - index) == 1
+                for segment in continuity_segments
+            )
+        ):
+            raise ValueError(
+                "反推结果第%d段衔接必须覆盖本段和相邻时间段原始帧，请重试"
+                % index
+            )
+
+    if "字幕" in all_fields and not re.search(
+        r"字幕[^“”\"]*[“\"]\s*[^“”\"]{1,80}\s*[”\"]",
+        all_fields,
+    ):
+        raise ValueError("反推结果第%d段字幕缺少可核验逐字内容，请重试" % index)
+
+    if min(
+        len(_compact_reverse_text(subject)),
+        len(_compact_reverse_text(action)),
+    ) >= 12 and _reverse_text_similarity(subject, action) >= 0.80:
+        raise ValueError("反推结果第%d段主体与动作机械重复，请重试" % index)
+
+    if (
+        _reverse_segment_claims_static(entry)
+        and not _frames_are_effectively_static(frame_paths)
+    ):
+        raise ValueError("反推结果第%d段无静止画面证据，请重试" % index)
+
+    for previous_index, previous in enumerate(previous_entries, 1):
+        if _reverse_segments_are_duplicate(entry, previous):
+            raise ValueError(
+                "反推结果第%d段与第%d段内容重复，请重试"
+                % (index, previous_index)
+            )
+    return entry
+
+
 def _validate_reverse_prompt_lengths(segments):
-    """Enforce length and non-repetition contracts after local assembly."""
+    """Keep a generous output cap and strict duplicate guard; no minimum length."""
     if not segments:
         raise ValueError("反推结果为空，请重试")
-    minimum = int(math.ceil(500.0 / len(segments)))
-    maximum = int(math.ceil(800.0 / len(segments)))
     lengths = [len(re.sub(r"\s+", "", segment or "")) for segment in segments]
     for index, length in enumerate(lengths, 1):
-        if length < minimum:
-            raise ValueError(
-                "反推结果第%d段过于简略：至少%d字，实际%d字，请重试"
-                % (index, minimum, length)
-            )
-        if length > maximum:
+        if length > _REVERSE_MAX_SEGMENT_CHARS:
             raise ValueError(
                 "反推结果第%d段过长：最多%d字，实际%d字，请重试"
-                % (index, maximum, length)
+                % (index, _REVERSE_MAX_SEGMENT_CHARS, length)
             )
-    compact_segments = [
-        re.sub(r"[\W_]+", "", segment or "").lower()
-        for segment in segments
-    ]
-    for index, compact in enumerate(compact_segments):
-        for previous_index, previous in enumerate(compact_segments[:index]):
-            similarity = SequenceMatcher(
-                None, previous, compact, autojunk=False,
-            ).ratio()
-            if compact == previous or (
-                min(len(previous), len(compact)) >= 40 and similarity >= 0.92
-            ):
+    entries = [{"text": segment, "fields": {}} for segment in segments]
+    for index, entry in enumerate(entries):
+        for previous_index, previous in enumerate(entries[:index]):
+            if _reverse_segments_are_duplicate(entry, previous):
                 raise ValueError(
                     "反推结果第%d段与第%d段内容重复，请重试"
                     % (index + 1, previous_index + 1)
                 )
     total = sum(lengths)
-    if total < 500 or total > 800:
+    if total > _REVERSE_MAX_TOTAL_CHARS:
         raise ValueError(
-            "反推结果总长度需为500-800字，实际%d字，请重试" % total
+            "反推结果总长度最多%d字，实际%d字，请重试"
+            % (_REVERSE_MAX_TOTAL_CHARS, total)
         )
     return segments
 
@@ -544,53 +1537,221 @@ def _split_reverse_text(text, expected_count):
     return result
 
 
-def _reverse_prompt_from_frames(title, duration, platform, script_text, frames):
-    timeline_ranges = _fixed_reverse_ranges(duration)
-    segment_count = len(timeline_ranges)
-    segment_min_chars = int(math.ceil(500.0 / segment_count))
-    segment_max_chars = max(segment_min_chars, int(720.0 / segment_count))
+def _reverse_segment_messages(
+    title, duration, platform, transcript, index, segment_count, timeline_range,
+    retry=False, retry_error=None,
+):
+    retry_note = ""
+    if retry:
+        retry_note = (
+            "这是本时间段基于原始帧的重新分析。不要沿用任何历史草稿、模板句或其他时间段文字，"
+            "必须重新逐帧观察后作答。上一轮校验错误：%s。"
+            "请针对错误中列出的缺失 subject、scene 或 action 重新检查当前原始双帧；"
+            "非人物主体同样必须填写，禁止返回全空JSON。"
+            % str(retry_error or "输出未通过结构与证据校验")
+        )
     usermsg = (
-        _breakdown_source_context(title, duration, platform, script_text) + "\n\n"
-        "请基于关键帧和口播，反推出一条可直接用于视频模型生成同款视频的中文执行提示词。"
-        "目标是让生成视频在镜头结构和动作节奏上尽可能接近参考视频：严格依据关键帧还原镜头出现顺序、"
-        "景别转换、主体动作节点、构图、场景布局、道具位置、光线色调和节奏变化，不要泛化成另一条“同风格原创”视频。"
-        "人物具体身份、面部和不可确认的品牌文字属于可替换元素，不得臆造；其余能从关键帧确认的视觉关系应尽量保持。"
-        "输入的每张图是两个连续时间点组成的双帧图，左侧早于右侧，图片顺序代表时间推进。"
-        "时间轴由程序根据真实视频时长生成，你不要输出、计算或修改任何时间。"
-        "请严格按关键帧时间顺序输出 %d 段画面描述，每段说明画面主体、动作起止、"
-        "景别、机位、运镜方向、构图变化及转场衔接，前后动作必须连续。"
-        "提示词还要具体写清六个层次：①主体至少 5 项（人物/产品的外观、身份、服装、状态和显著特征）"
-        "②场景至少 5 项（环境、关键道具、前中后景和空间关系）"
-        "③动作与时序至少 8 项（按起始—发展—结束描述人物的表情、视线、手势、肢体姿态、走位及与道具的互动，"
-        "同时写清镜头跟随、推进、拉远、摇移或转场的时机，形成可执行的连续过程，避免‘自然地动起来’等笼统表达）"
-        "④镜头至少 5 项（景别、视角、构图和整体运镜风格）"
-        "⑤光线与色调至少 4 项（照明方向、氛围、材质和色彩质感）"
-        "⑥节奏与情绪钩子至少 3 项（节奏变化、情绪推进和观看钩子）。"
-        "关键帧无法证明的动作不要写成原视频事实；仅可补充连接相邻关键帧所必需的过渡动作，并明确保持人物、"
-        "场景、道具位置和镜头方向连续。提示词结尾增加约束：以随请求附带的参考关键帧为视觉依据，"
-        "保持镜头顺序、动作节点和场景布局，不新增人物、道具、镜头或无关情节。"
-        "全部描述合计 500-800 字，每段目标 %d-%d 个中文字符。严格只输出一个 JSON 对象，不要标题、解释或 markdown；"
-        "对象只能有 segments 一个字段，其值是对象数组。"
-        "segments 必须恰好包含 %d 个对象，不要在对象中写时间。每个对象必须包含 subject、scene、action、camera、"
-        "lighting、sound、continuity 七个字符串字段，分别填写主体、场景、连续动作、镜头、光影、声音和前后衔接。"
-        "每个字段必须直接填写基于关键帧观察到的真实内容；看不清或听不清时写“无可确认信息”，不得编造，不得使用模板占位内容。"
-    ) % (segment_count, segment_min_chars, segment_max_chars, segment_count)
+        "视频标题（仅作背景，不能代替画面证据）：%s\n"
+        "视频总时长：%ss\n"
+        "平台：%s\n"
+        "当前时间段：第%d/%d段 %s\n"
+        "当前时间段ASR证据：%s\n\n"
+        "本次先做隔离分段取证；跨段连续性将在全部分段通过校验后由代码确定性归纳。"
+        "不得引用其他时间段、历史草稿或臆造跨段事实。\n\n"
+        "%s"
+        "随请求附带的图片只属于当前时间段，并按时间先后排列；至少包含两个原始时间点。"
+        "只分析这些图片，不得借用其他时间段画面。逐帧比较主体位置、手臂手腕、身体姿态、视线、"
+        "场景道具、遮挡、构图和光线的真实变化。只有相邻帧确实近乎一致时，action 才能写画面或姿态无变化；"
+        "存在坐起、抬手、转身等动作时绝不能同时写“未观察到明显动作变化”，细微动作也必须明确区分。"
+        "主体背对镜头或面部被遮挡时，不得描述表情、眼神或微笑。"
+        "不能从图片直接确认的身份、品牌、地点、情绪、运镜、光源、方位或情节一律省略；"
+        "不要写“似乎在感受风”“阳光明媚”“绿草如茵”等主观修辞，要改成可观察的姿态、光照或颜色事实。"
+        "不得写“面向树根”等无法由本段帧可靠证明的朝向。"
+        "sound 只能逐字引用或紧贴复述上方当前时间段ASR能够证明的口播或可辨识语音；"
+        "不得从ASR推断音乐、音效、情绪或环境声；没有证据就留空，无法与ASR文字直接匹配也留空，"
+        "不得根据画面写“未观察到声音”。字幕或屏幕文字只有在本段图片清晰可读时才可逐字引用，"
+        "并用中文引号标出实际文字；看不清就省略。"
+        "不要补写过渡动作，不要为了篇幅扩写，不设最低字数，宁可短也不能编造。"
+        "这是可直接交给视频生成模型的分段提示词，不是普通画面说明。"
+        "主体不一定是人物；产品、普通物体、几何图形、色块、文字、动物或风景中的主要可见对象也必须作为 subject，"
+        "按证据写清颜色、形状、材质和画面位置，不得因画面无人而把主体留空。"
+        "如果没有独立实体，subject 应写可由双帧证明的“抽象画面”或“纯色背景”及其主色、范围和结构。"
+        "scene 只写主体周围环境、背景和空间关系，不能把主要实体只塞进 scene 而让 subject 为空。"
+        "静态非人物画面也必须形成可生成提示词：若首尾两帧中的主体位置、形状和画面确实一致，"
+        "action 应准确写“主体保持静止，未观察到位置或形态变化”，并引用局部帧1、2；"
+        "不得为填充 action 编造移动、变形或运镜。"
+        "subject 写可见外观、服装（如适用）、主体在画面中的位置与可确认连续性；"
+        "scene 写关键环境、道具及前中后景关系；action 按双帧时间顺序写动作节点、方向和位移；"
+        "camera 写景别、构图、机位和可见运镜；lighting 写可见光线方向、明暗和色调；"
+        "隔离分段阶段 continuity 与 continuity_evidence_frames 必须留空；"
+        "不得写“与上一段保持一致”“承接上一段”等固定衔接句。"
+        "无法确认的非关键细节留空，但主体、场景、动作三个关键字段必须是当前帧可证明的具体事实，"
+        "不得用“主体细节”“场景信息”“动作自然”等空洞字段模板代替。"
+        "只输出一个JSON对象：{\"segments\":[{\"subject\":\"\",\"scene\":\"\",\"action\":\"\","
+        "\"camera\":\"\",\"lighting\":\"\",\"sound\":\"\",\"continuity\":\"\","
+        "\"evidence_frames\":{\"subject\":[1],\"scene\":[1],\"action\":[1,2],"
+        "\"camera\":[1,2],\"lighting\":[1]},"
+        "\"continuity_evidence_frames\":[]}]}。"
+        "evidence_frames 使用本请求图片的局部编号1、2；每个非空画面字段必须列出能直接证明它的帧，"
+        "action 必须同时引用首尾两帧以证明动作顺序。"
+        "segments 必须只有当前这一段；camera、lighting、sound 可以在无证据时留空，"
+        "subject、scene、action 不可留空且必须有当前图片证据；不要输出时间码、解释或markdown。"
+    ) % (
+        str(title or ""),
+        str(duration),
+        str(platform or ""),
+        index,
+        segment_count,
+        timeline_range,
+        transcript or "（无可确认的本段口播或声音）",
+        retry_note,
+    )
     sysmsg = (
-        "你是黄雀传媒资深短视频复刻编导。你擅长从连续关键帧中恢复镜头时间轴、动作节点与空间连续性，"
-        "并写成视频生成模型可执行的中文提示词。"
-        "严格只输出用户指定结构的 JSON 对象，不要任何多余内容。"
+        "你是短视频画面证据分析员。准确性高于完整性和篇幅；只写当前时间段原始帧或ASR能证明的事实。"
+        "严格输出指定JSON，不得复制其他时间段，不得使用固定连续性扩写。"
     )
-    raw = _chat_multimodal(
-        sysmsg, usermsg, frames, temp=0.1,
-        max_tokens=2400, image_detail=None,
+    return sysmsg, usermsg
+
+
+def _score_reverse_generation_coverage(entries, global_continuity, windows):
+    """Score evidence coverage only; this is not an end-to-end similarity claim."""
+    fields = [entry.get("fields", {}) for entry in (entries or [])]
+    expected = len(windows or [])
+    complete = lambda key: (
+        bool(fields)
+        and len(fields) == expected
+        and all(_compact_reverse_text(item.get(key, "")) for item in fields)
     )
-    segments = _validate_reverse_prompt_lengths(
-        _parse_reverse_segments(raw, segment_count)
+    evidence_complete = lambda key: (
+        complete(key)
+        and all(
+            bool(entry.get("evidence_frames", {}).get(key))
+            for entry in (entries or [])
+        )
     )
-    return "\n".join(
-        timeline_range + " " + segment
-        for timeline_range, segment in zip(timeline_ranges, segments)
-    )
+    parts = {
+        "subject": 30 if evidence_complete("subject") else 0,
+        "action_timing": (
+            20 if evidence_complete("action") else 0
+        ) + (5 if expected else 0),
+        "scene_composition": 20 if evidence_complete("scene") else 0,
+        "camera_duration": (
+            10 if evidence_complete("camera") else 0
+        ) + (5 if expected else 0),
+        "lighting_style": 10 if evidence_complete("lighting") else 0,
+    }
+    return {"total": sum(parts.values()), "parts": parts}
+
+
+def _assemble_reverse_prompt(entries, windows, global_continuity=None):
+    segments = _validate_reverse_prompt_lengths([
+        entry["text"] for entry in entries
+    ])
+    global_facts = _compose_reverse_global_facts(global_continuity)
+    lines = []
+    for index, ((_start, _end, timeline_range), segment) in enumerate(
+        zip(windows, segments)
+    ):
+        if index == 0 and global_facts:
+            segment = "全局连续性事实：" + global_facts + "；本段：" + segment
+        lines.append(timeline_range + " " + segment)
+    return "\n".join(lines)
+
+
+def _reverse_analysis_call_budget(segment_count):
+    """Expose the bounded call cost under one shared 540-second deadline."""
+    segment_count = max(1, min(4, int(segment_count or 1)))
+    return {
+        "analysis_deadline_seconds": BREAKDOWN_ANALYSIS_BUDGET,
+        "max_images_per_request": 2,
+        "global_model_calls": 0,
+        "normal_logical_calls": segment_count,
+        "worst_logical_calls": segment_count * 2,
+        "normal_physical_http_attempts": segment_count,
+        "same_provider_physical_attempts_per_logical": 2,
+        # Reverse prompting is pinned to glm-4v-plus. Each logical call can
+        # make at most two same-provider physical attempts and never falls
+        # back to another provider.
+        "worst_physical_http_attempts": segment_count * 2 * 2,
+        "provider": "zhipu",
+        "model": "glm-4v-plus",
+        "http_4xx_retry": False,
+        "cross_provider_fallback": False,
+    }
+
+
+def _reverse_prompt_from_frames(
+    title, duration, platform, script_text, frames,
+    return_details=False, deadline=None, heartbeat=None,
+):
+    windows = _reverse_segment_windows(duration)
+    segment_count = len(windows)
+    frame_groups = _reverse_model_frame_groups(frames, segment_count)
+    entries = []
+
+    for index, ((start, end, timeline_range), frame_group) in enumerate(
+        zip(windows, frame_groups), 1
+    ):
+        transcript = _segment_transcript(script_text, start, end)
+        retry_error = None
+        for attempt in range(2):
+            sysmsg, usermsg = _reverse_segment_messages(
+                title,
+                duration,
+                platform,
+                transcript,
+                index,
+                segment_count,
+                timeline_range,
+                retry=bool(attempt),
+                retry_error=retry_error,
+            )
+            if deadline is None and heartbeat is None:
+                raw = _reverse_chat_multimodal(
+                    sysmsg,
+                    usermsg,
+                    frame_group,
+                    temp=0.1,
+                    max_tokens=900,
+                    image_detail=None,
+                )
+            else:
+                raw = _reverse_chat_multimodal(
+                    sysmsg,
+                    usermsg,
+                    frame_group,
+                    temp=0.1,
+                    max_tokens=900,
+                    image_detail=None,
+                    deadline=deadline,
+                    heartbeat=heartbeat,
+                )
+            try:
+                entry = _parse_reverse_segment_evidence(raw)
+                _validate_reverse_segment_evidence(
+                    entry,
+                    entries,
+                    frame_group,
+                    index,
+                    transcript=transcript,
+                    require_frame_evidence=True,
+                )
+                break
+            except ValueError as error:
+                retry_error = error
+                _log_breakdown_parse_failure(
+                    "reverse-segment-%d-attempt-%d" % (index, attempt + 1),
+                    raw,
+                    error,
+                )
+                if attempt:
+                    raise
+        entries.append(entry)
+
+    prompt = _assemble_reverse_prompt(entries, windows)
+    if return_details:
+        return {"prompt": prompt, "entries": entries, "windows": windows}
+    return prompt
 
 
 def _clean_reverse_prompt(raw):
@@ -756,22 +1917,23 @@ def _format_transcript(segs):
 
 
 def _extract_frames(video_path, count=6, duration=30, scale_width=512,
-                    min_frames=None):
+                    min_frames=None, uniform=False):
     """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
     scale_width = max(256, min(int(scale_width or 512), 2048))
     outdir = tempfile.mkdtemp()
-    try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-             "-i", video_path,
-             "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
-             "-vsync", "vfr", "-vframes", str(count),
-             "%s/frame_%%d.jpg" % outdir],
-            check=True, timeout=60,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except subprocess.CalledProcessError:
-        pass  # 场景检测失败 → 退到均匀采样
+    if not uniform:
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                 "-i", video_path,
+                 "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
+                 "-vsync", "vfr", "-vframes", str(count),
+                 "%s/frame_%%d.jpg" % outdir],
+                check=True, timeout=60,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError:
+            pass  # 场景检测失败 → 退到均匀采样
     frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
                      if f.endswith(".jpg")],
                     key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
@@ -820,20 +1982,55 @@ def _pair_reverse_frames(frame_dir, frames):
     return paired
 
 
-def _post_zhipu(body, api_key):
+def _analysis_remaining(deadline):
+    if deadline is None:
+        return None
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 1:
+        raise TimeoutError("反推分析已超过总时间预算，请重试")
+    return remaining
+
+
+def _analysis_attempt_log(message, deadline=None, heartbeat=None):
+    print("[breakdown] %s" % message, flush=True)
+    _analysis_remaining(deadline)
+    if heartbeat:
+        heartbeat()
+
+
+def _post_zhipu(body, api_key, deadline=None, heartbeat=None):
     base = os.environ.get(
         "REVERSE_ZHIPU_BASE", "https://open.bigmodel.cn/api/paas/v4"
     ).rstrip("/")
-    timeout = int(os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210)
+    configured_timeout = int(
+        os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210
+    )
+    remaining = _analysis_remaining(deadline)
+    timeout = configured_timeout
+    max_attempts = 2
+    if remaining is not None:
+        # Two physical attempts share the same absolute budget. A small margin
+        # ensures the second timeout cannot run past the analysis deadline.
+        max_attempts = 2 if remaining >= 3 else 1
+        timeout = min(
+            configured_timeout,
+            max(1, int((remaining - 1) / float(max_attempts))),
+        )
+    if heartbeat:
+        heartbeat()
     try:
-        return egress.post_json_idempotent(
+        response = egress.post_json_idempotent(
             base, base, "/chat/completions",
             json.dumps(body, ensure_ascii=False).encode(),
             {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            log=lambda message: print("[breakdown] %s" % message, flush=True),
-            max_attempts=2,
+            log=lambda message: _analysis_attempt_log(
+                message, deadline=deadline, heartbeat=heartbeat
+            ),
+            max_attempts=max_attempts,
             timeout=timeout,
         )
+        _analysis_remaining(deadline)
+        return response
     except urllib.error.HTTPError as exc:
         try:
             detail = exc.read().decode("utf-8", "replace")
@@ -844,18 +2041,40 @@ def _post_zhipu(body, api_key):
             % (getattr(exc, "code", "?"), detail[:500].replace("\n", " ")),
             flush=True,
         )
+        try:
+            exc.breakdown_response_detail = detail
+        except Exception:
+            pass
         raise
 
 
-def _post_openai_fallback(body):
+def _post_openai_fallback(body, deadline=None, heartbeat=None):
     from .image import OPENAI_OFFICIAL_BASE
 
-    return egress.post_json(
-        OPENAI_OFFICIAL_BASE, OPENAI_BASE,
-        "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
+    if deadline is None:
+        return egress.post_json(
+            OPENAI_OFFICIAL_BASE, OPENAI_BASE,
+            "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
+            {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
+            log=lambda message: print("[breakdown] %s" % message, flush=True),
+        )
+    remaining = _analysis_remaining(deadline)
+    if heartbeat:
+        heartbeat()
+    response = egress.post_json_idempotent(
+        OPENAI_OFFICIAL_BASE,
+        OPENAI_BASE,
+        "/v1/chat/completions",
+        json.dumps(body, ensure_ascii=False).encode(),
         {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
-        log=lambda message: print("[breakdown] %s" % message, flush=True),
+        log=lambda message: _analysis_attempt_log(
+            message, deadline=deadline, heartbeat=heartbeat
+        ),
+        max_attempts=1,
+        timeout=max(1, int(remaining - 1)),
     )
+    _analysis_remaining(deadline)
+    return response
 
 
 def _chat_content(response):
@@ -873,8 +2092,45 @@ def _zhipu_rejected_request(exc):
     )
 
 
+def _zhipu_image_limit_error(exc):
+    if not _zhipu_rejected_request(exc):
+        return False
+    detail = str(getattr(exc, "breakdown_response_detail", "") or "")
+    return bool(
+        re.search(r'["\']?code["\']?\s*:\s*["\']?1210\b', detail)
+        or ("1210" in detail and "图片数量" in detail)
+    )
+
+
+def _reverse_chat_multimodal(
+    sysmsg, usermsg, image_paths, temp=0.1, max_tokens=900,
+    image_detail=None, deadline=None, heartbeat=None,
+):
+    image_paths = list(image_paths or [])
+    if len(image_paths) > 2:
+        raise ValueError("反推单次模型请求最多只能携带2张图片")
+    kwargs = {
+        "temp": temp,
+        "max_tokens": max_tokens,
+        "image_detail": image_detail,
+        "provider": "zhipu",
+        "model": "glm-4v-plus",
+        "allow_provider_fallback": False,
+    }
+    if deadline is not None or heartbeat is not None:
+        kwargs.update({"deadline": deadline, "heartbeat": heartbeat})
+    return _chat_multimodal(
+        sysmsg,
+        usermsg,
+        image_paths,
+        **kwargs
+    )
+
+
 def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
-                     max_tokens=None, image_detail="low", provider="zhipu"):
+                     max_tokens=None, image_detail="low", provider="zhipu",
+                     deadline=None, heartbeat=None,
+                     allow_provider_fallback=True, model=None):
     """智谱多模态优先，仅投递前失败时安全回退 GPT。"""
 
     content = [{"type": "text", "text": usermsg}]
@@ -888,7 +2144,7 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
 
     use_openai = provider == "openai"
     body = {
-        "model": os.environ.get(
+        "model": model or os.environ.get(
             "BREAKDOWN_FALLBACK_MODEL" if use_openai else "BREAKDOWN_MODEL",
             "gpt-4o" if use_openai else "glm-4v-plus",
         ),
@@ -904,7 +2160,12 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
     if use_openai:
         if not OPENAI_KEY:
             raise RuntimeError("OPENAI_API_KEY is not configured")
-        response = _post_openai_fallback(body)
+        if deadline is None and heartbeat is None:
+            response = _post_openai_fallback(body)
+        else:
+            response = _post_openai_fallback(
+                body, deadline=deadline, heartbeat=heartbeat
+            )
         result = _chat_content(response)
         print("[breakdown] openai format fallback success: %s" % body["model"], flush=True)
         return result
@@ -916,8 +2177,28 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
         raise RuntimeError("REVERSE_ZHIPU_KEY is not configured")
 
     try:
-        response = _post_zhipu(body, zhipu_key)
+        if deadline is None and heartbeat is None:
+            response = _post_zhipu(body, zhipu_key)
+        else:
+            response = _post_zhipu(
+                body,
+                zhipu_key,
+                deadline=deadline,
+                heartbeat=heartbeat,
+            )
     except Exception as exc:
+        if not allow_provider_fallback:
+            if _zhipu_image_limit_error(exc):
+                raise ValueError(
+                    "智谱输入图片数量超过限制（错误码1210）；"
+                    "反推单次请求最多只能携带2张图片"
+                ) from exc
+            print(
+                "[breakdown] zhipu failure, reverse provider fallback disabled: %s"
+                % type(exc).__name__,
+                flush=True,
+            )
+            raise
         rejected = _zhipu_rejected_request(exc)
         if not rejected and not egress._pre_delivery_failure(exc):
             print(
@@ -937,7 +2218,14 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
         fallback_body = dict(body)
         fallback_body["model"] = os.environ.get("BREAKDOWN_FALLBACK_MODEL", "gpt-4o")
         try:
-            response = _post_openai_fallback(fallback_body)
+            if deadline is None and heartbeat is None:
+                response = _post_openai_fallback(fallback_body)
+            else:
+                response = _post_openai_fallback(
+                    fallback_body,
+                    deadline=deadline,
+                    heartbeat=heartbeat,
+                )
             return _chat_content(response)
         except Exception as fallback_exc:
             print(

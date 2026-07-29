@@ -125,12 +125,39 @@ class ScriptActionsUiTests(unittest.TestCase):
     def test_reverse_video_without_avatar_uses_seedance_micro_channel(self):
         # 不选形象 → Seedance，并携带原视频关键帧作为视觉参考。
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
-        self.assertIn("var reverseRefs=((lastBreakdownReverse&&lastBreakdownReverse.frame_thumbnails)||[]).slice(0,4)", self.html)
+        self.assertIn(
+            "var reverseRefs=reverseReferenceImages(lastBreakdownReverse)",
+            self.html,
+        )
+        self.assertIn(
+            "function reverseReferenceThumbnailIndices(bd)",
+            self.html,
+        )
+        self.assertIn("function reverseReferenceImages(bd)", self.html)
+        self.assertIn("thumbs[index-1]||null", self.html)
+        self.assertNotIn(
+            "frame_thumbnails)||[]).slice(0,4)",
+            self.html,
+        )
         self.assertIn("prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
         self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
         self.assertIn("if(seedanceMode) selectedDuration=10", self.html)
         self.assertIn("var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
+
+    def test_reverse_history_preserves_explicit_reference_indices(self):
+        self.assertIn(
+            "reference_thumbnail_indices:isReverse?reverseRefs.map",
+            self.html,
+        )
+        self.assertIn(
+            "reverse_audit||{}).reference_thumbnail_indices",
+            self.html,
+        )
+        self.assertIn(
+            "reference_thumbnail_indices:m.reference_thumbnail_indices||",
+            self.html,
+        )
 
     def test_reverse_video_with_avatar_uses_existing_cinematic_api(self):
         self.assertIn("endpoint:'/api/gen/cinematic'", self.html)

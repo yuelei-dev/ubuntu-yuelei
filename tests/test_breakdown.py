@@ -12,6 +12,7 @@ import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
+from unittest import mock
 
 
 _ROUTING_ENV = (
@@ -108,10 +109,68 @@ class BreakdownTests(unittest.TestCase):
                 "action": action,
                 "camera": camera,
                 "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
-                "sound": "保留海浪环境声和舒缓背景音乐",
-                "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
+                "sound": "",
+                "continuity": "",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                    "camera": [1, 2],
+                    "lighting": [1, 2],
+                },
+                "continuity_evidence_frames": [],
             })
         return result
+
+    def _reverse_entry(self, **overrides):
+        fields = {
+            "subject": "白衣人物位于画面中",
+            "scene": "树林背景",
+            "action": "抬起右手",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+        }
+        fields.update(overrides)
+        return {
+            "text": self.breakdown._compose_reverse_segment(fields),
+            "fields": fields,
+            "evidence_frames": {
+                key: [1, 2]
+                for key in (
+                    "subject", "scene", "action", "camera", "lighting"
+                )
+                if fields.get(key)
+            },
+        }
+
+    def _global_continuity(self):
+        facts = {
+            "subject_identity": "同一名白衣人物，黑色长发",
+            "wardrobe": "白色长衣，未见服装切换",
+            "recurring_scene_objects": "海滩、浪花与远处海平线",
+            "scene_style": "户外海边场景",
+            "camera_style": "以平视中景为主",
+            "lighting_style": "暖色逆光，轮廓高光",
+        }
+        evidence = {
+            key: [1, 3, 5, 7]
+            for key in facts
+        }
+        return {
+            "facts": facts,
+            "evidence_frames": evidence,
+            "frame_count": 8,
+            "segment_count": 4,
+        }
+
+    def _global_continuity_response(self):
+        data = self._global_continuity()
+        return json.dumps({
+            "global_facts": data["facts"],
+            "evidence_frames": data["evidence_frames"],
+        }, ensure_ascii=False)
 
     def test_download_breakdown_video_retries_empty_and_truncated_cdn(self):
         calls = []
@@ -546,7 +605,7 @@ class BreakdownTests(unittest.TestCase):
                 return transcript if transcript is not None else [{"start": 0, "end": 3, "text": "先看门头"}]
 
         self.breakdown._heartbeat = lambda job_id, phase: calls.setdefault("phases", []).append(phase)
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False: (
             "fake-frame-dir",
             ["frame_1.jpg", "frame_2.jpg"],
         )
@@ -621,35 +680,42 @@ class BreakdownTests(unittest.TestCase):
         self.assertNotIn("10字内", src)
 
     def test_reverse_prompt_requires_structured_action_detail(self):
-        """反推 prompt 必须要求时间轴、六层结构、人物/镜头动作及 500-800 字。"""
+        """反推必须按段绑定证据，明确禁止字数填充和无证据推断。"""
         import inspect
-        src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
-        self.assertIn("500-800 字", src)
-        self.assertNotIn("150-300 字", src)
-        self.assertIn("六个层次", src)
-        self.assertIn("动作与时序", src)
-        self.assertIn("表情、视线、手势、肢体姿态、走位", src)
-        self.assertIn("跟随、推进、拉远、摇移或转场", src)
-        self.assertIn("起始—发展—结束", src)
-        self.assertIn("镜头至少 5 项（景别、视角、构图和整体运镜风格）", src)
-        self.assertIn("时间轴由程序根据真实视频时长生成", src)
-        self.assertIn("你不要输出、计算或修改任何时间", src)
-        self.assertIn("segments 必须恰好包含", src)
-        self.assertIn("严格依据关键帧还原镜头出现顺序", src)
-        self.assertIn("不要泛化成另一条“同风格原创”视频", src)
-        self.assertIn("不新增人物、道具、镜头或无关情节", src)
+        src = inspect.getsource(self.breakdown._reverse_segment_messages)
+        self.assertNotIn("500-800", src)
+        self.assertNotIn("至少 5 项", src)
+        self.assertIn("只属于当前时间段", src)
+        self.assertIn("逐帧比较主体位置、手臂手腕、身体姿态", src)
+        self.assertIn("只有相邻帧确实近乎一致时", src)
+        self.assertIn("一律省略", src)
+        self.assertIn("没有证据就留空", src)
+        self.assertIn("不设最低字数", src)
+        self.assertIn("宁可短也不能编造", src)
+        self.assertIn("背对镜头或面部被遮挡时，不得描述表情", src)
+        self.assertIn("未观察到明显动作变化", src)
+        self.assertIn("不得根据画面写“未观察到声音”", src)
+        self.assertIn("字幕或屏幕文字只有在本段图片清晰可读时", src)
+        self.assertIn("面向树根", src)
+        self.assertIn("主体不一定是人物", src)
+        self.assertIn("不得因画面无人而把主体留空", src)
+        self.assertIn("静态非人物画面也必须形成可生成提示词", src)
+        self.assertIn("抽象画面", src)
+        self.assertIn("纯色背景", src)
+        self.assertIn("不能把主要实体只塞进 scene", src)
+        self.assertIn("主体保持静止，未观察到位置或形态变化", src)
+        self.assertIn("subject、scene、action 不可留空", src)
 
-    def test_reverse_prompt_requires_minimum_detail_counts(self):
+    def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
         src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
-        self.assertIn("主体至少 5 项", src)
-        self.assertIn("场景至少 5 项", src)
-        self.assertIn("动作与时序至少 8 项", src)
-        self.assertIn("镜头至少 5 项", src)
-        self.assertIn("光线与色调至少 4 项", src)
-        self.assertIn("节奏与情绪钩子至少 3 项", src)
-        self.assertIn("左侧早于右侧", src)
-        self.assertIn("图片顺序代表时间推进", src)
+        self.assertIn("_reverse_model_frame_groups", src)
+        self.assertIn("_reverse_chat_multimodal", src)
+        self.assertIn("frame_group", src)
+        self.assertIn("max_tokens=900", src)
+        self.assertNotIn("allow_duplicates", src)
+        retry_src = inspect.getsource(self.breakdown._reverse_segment_messages)
+        self.assertIn("不要沿用任何历史草稿", retry_src)
 
     def test_chat_multimodal_supports_reverse_output_and_image_options(self):
         import inspect
@@ -699,11 +765,19 @@ class BreakdownTests(unittest.TestCase):
             ),
             transcript=None,
         )
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False: (
             "fake-frame-dir",
             [thumb.name] * 8,
         )
-        self.breakdown._pair_reverse_frames = lambda frame_dir, frames: list(frames)[:4]
+        objects = self._detailed_reverse_objects()
+        reverse_calls = []
+
+        def fake_reverse_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
+            reverse_calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
+            item = objects[len(reverse_calls) - 1]
+            return json.dumps({"segments": [item]}, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_reverse_chat
 
         try:
             result = self.breakdown._do_breakdown(
@@ -719,11 +793,87 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["source_platform"], "douyin")
         self.assertIn("白衣人物居中", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
-        self.assertEqual(len(result["frame_thumbnails"]), 4)
+        self.assertEqual(len(result["frame_thumbnails"]), 8)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
-        self.assertIn("反推出一条可直接用于视频模型生成同款视频的中文执行提示词", calls["usermsg"])
-        self.assertIn("严格只输出用户指定结构的 JSON 对象", calls["sysmsg"])
+        self.assertEqual(len(reverse_calls), 4)
+        self.assertTrue(all(
+            call[2] == [thumb.name, thumb.name] for call in reverse_calls
+        ))
+        self.assertIn("只属于当前时间段", reverse_calls[0][1])
+        self.assertIn("准确性高于完整性和篇幅", reverse_calls[0][0])
+        self.assertFalse(any(
+            call[4]["allow_provider_fallback"] for call in reverse_calls
+        ))
+        self.assertTrue(all(
+            call[4]["model"] == "glm-4v-plus" for call in reverse_calls
+        ))
+        self.assertEqual(
+            result["reference_frame_strategy"],
+            "explicit_indices_one_per_segment",
+        )
+        self.assertEqual(result["reference_thumbnail_indices"], [1, 2, 3, 4])
+        self.assertEqual(result["audit_thumbnail_indices"], [5, 6, 7, 8])
+        self.assertEqual(
+            [item["source_frame_index"] for item in result["frame_manifest"]],
+            [2, 4, 6, 8, 1, 3, 5, 7],
+        )
+        self.assertEqual(result["quality_score"]["total"], 100)
+        self.assertEqual(result["quality_contract"]["target_score"], 90)
+        self.assertEqual(len(result["segment_evidence"]), 4)
+        self.assertEqual(
+            result["segment_evidence"][0][
+                "local_evidence_frames"
+            ]["action"],
+            [1, 2],
+        )
+        self.assertEqual(
+            result["segment_evidence"][1][
+                "source_evidence_frames"
+            ]["action"],
+            [3, 4],
+        )
+        self.assertEqual(
+            result["sections"]["reverse_audit"]["frame_manifest"],
+            result["frame_manifest"],
+        )
+        self.assertEqual(
+            result["sections"]["reverse_audit"]["audit_thumbnail_indices"],
+            [5, 6, 7, 8],
+        )
+        audit_sources = {
+            item["source_frame_index"]
+            for item in result["frame_manifest"]
+        }
+        self.assertEqual(audit_sources, set(range(1, 9)))
+        assets_store = importlib.import_module("content_domains.assets_store")
+        persisted_meta = assets_store._project("breakdown", result)[3]
+        self.assertEqual(len(persisted_meta["frame_thumbnails"]), 8)
+        self.assertEqual(
+            persisted_meta["sections"]["reverse_audit"]["frame_manifest"],
+            result["frame_manifest"],
+        )
+        deadlines = [call[4].get("deadline") for call in reverse_calls]
+        self.assertTrue(all(deadline is not None for deadline in deadlines))
+        self.assertEqual(len(set(deadlines)), 1)
+        self.assertTrue(all(callable(call[4].get("heartbeat")) for call in reverse_calls))
+        self.assertIn("全局连续性事实", result["prompt"])
+        self.assertEqual(result["global_continuity"]["model_calls"], 0)
+        self.assertEqual(result["global_continuity"]["image_count"], 0)
+        self.assertEqual(result["analysis_call_budget"], {
+            "analysis_deadline_seconds": 540,
+            "max_images_per_request": 2,
+            "global_model_calls": 0,
+            "normal_logical_calls": 4,
+            "worst_logical_calls": 8,
+            "normal_physical_http_attempts": 4,
+            "same_provider_physical_attempts_per_logical": 2,
+            "worst_physical_http_attempts": 16,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "http_4xx_retry": False,
+            "cross_provider_fallback": False,
+        })
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
     def test_breakdown_scenes_retries_once_when_parse_fails(self):
@@ -756,32 +906,46 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(calls[1][4]["max_tokens"], 2400)
         self.assertIn("上一次输出未形成完整 JSON", calls[1][1])
 
-    def test_breakdown_reverse_prompt_calls_model_once(self):
+    def test_breakdown_reverse_prompt_retries_only_failed_segment(self):
         calls = []
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
             return ''
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
-        with self.assertRaisesRegex(ValueError, "反推结果解析失败，请重试"):
-            self.breakdown._reverse_prompt_from_frames("标题", 18, "douyin", "文案", ["f1.jpg"])
-        self.assertEqual(len(calls), 1)
+        with self.assertRaisesRegex(ValueError, "拆解结果解析失败，请重试"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 18, "douyin", "文案",
+                ["f%d.jpg" % index for index in range(1, 9)],
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][2], ["f1.jpg", "f2.jpg"])
+        self.assertEqual(calls[1][2], ["f1.jpg", "f2.jpg"])
         self.assertEqual(calls[0][3], 0.1)
-        self.assertEqual(calls[0][4], {"max_tokens": 2400, "image_detail": None})
+        self.assertEqual(calls[0][4], {
+            "max_tokens": 900,
+            "image_detail": None,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "allow_provider_fallback": False,
+        })
+        self.assertIn("不要沿用任何历史草稿", calls[1][1])
 
     def test_reverse_prompt_timeline_is_code_generated_and_gap_free(self):
         calls = []
+        objects = self._detailed_reverse_objects()
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
-            calls.append((usermsg, temp, kwargs))
+            calls.append((usermsg, list(frames), temp, kwargs))
             return json.dumps(
-                {"segments": self._detailed_reverse_objects()},
+                {"segments": [objects[len(calls) - 1]]},
                 ensure_ascii=False,
             )
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         prompt = self.breakdown._reverse_prompt_from_frames(
-            "海边舞蹈", 11.434, "douyin", "", ["f1.jpg"]
+            "海边舞蹈", 11.434, "douyin", "",
+            ["f%d.jpg" % index for index in range(1, 9)],
         )
 
         lines = prompt.splitlines()
@@ -789,9 +953,17 @@ class BreakdownTests(unittest.TestCase):
         self.assertTrue(lines[0].startswith("[00:00.0-00:02.9]"))
         self.assertTrue(lines[-1].startswith("[00:08.6-00:11.4]"))
         self.assertNotIn("00:11.4-00:11.4", prompt)
-        self.assertIn("不要输出、计算或修改任何时间", calls[0][0])
-        self.assertEqual(calls[0][1], 0.1)
-        self.assertEqual(calls[0][2], {"max_tokens": 2400, "image_detail": None})
+        self.assertEqual(len(calls), 4)
+        self.assertIn("当前时间段：第1/4段", calls[0][0])
+        self.assertEqual(calls[0][1], ["f1.jpg", "f2.jpg"])
+        self.assertEqual(calls[0][2], 0.1)
+        self.assertEqual(calls[0][3], {
+            "max_tokens": 900,
+            "image_detail": None,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "allow_provider_fallback": False,
+        })
 
     def test_reverse_prompt_composes_structured_segment_fields(self):
         structured = {
@@ -814,39 +986,57 @@ class BreakdownTests(unittest.TestCase):
         for label in ("主体：", "场景：", "动作：", "镜头：", "光影：", "声音：", "衔接："):
             self.assertIn(label, segments[0])
 
-    def test_reverse_prompt_requests_structured_fields_and_larger_budget(self):
+    def test_reverse_prompt_requests_structured_fields_without_length_target(self):
         calls = []
+        objects = self._detailed_reverse_objects()
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append((usermsg, kwargs))
             return json.dumps(
-                {"segments": self._detailed_reverse_objects()},
+                {"segments": [objects[len(calls) - 1]]},
                 ensure_ascii=False,
             )
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         self.breakdown._reverse_prompt_from_frames(
-            "标题", 18, "douyin", "", ["f1.jpg"]
+            "标题", 18, "douyin", "",
+            ["f%d.jpg" % index for index in range(1, 9)],
         )
-        self.assertEqual(calls[0][1]["max_tokens"], 2400)
-        self.assertIn("每段目标 125-180 个中文字符", calls[0][0])
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0][1]["max_tokens"], 900)
+        self.assertIn("不设最低字数", calls[0][0])
+        self.assertNotIn("每段目标", calls[0][0])
         for field in ("subject", "scene", "action", "camera", "lighting", "sound", "continuity"):
             self.assertIn(field, calls[0][0])
 
-    def test_reverse_prompt_scales_segment_length_for_short_video(self):
+    def test_reverse_prompt_accepts_concise_segment_for_short_video(self):
         calls = []
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, **kwargs):
             calls.append(usermsg)
-            segment = self._detailed_reverse_objects(1)[0]
-            segment = {key: value * 4 for key, value in segment.items()}
+            segment = {
+                "subject": "白衣人物",
+                "scene": "树林",
+                "action": "抬起右手",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                },
+            }
             return json.dumps({"segments": [segment]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
-        self.breakdown._reverse_prompt_from_frames(
-            "短视频", 2.5, "douyin", "", ["f1.jpg"]
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "短视频", 2.5, "douyin", "", ["f1.jpg", "f2.jpg"]
         )
-        self.assertIn("每段目标 500-720 个中文字符", calls[0])
+        self.assertIn("动作：抬起右手", prompt)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("不设最低字数", calls[0])
 
     def test_reverse_transcript_filters_implausible_density_and_repetition(self):
         self.assertTrue(
@@ -861,24 +1051,24 @@ class BreakdownTests(unittest.TestCase):
             )
         )
 
-    def test_reverse_prompt_rejects_wrong_segment_count_without_retry(self):
+    def test_reverse_prompt_rejects_wrong_single_segment_count_after_retry(self):
         calls = []
 
         def fake_chat_multimodal(*args, **kwargs):
             calls.append(kwargs)
-            return '{"segments":["只有一段"]}'
+            return '{"segments":[]}'
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         with self.assertRaisesRegex(ValueError, "段数错误"):
             self.breakdown._reverse_prompt_from_frames(
-                "标题", 11.434, "douyin", "", ["f1.jpg"]
+                "标题", 11.434, "douyin", "",
+                ["f%d.jpg" % index for index in range(1, 9)],
             )
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls), 2)
 
-    def test_reverse_prompt_recovers_plain_text_without_second_model_call(self):
-        plain = "\n".join(
-            self.breakdown._compose_reverse_segment(item)
-            for item in self._detailed_reverse_objects()
+    def test_reverse_prompt_rejects_unstructured_plain_text_after_retry(self):
+        plain = self.breakdown._compose_reverse_segment(
+            self._detailed_reverse_objects(1)[0]
         )
         calls = []
 
@@ -887,12 +1077,25 @@ class BreakdownTests(unittest.TestCase):
             return plain
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
-        prompt = self.breakdown._reverse_prompt_from_frames(
-            "标题", 11.434, "douyin", "", ["f1.jpg"]
+        with self.assertRaisesRegex(ValueError, "拆解结果解析失败"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 11.434, "douyin", "",
+                ["f%d.jpg" % index for index in range(1, 9)],
+            )
+        self.assertEqual(len(calls), 2)
+
+    def test_reverse_prompt_rejects_json_string_without_evidence_fields(self):
+        calls = []
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: (
+            calls.append(args) or
+            '{"segments":["只有一段笼统画面描述"]}'
         )
-        self.assertEqual(len(prompt.splitlines()), 4)
-        self.assertTrue(prompt.splitlines()[-1].startswith("[00:08.6-00:11.4]"))
-        self.assertEqual(len(calls), 1)
+        with self.assertRaisesRegex(ValueError, "必须是结构化对象"):
+            self.breakdown._reverse_prompt_from_frames(
+                "标题", 2.5, "douyin", "",
+                ["f1.jpg", "f2.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
 
     def test_reverse_prompt_rejects_placeholder_segments(self):
         raw = json.dumps({
@@ -909,36 +1112,50 @@ class BreakdownTests(unittest.TestCase):
     def test_reverse_prompt_rejects_long_structured_json_with_wrong_count(self):
         one_long_segment = self._detailed_reverse_objects(1)[0]
         one_long_segment = {
-            key: value * 4 for key, value in one_long_segment.items()
+            key: (value * 4 if isinstance(value, str) else value)
+            for key, value in one_long_segment.items()
         }
         raw = json.dumps({"segments": [one_long_segment]}, ensure_ascii=False)
         with self.assertRaisesRegex(ValueError, "需要4段，实际1段"):
             self.breakdown._parse_reverse_segments(raw, 4)
 
-    def test_reverse_prompt_rejects_missing_structured_field(self):
+    def test_reverse_prompt_allows_unsupported_fields_to_be_omitted(self):
         segments = self._detailed_reverse_objects()
         segments[0].pop("camera")
         raw = json.dumps({"segments": segments}, ensure_ascii=False)
-        with self.assertRaisesRegex(ValueError, "第1段缺少字段：camera"):
-            self.breakdown._parse_reverse_segments(raw, 4)
+        parsed = self.breakdown._parse_reverse_segments(raw, 4)
+        self.assertEqual(len(parsed), 4)
+        self.assertNotIn("镜头：", parsed[0])
 
-    def test_reverse_prompt_rejects_short_structured_output(self):
+    def test_reverse_prompt_accepts_short_structured_output(self):
         calls = []
+        variants = ["抬右手", "双臂举起", "侧身转头", "绕树伸手"]
 
         def fake_chat_multimodal(*args, **kwargs):
             calls.append(kwargs)
             short = {
-                key: "画面细节" for key, _label in
-                self.breakdown._REVERSE_SEGMENT_FIELDS
+                "subject": "白衣人物",
+                "scene": "树林",
+                "action": variants[len(calls) - 1],
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                },
             }
-            return json.dumps({"segments": [short] * 4}, ensure_ascii=False)
+            return json.dumps({"segments": [short]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
-        with self.assertRaisesRegex(ValueError, "第1段过于简略"):
-            self.breakdown._reverse_prompt_from_frames(
-                "标题", 11.434, "douyin", "", ["f1.jpg"]
-            )
-        self.assertEqual(len(calls), 1)
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "标题", 11.434, "douyin", "",
+            ["f%d.jpg" % index for index in range(1, 9)],
+        )
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(prompt.splitlines()), 4)
 
     def test_reverse_prompt_rejects_identical_detailed_segments(self):
         segment = self.breakdown._compose_reverse_segment(
@@ -960,6 +1177,823 @@ class BreakdownTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "第2段与第1段内容重复"):
             self.breakdown._validate_reverse_prompt_lengths(segments)
 
+    def test_regression_thresholds_cover_recorded_3248_metrics(self):
+        self.assertGreaterEqual(
+            0.878, self.breakdown._REVERSE_DUPLICATE_SEQUENCE_THRESHOLD
+        )
+        self.assertGreaterEqual(
+            0.7351, self.breakdown._REVERSE_DUPLICATE_SHINGLE_THRESHOLD
+        )
+
+    def test_regression_3248_reanalyzes_only_duplicate_segment_from_its_frames(self):
+        """任务3248：第1/2段相似度87.8%时只重看第2段原始帧。"""
+        segment_1 = {
+            "subject": "白色长裙女性坐在林间木桩上",
+            "scene": "树林前景，远处可见积雪山体",
+            "action": "身体朝向镜头，右臂向前上方抬起，手腕略向外翻",
+            "camera": "中景平视，人物位于画面中央",
+            "lighting": "自然日光照亮白色裙装",
+            "sound": "",
+            "continuity": "",
+        }
+        duplicate_2 = dict(segment_1)
+        duplicate_2["action"] = (
+            "身体朝向镜头，右臂继续向前上方抬起，手腕略向外翻"
+        )
+        corrected_2 = {
+            "subject": "同一白色长裙女性仍坐在木桩上",
+            "scene": "树林与远处雪山仍在背景中",
+            "action": "上身角度发生偏转，抬起的手臂位置降低，手腕和手掌朝向改变",
+            "camera": "中景构图，人物身体轮廓相对前一段发生位移",
+            "lighting": "自然日光，裙装高光位置随姿态改变",
+            "sound": "",
+            "continuity": "",
+        }
+        segment_3 = {
+            "subject": "白衣女性坐在室内床面",
+            "scene": "卧室床铺与浅色墙面",
+            "action": "双臂举过头顶，身体保持坐姿",
+            "camera": "室内中景正面构图",
+            "lighting": "柔和室内光",
+            "sound": "",
+            "continuity": "",
+        }
+        segment_4 = {
+            "subject": "白衣女性位于粗大树干旁并被部分遮挡",
+            "scene": "户外树林与近景树干",
+            "action": "一侧手臂向外弯曲，身体从树干侧面露出",
+            "camera": "树干占据近景，人物位于侧后方",
+            "lighting": "林间自然光",
+            "sound": "",
+            "continuity": "",
+        }
+        for segment in (
+            segment_1, duplicate_2, corrected_2, segment_3, segment_4
+        ):
+            segment["evidence_frames"] = {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            }
+        self.assertGreaterEqual(
+            self.breakdown._reverse_text_similarity(
+                self.breakdown._compose_reverse_segment(segment_1),
+                self.breakdown._compose_reverse_segment(duplicate_2),
+            ),
+            0.80,
+        )
+        responses = [
+            segment_1, duplicate_2, corrected_2, segment_3, segment_4,
+        ]
+        calls = []
+
+        def fake_chat(sysmsg, usermsg, frames, **kwargs):
+            calls.append((usermsg, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        prompt = self.breakdown._reverse_prompt_from_frames(
+            "任务3248", 15.267, "douyin",
+            "[0s-4s] 林间画面\n[8s-12s] 室内画面",
+            ["task3248-frame-%d.jpg" % index for index in range(1, 9)],
+        )
+
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(
+            [call[1] for call in calls],
+            [
+                ["task3248-frame-1.jpg", "task3248-frame-2.jpg"],
+                ["task3248-frame-3.jpg", "task3248-frame-4.jpg"],
+                ["task3248-frame-3.jpg", "task3248-frame-4.jpg"],
+                ["task3248-frame-5.jpg", "task3248-frame-6.jpg"],
+                ["task3248-frame-7.jpg", "task3248-frame-8.jpg"],
+            ],
+        )
+        self.assertIn("上身角度发生偏转", prompt)
+        self.assertIn("双臂举过头顶", prompt)
+        self.assertIn("树干旁并被部分遮挡", prompt)
+        self.assertEqual(
+            [line.split("] ", 1)[0] + "]" for line in prompt.splitlines()],
+            [
+                "[00:00.0-00:03.8]",
+                "[00:03.8-00:07.6]",
+                "[00:07.6-00:11.5]",
+                "[00:11.5-00:15.3]",
+            ],
+        )
+        self.assertNotIn(duplicate_2["action"], calls[2][0])
+        self.assertIn("不要沿用任何历史草稿", calls[2][0])
+
+    def test_regression_3248_rejects_motion_and_no_change_contradiction(self):
+        entry = self._reverse_entry(
+            scene="室内床铺",
+            action="人物在床上坐起，但未观察到明显动作变化",
+        )
+        with self.assertRaisesRegex(ValueError, "动作与“无变化”自相矛盾"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["bed-1.jpg", "bed-2.jpg"], 3
+            )
+
+    def test_regression_3248_rejects_hidden_face_expression(self):
+        entry = self._reverse_entry(
+            subject="白衣人物背对镜头",
+            action="人物保持背向，表情平静并带有微笑",
+        )
+        with self.assertRaisesRegex(ValueError, "不可见的背面表情"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["back-1.jpg", "back-2.jpg"], 1
+            )
+
+    def test_regression_3248_rejects_subjective_visual_inferences(self):
+        for phrase in ("似乎在感受风", "阳光明媚", "绿草如茵"):
+            with self.subTest(phrase=phrase):
+                entry = self._reverse_entry(scene="树林背景，" + phrase)
+                with self.assertRaisesRegex(ValueError, "无证据主观推断"):
+                    self.breakdown._validate_reverse_segment_evidence(
+                        entry, [], ["view-1.jpg", "view-2.jpg"], 1
+                    )
+
+    def test_regression_3248_rejects_sound_claim_inferred_from_image(self):
+        entry = self._reverse_entry(sound="未观察到声音")
+        with self.assertRaisesRegex(ValueError, "从画面推断声音"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["silent-1.jpg", "silent-2.jpg"], 1,
+                transcript="[0s-2s] 实际可辨识口播",
+            )
+
+    def test_regression_3248_rejects_unreliable_tree_root_orientation(self):
+        entry = self._reverse_entry(action="人物面向树根并抬起右手")
+        with self.assertRaisesRegex(ValueError, "无可靠证据方位"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["tree-1.jpg", "tree-2.jpg"], 4
+            )
+
+    def test_regression_3248_subtitle_requires_quoted_visible_text(self):
+        unsupported = self._reverse_entry(scene="画面字幕提示人物来到树林")
+        with self.assertRaisesRegex(ValueError, "字幕缺少可核验逐字内容"):
+            self.breakdown._validate_reverse_segment_evidence(
+                unsupported, [], ["caption-1.jpg", "caption-2.jpg"], 1
+            )
+
+        supported = self._reverse_entry(scene="画面字幕“来到树林”清晰可读")
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                supported, [], ["caption-1.jpg", "caption-2.jpg"], 1
+            ),
+            supported,
+        )
+
+    def test_regression_5708_identical_segments_fail_after_frame_only_retry(self):
+        """任务5708：不同画面生成相同正文时，重试也绝不放行。"""
+        repeated = {
+            "subject": "一名女性站在画面中央",
+            "scene": "户外背景位于人物身后",
+            "action": "人物面向镜头并抬起右手",
+            "camera": "中景固定构图",
+            "lighting": "自然光",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        calls = []
+
+        def fake_chat(sysmsg, usermsg, frames, **kwargs):
+            calls.append((usermsg, list(frames), kwargs))
+            return json.dumps({"segments": [repeated]}, ensure_ascii=False)
+
+        self.breakdown._chat_multimodal = fake_chat
+        with self.assertRaisesRegex(ValueError, "第2段与第1段内容重复"):
+            self.breakdown._reverse_prompt_from_frames(
+                "任务5708", 33.209, "douyin", "",
+                ["task5708-frame-%d.jpg" % index for index in range(1, 9)],
+            )
+
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0][1], [
+            "task5708-frame-1.jpg", "task5708-frame-2.jpg",
+        ])
+        self.assertEqual(calls[1][1], [
+            "task5708-frame-3.jpg", "task5708-frame-4.jpg",
+        ])
+        self.assertEqual(calls[2][1], calls[1][1])
+        self.assertNotIn(repeated["action"], calls[2][0])
+        self.assertIn("不要沿用任何历史草稿", calls[2][0])
+
+    def test_reverse_static_claim_requires_static_frame_evidence(self):
+        segment = {
+            "subject": "白衣人物",
+            "scene": "树林",
+            "action": "人物静止不动，姿态无变化",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+        }
+        calls = []
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: (
+            calls.append(args) or
+            json.dumps({"segments": [segment]}, ensure_ascii=False)
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=False
+        ):
+            with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+                self.breakdown._reverse_prompt_from_frames(
+                    "动态画面", 2.5, "douyin", "",
+                    ["moving-1.jpg", "moving-2.jpg"],
+                )
+        self.assertEqual(len(calls), 2)
+
+    def test_reverse_static_claim_is_allowed_when_frames_are_static(self):
+        segment = {
+            "subject": "白衣人物",
+            "scene": "树林",
+            "action": "人物静止不动，姿态无变化",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ):
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "静止画面", 2.5, "douyin", "",
+                ["static-1.jpg", "static-2.jpg"],
+            )
+        self.assertIn("人物静止不动", prompt)
+
+    def test_reverse_static_non_person_is_generation_ready_with_static_evidence(self):
+        segment = {
+            "subject": "白色矩形位于纯色画面中央",
+            "scene": "蓝色纯色背景包围中央矩形",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定正面构图",
+            "lighting": "画面亮度均匀，未见阴影变化",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "静态几何图形",
+                2.5,
+                "local",
+                "",
+                ["rectangle-first.jpg", "rectangle-last.jpg"],
+            )
+        static_check.assert_called_once_with(
+            ["rectangle-first.jpg", "rectangle-last.jpg"]
+        )
+        self.assertIn("主体：白色矩形位于纯色画面中央", prompt)
+        self.assertIn("动作：主体保持静止，未观察到位置或形态变化", prompt)
+
+    def test_reverse_static_non_person_claim_still_requires_ssim(self):
+        segment = {
+            "subject": "白色矩形位于画面中央",
+            "scene": "蓝色纯色背景",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=False
+        ):
+            with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+                self.breakdown._reverse_prompt_from_frames(
+                    "动态矩形",
+                    2.5,
+                    "local",
+                    "",
+                    ["rectangle-first.jpg", "rectangle-last.jpg"],
+                )
+
+    def test_reverse_no_action_with_static_frames_calls_ssim_once(self):
+        entry = {
+            "text": "主体：白色矩形；场景：蓝色背景；动作：无动作。",
+            "fields": {
+                "subject": "白色矩形",
+                "scene": "蓝色背景",
+                "action": "无动作",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["static-first.jpg", "static-last.jpg"]
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ) as static_check:
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                frames,
+                1,
+                require_frame_evidence=True,
+            )
+        static_check.assert_called_once_with(frames)
+
+    def test_reverse_no_action_with_motion_frames_calls_ssim_once_and_fails(self):
+        entry = {
+            "text": "主体：白色矩形；场景：蓝色背景；动作：无动作。",
+            "fields": {
+                "subject": "白色矩形",
+                "scene": "蓝色背景",
+                "action": "无动作",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["motion-first.jpg", "motion-last.jpg"]
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=False
+        ) as static_check:
+            with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+                self.breakdown._validate_reverse_segment_evidence(
+                    entry,
+                    [],
+                    frames,
+                    1,
+                    require_frame_evidence=True,
+                )
+        static_check.assert_called_once_with(frames)
+
+    def test_reverse_explicit_no_action_synonyms_claim_static(self):
+        for action in (
+            "无动作",
+            "没有动作",
+            "未见动作",
+            "未观察到动作",
+            "未发生动作",
+            "但仍无动作",
+        ):
+            with self.subTest(action=action):
+                self.assertTrue(
+                    self.breakdown._reverse_segment_claims_static(
+                        {"fields": {"action": action}}
+                    )
+                )
+
+    def test_reverse_no_action_prefix_inside_speed_change_is_not_static(self):
+        entry = {
+            "text": (
+                "主体：黑色圆形；场景：浅色背景；"
+                "动作：未观察到动作速度变化，圆形持续从左到右移动。"
+            ),
+            "fields": {
+                "subject": "黑色圆形",
+                "scene": "浅色背景",
+                "action": "未观察到动作速度变化，圆形持续从左到右移动",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["motion-first.jpg", "motion-last.jpg"]
+        self.assertFalse(self.breakdown._reverse_segment_claims_static(entry))
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                frames,
+                1,
+                require_frame_evidence=True,
+            )
+        static_check.assert_not_called()
+
+    def test_reverse_complete_static_clause_with_real_motion_is_contradictory(self):
+        actions = (
+            "没有明显动作变化，但人物从坐姿起身",
+            "没有明显动作变化，但物体继续移动",
+            "圆形持续移动，但仍无动作",
+        )
+        for action in actions:
+            with self.subTest(action=action):
+                entry = {
+                    "text": "主体：可见主体；场景：室内；动作：%s。" % action,
+                    "fields": {
+                        "subject": "可见主体",
+                        "scene": "室内",
+                        "action": action,
+                        "camera": "",
+                        "lighting": "",
+                        "sound": "",
+                        "continuity": "",
+                    },
+                    "evidence_frames": {
+                        "subject": [1, 2],
+                        "scene": [1, 2],
+                        "action": [1, 2],
+                    },
+                    "continuity_evidence_frames": [],
+                }
+                self.assertFalse(
+                    self.breakdown._reverse_segment_claims_static(entry)
+                )
+                with mock.patch.object(
+                    self.breakdown, "_frames_are_effectively_static"
+                ) as static_check:
+                    with self.assertRaisesRegex(ValueError, "自相矛盾"):
+                        self.breakdown._validate_reverse_segment_evidence(
+                            entry,
+                            [],
+                            ["motion-first.jpg", "motion-last.jpg"],
+                            1,
+                            require_frame_evidence=True,
+                        )
+                static_check.assert_not_called()
+
+    def test_reverse_pure_abstract_frame_uses_evidence_backed_subject(self):
+        segment = {
+            "subject": "抽象画面，红色色块填满整个画面",
+            "scene": "无独立前景或背景物体",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定满幅构图",
+            "lighting": "红色区域亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ):
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "纯色画面",
+                2.5,
+                "local",
+                "",
+                ["abstract-first.jpg", "abstract-last.jpg"],
+            )
+        self.assertIn("主体：抽象画面，红色色块填满整个画面", prompt)
+
+    def test_reverse_non_person_shape_describes_visible_change_without_static_claim(self):
+        segment = {
+            "subject": "黑色圆形位于浅色画面左侧",
+            "scene": "浅色纯色背景",
+            "action": "黑色圆形从左侧移到右侧，同时直径增大",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "变化图形",
+                2.5,
+                "local",
+                "",
+                ["shape-first.jpg", "shape-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("从左侧移到右侧", prompt)
+
+    def test_reverse_unchanged_position_with_color_change_is_not_static(self):
+        segment = {
+            "subject": "画面中央的矩形首帧为白色，尾帧为红色",
+            "scene": "蓝色纯色背景",
+            "action": "矩形位置保持不变，颜色由白色逐渐变为红色",
+            "camera": "固定满幅构图",
+            "lighting": "背景亮度保持均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "矩形变色",
+                2.5,
+                "local",
+                "",
+                ["color-first.jpg", "color-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("位置保持不变，颜色由白色逐渐变为红色", prompt)
+
+    def test_reverse_unchanged_shape_with_motion_is_not_static(self):
+        segment = {
+            "subject": "黑色圆形出现在浅色画面中",
+            "scene": "浅色纯色背景",
+            "action": "圆形形状保持不变，从左侧移动到右侧",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "圆形移动",
+                2.5,
+                "local",
+                "",
+                ["motion-first.jpg", "motion-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("形状保持不变，从左侧移动到右侧", prompt)
+
+    def test_reverse_non_person_object_remains_the_subject(self):
+        segment = {
+            "subject": "透明玻璃瓶位于木桌中央，瓶身贴有白色标签",
+            "scene": "浅色木桌与灰色背景构成简洁室内静物场景",
+            "action": "玻璃瓶从竖直状态向画面右侧倾斜",
+            "camera": "固定正面中近景构图",
+            "lighting": "左侧柔光在瓶身形成可见高光",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "玻璃瓶静物",
+                2.5,
+                "local",
+                "",
+                ["bottle-first.jpg", "bottle-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("主体：透明玻璃瓶位于木桌中央", prompt)
+        self.assertIn("动作：玻璃瓶从竖直状态向画面右侧倾斜", prompt)
+
+    def test_reverse_retry_carries_missing_field_error_not_old_draft(self):
+        missing = {
+            "subject": "",
+            "scene": "Blue background with a white rectangle",
+            "action": "",
+            "camera": "Static",
+            "lighting": "Uniform",
+            "sound": "",
+            "continuity": "",
+        }
+        corrected = {
+            "subject": "白色矩形位于画面中央",
+            "scene": "蓝色纯色背景",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        calls = []
+        responses = [missing, corrected]
+
+        def fake_chat(_system, user, frames, **kwargs):
+            calls.append((user, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ):
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "静态白色矩形",
+                2.5,
+                "local",
+                "",
+                ["rectangle-first.jpg", "rectangle-last.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertIn("上一轮校验错误", calls[1][0])
+        self.assertIn("subject（主体）", calls[1][0])
+        self.assertIn("action（动作）", calls[1][0])
+        self.assertIn("禁止返回全空JSON", calls[1][0])
+        self.assertNotIn("Blue background with a white rectangle", calls[1][0])
+        self.assertNotIn("camera=Static", calls[1][0])
+        self.assertIn("主体：白色矩形位于画面中央", prompt)
+
+    def test_regression_real_glm_static_rectangle_responses_still_fail(self):
+        first_real_response = {
+            "subject": "",
+            "scene": "Blue background with a white rectangle",
+            "action": "",
+            "camera": "Static",
+            "lighting": "Uniform",
+            "sound": "",
+            "continuity": "",
+        }
+        blank = {
+            "subject": "",
+            "scene": "",
+            "action": "",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+        }
+        calls = []
+        responses = [first_real_response, blank]
+
+        def fake_chat(_system, user, frames, **kwargs):
+            calls.append((user, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        with self.assertRaisesRegex(
+            ValueError, "本段为空.*subject、scene、action"
+        ):
+            self.breakdown._reverse_prompt_from_frames(
+                "静态空画面",
+                2.5,
+                "local",
+                "",
+                ["blank-first.jpg", "blank-last.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertIn("subject（主体）", calls[1][0])
+        self.assertIn("action（动作）", calls[1][0])
+        self.assertNotIn(
+            "Blue background with a white rectangle", calls[1][0]
+        )
+
+    def test_reverse_segment_transcript_keeps_only_overlapping_asr(self):
+        transcript = (
+            "[0s-3.8s] 第一段口播\n"
+            "[3.8s-7.6s] 第二段口播\n"
+            "[7.6s-11.5s] 第三段口播\n"
+            "[11.5s-15.3s] 第四段口播"
+        )
+        self.assertEqual(
+            self.breakdown._segment_transcript(transcript, 3.8, 7.6),
+            "第二段口播",
+        )
+
+    def test_reverse_rejects_sound_without_segment_asr_evidence(self):
+        segment = {
+            "subject": "白衣人物",
+            "scene": "树林",
+            "action": "抬起右手",
+            "camera": "",
+            "lighting": "",
+            "sound": "舒缓背景音乐",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+        }
+        calls = []
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: (
+            calls.append(args) or
+            json.dumps({"segments": [segment]}, ensure_ascii=False)
+        )
+        with self.assertRaisesRegex(ValueError, "声音缺少本段ASR证据"):
+            self.breakdown._reverse_prompt_from_frames(
+                "无口播画面", 2.5, "douyin", "",
+                ["frame-1.jpg", "frame-2.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
+
+    def test_reverse_rejects_subject_action_mechanical_copy(self):
+        entry = {
+            "text": "主体：白衣人物坐在树旁抬起右手；动作：白衣人物坐在树旁抬起右手。",
+            "fields": {
+                "subject": "白衣人物坐在树旁抬起右手",
+                "scene": "树林背景",
+                "action": "白衣人物坐在树旁抬起右手",
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "主体与动作机械重复"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry, [], ["f1.jpg", "f2.jpg"], 1
+            )
+
     def test_reverse_timeline_uses_tenth_second_precision(self):
         self.assertEqual(
             self.breakdown._fixed_reverse_ranges(11.434),
@@ -971,68 +2005,900 @@ class BreakdownTests(unittest.TestCase):
             ],
         )
 
-    def test_reverse_single_call_acceptance_contract(self):
-        import re
+    def test_reverse_visual_semantic_rubric_is_auditable_hundred_points(self):
+        contract = self.breakdown._reverse_quality_contract()
+        self.assertEqual(contract["definition"], "visual_semantic_not_pixel")
+        self.assertEqual(
+            contract["score_scope"],
+            "source_evidence_coverage_not_generated_video_similarity",
+        )
+        self.assertEqual(contract["target_score"], 90)
+        self.assertTrue(contract["requires_reference_guidance"])
+        self.assertEqual(sum(contract["weights"].values()), 100)
+        self.assertEqual(
+            contract["critical_failures"],
+            ["subject", "scene", "action"],
+        )
 
+        entries = [
+            self._reverse_entry(
+                subject="白衣人物位于画面中部",
+                scene="海滩、浪花与海平线",
+                action="人物从左向右迈步",
+                camera="平视中景跟随",
+                lighting="暖色逆光",
+            )
+            for _index in range(4)
+        ]
+        score = self.breakdown._score_reverse_generation_coverage(
+            entries,
+            self._global_continuity(),
+            self.breakdown._reverse_segment_windows(15.267),
+        )
+        self.assertEqual(score["total"], 100)
+        self.assertEqual(score["parts"], {
+            "subject": 30,
+            "action_timing": 25,
+            "scene_composition": 20,
+            "camera_duration": 15,
+            "lighting_style": 10,
+        })
+
+    def test_reverse_global_facts_require_original_frame_evidence(self):
+        parsed = self.breakdown._parse_reverse_global_facts(
+            self._global_continuity_response(), 8, 4
+        )
+        self.assertEqual(
+            parsed["facts"]["wardrobe"],
+            "白色长衣，未见服装切换",
+        )
+        self.assertEqual(parsed["evidence_frames"]["wardrobe"], [1, 3, 5, 7])
+
+        invalid = json.loads(self._global_continuity_response())
+        invalid["evidence_frames"]["wardrobe"] = []
+        with self.assertRaisesRegex(ValueError, "缺少原始帧编号"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(invalid, ensure_ascii=False), 8, 4
+            )
+
+        single_segment = json.loads(self._global_continuity_response())
+        single_segment["evidence_frames"]["wardrobe"] = [1, 2]
+        with self.assertRaisesRegex(ValueError, "至少两个不同时间段"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(single_segment, ensure_ascii=False), 8, 4
+            )
+
+    def test_reverse_segment_isolated_request_forbids_cross_segment_draft(self):
+        _system, user = self.breakdown._reverse_segment_messages(
+            "标题", 15.267, "douyin", "", 2, 4,
+            "[00:03.8-00:07.6]",
+            retry=True,
+        )
+        self.assertIn("隔离分段取证", user)
+        self.assertIn("跨段连续性将在全部分段通过校验后由代码确定性归纳", user)
+        self.assertIn("不要沿用任何历史草稿", user)
+        self.assertNotIn("上一轮输出", user)
+        self.assertIn('"evidence_frames"', user)
+        self.assertIn("action 必须同时引用首尾两帧", user)
+        self.assertIn("continuity_evidence_frames 必须留空", user)
+        self.assertNotIn("同一名白衣人物，黑色长发", user)
+        self.assertTrue(_system)
+        entry = self._reverse_entry()
+        entry["continuity_evidence_frames"] = [1, 3]
+        with self.assertRaisesRegex(ValueError, "不能在隔离分段分析中"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+            )
+
+    def test_reverse_production_segment_requires_auditable_frame_indices(self):
+        raw = json.dumps({
+            "segments": [{
+                "subject": "白衣人物位于画面中央",
+                "scene": "海滩与远处海平线",
+                "action": "人物从左向右迈步",
+                "camera": "平视中景",
+                "lighting": "暖色逆光",
+                "sound": "",
+                "continuity": "",
+                "evidence_frames": {
+                    "subject": [1],
+                    "scene": [1],
+                    "action": [1],
+                    "camera": [1],
+                    "lighting": [1],
+                },
+            }],
+        }, ensure_ascii=False)
+        entry = self.breakdown._parse_reverse_segment_evidence(raw)
+        with self.assertRaisesRegex(ValueError, "动作时序必须同时引用"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+            )
+
+    def test_reverse_rejects_hollow_critical_generation_fields(self):
+        entry = self._reverse_entry(scene="场景细节")
+        with self.assertRaisesRegex(ValueError, "空洞占位内容"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+            )
+
+    def test_reverse_sound_must_match_current_segment_asr_text(self):
+        mismatch = self._reverse_entry(sound="激昂摇滚乐")
+        with self.assertRaisesRegex(ValueError, "声音与本段ASR内容不匹配"):
+            self.breakdown._validate_reverse_segment_evidence(
+                mismatch,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                transcript="欢迎光临",
+            )
+
+        matching = self._reverse_entry(sound="人物口播“欢迎光临”")
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            matching,
+            [],
+            ["segment-first.jpg", "segment-last.jpg"],
+            1,
+            transcript="欢迎光临本店",
+        )
+        self.assertIs(validated, matching)
+        embellished = self._reverse_entry(
+            sound="人物说“欢迎光临”，同时伴随激昂摇滚乐"
+        )
+        with self.assertRaisesRegex(ValueError, "声音与本段ASR内容不匹配"):
+            self.breakdown._validate_reverse_segment_evidence(
+                embellished,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                transcript="欢迎光临",
+            )
+
+    def test_reverse_rejects_fixed_continuity_even_when_bodies_differ(self):
+        entry = self._reverse_entry(
+            subject="第二段黑衣人物位于画面右侧",
+            scene="室内桌面和台灯",
+            action="人物从右向左放下杯子",
+            continuity="与上一段保持一致",
+        )
+        entry["continuity_evidence_frames"] = [1, 3]
+        with self.assertRaisesRegex(ValueError, "使用固定衔接文字"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [self._reverse_entry()],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=self._global_continuity(),
+            )
+
+    def test_reverse_continuity_requires_current_and_adjacent_segment_evidence(self):
+        entry = self._reverse_entry(
+            continuity="人物从室外切换到室内，服装未变"
+        )
+        entry["continuity_evidence_frames"] = [1]
+        with self.assertRaisesRegex(ValueError, "本段和相邻时间段"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=self._global_continuity(),
+            )
+
+    def test_reverse_analysis_budget_stays_inside_reaper_grace(self):
+        core = importlib.import_module("content_domains.core")
+        self.assertEqual(core.KIND_GRACE["breakdown"], 600)
+        self.assertLessEqual(self.breakdown.BREAKDOWN_ANALYSIS_BUDGET, 540)
+        self.assertLess(
+            self.breakdown.BREAKDOWN_ANALYSIS_BUDGET,
+            core.KIND_GRACE["breakdown"],
+        )
+        self.assertEqual(
+            self.breakdown._reverse_analysis_call_budget(4),
+            {
+                "analysis_deadline_seconds": 540,
+                "max_images_per_request": 2,
+                "global_model_calls": 0,
+                "normal_logical_calls": 4,
+                "worst_logical_calls": 8,
+                "normal_physical_http_attempts": 4,
+                "same_provider_physical_attempts_per_logical": 2,
+                "worst_physical_http_attempts": 16,
+                "provider": "zhipu",
+                "model": "glm-4v-plus",
+                "http_4xx_retry": False,
+                "cross_provider_fallback": False,
+            },
+        )
+
+    def test_reverse_provider_contract_rejects_more_than_two_images(self):
+        with patch.object(
+            self.breakdown, "_chat_multimodal"
+        ) as chat:
+            with self.assertRaisesRegex(ValueError, "最多只能携带2张图片"):
+                self.breakdown._reverse_chat_multimodal(
+                    "system",
+                    "user",
+                    ["frame-%d.jpg" % index for index in range(1, 9)],
+                )
+        chat.assert_not_called()
+
+    def test_reverse_provider_contract_never_falls_back_to_openai(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        failures = [
+            urllib.error.HTTPError(
+                "https://zhipu.test", 400, "bad request", {}, io.BytesIO(b"{}")
+            ),
+            urllib.error.HTTPError(
+                "https://zhipu.test", 503, "unavailable", {}, io.BytesIO(b"{}")
+            ),
+            urllib.error.URLError("network down"),
+            TimeoutError("timed out"),
+        ]
+        for failure in failures:
+            with self.subTest(error=type(failure).__name__), patch.object(
+                self.breakdown, "_post_zhipu", side_effect=failure
+            ), patch.object(
+                self.breakdown, "_post_openai_fallback"
+            ) as fallback:
+                with self.assertRaises(type(failure)):
+                    self.breakdown._reverse_chat_multimodal(
+                        "system", "user", []
+                    )
+                fallback.assert_not_called()
+
+    def test_reverse_zhipu_1210_is_one_http_attempt_without_fallback(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        error = urllib.error.HTTPError(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(
+                b'{"error":{"code":"1210","message":"image count exceeded"}}'
+            ),
+        )
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            side_effect=error,
+        ) as post, patch.object(
+            self.breakdown, "_post_openai_fallback"
+        ) as fallback:
+            with self.assertRaisesRegex(ValueError, "1210") as raised:
+                self.breakdown._reverse_chat_multimodal(
+                    "system", "user", []
+                )
+        self.assertNotIsInstance(raised.exception, TimeoutError)
+        self.assertEqual(post.call_count, 1)
+        fallback.assert_not_called()
+
+    def test_general_multimodal_1210_keeps_existing_openai_fallback(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        self.breakdown.OPENAI_KEY = "openai-test-key"
+        error = urllib.error.HTTPError(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        error.breakdown_response_detail = (
+            '{"error":{"code":"1210","message":"image count exceeded"}}'
+        )
+        with patch.object(
+            self.breakdown, "_post_zhipu", side_effect=error
+        ), patch.object(
+            self.breakdown,
+            "_post_openai_fallback",
+            return_value={
+                "choices": [{"message": {"content": "fallback result"}}]
+            },
+        ) as fallback:
+            result = self.breakdown._chat_multimodal(
+                "system",
+                "user",
+                [],
+                allow_provider_fallback=True,
+            )
+        self.assertEqual(result, "fallback result")
+        self.assertEqual(fallback.call_count, 1)
+
+    def test_reverse_requests_are_fixed_to_glm_4v_plus(self):
+        captured = []
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+
+        def fake_zhipu(body, api_key):
+            captured.append((body, api_key))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch.object(
+            self.breakdown, "_post_zhipu", side_effect=fake_zhipu
+        ), patch.object(
+            self.breakdown, "_post_openai_fallback"
+        ) as fallback:
+            self.assertEqual(
+                self.breakdown._reverse_chat_multimodal(
+                    "system", "user", []
+                ),
+                "ok",
+            )
+        self.assertEqual(captured[0][0]["model"], "glm-4v-plus")
+        fallback.assert_not_called()
+
+    def test_reverse_model_physical_retry_refreshes_heartbeat(self):
+        events = []
+        captured = {}
+
+        def fake_post(*args, **kwargs):
+            captured.update(kwargs)
+            events.append("physical_attempt_1")
+            kwargs["log"]("first physical attempt failed")
+            events.append("physical_attempt_2")
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch.object(
+            self.breakdown.egress, "post_json_idempotent", fake_post
+        ), patch.object(
+            self.breakdown.time,
+            "monotonic",
+            side_effect=[100.0, 101.0, 102.0],
+        ):
+            response = self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus"},
+                "key",
+                deadline=640.0,
+                heartbeat=lambda: events.append("heartbeat"),
+            )
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(events, [
+            "heartbeat",
+            "physical_attempt_1",
+            "heartbeat",
+            "physical_attempt_2",
+        ])
+        self.assertEqual(captured["max_attempts"], 2)
+        self.assertLessEqual(captured["timeout"] * 2, 539)
+
+    def test_reverse_model_normal_attempt_refreshes_heartbeat(self):
+        heartbeats = []
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            return_value={"choices": [{"message": {"content": "ok"}}]},
+        ), patch.object(
+            self.breakdown.time,
+            "monotonic",
+            side_effect=[100.0, 101.0],
+        ):
+            self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus"},
+                "key",
+                deadline=640.0,
+                heartbeat=lambda: heartbeats.append("beat"),
+            )
+        self.assertEqual(heartbeats, ["beat"])
+
+    def test_reverse_analysis_deadline_stops_before_new_request(self):
+        called = []
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            lambda *args, **kwargs: called.append(True),
+        ), patch.object(
+            self.breakdown.time, "monotonic", return_value=701.0
+        ):
+            with self.assertRaisesRegex(TimeoutError, "总时间预算"):
+                self.breakdown._post_zhipu(
+                    {"model": "glm-4v-plus"},
+                    "key",
+                    deadline=700.0,
+                    heartbeat=lambda: called.append("heartbeat"),
+                )
+        self.assertEqual(called, [])
+
+    def test_reverse_audit_fields_use_existing_persisted_asset_columns(self):
+        root = Path(__file__).resolve().parents[1]
+        assets = (
+            root / "server" / "content_domains" / "assets_store.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"sections": r.get("sections")', assets)
+        self.assertIn('"frame_thumbnails": r.get("frame_thumbnails")', assets)
+
+    def test_reverse_reference_frames_cover_every_segment_in_order(self):
+        self.assertEqual(
+            self.breakdown._reverse_reference_frames(
+                ["frame-%d.jpg" % index for index in range(1, 9)], 4
+            ),
+            ["frame-2.jpg", "frame-4.jpg", "frame-6.jpg", "frame-8.jpg"],
+        )
+        bundle = self.breakdown._reverse_frame_bundle(
+            ["frame-%d.jpg" % index for index in range(1, 9)], 4
+        )
+        self.assertEqual(bundle["frames"], [
+            "frame-2.jpg", "frame-4.jpg", "frame-6.jpg", "frame-8.jpg",
+            "frame-1.jpg", "frame-3.jpg", "frame-5.jpg", "frame-7.jpg",
+        ])
+        self.assertEqual(
+            {item["source_frame_index"] for item in bundle["manifest"]},
+            set(range(1, 9)),
+        )
+
+    def test_reverse_model_frame_groups_use_two_images_for_one_to_four_segments(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        cases = (
+            (1, [["frame-1.jpg", "frame-8.jpg"]], [[1, 8]]),
+            (
+                2,
+                [
+                    ["frame-1.jpg", "frame-4.jpg"],
+                    ["frame-5.jpg", "frame-8.jpg"],
+                ],
+                [[1, 4], [5, 8]],
+            ),
+            (
+                3,
+                [
+                    ["frame-1.jpg", "frame-3.jpg"],
+                    ["frame-4.jpg", "frame-5.jpg"],
+                    ["frame-6.jpg", "frame-8.jpg"],
+                ],
+                [[1, 3], [4, 5], [6, 8]],
+            ),
+            (
+                4,
+                [
+                    ["frame-1.jpg", "frame-2.jpg"],
+                    ["frame-3.jpg", "frame-4.jpg"],
+                    ["frame-5.jpg", "frame-6.jpg"],
+                    ["frame-7.jpg", "frame-8.jpg"],
+                ],
+                [[1, 2], [3, 4], [5, 6], [7, 8]],
+            ),
+        )
+        for segment_count, expected_frames, expected_sources in cases:
+            with self.subTest(segment_count=segment_count):
+                self.assertEqual(
+                    self.breakdown._reverse_model_frame_groups(
+                        frames, segment_count
+                    ),
+                    expected_frames,
+                )
+                self.assertEqual(
+                    self.breakdown._reverse_frame_bundle(
+                        frames, segment_count
+                    )["segment_model_source_indices"],
+                    expected_sources,
+                )
+        entries = [
+            self._reverse_entry(action="第%d段动作" % index)
+            for index in range(1, 4)
+        ]
+        evidence = self.breakdown._reverse_segment_evidence_manifest(
+            entries,
+            self.breakdown._reverse_segment_windows(8.0),
+            [[1, 2, 3], [4, 5], [6, 7, 8]],
+            [[1, 3], [4, 5], [6, 8]],
+        )
+        self.assertEqual(
+            [
+                item["source_evidence_frames"]["action"]
+                for item in evidence
+            ],
+            [[1, 3], [4, 5], [6, 8]],
+        )
+        self.assertEqual(
+            evidence[2]["segment_source_frames"],
+            [6, 7, 8],
+        )
+
+    def test_reverse_global_continuity_is_zero_image_deterministic_aggregation(self):
+        entries = [
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="树林与石阶",
+                action="人物抬起右手",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="室内床铺",
+                action="人物坐到床边",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="树干近景",
+                action="人物从树后走出",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+        ]
+        with patch.object(
+            self.breakdown, "_chat_multimodal"
+        ) as chat:
+            result = self.breakdown._reverse_global_facts_from_segments(
+                entries,
+                [[1, 3], [4, 5], [6, 8]],
+                8,
+            )
+        chat.assert_not_called()
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(result["image_count"], 0)
+        self.assertEqual(result["segment_count"], 3)
+        self.assertEqual(
+            result["facts"]["subject_identity"],
+            "同一白衣人物位于画面中央",
+        )
+        self.assertEqual(
+            result["evidence_frames"]["subject_identity"],
+            [1, 3, 4, 5, 6, 8],
+        )
+        self.assertEqual(
+            [item["text"] for item in result["changes"]["action"]],
+            ["人物抬起右手", "人物坐到床边", "人物从树后走出"],
+        )
+        self.assertEqual(
+            result["changes"]["scene"][1]["evidence_frames"],
+            [4, 5],
+        )
+
+    def test_reverse_one_to_four_segments_make_only_two_image_requests(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        cases = (
+            (2.0, [[frames[0], frames[7]]]),
+            (5.0, [[frames[0], frames[3]], [frames[4], frames[7]]]),
+            (
+                8.0,
+                [
+                    [frames[0], frames[2]],
+                    [frames[3], frames[4]],
+                    [frames[5], frames[7]],
+                ],
+            ),
+            (
+                11.0,
+                [
+                    [frames[0], frames[1]],
+                    [frames[2], frames[3]],
+                    [frames[4], frames[5]],
+                    [frames[6], frames[7]],
+                ],
+            ),
+        )
+        for duration, expected in cases:
+            calls = []
+            objects = self._detailed_reverse_objects(len(expected))
+
+            def fake_chat(_system, _user, request_frames, **kwargs):
+                calls.append((list(request_frames), kwargs))
+                return json.dumps(
+                    {"segments": [objects[len(calls) - 1]]},
+                    ensure_ascii=False,
+                )
+
+            with self.subTest(duration=duration), patch.object(
+                self.breakdown, "_chat_multimodal", side_effect=fake_chat
+            ):
+                self.breakdown._reverse_prompt_from_frames(
+                    "短视频", duration, "douyin", "", frames
+                )
+            self.assertEqual(
+                [request_frames for request_frames, _kwargs in calls],
+                expected,
+            )
+            self.assertTrue(all(
+                len(request_frames) <= 2
+                and kwargs["model"] == "glm-4v-plus"
+                and kwargs["allow_provider_fallback"] is False
+                for request_frames, kwargs in calls
+            ))
+
+    def test_reverse_short_video_reference_indices_survive_persistence(self):
+        assets_store = importlib.import_module("content_domains.assets_store")
+        frames = ["frame-%d" % index for index in range(1, 9)]
+        cases = (
+            (2.0, [8]),
+            (5.0, [4, 8]),
+            (8.0, [3, 5, 8]),
+            (11.0, [2, 4, 6, 8]),
+        )
+        for duration, expected_sources in cases:
+            with self.subTest(duration=duration):
+                segment_count = len(
+                    self.breakdown._reverse_segment_windows(duration)
+                )
+                bundle = self.breakdown._reverse_frame_bundle(
+                    frames, segment_count
+                )
+                thumbnails = [
+                    "thumb-source-%d" % item["source_frame_index"]
+                    for item in bundle["manifest"]
+                ]
+                result = {
+                    "type": "breakdown_reverse",
+                    "prompt": "prompt",
+                    "frame_thumbnails": thumbnails,
+                    "sections": {
+                        "reverse_audit": {
+                            "reference_thumbnail_indices": bundle[
+                                "reference_thumbnail_indices"
+                            ],
+                            "audit_thumbnail_indices": bundle[
+                                "audit_thumbnail_indices"
+                            ],
+                            "frame_manifest": bundle["manifest"],
+                        },
+                    },
+                }
+                persisted = assets_store._project(
+                    "breakdown", result
+                )[3]
+                audit = persisted["sections"]["reverse_audit"]
+                selected = [
+                    persisted["frame_thumbnails"][index - 1]
+                    for index in audit["reference_thumbnail_indices"]
+                ]
+                self.assertEqual(
+                    selected,
+                    [
+                        "thumb-source-%d" % source
+                        for source in expected_sources
+                    ],
+                )
+                self.assertEqual(
+                    len(audit["reference_thumbnail_indices"]),
+                    segment_count,
+                )
+                self.assertTrue(
+                    set(audit["reference_thumbnail_indices"]).isdisjoint(
+                        audit["audit_thumbnail_indices"]
+                    )
+                )
+
+    def test_reverse_short_video_continuity_uses_actual_segment_count(self):
+        single = {
+            "facts": {
+                key: "" for key, _label
+                in self.breakdown._REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "evidence_frames": {
+                key: [] for key, _label
+                in self.breakdown._REVERSE_GLOBAL_FACT_FIELDS
+            },
+            "frame_count": 8,
+            "segment_count": 1,
+        }
+        one_segment_entry = self._reverse_entry(
+            continuity="人物在本段保持白色服装"
+        )
+        one_segment_entry["continuity_evidence_frames"] = [1, 8]
+        with self.assertRaisesRegex(ValueError, "单段视频"):
+            self.breakdown._validate_reverse_segment_evidence(
+                one_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
+                global_continuity=single,
+            )
+
+        two_segments = self._global_continuity()
+        two_segments["segment_count"] = 2
+        two_segments["evidence_frames"] = {
+            key: [1, 5] for key in two_segments["facts"]
+        }
+        second_segment_entry = self._reverse_entry(
+            continuity="白色服装在两个相邻时间段均可见"
+        )
+        second_segment_entry["continuity_evidence_frames"] = [1, 5]
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                second_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=two_segments,
+            ),
+            second_segment_entry,
+        )
+
+        self.assertEqual(
+            [
+                self.breakdown._reverse_source_frame_segment(
+                    frame, 8, 3
+                )
+                for frame in range(1, 9)
+            ],
+            [1, 1, 1, 2, 2, 3, 3, 3],
+        )
+        three_segments = self._global_continuity()
+        three_segments["segment_count"] = 3
+        three_segments["evidence_frames"] = {
+            key: [4, 6] for key in three_segments["facts"]
+        }
+        third_segment_entry = self._reverse_entry(
+            continuity="人物服装在第二、第三时间段均可见"
+        )
+        third_segment_entry["continuity_evidence_frames"] = [4, 6]
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                third_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                3,
+                require_frame_evidence=True,
+                global_continuity=three_segments,
+            ),
+            third_segment_entry,
+        )
+
+        cross_boundary = json.loads(self._global_continuity_response())
+        cross_boundary["evidence_frames"] = {
+            key: [4, 6] for key in cross_boundary["global_facts"]
+        }
+        parsed = self.breakdown._parse_reverse_global_facts(
+            json.dumps(cross_boundary, ensure_ascii=False), 8, 3
+        )
+        self.assertEqual(
+            parsed["evidence_frames"]["subject_identity"], [4, 6]
+        )
+        same_segment = dict(cross_boundary)
+        same_segment["evidence_frames"] = {
+            key: [6, 8] for key in same_segment["global_facts"]
+        }
+        with self.assertRaisesRegex(ValueError, "至少两个不同时间段"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(same_segment, ensure_ascii=False), 8, 3
+            )
+
+    def test_reverse_one_segment_skips_cross_segment_global_model_call(self):
+        self.breakdown._chat_multimodal = mock.Mock(
+            side_effect=AssertionError("single segment must not call global VLM")
+        )
+        continuity = self.breakdown._reverse_global_facts_from_segments(
+            [self._reverse_entry(
+                camera="中景固定机位",
+                lighting="中性自然光",
+            )],
+            [[1, 8]],
+            8,
+        )
+        self.assertEqual(continuity["segment_count"], 1)
+        self.assertFalse(any(continuity["facts"].values()))
+        self.assertEqual(continuity["model_calls"], 0)
+        self.assertEqual(continuity["image_count"], 0)
+        entry = self._reverse_entry(
+            camera="中景固定机位",
+            lighting="中性自然光",
+        )
+        score = self.breakdown._score_reverse_generation_coverage(
+            [entry],
+            continuity,
+            self.breakdown._reverse_segment_windows(2.0),
+        )
+        self.assertEqual(score["total"], 100)
+
+    def test_reverse_downstream_generation_field_mapping_is_explicit(self):
+        root = Path(__file__).resolve().parents[1]
+        ui = (root / "site" / "workbench" / "script.html").read_text(
+            encoding="utf-8"
+        )
+        video = (root / "server" / "content_domains" / "video.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "var reverseRefs=reverseReferenceImages(lastBreakdownReverse)",
+            ui,
+        )
+        self.assertNotIn(
+            "frame_thumbnails)||[]).slice(0,4)",
+            ui,
+        )
+        self.assertIn(
+            "reverse_audit||{}).reference_thumbnail_indices",
+            ui,
+        )
+        self.assertIn("channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", ui)
+        self.assertIn("endpoint:'/api/gen/xiaole_video'", ui)
+        self.assertIn("cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt", ui)
+        self.assertIn("endpoint:'/api/gen/cinematic'", ui)
+        self.assertIn('"micro": "seedance-2.0-fast"', video)
+        self.assertIn('input_d["mode"] = "image_to_video"', video)
+        self.assertIn('input_d["duration_seconds"] = 10', video)
+        self.assertIn('"prompt": prompt or MOTION_PROMPT', video)
+
+    def test_reverse_segment_scoped_acceptance_contract(self):
         calls = []
+        objects = self._detailed_reverse_objects()
 
         def fake_chat_multimodal(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
             return json.dumps(
-                {"segments": self._detailed_reverse_objects()},
+                {"segments": [objects[len(calls) - 1]]},
                 ensure_ascii=False,
             )
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         prompt = self.breakdown._reverse_prompt_from_frames(
             "海边人物动作", 15.093, "local", "", [
-                "pair-1.jpg", "pair-2.jpg", "pair-3.jpg", "pair-4.jpg",
+                "frame-%d.jpg" % index for index in range(1, 9)
             ],
         )
 
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][2], [
-            "pair-1.jpg", "pair-2.jpg", "pair-3.jpg", "pair-4.jpg",
-        ])
-        self.assertEqual(calls[0][3], 0.1)
+        self.assertEqual(len(calls), 4)
         self.assertEqual(
-            calls[0][4],
-            {"max_tokens": 2400, "image_detail": None},
+            [call[2] for call in calls],
+            [
+                ["frame-1.jpg", "frame-2.jpg"],
+                ["frame-3.jpg", "frame-4.jpg"],
+                ["frame-5.jpg", "frame-6.jpg"],
+                ["frame-7.jpg", "frame-8.jpg"],
+            ],
         )
-        self.assertIn("不得臆造", calls[0][1])
-        self.assertIn("不新增人物、道具、镜头或无关情节", calls[0][1])
+        self.assertTrue(all(call[3] == 0.1 for call in calls))
+        self.assertTrue(all(
+            call[4] == {
+                "max_tokens": 900,
+                "image_detail": None,
+                "provider": "zhipu",
+                "model": "glm-4v-plus",
+                "allow_provider_fallback": False,
+            }
+            for call in calls
+        ))
+        self.assertIn("不能从图片直接确认", calls[0][1])
+        self.assertIn("不得复制其他时间段", calls[0][0])
 
         lines = prompt.splitlines()
         self.assertEqual(len(lines), 4)
         self.assertTrue(lines[0].startswith("[00:00.0-00:03.8]"))
         self.assertTrue(lines[-1].startswith("[00:11.3-00:15.1]"))
         bodies = [line.split("] ", 1)[1] for line in lines]
-        lengths = [len(re.sub(r"\s+", "", body)) for body in bodies]
-        self.assertTrue(all(125 <= length <= 200 for length in lengths))
-        self.assertTrue(500 <= sum(lengths) <= 800)
         self.assertEqual(len(set(bodies)), 4)
         for body in bodies:
             for label in (
                 "主体：", "场景：", "动作：", "镜头：",
-                "光影：", "声音：", "衔接：",
+                "光影：",
             ):
                 self.assertIn(label, body)
+            self.assertNotIn("衔接：", body)
+            self.assertNotIn("声音：", body)
 
-    def test_reverse_single_call_contract_handles_ten_concurrent_jobs(self):
+    def test_reverse_segment_contract_handles_ten_concurrent_jobs(self):
         import threading
         from concurrent.futures import ThreadPoolExecutor
 
-        response = json.dumps(
-            {"segments": self._detailed_reverse_objects()},
-            ensure_ascii=False,
-        )
+        objects = self._detailed_reverse_objects()
         lock = threading.Lock()
         call_count = [0]
 
-        def fake_chat_multimodal(*args, **kwargs):
+        def fake_chat_multimodal(sysmsg, usermsg, frames, *args, **kwargs):
+            frame_number = int(
+                os.path.basename(frames[0]).split("-")[-1].split(".")[0]
+            )
+            item = objects[(frame_number - 1) // 2]
             with lock:
                 call_count[0] += 1
-            return response
+            return json.dumps({"segments": [item]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
 
@@ -1042,13 +2908,13 @@ class BreakdownTests(unittest.TestCase):
                 15.093,
                 "local",
                 "",
-                ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"],
+                ["frame-%d.jpg" % number for number in range(1, 9)],
             )
 
         with ThreadPoolExecutor(max_workers=10) as executor:
             prompts = list(executor.map(reverse_one, range(10)))
 
-        self.assertEqual(call_count[0], 10)
+        self.assertEqual(call_count[0], 40)
         self.assertEqual(len(prompts), 10)
         self.assertTrue(all(len(prompt.splitlines()) == 4 for prompt in prompts))
         self.assertTrue(all(
@@ -1070,7 +2936,7 @@ class BreakdownTests(unittest.TestCase):
         raw = "画" * 850
         self.assertEqual(self.breakdown._clean_reverse_prompt(raw), raw)
 
-    def test_reverse_mode_extracts_eight_high_resolution_frames_and_pairs_them(self):
+    def test_reverse_mode_extracts_eight_uniform_frames_and_groups_by_segment(self):
         calls = self._install_fake_env(
             json.dumps(
                 {"segments": self._detailed_reverse_objects()},
@@ -1079,22 +2945,32 @@ class BreakdownTests(unittest.TestCase):
             transcript=[],
         )
 
-        def fake_extract(path, count, duration, scale_width=512, min_frames=None):
-            calls["extract_args"] = (count, scale_width, min_frames)
+        def fake_extract(
+            path, count, duration, scale_width=512, min_frames=None,
+            uniform=False,
+        ):
+            calls["extract_args"] = (count, scale_width, min_frames, uniform)
             return "frames-dir", ["f%d.jpg" % i for i in range(1, 9)]
 
         def fake_pair(frame_dir, frames):
-            calls["pair_args"] = (frame_dir, list(frames))
-            return ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"]
+            self.fail("reverse content path must use original frames, not pair images")
 
         self.breakdown._extract_frames = fake_extract
+        original_thumbnails = self.breakdown._frame_thumbnails
+        self.breakdown._frame_thumbnails = lambda paths, limit=4: [
+            "data:image/jpeg;base64,frame-%d" % index
+            for index, _path in enumerate(list(paths)[:limit], 1)
+        ]
         had_pair = hasattr(self.breakdown, "_pair_reverse_frames")
         original_pair = getattr(self.breakdown, "_pair_reverse_frames", None)
         self.breakdown._pair_reverse_frames = fake_pair
+        objects = self._detailed_reverse_objects()
+        reverse_calls = []
+
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
-            calls["frames"] = list(frames)
+            reverse_calls.append(list(frames))
             return json.dumps(
-                {"segments": self._detailed_reverse_objects()},
+                {"segments": [objects[len(reverse_calls) - 1]]},
                 ensure_ascii=False,
             )
         self.breakdown._chat_multimodal = fake_chat
@@ -1106,14 +2982,19 @@ class BreakdownTests(unittest.TestCase):
                 "reverse_prompt",
             )
         finally:
+            self.breakdown._frame_thumbnails = original_thumbnails
             if had_pair:
                 self.breakdown._pair_reverse_frames = original_pair
             else:
                 delattr(self.breakdown, "_pair_reverse_frames")
 
-        self.assertEqual(calls["extract_args"], (8, 1024, 8))
-        self.assertEqual(calls["pair_args"][1], ["f%d.jpg" % i for i in range(1, 9)])
-        self.assertEqual(calls["frames"], ["p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"])
+        self.assertEqual(calls["extract_args"], (8, 1024, 8, True))
+        self.assertEqual(reverse_calls, [
+            ["f1.jpg", "f2.jpg"],
+            ["f3.jpg", "f4.jpg"],
+            ["f5.jpg", "f6.jpg"],
+            ["f7.jpg", "f8.jpg"],
+        ])
         self.assertEqual(result["frame_count"], 8)
 
     def test_pair_reverse_frames_preserves_time_order(self):
