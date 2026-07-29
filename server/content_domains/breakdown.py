@@ -39,6 +39,7 @@ _REVERSE_STATIC_ACTION_MARKERS = (
     "动作无变化",
     "姿态无变化",
     "没有动作变化",
+    "没有明显动作变化",
     "没有姿态变化",
     "未观察到明显动作变化",
     "未见明显动作变化",
@@ -1196,10 +1197,28 @@ def _frames_are_effectively_static(frame_paths):
     return True
 
 
+def _reverse_action_has_static_clause(action):
+    action = str(action or "").strip()
+    if not action:
+        return False
+    boundary = r"[，,；;。.!！?？\n]"
+    clause_prefix = r"(?:(?:但|却|而|同时|仍然|仍|并且|并)\s*)?"
+    return any(
+        re.search(
+            r"(?:^|%s)\s*%s%s\s*(?=$|%s)"
+            % (boundary, clause_prefix, re.escape(marker), boundary),
+            action,
+        )
+        for marker in _REVERSE_STATIC_ACTION_MARKERS
+    )
+
+
 def _reverse_segment_claims_static(entry):
     action = str(entry.get("fields", {}).get("action") or "")
-    claim_text = action or str(entry.get("text") or "")
-    return any(marker in claim_text for marker in _REVERSE_STATIC_ACTION_MARKERS)
+    return (
+        _reverse_action_has_static_clause(action)
+        and not any(marker in action for marker in _REVERSE_MOTION_ACTION_MARKERS)
+    )
 
 
 def _reverse_segment_field_text(entry, *keys):
@@ -1287,7 +1306,7 @@ def _validate_reverse_segment_evidence(
     all_fields = _reverse_segment_field_text(entry)
 
     if (
-        _reverse_segment_claims_static(entry)
+        _reverse_action_has_static_clause(action)
         and any(marker in action for marker in _REVERSE_MOTION_ACTION_MARKERS)
     ):
         raise ValueError("反推结果第%d段动作与“无变化”自相矛盾，请重试" % index)

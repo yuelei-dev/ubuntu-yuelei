@@ -1593,6 +1593,83 @@ class BreakdownTests(unittest.TestCase):
                     )
                 )
 
+    def test_reverse_no_action_prefix_inside_speed_change_is_not_static(self):
+        entry = {
+            "text": (
+                "主体：黑色圆形；场景：浅色背景；"
+                "动作：未观察到动作速度变化，圆形持续从左到右移动。"
+            ),
+            "fields": {
+                "subject": "黑色圆形",
+                "scene": "浅色背景",
+                "action": "未观察到动作速度变化，圆形持续从左到右移动",
+                "camera": "",
+                "lighting": "",
+                "sound": "",
+                "continuity": "",
+            },
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+            "continuity_evidence_frames": [],
+        }
+        frames = ["motion-first.jpg", "motion-last.jpg"]
+        self.assertFalse(self.breakdown._reverse_segment_claims_static(entry))
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                frames,
+                1,
+                require_frame_evidence=True,
+            )
+        static_check.assert_not_called()
+
+    def test_reverse_complete_static_clause_with_real_motion_is_contradictory(self):
+        actions = (
+            "没有明显动作变化，但人物从坐姿起身",
+            "没有明显动作变化，但物体继续移动",
+        )
+        for action in actions:
+            with self.subTest(action=action):
+                entry = {
+                    "text": "主体：可见主体；场景：室内；动作：%s。" % action,
+                    "fields": {
+                        "subject": "可见主体",
+                        "scene": "室内",
+                        "action": action,
+                        "camera": "",
+                        "lighting": "",
+                        "sound": "",
+                        "continuity": "",
+                    },
+                    "evidence_frames": {
+                        "subject": [1, 2],
+                        "scene": [1, 2],
+                        "action": [1, 2],
+                    },
+                    "continuity_evidence_frames": [],
+                }
+                self.assertFalse(
+                    self.breakdown._reverse_segment_claims_static(entry)
+                )
+                with mock.patch.object(
+                    self.breakdown, "_frames_are_effectively_static"
+                ) as static_check:
+                    with self.assertRaisesRegex(ValueError, "自相矛盾"):
+                        self.breakdown._validate_reverse_segment_evidence(
+                            entry,
+                            [],
+                            ["motion-first.jpg", "motion-last.jpg"],
+                            1,
+                            require_frame_evidence=True,
+                        )
+                static_check.assert_not_called()
+
     def test_reverse_pure_abstract_frame_uses_evidence_backed_subject(self):
         segment = {
             "subject": "抽象画面，红色色块填满整个画面",
