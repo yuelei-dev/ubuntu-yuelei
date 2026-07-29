@@ -22,6 +22,14 @@ BREAKDOWN_MAX_DOWNLOAD_BYTES = max(
     int(os.environ.get("BREAKDOWN_MAX_DOWNLOAD_BYTES", str(200 * 1024 * 1024))
         or str(200 * 1024 * 1024)),
 )
+# breakdown reaper grace is 600s. Keep one absolute analysis budget below it.
+BREAKDOWN_ANALYSIS_BUDGET = max(
+    60,
+    min(
+        540,
+        int(os.environ.get("BREAKDOWN_ANALYSIS_BUDGET", "540") or "540"),
+    ),
+)
 _REVERSE_MAX_SEGMENT_CHARS = 500
 _REVERSE_MAX_TOTAL_CHARS = 1600
 _REVERSE_DUPLICATE_SEQUENCE_THRESHOLD = 0.80
@@ -87,6 +95,12 @@ _REVERSE_EMPTY_PLACEHOLDER_VALUES = {
     "动作", "动作信息", "动作细节", "动作自然", "无法确认", "不确定",
     "无可确认信息", "未识别", "未知",
 }
+_REVERSE_FIXED_CONTINUITY_MARKERS = (
+    "与上一段保持一致", "与前一段保持一致",
+    "保持与上一段一致", "保持与前一段一致",
+    "承接上一段", "承接前一段", "延续上一段", "延续前一段",
+    "与上一段一致", "与前一段一致", "同上一段", "同前一段",
+)
 _REVERSE_MAX_GLOBAL_CHARS = 220
 _REVERSE_VISUAL_SEMANTIC_CONTRACT = {
     "definition": "visual_semantic_not_pixel",
@@ -221,8 +235,15 @@ def _do_breakdown(payload, info, url, mode=None):
         _heartbeat(job_id, "analyzing")
         platform = info.get("platform", "")
         if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
+            analysis_deadline = time.monotonic() + BREAKDOWN_ANALYSIS_BUDGET
+            analysis_heartbeat = lambda: _heartbeat(job_id, "analyzing")
             global_continuity = _reverse_global_facts_from_frames(
-                title, duration, platform, model_frames
+                title,
+                duration,
+                platform,
+                model_frames,
+                deadline=analysis_deadline,
+                heartbeat=analysis_heartbeat,
             )
             prompt_result = _reverse_prompt_from_frames(
                 title,
@@ -232,6 +253,8 @@ def _do_breakdown(payload, info, url, mode=None):
                 model_frames,
                 global_continuity=global_continuity,
                 return_details=True,
+                deadline=analysis_deadline,
+                heartbeat=analysis_heartbeat,
             )
             quality_score = _score_reverse_generation_coverage(
                 prompt_result["entries"],
@@ -244,9 +267,29 @@ def _do_breakdown(payload, info, url, mode=None):
                     "反推结果生成要素覆盖度不足：%d分，至少需要%d分，请重试"
                     % (quality_score["total"], target_score)
                 )
-            reference_frames = _reverse_reference_frames(
+            frame_bundle = _reverse_frame_bundle(
                 frames, len(prompt_result["windows"])
             )
+            frame_thumbnails = _frame_thumbnails(
+                frame_bundle["frames"], limit=len(frame_bundle["frames"])
+            )
+            if len(frame_thumbnails) != len(frame_bundle["frames"]):
+                raise ValueError("反推审计证据帧序列化失败，请重试")
+            segment_evidence = _reverse_segment_evidence_manifest(
+                prompt_result["entries"],
+                prompt_result["windows"],
+                frame_bundle["segment_source_indices"],
+            )
+            audit_sections = {
+                "frame_manifest": frame_bundle["manifest"],
+                "reference_thumbnail_indices": frame_bundle[
+                    "reference_thumbnail_indices"
+                ],
+                "global_continuity": global_continuity,
+                "segment_evidence": segment_evidence,
+                "quality_contract": _reverse_quality_contract(),
+                "quality_score": quality_score,
+            }
             return {
                 "type": "breakdown_reverse",
                 "source_url": url,
@@ -255,22 +298,22 @@ def _do_breakdown(payload, info, url, mode=None):
                 "duration": duration,
                 "prompt": prompt_result["prompt"],
                 "frame_count": len(frames or []),
-                "frame_thumbnails": _frame_thumbnails(reference_frames),
-                "reference_frame_strategy": "one_per_segment",
-                "global_continuity": global_continuity,
-                "segment_evidence": [
-                    {
-                        "timeline": timeline_range,
-                        "evidence_frames": entry.get("evidence_frames", {}),
-                    }
-                    for (
-                        _start, _end, timeline_range
-                    ), entry in zip(
-                        prompt_result["windows"], prompt_result["entries"]
-                    )
+                # First four are downstream refs [2,4,6,8]; remaining four
+                # preserve every source frame needed to audit the evidence.
+                "frame_thumbnails": frame_thumbnails,
+                "reference_frame_strategy": "first_four_one_per_segment",
+                "reference_thumbnail_indices": frame_bundle[
+                    "reference_thumbnail_indices"
                 ],
+                "frame_manifest": frame_bundle["manifest"],
+                "global_continuity": global_continuity,
+                "segment_evidence": segment_evidence,
                 "quality_contract": _reverse_quality_contract(),
                 "quality_score": quality_score,
+                # assets_store already persists sections and frame_thumbnails;
+                # keeping the audit manifest here prevents cleanup from
+                # leaving evidence numbers without their encoded source frame.
+                "sections": {"reverse_audit": audit_sections},
                 "asr_failed": asr_failed,
             }
 
@@ -551,6 +594,96 @@ def _reverse_reference_frames(frames, segment_count):
     ]
 
 
+def _group_reverse_frame_indices(frame_count, segment_count):
+    frame_count = max(0, int(frame_count or 0))
+    segment_count = max(1, int(segment_count or 1))
+    return [
+        list(range(
+            int(round(index * frame_count / float(segment_count))) + 1,
+            int(round((index + 1) * frame_count / float(segment_count))) + 1,
+        ))
+        for index in range(segment_count)
+    ]
+
+
+def _reverse_frame_bundle(frames, segment_count):
+    """Put four downstream refs first, then retain all other audit frames."""
+    ordered = list(frames or [])
+    segment_source_indices = _group_reverse_frame_indices(
+        len(ordered), segment_count
+    )
+    reference_source_indices = [
+        indices[-1] for indices in segment_source_indices if indices
+    ]
+    remaining_source_indices = [
+        index for index in range(1, len(ordered) + 1)
+        if index not in reference_source_indices
+    ]
+    source_order = reference_source_indices + remaining_source_indices
+    location = {}
+    for segment_index, indices in enumerate(segment_source_indices, 1):
+        for local_index, source_index in enumerate(indices, 1):
+            location[source_index] = (segment_index, local_index)
+    manifest = []
+    for thumbnail_index, source_index in enumerate(source_order, 1):
+        segment_index, local_index = location[source_index]
+        manifest.append({
+            "thumbnail_index": thumbnail_index,
+            "source_frame_index": source_index,
+            "segment_index": segment_index,
+            "segment_local_index": local_index,
+            "downstream_reference": (
+                source_index in reference_source_indices
+            ),
+        })
+    return {
+        "frames": [ordered[index - 1] for index in source_order],
+        "manifest": manifest,
+        "reference_thumbnail_indices": list(
+            range(1, len(reference_source_indices) + 1)
+        ),
+        "segment_source_indices": segment_source_indices,
+    }
+
+
+def _reverse_segment_evidence_manifest(entries, windows, segment_source_indices):
+    result = []
+    for entry, (_start, _end, timeline), source_indices in zip(
+        entries or [], windows or [], segment_source_indices or []
+    ):
+        mapped = {}
+        for key, local_indices in (
+            entry.get("evidence_frames") or {}
+        ).items():
+            mapped[key] = [
+                source_indices[index - 1]
+                for index in local_indices
+                if 1 <= index <= len(source_indices)
+            ]
+        result.append({
+            "timeline": timeline,
+            "local_to_source": {
+                str(index): source_index
+                for index, source_index in enumerate(source_indices, 1)
+            },
+            "local_evidence_frames": entry.get("evidence_frames") or {},
+            "source_evidence_frames": mapped,
+            "continuity_source_frames": entry.get(
+                "continuity_evidence_frames", []
+            ),
+        })
+    return result
+
+
+def _reverse_source_frame_segment(frame_index, frame_count, segment_count=4):
+    if frame_count <= 0 or segment_count <= 0:
+        return 0
+    return min(
+        segment_count,
+        int((int(frame_index) - 1) * segment_count / float(frame_count)) + 1,
+    )
+
+
 def _clock_to_seconds(value):
     text = str(value or "").strip().replace(",", ".")
     parts = text.split(":")
@@ -679,13 +812,20 @@ def _reverse_quality_contract():
     ))
 
 
-def _compose_reverse_global_facts(global_continuity):
+def _compose_reverse_global_facts(global_continuity, include_evidence=False):
     facts = (global_continuity or {}).get("facts") or {}
+    evidence = (global_continuity or {}).get("evidence_frames") or {}
     parts = []
     for key, label in _REVERSE_GLOBAL_FACT_FIELDS:
         text = " ".join(str(facts.get(key) or "").replace("\r", "").split()).strip()
         if text:
-            parts.append("%s：%s" % (label, text.rstrip("；;。")))
+            part = "%s：%s" % (label, text.rstrip("；;。"))
+            if include_evidence:
+                indices = evidence.get(key) or []
+                part += "（证据原始帧：%s）" % "、".join(
+                    str(index) for index in indices
+                )
+            parts.append(part)
     return "；".join(parts)
 
 
@@ -721,6 +861,18 @@ def _parse_reverse_global_facts(raw, frame_count):
                 indices.append(index)
         if text and not indices:
             raise ValueError("反推全局连续性事实缺少原始帧编号，请重试")
+        if text:
+            evidence_segments = {
+                _reverse_source_frame_segment(
+                    index, int(frame_count or 0), segment_count=4
+                )
+                for index in indices
+            }
+            evidence_segments.discard(0)
+            if len(evidence_segments) < 2:
+                raise ValueError(
+                    "反推全局连续性事实必须覆盖至少两个不同时间段，请重试"
+                )
         normalized_evidence[key] = indices
 
     all_facts = " ".join(normalized_facts.values())
@@ -743,10 +895,16 @@ def _parse_reverse_global_facts(raw, frame_count):
         raise ValueError(
             "反推全局连续性包含无证据主观推断“%s”，请重试" % unsupported
         )
-    return {"facts": normalized_facts, "evidence_frames": normalized_evidence}
+    return {
+        "facts": normalized_facts,
+        "evidence_frames": normalized_evidence,
+        "frame_count": int(frame_count or 0),
+    }
 
 
-def _reverse_global_facts_from_frames(title, duration, platform, frames):
+def _reverse_global_facts_from_frames(
+    title, duration, platform, frames, deadline=None, heartbeat=None
+):
     """Extract only cross-segment facts from all original frames, once."""
     ordered = list(frames or [])
     if len(ordered) < 8:
@@ -759,7 +917,9 @@ def _reverse_global_facts_from_frames(title, duration, platform, frames):
         "只提取跨时间段重复出现或稳定可确认的连续性事实：同一主体的可见外观、服装与随身物，"
         "重复场景和关键物，整体场景、镜头、光线与色调风格。发生变化时要明确列出变化，"
         "不得把不同人物或不同场景强行写成一致，不得推断身份、品牌、地点、情绪或不可见细节。"
-        "每个非空事实必须在 evidence_frames 中列出至少一个能直接看到它的原始帧编号。"
+        "每个非空事实必须在 evidence_frames 中列出至少两个不同时间段、能直接看到它的原始帧编号。"
+        "如果主体、服装、场景或风格发生变化，事实文字必须明确分别写出变化前后状态，"
+        "evidence_frames 必须同时列出变化前后所在时间段的帧号。"
         "这不是分段提示词，不写动作剧情，不写固定续写句，不使用任何历史草稿。"
         "只输出JSON：{\"global_facts\":{\"%s\":\"\"},"
         "\"evidence_frames\":{\"%s\":[]}}。字段必须完整，可以留空；不要Markdown或解释。"
@@ -779,6 +939,8 @@ def _reverse_global_facts_from_frames(title, duration, platform, frames):
         temp=0.1,
         max_tokens=600,
         image_detail=None,
+        deadline=deadline,
+        heartbeat=heartbeat,
     )
     return _parse_reverse_global_facts(raw, len(ordered))
 
@@ -884,6 +1046,17 @@ def _parse_reverse_segment_evidence(raw):
             if frame_index not in normalized:
                 normalized.append(frame_index)
         evidence_frames[key] = normalized
+    continuity_evidence_frames = value.get("continuity_evidence_frames") or []
+    if not isinstance(continuity_evidence_frames, list):
+        raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
+    normalized_continuity_evidence = []
+    for raw_index in continuity_evidence_frames:
+        try:
+            frame_index = int(raw_index)
+        except (TypeError, ValueError):
+            raise ValueError("反推结果本段跨段衔接证据格式错误，请重试")
+        if frame_index not in normalized_continuity_evidence:
+            normalized_continuity_evidence.append(frame_index)
     text = _compose_reverse_segment(fields)
     text = str(text or "").strip()
     if not text:
@@ -892,6 +1065,7 @@ def _parse_reverse_segment_evidence(raw):
         "text": text,
         "fields": fields,
         "evidence_frames": evidence_frames,
+        "continuity_evidence_frames": normalized_continuity_evidence,
     }
 
 
@@ -935,9 +1109,25 @@ def _reverse_segment_field_text(entry, *keys):
     return " ".join(str(fields.get(key) or "") for key in selected).strip()
 
 
+def _reverse_sound_matches_transcript(sound, transcript):
+    sound_text = _compact_reverse_text(sound)
+    transcript_text = _compact_reverse_text(transcript)
+    if not sound_text or not transcript_text:
+        return False
+    for marker in (
+        "人物口播", "人物说出", "人物说", "口播内容", "语音内容",
+        "台词内容", "口播", "语音", "台词", "说出",
+        "女声说", "男声说", "有人说", "人物", "女声", "男声", "说",
+    ):
+        sound_text = sound_text.replace(_compact_reverse_text(marker), "")
+    if len(sound_text) < 2:
+        return False
+    return sound_text in transcript_text
+
+
 def _validate_reverse_segment_evidence(
     entry, previous_entries, frame_paths, index, transcript="",
-    require_frame_evidence=False,
+    require_frame_evidence=False, global_continuity=None,
 ):
     text = entry.get("text", "")
     compact = _compact_reverse_text(text)
@@ -989,6 +1179,7 @@ def _validate_reverse_segment_evidence(
     subject = fields.get("subject", "")
     action = fields.get("action", "")
     sound = fields.get("sound", "")
+    continuity = fields.get("continuity", "")
     all_fields = _reverse_segment_field_text(entry)
 
     if (
@@ -1042,10 +1233,66 @@ def _validate_reverse_segment_evidence(
     if _compact_reverse_text(sound) and not str(transcript or "").strip():
         raise ValueError("反推结果第%d段声音缺少本段ASR证据，请重试" % index)
     if (
+        _compact_reverse_text(sound)
+        and not _reverse_sound_matches_transcript(sound, transcript)
+    ):
+        raise ValueError("反推结果第%d段声音与本段ASR内容不匹配，请重试" % index)
+    if (
         str(transcript or "").strip()
         and any(marker in sound for marker in _REVERSE_NO_SPEECH_MARKERS)
     ):
         raise ValueError("反推结果第%d段声音与本段ASR自相矛盾，请重试" % index)
+
+    fixed_continuity = next(
+        (
+            marker for marker in _REVERSE_FIXED_CONTINUITY_MARKERS
+            if marker in continuity
+        ),
+        None,
+    )
+    if fixed_continuity:
+        raise ValueError(
+            "反推结果第%d段使用固定衔接文字“%s”，请重试"
+            % (index, fixed_continuity)
+        )
+    if require_frame_evidence and _compact_reverse_text(continuity):
+        continuity_indices = entry.get("continuity_evidence_frames") or []
+        total_frames = int((global_continuity or {}).get("frame_count") or 8)
+        allowed_global_indices = {
+            frame
+            for indices in (
+                (global_continuity or {}).get("evidence_frames") or {}
+            ).values()
+            for frame in indices
+        }
+        if (
+            not continuity_indices
+            or any(
+                frame < 1 or frame > total_frames
+                for frame in continuity_indices
+            )
+            or not set(continuity_indices).issubset(allowed_global_indices)
+        ):
+            raise ValueError(
+                "反推结果第%d段衔接缺少可核验的全局原始帧证据，请重试"
+                % index
+            )
+        continuity_segments = {
+            _reverse_source_frame_segment(frame, total_frames, 4)
+            for frame in continuity_indices
+        }
+        if (
+            index not in continuity_segments
+            or len(continuity_segments) < 2
+            or not any(
+                abs(segment - index) == 1
+                for segment in continuity_segments
+            )
+        ):
+            raise ValueError(
+                "反推结果第%d段衔接必须覆盖本段和相邻时间段原始帧，请重试"
+                % index
+            )
 
     if "字幕" in all_fields and not re.search(
         r"字幕[^“”\"]*[“\"]\s*[^“”\"]{1,80}\s*[”\"]",
@@ -1156,7 +1403,9 @@ def _reverse_segment_messages(
             "这是本时间段基于原始帧的重新分析。不要沿用任何历史草稿、模板句或其他时间段文字，"
             "必须重新逐帧观察后作答。"
         )
-    global_facts = _compose_reverse_global_facts(global_continuity)
+    global_facts = _compose_reverse_global_facts(
+        global_continuity, include_evidence=True
+    )
     usermsg = (
         "视频标题（仅作背景，不能代替画面证据）：%s\n"
         "视频总时长：%ss\n"
@@ -1175,7 +1424,8 @@ def _reverse_segment_messages(
         "不能从图片直接确认的身份、品牌、地点、情绪、运镜、光源、方位或情节一律省略；"
         "不要写“似乎在感受风”“阳光明媚”“绿草如茵”等主观修辞，要改成可观察的姿态、光照或颜色事实。"
         "不得写“面向树根”等无法由本段帧可靠证明的朝向。"
-        "sound 只能填写上方当前时间段ASR能够证明的口播或可辨识语音；没有证据就留空，"
+        "sound 只能逐字引用或紧贴复述上方当前时间段ASR能够证明的口播或可辨识语音；"
+        "不得从ASR推断音乐、音效、情绪或环境声；没有证据就留空，无法与ASR文字直接匹配也留空，"
         "不得根据画面写“未观察到声音”。字幕或屏幕文字只有在本段图片清晰可读时才可逐字引用，"
         "并用中文引号标出实际文字；看不清就省略。"
         "不要补写过渡动作，不要为了篇幅扩写，不设最低字数，宁可短也不能编造。"
@@ -1184,12 +1434,16 @@ def _reverse_segment_messages(
         "scene 写关键环境、道具及前中后景关系；action 按双帧时间顺序写动作节点、方向和位移；"
         "camera 写景别、构图、机位和可见运镜；lighting 写可见光线方向、明暗和色调；"
         "continuity 写本段进入/离开、镜头切换或与相邻段衔接所需的可见事实。"
+        "continuity 非空时还必须给 continuity_evidence_frames，使用全片原始帧编号，"
+        "同时引用本段和一个相邻时间段、且这些编号必须来自上方全局事实的帧证据；"
+        "不得只写“与上一段保持一致”“承接上一段”等固定衔接句。"
         "无法确认的非关键细节留空，但主体、场景、动作三个关键字段必须是当前帧可证明的具体事实，"
         "不得用“主体细节”“场景信息”“动作自然”等空洞字段模板代替。"
         "只输出一个JSON对象：{\"segments\":[{\"subject\":\"\",\"scene\":\"\",\"action\":\"\","
         "\"camera\":\"\",\"lighting\":\"\",\"sound\":\"\",\"continuity\":\"\","
         "\"evidence_frames\":{\"subject\":[1],\"scene\":[1],\"action\":[1,2],"
-        "\"camera\":[1,2],\"lighting\":[1]}}]}。"
+        "\"camera\":[1,2],\"lighting\":[1]},"
+        "\"continuity_evidence_frames\":[]}]}。"
         "evidence_frames 使用本请求图片的局部编号1、2；每个非空画面字段必须列出能直接证明它的帧，"
         "action 必须同时引用首尾两帧以证明动作顺序。"
         "segments 必须只有当前这一段；字段可以为空，非空内容必须有当前图片或ASR证据；不要输出时间码、解释或markdown。"
@@ -1258,6 +1512,7 @@ def _score_reverse_generation_coverage(entries, global_continuity, windows):
 def _reverse_prompt_from_frames(
     title, duration, platform, script_text, frames,
     global_continuity=None, return_details=False,
+    deadline=None, heartbeat=None,
 ):
     windows = _reverse_segment_windows(duration)
     segment_count = len(windows)
@@ -1280,14 +1535,26 @@ def _reverse_prompt_from_frames(
                 retry=bool(attempt),
                 global_continuity=global_continuity,
             )
-            raw = _chat_multimodal(
-                sysmsg,
-                usermsg,
-                frame_group,
-                temp=0.1,
-                max_tokens=900,
-                image_detail=None,
-            )
+            if deadline is None and heartbeat is None:
+                raw = _chat_multimodal(
+                    sysmsg,
+                    usermsg,
+                    frame_group,
+                    temp=0.1,
+                    max_tokens=900,
+                    image_detail=None,
+                )
+            else:
+                raw = _chat_multimodal(
+                    sysmsg,
+                    usermsg,
+                    frame_group,
+                    temp=0.1,
+                    max_tokens=900,
+                    image_detail=None,
+                    deadline=deadline,
+                    heartbeat=heartbeat,
+                )
             try:
                 entry = _parse_reverse_segment_evidence(raw)
                 _validate_reverse_segment_evidence(
@@ -1297,6 +1564,7 @@ def _reverse_prompt_from_frames(
                     index,
                     transcript=transcript,
                     require_frame_evidence=bool(global_continuity),
+                    global_continuity=global_continuity,
                 )
                 break
             except ValueError as error:
@@ -1554,20 +1822,55 @@ def _pair_reverse_frames(frame_dir, frames):
     return paired
 
 
-def _post_zhipu(body, api_key):
+def _analysis_remaining(deadline):
+    if deadline is None:
+        return None
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 1:
+        raise TimeoutError("反推分析已超过总时间预算，请重试")
+    return remaining
+
+
+def _analysis_attempt_log(message, deadline=None, heartbeat=None):
+    print("[breakdown] %s" % message, flush=True)
+    _analysis_remaining(deadline)
+    if heartbeat:
+        heartbeat()
+
+
+def _post_zhipu(body, api_key, deadline=None, heartbeat=None):
     base = os.environ.get(
         "REVERSE_ZHIPU_BASE", "https://open.bigmodel.cn/api/paas/v4"
     ).rstrip("/")
-    timeout = int(os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210)
+    configured_timeout = int(
+        os.environ.get("BREAKDOWN_ZHIPU_TIMEOUT", "210") or 210
+    )
+    remaining = _analysis_remaining(deadline)
+    timeout = configured_timeout
+    max_attempts = 2
+    if remaining is not None:
+        # Two physical attempts share the same absolute budget. A small margin
+        # ensures the second timeout cannot run past the analysis deadline.
+        max_attempts = 2 if remaining >= 3 else 1
+        timeout = min(
+            configured_timeout,
+            max(1, int((remaining - 1) / float(max_attempts))),
+        )
+    if heartbeat:
+        heartbeat()
     try:
-        return egress.post_json_idempotent(
+        response = egress.post_json_idempotent(
             base, base, "/chat/completions",
             json.dumps(body, ensure_ascii=False).encode(),
             {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-            log=lambda message: print("[breakdown] %s" % message, flush=True),
-            max_attempts=2,
+            log=lambda message: _analysis_attempt_log(
+                message, deadline=deadline, heartbeat=heartbeat
+            ),
+            max_attempts=max_attempts,
             timeout=timeout,
         )
+        _analysis_remaining(deadline)
+        return response
     except urllib.error.HTTPError as exc:
         try:
             detail = exc.read().decode("utf-8", "replace")
@@ -1581,15 +1884,33 @@ def _post_zhipu(body, api_key):
         raise
 
 
-def _post_openai_fallback(body):
+def _post_openai_fallback(body, deadline=None, heartbeat=None):
     from .image import OPENAI_OFFICIAL_BASE
 
-    return egress.post_json(
-        OPENAI_OFFICIAL_BASE, OPENAI_BASE,
-        "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
+    if deadline is None:
+        return egress.post_json(
+            OPENAI_OFFICIAL_BASE, OPENAI_BASE,
+            "/v1/chat/completions", json.dumps(body, ensure_ascii=False).encode(),
+            {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
+            log=lambda message: print("[breakdown] %s" % message, flush=True),
+        )
+    remaining = _analysis_remaining(deadline)
+    if heartbeat:
+        heartbeat()
+    response = egress.post_json_idempotent(
+        OPENAI_OFFICIAL_BASE,
+        OPENAI_BASE,
+        "/v1/chat/completions",
+        json.dumps(body, ensure_ascii=False).encode(),
         {"Authorization": "Bearer " + OPENAI_KEY, "Content-Type": "application/json"},
-        log=lambda message: print("[breakdown] %s" % message, flush=True),
+        log=lambda message: _analysis_attempt_log(
+            message, deadline=deadline, heartbeat=heartbeat
+        ),
+        max_attempts=1,
+        timeout=max(1, int(remaining - 1)),
     )
+    _analysis_remaining(deadline)
+    return response
 
 
 def _chat_content(response):
@@ -1608,7 +1929,8 @@ def _zhipu_rejected_request(exc):
 
 
 def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
-                     max_tokens=None, image_detail="low", provider="zhipu"):
+                     max_tokens=None, image_detail="low", provider="zhipu",
+                     deadline=None, heartbeat=None):
     """智谱多模态优先，仅投递前失败时安全回退 GPT。"""
 
     content = [{"type": "text", "text": usermsg}]
@@ -1638,7 +1960,12 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
     if use_openai:
         if not OPENAI_KEY:
             raise RuntimeError("OPENAI_API_KEY is not configured")
-        response = _post_openai_fallback(body)
+        if deadline is None and heartbeat is None:
+            response = _post_openai_fallback(body)
+        else:
+            response = _post_openai_fallback(
+                body, deadline=deadline, heartbeat=heartbeat
+            )
         result = _chat_content(response)
         print("[breakdown] openai format fallback success: %s" % body["model"], flush=True)
         return result
@@ -1650,7 +1977,15 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
         raise RuntimeError("REVERSE_ZHIPU_KEY is not configured")
 
     try:
-        response = _post_zhipu(body, zhipu_key)
+        if deadline is None and heartbeat is None:
+            response = _post_zhipu(body, zhipu_key)
+        else:
+            response = _post_zhipu(
+                body,
+                zhipu_key,
+                deadline=deadline,
+                heartbeat=heartbeat,
+            )
     except Exception as exc:
         rejected = _zhipu_rejected_request(exc)
         if not rejected and not egress._pre_delivery_failure(exc):
@@ -1671,7 +2006,14 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
         fallback_body = dict(body)
         fallback_body["model"] = os.environ.get("BREAKDOWN_FALLBACK_MODEL", "gpt-4o")
         try:
-            response = _post_openai_fallback(fallback_body)
+            if deadline is None and heartbeat is None:
+                response = _post_openai_fallback(fallback_body)
+            else:
+                response = _post_openai_fallback(
+                    fallback_body,
+                    deadline=deadline,
+                    heartbeat=heartbeat,
+                )
             return _chat_content(response)
         except Exception as fallback_exc:
             print(

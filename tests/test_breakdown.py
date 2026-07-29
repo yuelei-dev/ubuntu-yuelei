@@ -103,6 +103,12 @@ class BreakdownTests(unittest.TestCase):
         result = []
         for index in range(1, count + 1):
             action, camera = variants[(index - 1) % len(variants)]
+            continuity_frames = {
+                1: [1, 3],
+                2: [1, 3],
+                3: [3, 5],
+                4: [5, 7],
+            }[(index - 1) % 4 + 1]
             result.append({
                 "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
                 "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
@@ -118,6 +124,7 @@ class BreakdownTests(unittest.TestCase):
                     "camera": [1, 2],
                     "lighting": [1, 2],
                 },
+                "continuity_evidence_frames": continuity_frames,
             })
         return result
 
@@ -780,22 +787,59 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["source_platform"], "douyin")
         self.assertIn("白衣人物居中", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
-        self.assertEqual(len(result["frame_thumbnails"]), 4)
+        self.assertEqual(len(result["frame_thumbnails"]), 8)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
         self.assertEqual(len(reverse_calls), 5)
         self.assertEqual(reverse_calls[0][2], [thumb.name] * 8)
+        self.assertIn("变化前后所在时间段", reverse_calls[0][1])
         self.assertIn("只属于当前时间段", reverse_calls[1][1])
         self.assertIn("准确性高于完整性和篇幅", reverse_calls[1][0])
         self.assertEqual(reverse_calls[1][2], [thumb.name, thumb.name])
-        self.assertEqual(result["reference_frame_strategy"], "one_per_segment")
+        self.assertEqual(
+            result["reference_frame_strategy"],
+            "first_four_one_per_segment",
+        )
+        self.assertEqual(result["reference_thumbnail_indices"], [1, 2, 3, 4])
+        self.assertEqual(
+            [item["source_frame_index"] for item in result["frame_manifest"]],
+            [2, 4, 6, 8, 1, 3, 5, 7],
+        )
         self.assertEqual(result["quality_score"]["total"], 100)
         self.assertEqual(result["quality_contract"]["target_score"], 90)
         self.assertEqual(len(result["segment_evidence"]), 4)
         self.assertEqual(
-            result["segment_evidence"][0]["evidence_frames"]["action"],
+            result["segment_evidence"][0][
+                "local_evidence_frames"
+            ]["action"],
             [1, 2],
         )
+        self.assertEqual(
+            result["segment_evidence"][1][
+                "source_evidence_frames"
+            ]["action"],
+            [3, 4],
+        )
+        self.assertEqual(
+            result["sections"]["reverse_audit"]["frame_manifest"],
+            result["frame_manifest"],
+        )
+        audit_sources = {
+            item["source_frame_index"]
+            for item in result["frame_manifest"]
+        }
+        self.assertEqual(audit_sources, set(range(1, 9)))
+        assets_store = importlib.import_module("content_domains.assets_store")
+        persisted_meta = assets_store._project("breakdown", result)[3]
+        self.assertEqual(len(persisted_meta["frame_thumbnails"]), 8)
+        self.assertEqual(
+            persisted_meta["sections"]["reverse_audit"]["frame_manifest"],
+            result["frame_manifest"],
+        )
+        deadlines = [call[4].get("deadline") for call in reverse_calls]
+        self.assertTrue(all(deadline is not None for deadline in deadlines))
+        self.assertEqual(len(set(deadlines)), 1)
+        self.assertTrue(all(callable(call[4].get("heartbeat")) for call in reverse_calls))
         self.assertIn("全局连续性事实", result["prompt"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
@@ -1248,7 +1292,7 @@ class BreakdownTests(unittest.TestCase):
             "camera": "中景固定构图",
             "lighting": "自然光",
             "sound": "",
-            "continuity": "与上一段保持一致",
+            "continuity": "",
         }
         calls = []
 
@@ -1436,6 +1480,13 @@ class BreakdownTests(unittest.TestCase):
                 json.dumps(invalid, ensure_ascii=False), 8
             )
 
+        single_segment = json.loads(self._global_continuity_response())
+        single_segment["evidence_frames"]["wardrobe"] = [1, 2]
+        with self.assertRaisesRegex(ValueError, "至少两个不同时间段"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(single_segment, ensure_ascii=False), 8
+            )
+
     def test_reverse_segment_receives_evidence_only_global_continuity(self):
         _system, user = self.breakdown._reverse_segment_messages(
             "标题", 15.267, "douyin", "", 2, 4,
@@ -1445,11 +1496,22 @@ class BreakdownTests(unittest.TestCase):
         )
         self.assertIn("全片连续性事实（由全部原始帧独立提取，不是历史草稿）", user)
         self.assertIn("同一名白衣人物，黑色长发", user)
+        self.assertIn("证据原始帧：1、3、5、7", user)
         self.assertIn("若当前帧显示变化，以当前帧为准", user)
         self.assertIn("不要沿用任何历史草稿", user)
         self.assertNotIn("上一轮输出", user)
         self.assertIn('"evidence_frames"', user)
         self.assertIn("action 必须同时引用首尾两帧", user)
+        global_system, global_user = (
+            self.breakdown._reverse_segment_messages(
+                "标题", 15.267, "douyin", "", 1, 4,
+                "[00:00.0-00:03.8]",
+                global_continuity=self._global_continuity(),
+            )
+        )
+        self.assertIn("同时引用本段和一个相邻时间段", global_user)
+        self.assertIn("不得只写“与上一段保持一致”", global_user)
+        self.assertTrue(global_system)
 
     def test_reverse_production_segment_requires_auditable_frame_indices(self):
         raw = json.dumps({
@@ -1491,12 +1553,177 @@ class BreakdownTests(unittest.TestCase):
                 require_frame_evidence=True,
             )
 
+    def test_reverse_sound_must_match_current_segment_asr_text(self):
+        mismatch = self._reverse_entry(sound="激昂摇滚乐")
+        with self.assertRaisesRegex(ValueError, "声音与本段ASR内容不匹配"):
+            self.breakdown._validate_reverse_segment_evidence(
+                mismatch,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                transcript="欢迎光临",
+            )
+
+        matching = self._reverse_entry(sound="人物口播“欢迎光临”")
+        validated = self.breakdown._validate_reverse_segment_evidence(
+            matching,
+            [],
+            ["segment-first.jpg", "segment-last.jpg"],
+            1,
+            transcript="欢迎光临本店",
+        )
+        self.assertIs(validated, matching)
+        embellished = self._reverse_entry(
+            sound="人物说“欢迎光临”，同时伴随激昂摇滚乐"
+        )
+        with self.assertRaisesRegex(ValueError, "声音与本段ASR内容不匹配"):
+            self.breakdown._validate_reverse_segment_evidence(
+                embellished,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                transcript="欢迎光临",
+            )
+
+    def test_reverse_rejects_fixed_continuity_even_when_bodies_differ(self):
+        entry = self._reverse_entry(
+            subject="第二段黑衣人物位于画面右侧",
+            scene="室内桌面和台灯",
+            action="人物从右向左放下杯子",
+            continuity="与上一段保持一致",
+        )
+        entry["continuity_evidence_frames"] = [1, 3]
+        with self.assertRaisesRegex(ValueError, "使用固定衔接文字"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [self._reverse_entry()],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=self._global_continuity(),
+            )
+
+    def test_reverse_continuity_requires_current_and_adjacent_segment_evidence(self):
+        entry = self._reverse_entry(
+            continuity="人物从室外切换到室内，服装未变"
+        )
+        entry["continuity_evidence_frames"] = [1]
+        with self.assertRaisesRegex(ValueError, "本段和相邻时间段"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                2,
+                require_frame_evidence=True,
+                global_continuity=self._global_continuity(),
+            )
+
+    def test_reverse_analysis_budget_stays_inside_reaper_grace(self):
+        core = importlib.import_module("content_domains.core")
+        self.assertEqual(core.KIND_GRACE["breakdown"], 600)
+        self.assertLessEqual(self.breakdown.BREAKDOWN_ANALYSIS_BUDGET, 540)
+        self.assertLess(
+            self.breakdown.BREAKDOWN_ANALYSIS_BUDGET,
+            core.KIND_GRACE["breakdown"],
+        )
+
+    def test_reverse_model_physical_retry_refreshes_heartbeat(self):
+        events = []
+        captured = {}
+
+        def fake_post(*args, **kwargs):
+            captured.update(kwargs)
+            events.append("physical_attempt_1")
+            kwargs["log"]("first physical attempt failed")
+            events.append("physical_attempt_2")
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch.object(
+            self.breakdown.egress, "post_json_idempotent", fake_post
+        ), patch.object(
+            self.breakdown.time,
+            "monotonic",
+            side_effect=[100.0, 101.0, 102.0],
+        ):
+            response = self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus"},
+                "key",
+                deadline=640.0,
+                heartbeat=lambda: events.append("heartbeat"),
+            )
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(events, [
+            "heartbeat",
+            "physical_attempt_1",
+            "heartbeat",
+            "physical_attempt_2",
+        ])
+        self.assertEqual(captured["max_attempts"], 2)
+        self.assertLessEqual(captured["timeout"] * 2, 539)
+
+    def test_reverse_model_normal_attempt_refreshes_heartbeat(self):
+        heartbeats = []
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            return_value={"choices": [{"message": {"content": "ok"}}]},
+        ), patch.object(
+            self.breakdown.time,
+            "monotonic",
+            side_effect=[100.0, 101.0],
+        ):
+            self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus"},
+                "key",
+                deadline=640.0,
+                heartbeat=lambda: heartbeats.append("beat"),
+            )
+        self.assertEqual(heartbeats, ["beat"])
+
+    def test_reverse_analysis_deadline_stops_before_new_request(self):
+        called = []
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            lambda *args, **kwargs: called.append(True),
+        ), patch.object(
+            self.breakdown.time, "monotonic", return_value=701.0
+        ):
+            with self.assertRaisesRegex(TimeoutError, "总时间预算"):
+                self.breakdown._post_zhipu(
+                    {"model": "glm-4v-plus"},
+                    "key",
+                    deadline=700.0,
+                    heartbeat=lambda: called.append("heartbeat"),
+                )
+        self.assertEqual(called, [])
+
+    def test_reverse_audit_fields_use_existing_persisted_asset_columns(self):
+        root = Path(__file__).resolve().parents[1]
+        assets = (
+            root / "server" / "content_domains" / "assets_store.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"sections": r.get("sections")', assets)
+        self.assertIn('"frame_thumbnails": r.get("frame_thumbnails")', assets)
+
     def test_reverse_reference_frames_cover_every_segment_in_order(self):
         self.assertEqual(
             self.breakdown._reverse_reference_frames(
                 ["frame-%d.jpg" % index for index in range(1, 9)], 4
             ),
             ["frame-2.jpg", "frame-4.jpg", "frame-6.jpg", "frame-8.jpg"],
+        )
+        bundle = self.breakdown._reverse_frame_bundle(
+            ["frame-%d.jpg" % index for index in range(1, 9)], 4
+        )
+        self.assertEqual(bundle["frames"], [
+            "frame-2.jpg", "frame-4.jpg", "frame-6.jpg", "frame-8.jpg",
+            "frame-1.jpg", "frame-3.jpg", "frame-5.jpg", "frame-7.jpg",
+        ])
+        self.assertEqual(
+            {item["source_frame_index"] for item in bundle["manifest"]},
+            set(range(1, 9)),
         )
 
     def test_reverse_downstream_generation_field_mapping_is_explicit(self):
@@ -1640,6 +1867,11 @@ class BreakdownTests(unittest.TestCase):
             self.fail("reverse content path must use original frames, not pair images")
 
         self.breakdown._extract_frames = fake_extract
+        original_thumbnails = self.breakdown._frame_thumbnails
+        self.breakdown._frame_thumbnails = lambda paths, limit=4: [
+            "data:image/jpeg;base64,frame-%d" % index
+            for index, _path in enumerate(list(paths)[:limit], 1)
+        ]
         had_pair = hasattr(self.breakdown, "_pair_reverse_frames")
         original_pair = getattr(self.breakdown, "_pair_reverse_frames", None)
         self.breakdown._pair_reverse_frames = fake_pair
@@ -1663,6 +1895,7 @@ class BreakdownTests(unittest.TestCase):
                 "reverse_prompt",
             )
         finally:
+            self.breakdown._frame_thumbnails = original_thumbnails
             if had_pair:
                 self.breakdown._pair_reverse_frames = original_pair
             else:
