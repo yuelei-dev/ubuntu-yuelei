@@ -686,12 +686,20 @@ def _reverse_segment_evidence_manifest(entries, windows, segment_source_indices)
 
 
 def _reverse_source_frame_segment(frame_index, frame_count, segment_count):
+    frame_count = int(frame_count or 0)
+    segment_count = int(segment_count or 0)
+    try:
+        frame_index = int(frame_index)
+    except (TypeError, ValueError):
+        return 0
     if frame_count <= 0 or segment_count <= 0:
         return 0
-    return min(
-        segment_count,
-        int((int(frame_index) - 1) * segment_count / float(frame_count)) + 1,
-    )
+    for index, source_indices in enumerate(
+        _group_reverse_frame_indices(frame_count, segment_count), 1
+    ):
+        if frame_index in source_indices:
+            return index
+    return 0
 
 
 def _clock_to_seconds(value):

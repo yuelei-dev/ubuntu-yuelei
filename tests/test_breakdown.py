@@ -1846,6 +1846,55 @@ class BreakdownTests(unittest.TestCase):
             second_segment_entry,
         )
 
+        self.assertEqual(
+            [
+                self.breakdown._reverse_source_frame_segment(
+                    frame, 8, 3
+                )
+                for frame in range(1, 9)
+            ],
+            [1, 1, 1, 2, 2, 3, 3, 3],
+        )
+        three_segments = self._global_continuity()
+        three_segments["segment_count"] = 3
+        three_segments["evidence_frames"] = {
+            key: [4, 6] for key in three_segments["facts"]
+        }
+        third_segment_entry = self._reverse_entry(
+            continuity="人物服装在第二、第三时间段均可见"
+        )
+        third_segment_entry["continuity_evidence_frames"] = [4, 6]
+        self.assertIs(
+            self.breakdown._validate_reverse_segment_evidence(
+                third_segment_entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                3,
+                require_frame_evidence=True,
+                global_continuity=three_segments,
+            ),
+            third_segment_entry,
+        )
+
+        cross_boundary = json.loads(self._global_continuity_response())
+        cross_boundary["evidence_frames"] = {
+            key: [4, 6] for key in cross_boundary["global_facts"]
+        }
+        parsed = self.breakdown._parse_reverse_global_facts(
+            json.dumps(cross_boundary, ensure_ascii=False), 8, 3
+        )
+        self.assertEqual(
+            parsed["evidence_frames"]["subject_identity"], [4, 6]
+        )
+        same_segment = dict(cross_boundary)
+        same_segment["evidence_frames"] = {
+            key: [6, 8] for key in same_segment["global_facts"]
+        }
+        with self.assertRaisesRegex(ValueError, "至少两个不同时间段"):
+            self.breakdown._parse_reverse_global_facts(
+                json.dumps(same_segment, ensure_ascii=False), 8, 3
+            )
+
     def test_reverse_one_segment_skips_cross_segment_global_model_call(self):
         self.breakdown._chat_multimodal = mock.Mock(
             side_effect=AssertionError("single segment must not call global VLM")
