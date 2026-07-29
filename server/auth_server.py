@@ -1088,8 +1088,26 @@ SYSTEM_ACTOR = "system"   # points_audit.who_admin：非管理员操作（任务
 POINTS_TRANSACTION_KEY_RE = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 
 
-def _write_audit(c, who_admin, username, delta, before, after, reason):
+def _write_audit(c, who_admin, username, delta, before, after, reason,
+                 transaction_key=""):
     """在【同一个事务里】写审计流水。分开写会出现「扣了点但审计没记」或反过来。"""
+    if transaction_key:
+        columns = {
+            row["name"] for row in c.execute(
+                "PRAGMA table_info(points_audit)"
+            ).fetchall()
+        }
+        if "transaction_key" in columns:
+            c.execute(
+                "INSERT INTO points_audit"
+                "(who_admin,username,delta,before_points,after_points,reason,"
+                " created_at,transaction_key) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    who_admin, username, delta, before, after,
+                    (reason or "")[:120], int(time.time()), transaction_key,
+                ),
+            )
+            return
     c.execute(
         "INSERT INTO points_audit(who_admin, username, delta, before_points, after_points, reason, created_at) "
         "VALUES(?,?,?,?,?,?,?)",
@@ -1206,6 +1224,51 @@ def apply_points_transaction(transaction_key, username, kind, amount, reason="")
             c.commit()
             return stored.get("points"), stored.get("error"), True
 
+        # Compatibility with the production-style ledger that stored successful
+        # transaction keys directly on points_audit before points_transactions
+        # existed. Import the immutable result snapshot instead of applying the
+        # balance change again. Rejected legacy requests have no audit row; new
+        # rejected requests are persisted below in points_transactions.
+        audit_columns = {
+            row["name"] for row in c.execute(
+                "PRAGMA table_info(points_audit)"
+            ).fetchall()
+        }
+        if "transaction_key" in audit_columns:
+            legacy = c.execute(
+                "SELECT username,delta,after_points FROM points_audit"
+                " WHERE transaction_key=? LIMIT 1",
+                (transaction_key,),
+            ).fetchone()
+            if legacy:
+                expected_delta = -amount if kind == "deduct" else amount
+                if (
+                    legacy["username"] != username
+                    or amount <= 0
+                    or int(legacy["delta"]) != expected_delta
+                ):
+                    c.commit()
+                    return None, "conflict", True
+                current = get_points_row(username, c)
+                public = public_points(current) if current else None
+                error = None if public is not None else "not_found"
+                if public is not None:
+                    public["points"] = int(legacy["after_points"] or 0)
+                result = {"points": public, "error": error}
+                now = int(time.time())
+                c.execute(
+                    "INSERT INTO points_transactions"
+                    "(transaction_key,username,kind,amount,status,result_json,created_at,updated_at)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        transaction_key, username, kind, amount, "applied",
+                        json.dumps(result, ensure_ascii=False, sort_keys=True),
+                        now, now,
+                    ),
+                )
+                c.commit()
+                return public, error, True
+
         before_row = get_points_row(username, c)
         public = None
         error = None
@@ -1244,6 +1307,7 @@ def apply_points_transaction(transaction_key, username, kind, amount, reason="")
                         _write_audit(
                             c, SYSTEM_ACTOR, username, delta, before,
                             int(after_row["points"] or 0), reason,
+                            transaction_key=transaction_key,
                         )
 
         result = {"points": public, "error": error}

@@ -1121,7 +1121,12 @@
           if(bdLocalStatus){bdLocalStatus.textContent='反推完成，已保存到生成记录';bdLocalStatus.style.color='#4ade80';}
           if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
         }else if(d.status==='error'||d.status==='failed'){
-          clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · 已退点');
+          if(d.refunded===true||Number(d.refunded)===1){
+            clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · 已退点');
+          }else{
+            if(bdLocalStatus){bdLocalStatus.textContent='反推失败，退款处理中';bdLocalStatus.style.color='#f59e0b';}
+            scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f59e0b;">反推失败：'+esc(d.error||'未知错误')+' · 退款处理中</div>';
+          }
         }else if(d.phase){
           var msg={extracting_frames:'正在读取关键画面…',transcribing:'正在读取音频语义（仅辅助）…',analyzing:'AI 正在按七个栏目反推视频画面…'}[d.phase]||'处理中…';
           scenes.innerHTML='<div style="padding:34px;text-align:center;color:#a78bfa;font-size:13px;">'+msg+'</div>';
@@ -1158,18 +1163,32 @@
           _localFail('提交凭证与当前任务冲突，已终止该凭证；请再次点击重新提交');
           return;
         }
-        if(response.d&&response.d.job_id&&response.s===200){
+        var refundConfirmed=response.d&&(response.d.refunded===true
+          ||Number(response.d.refunded)===1||response.d.payment_state==='refunded');
+        var chargeRejected=response.d&&response.d.payment_state==='charge_rejected';
+        if(response.d&&response.d.job_id&&response.s===200
+          &&(response.d.status!=='error'||refundConfirmed||chargeRejected)){
           _confirmSubmission(pending);
+          if(chargeRejected){
+            _localBusy(btn,false);
+            _localFail('上传任务未扣点，提交已终止');
+            return;
+          }
           if(bdLocalStatus)bdLocalStatus.textContent='已恢复上传任务，正在查询…';
           _pollLocalReverse(response.d.job_id,btn);
           return;
+        }
+        if(response.s===202&&response.d&&response.d.payment_state==='refund_pending'){
+          if(bdLocalStatus){bdLocalStatus.textContent='退款处理中，原提交凭证已保留';bdLocalStatus.style.color='#f59e0b';}
         }
         var unresolved=response.s===202||response.s===404
           ||(response.d&&response.d.code==='idempotency_in_progress')
           ||response.validJson===false;
         if(unresolved&&attempts<10){ setTimeout(check,1000); return; }
         _localBusy(btn,false);
-        _localFail('暂时无法精确确认任务，已保留原提交凭证；再次点击会继续使用同一凭证查询');
+        _localFail(response.d&&response.d.payment_state==='refund_pending'
+          ?'退款处理中，已保留原提交凭证；稍后会继续使用同一退款交易确认'
+          :'暂时无法精确确认任务，已保留原提交凭证；再次点击会继续使用同一凭证查询');
       }).catch(function(){
         if(attempts<10){ setTimeout(check,1000); return; }
         _localBusy(btn,false);

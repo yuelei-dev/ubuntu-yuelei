@@ -42,6 +42,44 @@ class AuthPointsTests(unittest.TestCase):
             os.environ["HQ_TEST_AUTH_DB"] = self.old_db
         self.tmp.cleanup()
 
+    def enable_legacy_audit_keys(self):
+        connection = sqlite3.connect(self.auth.DB)
+        try:
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(points_audit)"
+                ).fetchall()
+            }
+            if "transaction_key" not in columns:
+                connection.execute(
+                    "ALTER TABLE points_audit ADD COLUMN transaction_key TEXT"
+                )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS"
+                " idx_points_audit_transaction_key"
+                " ON points_audit(transaction_key)"
+                " WHERE transaction_key IS NOT NULL"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def insert_legacy_audit(self, key, delta, before, after, username="fang"):
+        connection = sqlite3.connect(self.auth.DB)
+        try:
+            connection.execute(
+                "INSERT INTO points_audit"
+                "(who_admin,username,delta,before_points,after_points,reason,"
+                " created_at,transaction_key) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "system", username, delta, before, after,
+                    "legacy reason", 123, key,
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def test_deduct_is_atomic_and_rejects_insufficient_points(self):
         points, err = self.auth.deduct_points("fang", 7)
         self.assertIsNone(err)
@@ -168,6 +206,176 @@ class AuthPointsTests(unittest.TestCase):
         self.assertEqual(err, "conflict")
         self.assertTrue(replayed)
         self.assertEqual(self.auth.get_points_row("fang")["points"], 110)
+
+    def test_new_database_without_legacy_audit_column_is_idempotent(self):
+        connection = sqlite3.connect(self.auth.DB)
+        try:
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(points_audit)"
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+        self.assertNotIn("transaction_key", columns)
+        self.auth.init_db()
+        self.auth.init_db()
+        points, error, replayed = self.auth.apply_points_transaction(
+            "breakdown-local-charge-no-legacy", "fang", "deduct", 2,
+            "first reason",
+        )
+        self.assertIsNone(error)
+        self.assertFalse(replayed)
+        self.assertEqual(points["points"], 8)
+        points, error, replayed = self.auth.apply_points_transaction(
+            "breakdown-local-charge-no-legacy", "fang", "deduct", 2,
+            "different reason is compatible",
+        )
+        self.assertIsNone(error)
+        self.assertTrue(replayed)
+        self.assertEqual(points["points"], 8)
+
+    def test_legacy_deduct_and_refund_keys_replay_without_balance_mutation(self):
+        self.enable_legacy_audit_keys()
+        connection = sqlite3.connect(self.auth.DB)
+        try:
+            connection.execute(
+                "UPDATE users SET points=42 WHERE username='fang'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        deduct_key = "breakdown-local-charge-legacy-201"
+        refund_key = "breakdown-local-refund-legacy-201"
+        self.insert_legacy_audit(deduct_key, -4, 10, 6)
+        self.insert_legacy_audit(refund_key, 4, 6, 10)
+        self.auth.init_db()
+        self.auth.init_db()
+
+        deducted, error, replayed = self.auth.apply_points_transaction(
+            deduct_key, "fang", "deduct", 4, "new reason ignored",
+        )
+        self.assertIsNone(error)
+        self.assertTrue(replayed)
+        self.assertEqual(deducted["points"], 6)
+        refunded, error, replayed = self.auth.apply_points_transaction(
+            refund_key, "fang", "refund", 4, "another reason ignored",
+        )
+        self.assertIsNone(error)
+        self.assertTrue(replayed)
+        self.assertEqual(refunded["points"], 10)
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 42)
+
+        connection = self.auth.db()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_audit"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_transactions"
+                ).fetchone()[0],
+                2,
+            )
+        finally:
+            connection.close()
+
+    def test_legacy_key_rejects_user_direction_or_amount_drift(self):
+        self.enable_legacy_audit_keys()
+        key = "breakdown-local-charge-legacy-202"
+        self.insert_legacy_audit(key, -4, 10, 6)
+        for username, kind, amount in (
+            ("mallory", "deduct", 4),
+            ("fang", "refund", 4),
+            ("fang", "deduct", 3),
+            ("fang", "deduct", 0),
+        ):
+            points, error, replayed = self.auth.apply_points_transaction(
+                key, username, kind, amount, "reason is not identity",
+            )
+            self.assertIsNone(points)
+            self.assertEqual(error, "conflict")
+            self.assertTrue(replayed)
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 10)
+
+    def test_concurrent_legacy_key_imports_one_snapshot_and_no_money(self):
+        self.enable_legacy_audit_keys()
+        key = "breakdown-local-refund-legacy-203"
+        self.insert_legacy_audit(key, 5, 5, 10)
+        results = []
+        lock = threading.Lock()
+
+        def replay():
+            result = self.auth.apply_points_transaction(
+                key, "fang", "refund", 5, "concurrent replay",
+            )
+            with lock:
+                results.append(result)
+
+        workers = [threading.Thread(target=replay) for _ in range(12)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(len(results), 12)
+        self.assertTrue(all(error is None for _, error, _ in results))
+        self.assertTrue(all(replayed for _, _, replayed in results))
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 10)
+        connection = self.auth.db()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_audit"
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_transactions"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
+
+    def test_new_key_writes_unique_legacy_audit_and_snapshot_together(self):
+        self.enable_legacy_audit_keys()
+        key = "breakdown-local-charge-new-ledgers-204"
+        points, error, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 3, "first reason",
+        )
+        self.assertIsNone(error)
+        self.assertFalse(replayed)
+        self.assertEqual(points["points"], 7)
+        points, error, replayed = self.auth.apply_points_transaction(
+            key, "fang", "deduct", 3, "changed reason",
+        )
+        self.assertIsNone(error)
+        self.assertTrue(replayed)
+        self.assertEqual(points["points"], 7)
+        connection = self.auth.db()
+        try:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_audit"
+                    " WHERE transaction_key=?",
+                    (key,),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM points_transactions"
+                    " WHERE transaction_key=?",
+                    (key,),
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            connection.close()
 
     def test_http_points_endpoints_require_internal_token(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), self.auth.H)

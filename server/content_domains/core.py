@@ -854,6 +854,8 @@ def _pending_job_scanner():
             _recover_pending_jobs(JOB_QUEUE_MAX)
         except Exception:
             pass
+        try: __import__(__package__ + ".local_reverse_upload", fromlist=["*"]).reconcile_pending_refunds(jdb, jobs_store, _domains()[1])
+        except Exception: print("[refund-reconcile] retry failed; will retry", flush=True)
         time.sleep(30)
 
 _ALL_JOB_QUEUES = (_job_queue, _fast_job_queue, _talking_job_queue,

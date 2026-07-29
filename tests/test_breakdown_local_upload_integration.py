@@ -4,8 +4,9 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
-from contextlib import ExitStack, closing
+from contextlib import ExitStack, closing, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -642,19 +643,15 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM submission_idempotency"
             ).fetchone()[0]
         self.assertEqual(row["status"], "error")
-        self.assertEqual(row["refunded"], 0)
+        self.assertEqual(row["refunded"], 2)
         self.assertEqual(self.payment_state(row["id"]), "refund_pending")
         self.assertEqual(idem_count, 1)
         self.assertEqual(self.points.balance, 80)
         self.assertEqual(self.points.refunds, [])
 
-        invalid = _Handler(
-            "/api/gen/breakdown/local-upload?media_type=image",
-            b"invalid", "application/octet-stream",
-        )
-        with self.patches():
-            invalid_result = self.core.H.do_POST(invalid)
-        self.assertEqual(invalid_result[0], 400)
+        _, recovered = self.query_status()
+        self.assertEqual(recovered[0], 200)
+        self.assertTrue(recovered[1]["refunded"])
         self.assertEqual(self.job_row(row["id"])["refunded"], 1)
         self.assertEqual(len(self.points.refunds), 1)
         self.assertEqual(self.points.balance, 100)
@@ -663,7 +660,7 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
                 connection.execute(
                     "SELECT COUNT(*) FROM submission_idempotency"
                 ).fetchone()[0],
-                0,
+                1,
             )
         self.assertEqual(
             self.local_upload.reconcile_pending_refunds(
@@ -701,7 +698,7 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
         with closing(self.jdb()) as connection:
             row = connection.execute("SELECT * FROM jobs").fetchone()
         self.assertEqual(row["status"], "error")
-        self.assertEqual(row["refunded"], 0)
+        self.assertEqual(row["refunded"], 2)
         self.assertEqual(self.payment_state(row["id"]), "refund_pending")
         self.assertEqual(self.points.balance, 100)
         self.assertEqual(len(self.points.refunds), 1)
@@ -790,8 +787,10 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
         with closing(self.jdb()) as connection:
             job_id = connection.execute("SELECT id FROM jobs").fetchone()[0]
         _, replay = self.submit_upload()
-        self.assertEqual(replay[0], 200)
+        self.assertEqual(replay[0], 202)
         self.assertEqual(replay[1]["job_id"], job_id)
+        self.assertEqual(replay[1]["payment_state"], "refund_pending")
+        self.assertEqual(self.job_row(job_id)["refunded"], 2)
         self.assertEqual(len(self.points.deductions), 1)
         self.assertEqual(self.points.refunds, [])
         with closing(self.jdb()) as connection:
@@ -799,6 +798,153 @@ class BreakdownLocalUploadIntegrationTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
                 1,
             )
+        _, recovered = self.query_status()
+        self.assertEqual(recovered[0], 200)
+        self.assertTrue(recovered[1]["refunded"])
+        self.assertEqual(self.job_row(job_id)["refunded"], 1)
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_three_status_refund_failures_keep_key_then_fourth_confirms_once(self):
+        self.points.fail_refunds = 4
+        _, first = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(first[0], 429)
+        job_id = first[1].get("job_id") or self.job_row(1)["id"]
+        self.assertEqual(self.job_row(job_id)["refunded"], 2)
+        self.assertEqual(self.points.balance, 80)
+
+        for _ in range(3):
+            _, pending = self.query_status()
+            self.assertEqual(pending[0], 202)
+            self.assertEqual(pending[1]["payment_state"], "refund_pending")
+            self.assertEqual(self.job_row(job_id)["refunded"], 2)
+            self.assertEqual(self.points.balance, 80)
+            with closing(self.jdb()) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM submission_idempotency"
+                    ).fetchone()[0],
+                    1,
+                )
+
+        _, confirmed = self.query_status()
+        self.assertEqual(confirmed[0], 200)
+        self.assertTrue(confirmed[1]["refunded"])
+        self.assertEqual(confirmed[1]["payment_state"], "refunded")
+        self.assertEqual(self.job_row(job_id)["refunded"], 1)
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+        _, replayed = self.query_status()
+        self.assertEqual(replayed[0], 200)
+        self.assertTrue(replayed[1]["refunded"])
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_two_refund_scanners_compete_but_only_one_credit_is_applied(self):
+        self.points.fail_refunds = 1
+        _, first = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(first[0], 429)
+        job_id = self.job_row(1)["id"]
+        barrier = threading.Barrier(3)
+        results = []
+
+        def scan():
+            barrier.wait()
+            results.append(self.local_upload.reconcile_pending_refunds(
+                self.jdb, self.jobs_store, self.points,
+            ))
+
+        workers = [threading.Thread(target=scan) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        barrier.wait()
+        for worker in workers:
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+
+        self.assertEqual(sum(results), 1)
+        self.assertEqual(self.job_row(job_id)["refunded"], 1)
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_background_retry_converges_without_status_request(self):
+        self.points.fail_refunds = 2
+        _, first = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(first[0], 429)
+        job_id = self.job_row(1)["id"]
+        with mock.patch.object(self.core, "jdb", self.jdb), mock.patch.object(
+            self.core, "_domains",
+            return_value=(mock.Mock(), self.points, mock.Mock()),
+        ):
+            self.assertEqual(
+                self.local_upload.reconcile_pending_refunds(
+                    self.jdb, self.jobs_store, self.points,
+                ),
+                0,
+            )
+            self.assertEqual(self.job_row(job_id)["refunded"], 2)
+            self.assertEqual(
+                self.local_upload.reconcile_pending_refunds(
+                    self.jdb, self.jobs_store, self.points,
+                ),
+                1,
+            )
+        self.assertEqual(self.job_row(job_id)["refunded"], 1)
+        self.assertEqual(self.payment_state(job_id), "refunded")
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_restart_reclaims_an_abandoned_refund_attempt_with_same_key(self):
+        self.points.fail_refunds = 1
+        _, first = self.submit_upload(enqueue=lambda *args: False)
+        self.assertEqual(first[0], 429)
+        job_id = self.job_row(1)["id"]
+        with closing(self.jdb()) as connection:
+            row = connection.execute(
+                "SELECT payload FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            payload = json.loads(row["payload"])
+            payload["_local_upload_payment"]["refund_attempt_owner"] = (
+                "dead-process"
+            )
+            connection.execute(
+                "UPDATE jobs SET refunded=0,payload=? WHERE id=?",
+                (json.dumps(payload), job_id),
+            )
+            connection.commit()
+
+        with mock.patch.object(
+            self.local_upload, "_REFUND_PROCESS_ID", "restarted-process"
+        ):
+            self.assertEqual(
+                self.local_upload.reconcile_pending_refunds(
+                    self.jdb, self.jobs_store, self.points,
+                ),
+                1,
+            )
+        self.assertEqual(self.job_row(job_id)["refunded"], 1)
+        self.assertEqual(self.points.balance, 100)
+        self.assertEqual(len(self.points.refunds), 1)
+
+    def test_existing_daemon_scanner_contains_retry_failures_without_new_loop(self):
+        output = io.StringIO()
+        with redirect_stdout(output), mock.patch.object(
+            self.core, "_recover_pending_jobs", return_value=0,
+        ), mock.patch.object(
+            self.local_upload, "reconcile_pending_refunds",
+            side_effect=RuntimeError("private upstream detail"),
+        ), mock.patch.object(
+            self.core.time, "sleep", side_effect=StopIteration,
+        ), self.assertRaises(StopIteration):
+            self.core._pending_job_scanner()
+        self.assertIn("[refund-reconcile] retry failed; will retry", output.getvalue())
+        self.assertNotIn("private upstream detail", output.getvalue())
+        core_source = Path(self.core.__file__).read_text(encoding="utf-8")
+        self.assertEqual(core_source.count("reconcile_pending_refunds"), 1)
+        self.assertIn(
+            'name="content-job-recover", daemon=True',
+            core_source,
+        )
 
     def test_repeated_paid_rejection_never_refunds_twice(self):
         _, result = self.submit_upload()

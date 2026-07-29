@@ -96,6 +96,23 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("renderBreakdownReverse({type:'breakdown_reverse'", self.html)
         self.assertIn("analysis:m.analysis||''", self.html)
 
+    def test_local_refund_ui_waits_for_explicit_confirmation(self):
+        self.assertIn(
+            "if(d.refunded===true||Number(d.refunded)===1)",
+            self.html,
+        )
+        self.assertIn("反推失败，退款处理中", self.html)
+        self.assertIn(
+            "response.d.payment_state==='refunded'",
+            self.html,
+        )
+        self.assertIn(
+            "response.d.payment_state==='refund_pending'",
+            self.html,
+        )
+        self.assertIn("退款处理中，原提交凭证已保留", self.html)
+        self.assertIn("上传任务未扣点，提交已终止", self.html)
+
     def test_breakdown_analysis_is_rendered_and_saved_to_history(self):
         self.assertIn('id="bdAnalysis"', self.html)
         self.assertIn('id="bdAnalysisText"', self.html)
