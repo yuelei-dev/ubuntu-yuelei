@@ -1785,6 +1785,37 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(post.call_count, 1)
         fallback.assert_not_called()
 
+    def test_general_multimodal_1210_keeps_existing_openai_fallback(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        self.breakdown.OPENAI_KEY = "openai-test-key"
+        error = urllib.error.HTTPError(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(b"{}"),
+        )
+        error.breakdown_response_detail = (
+            '{"error":{"code":"1210","message":"image count exceeded"}}'
+        )
+        with patch.object(
+            self.breakdown, "_post_zhipu", side_effect=error
+        ), patch.object(
+            self.breakdown,
+            "_post_openai_fallback",
+            return_value={
+                "choices": [{"message": {"content": "fallback result"}}]
+            },
+        ) as fallback:
+            result = self.breakdown._chat_multimodal(
+                "system",
+                "user",
+                [],
+                allow_provider_fallback=True,
+            )
+        self.assertEqual(result, "fallback result")
+        self.assertEqual(fallback.call_count, 1)
+
     def test_reverse_requests_are_fixed_to_glm_4v_plus(self):
         captured = []
         os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"

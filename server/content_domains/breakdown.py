@@ -2141,12 +2141,12 @@ def _chat_multimodal(sysmsg, usermsg, image_paths, temp=0.7,
                 heartbeat=heartbeat,
             )
     except Exception as exc:
-        if _zhipu_image_limit_error(exc):
-            raise ValueError(
-                "智谱输入图片数量超过限制（错误码1210）；"
-                "反推单次请求最多只能携带2张图片"
-            ) from exc
         if not allow_provider_fallback:
+            if _zhipu_image_limit_error(exc):
+                raise ValueError(
+                    "智谱输入图片数量超过限制（错误码1210）；"
+                    "反推单次请求最多只能携带2张图片"
+                ) from exc
             print(
                 "[breakdown] zhipu failure, reverse provider fallback disabled: %s"
                 % type(exc).__name__,
