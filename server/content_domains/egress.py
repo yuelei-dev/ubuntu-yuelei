@@ -18,6 +18,7 @@ gpt 失败率 40%。改为优先走自建出境直连官方 API，前一档超�
 （如内容审核没出图）由调用方判断——那是官方 API 的决定，换通道也一样，不该白降级。
 """
 import errno
+import http.client
 import json
 import os
 import socket
@@ -38,6 +39,12 @@ EGRESS_TIMEOUT = int(os.environ.get("EGRESS_TIMEOUT", "210") or 210)
 # 需压在 reaper image 900s 宽限内：如首选 300 + mihomo 210 + heygen 300 = 810s，安全。
 EGRESS_PRIMARY_TIMEOUT = int(os.environ.get("EGRESS_PRIMARY_TIMEOUT", str(EGRESS_TIMEOUT)) or EGRESS_TIMEOUT)
 HEYGEN_TIMEOUT = int(os.environ.get("EGRESS_HEYGEN_TIMEOUT", "300") or 300)
+HEYGEN_DIRECT_PROXY = os.environ.get("HEYGEN_DIRECT_PROXY", "").strip()
+HEYGEN_PROXY_FALLBACK = (
+    EGRESS_FALLBACK
+    or os.environ.get("HTTPS_PROXY")
+    or "http://127.0.0.1:7897"
+).strip()
 
 # 直连 opener：ProxyHandler({}) 显式清空，绕过 content.env 里进程级的 HTTP(S)_PROXY，
 # 保证 heygen 兜底那一档确实直连、不会误走进 mihomo。
@@ -95,6 +102,11 @@ def preferred_proxy(fallback=""):
     if tunnel_alive():
         return EGRESS_PRIMARY
     return (fallback or EGRESS_FALLBACK or "").strip()
+
+
+def heygen_proxy():
+    """Use the same dedicated HeyGen egress selection in calls and probes."""
+    return HEYGEN_DIRECT_PROXY or preferred_proxy(HEYGEN_PROXY_FALLBACK)
 
 
 def _channel_usable(proxy):
@@ -231,3 +243,104 @@ def post_json_idempotent(official_base, heygen_base, path, data, headers, log=No
                 % (path, number, limit, label, str(last)[:120])
             )
     raise last if last is not None else RuntimeError("egress: request failed")
+
+
+def _read_image_stream(response, expected=1):
+    """Read Images API SSE while retaining the last valid progressive image."""
+    completed, partial = [], []
+    try:
+        while True:
+            line = response.readline()
+            if not line:
+                break
+            if not line.startswith(b"data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == b"[DONE]":
+                continue
+            event = json.loads(raw)
+            image = event.get("b64_json") or event.get("partial_image_b64")
+            if not image:
+                continue
+            if str(event.get("type") or "").endswith(".completed"):
+                completed.append(image)
+                if len(completed) >= max(1, int(expected or 1)):
+                    return {"data": [{"b64_json": value} for value in completed]}
+            else:
+                partial.append(image)
+    except (
+        http.client.RemoteDisconnected,
+        http.client.IncompleteRead,
+        urllib.error.URLError,
+        TimeoutError,
+        ConnectionError,
+    ):
+        if completed:
+            return {
+                "data": [{"b64_json": value} for value in completed],
+                "stream_incomplete": True,
+            }
+        if partial:
+            return {
+                "data": [{"b64_json": partial[-1]}],
+                "stream_incomplete": True,
+            }
+        raise
+    images = completed or (partial[-1:] if partial else [])
+    if images:
+        result = {"data": [{"b64_json": value} for value in images]}
+        if len(completed) < max(1, int(expected or 1)):
+            result["stream_incomplete"] = True
+        return result
+    raise ValueError("图片流结束但未返回有效图片")
+
+
+def post_image_json(official_base, heygen_base, path, data, headers, log=None):
+    """Use SSE on official image routes and preserve the existing JSON relay."""
+    original = json.loads(data)
+    expected = max(1, int(original.get("n") or 1))
+    stream_body = dict(original)
+    stream_body.update({"stream": True, "partial_images": 1})
+    stream_data = json.dumps(stream_body, ensure_ascii=False).encode()
+    last = None
+    for label, base, proxy, timeout in channels(official_base, heygen_base):
+        if not _channel_usable(proxy):
+            last = last or urllib.error.URLError(
+                ConnectionRefusedError("代理 %s 不可达" % proxy)
+            )
+            if log:
+                log("[egress] %s 代理不可达，跳过该档（未发出任何请求）" % label)
+            continue
+        is_official = label != "heygen"
+        request_headers = dict(headers)
+        if is_official:
+            request_headers["Accept"] = "text/event-stream"
+        request = urllib.request.Request(
+            base + path,
+            data=stream_data if is_official else data,
+            headers=request_headers,
+            method="POST",
+        )
+        try:
+            with _opener(proxy).open(request, timeout=timeout) as response:
+                if is_official:
+                    result = _read_image_stream(response, expected)
+                    if result.get("stream_incomplete") and log:
+                        log("[egress] 图片流提前结束，已保留最后一张有效渐进图")
+                    return result
+                return json.loads(response.read())
+        except Exception as error:
+            last = error
+            if not _pre_delivery_failure(error):
+                if log:
+                    log(
+                        "[egress] %s via %s 失败，且请求可能已送达上游，直接失败退点: %s"
+                        % (path, label, str(error)[:120])
+                    )
+                raise
+            if label != "heygen" and log:
+                log(
+                    "[egress] %s via %s 连接阶段失败(未送达)，降级下一档: %s"
+                    % (path, label, str(error)[:120])
+                )
+    raise last if last is not None else RuntimeError("egress: 无可用通道")

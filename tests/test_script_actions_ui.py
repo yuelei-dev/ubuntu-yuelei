@@ -49,7 +49,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="reverseVideoCost"', self.html)
         self.assertIn("selectedDuration=10", self.html)
         self.assertIn("selectedAvatarId=null", self.html)
-        self.assertIn("selectedDuration*30", self.html)
+        self.assertIn("var rate=selectedAvatarId===null?30:10", self.html)
+        self.assertIn("selectedDuration*rate", self.html)
 
     def test_reverse_video_picker_load_failure_keeps_no_avatar_available(self):
         self.assertIn("function _showReverseVideoPicker(prompt,onConfirm)", self.html)
@@ -141,8 +142,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         )
         self.assertIn("prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
         self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
-        self.assertIn("if(seedanceMode) selectedDuration=10", self.html)
-        self.assertIn("var unsupported=seedanceMode&&Number(btn.getAttribute('data-reverse-duration'))!==10", self.html)
+        self.assertNotIn("micro: seedance-2.0-fast", self.html)
+        self.assertIn("channel:'micro'", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
 
     def test_reverse_history_preserves_explicit_reference_indices(self):
