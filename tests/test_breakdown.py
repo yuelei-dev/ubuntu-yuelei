@@ -697,6 +697,14 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("不得根据画面写“未观察到声音”", src)
         self.assertIn("字幕或屏幕文字只有在本段图片清晰可读时", src)
         self.assertIn("面向树根", src)
+        self.assertIn("主体不一定是人物", src)
+        self.assertIn("不得因画面无人而把主体留空", src)
+        self.assertIn("静态非人物画面也必须形成可生成提示词", src)
+        self.assertIn("抽象画面", src)
+        self.assertIn("纯色背景", src)
+        self.assertIn("不能把主要实体只塞进 scene", src)
+        self.assertIn("主体保持静止，未观察到位置或形态变化", src)
+        self.assertIn("subject、scene、action 不可留空", src)
 
     def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
@@ -1438,6 +1446,275 @@ class BreakdownTests(unittest.TestCase):
                 ["static-1.jpg", "static-2.jpg"],
             )
         self.assertIn("人物静止不动", prompt)
+
+    def test_reverse_static_non_person_is_generation_ready_with_static_evidence(self):
+        segment = {
+            "subject": "白色矩形位于纯色画面中央",
+            "scene": "蓝色纯色背景包围中央矩形",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定正面构图",
+            "lighting": "画面亮度均匀，未见阴影变化",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "静态几何图形",
+                2.5,
+                "local",
+                "",
+                ["rectangle-first.jpg", "rectangle-last.jpg"],
+            )
+        static_check.assert_called_once_with(
+            ["rectangle-first.jpg", "rectangle-last.jpg"]
+        )
+        self.assertIn("主体：白色矩形位于纯色画面中央", prompt)
+        self.assertIn("动作：主体保持静止，未观察到位置或形态变化", prompt)
+
+    def test_reverse_static_non_person_claim_still_requires_ssim(self):
+        segment = {
+            "subject": "白色矩形位于画面中央",
+            "scene": "蓝色纯色背景",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=False
+        ):
+            with self.assertRaisesRegex(ValueError, "无静止画面证据"):
+                self.breakdown._reverse_prompt_from_frames(
+                    "动态矩形",
+                    2.5,
+                    "local",
+                    "",
+                    ["rectangle-first.jpg", "rectangle-last.jpg"],
+                )
+
+    def test_reverse_pure_abstract_frame_uses_evidence_backed_subject(self):
+        segment = {
+            "subject": "抽象画面，红色色块填满整个画面",
+            "scene": "无独立前景或背景物体",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定满幅构图",
+            "lighting": "红色区域亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ):
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "纯色画面",
+                2.5,
+                "local",
+                "",
+                ["abstract-first.jpg", "abstract-last.jpg"],
+            )
+        self.assertIn("主体：抽象画面，红色色块填满整个画面", prompt)
+
+    def test_reverse_non_person_shape_describes_visible_change_without_static_claim(self):
+        segment = {
+            "subject": "黑色圆形位于浅色画面左侧",
+            "scene": "浅色纯色背景",
+            "action": "黑色圆形从左侧移到右侧，同时直径增大",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "变化图形",
+                2.5,
+                "local",
+                "",
+                ["shape-first.jpg", "shape-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("从左侧移到右侧", prompt)
+
+    def test_reverse_non_person_object_remains_the_subject(self):
+        segment = {
+            "subject": "透明玻璃瓶位于木桌中央，瓶身贴有白色标签",
+            "scene": "浅色木桌与灰色背景构成简洁室内静物场景",
+            "action": "玻璃瓶从竖直状态向画面右侧倾斜",
+            "camera": "固定正面中近景构图",
+            "lighting": "左侧柔光在瓶身形成可见高光",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "玻璃瓶静物",
+                2.5,
+                "local",
+                "",
+                ["bottle-first.jpg", "bottle-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("主体：透明玻璃瓶位于木桌中央", prompt)
+        self.assertIn("动作：玻璃瓶从竖直状态向画面右侧倾斜", prompt)
+
+    def test_reverse_retry_carries_missing_field_error_not_old_draft(self):
+        missing = {
+            "subject": "",
+            "scene": "Blue background with a white rectangle",
+            "action": "",
+            "camera": "Static",
+            "lighting": "Uniform",
+            "sound": "",
+            "continuity": "",
+        }
+        corrected = {
+            "subject": "白色矩形位于画面中央",
+            "scene": "蓝色纯色背景",
+            "action": "主体保持静止，未观察到位置或形态变化",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        calls = []
+        responses = [missing, corrected]
+
+        def fake_chat(_system, user, frames, **kwargs):
+            calls.append((user, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static", return_value=True
+        ):
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "静态白色矩形",
+                2.5,
+                "local",
+                "",
+                ["rectangle-first.jpg", "rectangle-last.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][1], calls[1][1])
+        self.assertIn("上一轮校验错误", calls[1][0])
+        self.assertIn("subject（主体）", calls[1][0])
+        self.assertIn("action（动作）", calls[1][0])
+        self.assertIn("禁止返回全空JSON", calls[1][0])
+        self.assertNotIn("Blue background with a white rectangle", calls[1][0])
+        self.assertNotIn("camera=Static", calls[1][0])
+        self.assertIn("主体：白色矩形位于画面中央", prompt)
+
+    def test_regression_real_glm_static_rectangle_responses_still_fail(self):
+        first_real_response = {
+            "subject": "",
+            "scene": "Blue background with a white rectangle",
+            "action": "",
+            "camera": "Static",
+            "lighting": "Uniform",
+            "sound": "",
+            "continuity": "",
+        }
+        blank = {
+            "subject": "",
+            "scene": "",
+            "action": "",
+            "camera": "",
+            "lighting": "",
+            "sound": "",
+            "continuity": "",
+        }
+        calls = []
+        responses = [first_real_response, blank]
+
+        def fake_chat(_system, user, frames, **kwargs):
+            calls.append((user, list(frames), kwargs))
+            return json.dumps(
+                {"segments": [responses[len(calls) - 1]]},
+                ensure_ascii=False,
+            )
+
+        self.breakdown._chat_multimodal = fake_chat
+        with self.assertRaisesRegex(
+            ValueError, "本段为空.*subject、scene、action"
+        ):
+            self.breakdown._reverse_prompt_from_frames(
+                "静态空画面",
+                2.5,
+                "local",
+                "",
+                ["blank-first.jpg", "blank-last.jpg"],
+            )
+        self.assertEqual(len(calls), 2)
+        self.assertIn("subject（主体）", calls[1][0])
+        self.assertIn("action（动作）", calls[1][0])
+        self.assertNotIn(
+            "Blue background with a white rectangle", calls[1][0]
+        )
 
     def test_reverse_segment_transcript_keeps_only_overlapping_asr(self):
         transcript = (

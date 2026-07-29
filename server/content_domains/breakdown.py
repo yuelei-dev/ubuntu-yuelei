@@ -53,6 +53,17 @@ _REVERSE_STATIC_ACTION_MARKERS = (
     "画面无变化",
     "画面内容保持一致",
     "没有任何变化",
+    "位置与形状保持不变",
+    "位置和形状保持不变",
+    "位置保持不变",
+    "形状保持不变",
+    "未观察到位移",
+    "未见位移",
+    "无位移",
+    "无形变",
+    "主体保持静止",
+    "未观察到位置或形态变化",
+    "未观察到位置或形状变化",
 )
 _REVERSE_MOTION_ACTION_MARKERS = (
     "坐起", "起身", "抬起", "举起", "放下", "转身", "回头",
@@ -1151,7 +1162,9 @@ def _parse_reverse_segment_evidence(raw):
     text = _compose_reverse_segment(fields)
     text = str(text or "").strip()
     if not text:
-        raise ValueError("反推结果本段为空，请重试")
+        raise ValueError(
+            "反推结果本段为空，缺少 subject、scene、action，请重试"
+        )
     return {
         "text": text,
         "fields": fields,
@@ -1231,12 +1244,12 @@ def _validate_reverse_segment_evidence(
         )
 
     fields = entry.get("fields", {})
+    missing_critical_fields = []
     for key, label in (("subject", "主体"), ("scene", "场景"), ("action", "动作")):
         compact_field = _compact_reverse_text(fields.get(key, ""))
         if not compact_field:
-            raise ValueError(
-                "反推结果第%d段缺少可生成的关键%s事实，请重试" % (index, label)
-            )
+            missing_critical_fields.append("%s（%s）" % (key, label))
+            continue
         if compact_field in {
             _compact_reverse_text(value)
             for value in _REVERSE_EMPTY_PLACEHOLDER_VALUES
@@ -1244,6 +1257,11 @@ def _validate_reverse_segment_evidence(
             raise ValueError(
                 "反推结果第%d段关键%s是空洞占位内容，请重试" % (index, label)
             )
+    if missing_critical_fields:
+        raise ValueError(
+            "反推结果第%d段缺少可生成的关键字段：%s，请重试"
+            % (index, "、".join(missing_critical_fields))
+        )
     if require_frame_evidence:
         evidence_frames = entry.get("evidence_frames") or {}
         frame_count = len(frame_paths or [])
@@ -1507,13 +1525,16 @@ def _split_reverse_text(text, expected_count):
 
 def _reverse_segment_messages(
     title, duration, platform, transcript, index, segment_count, timeline_range,
-    retry=False,
+    retry=False, retry_error=None,
 ):
     retry_note = ""
     if retry:
         retry_note = (
             "这是本时间段基于原始帧的重新分析。不要沿用任何历史草稿、模板句或其他时间段文字，"
-            "必须重新逐帧观察后作答。"
+            "必须重新逐帧观察后作答。上一轮校验错误：%s。"
+            "请针对错误中列出的缺失 subject、scene 或 action 重新检查当前原始双帧；"
+            "非人物主体同样必须填写，禁止返回全空JSON。"
+            % str(retry_error or "输出未通过结构与证据校验")
         )
     usermsg = (
         "视频标题（仅作背景，不能代替画面证据）：%s\n"
@@ -1538,7 +1559,14 @@ def _reverse_segment_messages(
         "并用中文引号标出实际文字；看不清就省略。"
         "不要补写过渡动作，不要为了篇幅扩写，不设最低字数，宁可短也不能编造。"
         "这是可直接交给视频生成模型的分段提示词，不是普通画面说明。"
-        "subject 写可见外观、服装、主体在画面中的位置与身份连续性；"
+        "主体不一定是人物；产品、普通物体、几何图形、色块、文字、动物或风景中的主要可见对象也必须作为 subject，"
+        "按证据写清颜色、形状、材质和画面位置，不得因画面无人而把主体留空。"
+        "如果没有独立实体，subject 应写可由双帧证明的“抽象画面”或“纯色背景”及其主色、范围和结构。"
+        "scene 只写主体周围环境、背景和空间关系，不能把主要实体只塞进 scene 而让 subject 为空。"
+        "静态非人物画面也必须形成可生成提示词：若首尾两帧中的主体位置、形状和画面确实一致，"
+        "action 应准确写“主体保持静止，未观察到位置或形态变化”，并引用局部帧1、2；"
+        "不得为填充 action 编造移动、变形或运镜。"
+        "subject 写可见外观、服装（如适用）、主体在画面中的位置与可确认连续性；"
         "scene 写关键环境、道具及前中后景关系；action 按双帧时间顺序写动作节点、方向和位移；"
         "camera 写景别、构图、机位和可见运镜；lighting 写可见光线方向、明暗和色调；"
         "隔离分段阶段 continuity 与 continuity_evidence_frames 必须留空；"
@@ -1552,7 +1580,8 @@ def _reverse_segment_messages(
         "\"continuity_evidence_frames\":[]}]}。"
         "evidence_frames 使用本请求图片的局部编号1、2；每个非空画面字段必须列出能直接证明它的帧，"
         "action 必须同时引用首尾两帧以证明动作顺序。"
-        "segments 必须只有当前这一段；字段可以为空，非空内容必须有当前图片或ASR证据；不要输出时间码、解释或markdown。"
+        "segments 必须只有当前这一段；camera、lighting、sound 可以在无证据时留空，"
+        "subject、scene、action 不可留空且必须有当前图片证据；不要输出时间码、解释或markdown。"
     ) % (
         str(title or ""),
         str(duration),
@@ -1650,6 +1679,7 @@ def _reverse_prompt_from_frames(
         zip(windows, frame_groups), 1
     ):
         transcript = _segment_transcript(script_text, start, end)
+        retry_error = None
         for attempt in range(2):
             sysmsg, usermsg = _reverse_segment_messages(
                 title,
@@ -1660,6 +1690,7 @@ def _reverse_prompt_from_frames(
                 segment_count,
                 timeline_range,
                 retry=bool(attempt),
+                retry_error=retry_error,
             )
             if deadline is None and heartbeat is None:
                 raw = _reverse_chat_multimodal(
@@ -1693,6 +1724,7 @@ def _reverse_prompt_from_frames(
                 )
                 break
             except ValueError as error:
+                retry_error = error
                 _log_breakdown_parse_failure(
                     "reverse-segment-%d-attempt-%d" % (index, attempt + 1),
                     raw,
