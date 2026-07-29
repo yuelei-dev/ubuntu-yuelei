@@ -103,12 +103,6 @@ class BreakdownTests(unittest.TestCase):
         result = []
         for index in range(1, count + 1):
             action, camera = variants[(index - 1) % len(variants)]
-            continuity_frames = {
-                1: [1, 3],
-                2: [1, 3],
-                3: [3, 5],
-                4: [5, 7],
-            }[(index - 1) % 4 + 1]
             result.append({
                 "subject": "第%d段白衣人物居中，服装、朝向和姿态清晰一致" % index,
                 "scene": "傍晚海滩、近处浪花、远处海平线和低空云层",
@@ -116,7 +110,7 @@ class BreakdownTests(unittest.TestCase):
                 "camera": camera,
                 "lighting": "夕阳逆光形成暖色轮廓，沙面保留柔和高光",
                 "sound": "",
-                "continuity": "承接人物朝向与动作落点，保持光线和运镜连续",
+                "continuity": "",
                 "evidence_frames": {
                     "subject": [1, 2],
                     "scene": [1, 2],
@@ -124,7 +118,7 @@ class BreakdownTests(unittest.TestCase):
                     "camera": [1, 2],
                     "lighting": [1, 2],
                 },
-                "continuity_evidence_frames": continuity_frames,
+                "continuity_evidence_frames": [],
             })
         return result
 
@@ -707,7 +701,8 @@ class BreakdownTests(unittest.TestCase):
     def test_reverse_prompt_requires_segment_scoped_original_frames(self):
         import inspect
         src = inspect.getsource(self.breakdown._reverse_prompt_from_frames)
-        self.assertIn("_group_reverse_frames", src)
+        self.assertIn("_reverse_model_frame_groups", src)
+        self.assertIn("_reverse_chat_multimodal", src)
         self.assertIn("frame_group", src)
         self.assertIn("max_tokens=900", src)
         self.assertNotIn("allow_duplicates", src)
@@ -771,9 +766,7 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_reverse_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             reverse_calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
-            if len(frames) == 8:
-                return self._global_continuity_response()
-            item = objects[len(reverse_calls) - 2]
+            item = objects[len(reverse_calls) - 1]
             return json.dumps({"segments": [item]}, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_reverse_chat
@@ -795,12 +788,18 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["frame_thumbnails"]), 8)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
-        self.assertEqual(len(reverse_calls), 5)
-        self.assertEqual(reverse_calls[0][2], [thumb.name] * 8)
-        self.assertIn("变化前后所在时间段", reverse_calls[0][1])
-        self.assertIn("只属于当前时间段", reverse_calls[1][1])
-        self.assertIn("准确性高于完整性和篇幅", reverse_calls[1][0])
-        self.assertEqual(reverse_calls[1][2], [thumb.name, thumb.name])
+        self.assertEqual(len(reverse_calls), 4)
+        self.assertTrue(all(
+            call[2] == [thumb.name, thumb.name] for call in reverse_calls
+        ))
+        self.assertIn("只属于当前时间段", reverse_calls[0][1])
+        self.assertIn("准确性高于完整性和篇幅", reverse_calls[0][0])
+        self.assertFalse(any(
+            call[4]["allow_provider_fallback"] for call in reverse_calls
+        ))
+        self.assertTrue(all(
+            call[4]["model"] == "glm-4v-plus" for call in reverse_calls
+        ))
         self.assertEqual(
             result["reference_frame_strategy"],
             "explicit_indices_one_per_segment",
@@ -851,6 +850,22 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(set(deadlines)), 1)
         self.assertTrue(all(callable(call[4].get("heartbeat")) for call in reverse_calls))
         self.assertIn("全局连续性事实", result["prompt"])
+        self.assertEqual(result["global_continuity"]["model_calls"], 0)
+        self.assertEqual(result["global_continuity"]["image_count"], 0)
+        self.assertEqual(result["analysis_call_budget"], {
+            "analysis_deadline_seconds": 540,
+            "max_images_per_request": 2,
+            "global_model_calls": 0,
+            "normal_logical_calls": 4,
+            "worst_logical_calls": 8,
+            "normal_physical_http_attempts": 4,
+            "same_provider_physical_attempts_per_logical": 2,
+            "worst_physical_http_attempts": 16,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "http_4xx_retry": False,
+            "cross_provider_fallback": False,
+        })
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
     def test_breakdown_scenes_retries_once_when_parse_fails(self):
@@ -899,7 +914,13 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(calls[0][2], ["f1.jpg", "f2.jpg"])
         self.assertEqual(calls[1][2], ["f1.jpg", "f2.jpg"])
         self.assertEqual(calls[0][3], 0.1)
-        self.assertEqual(calls[0][4], {"max_tokens": 900, "image_detail": None})
+        self.assertEqual(calls[0][4], {
+            "max_tokens": 900,
+            "image_detail": None,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "allow_provider_fallback": False,
+        })
         self.assertIn("不要沿用任何历史草稿", calls[1][1])
 
     def test_reverse_prompt_timeline_is_code_generated_and_gap_free(self):
@@ -928,7 +949,13 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("当前时间段：第1/4段", calls[0][0])
         self.assertEqual(calls[0][1], ["f1.jpg", "f2.jpg"])
         self.assertEqual(calls[0][2], 0.1)
-        self.assertEqual(calls[0][3], {"max_tokens": 900, "image_detail": None})
+        self.assertEqual(calls[0][3], {
+            "max_tokens": 900,
+            "image_detail": None,
+            "provider": "zhipu",
+            "model": "glm-4v-plus",
+            "allow_provider_fallback": False,
+        })
 
     def test_reverse_prompt_composes_structured_segment_fields(self):
         structured = {
@@ -987,6 +1014,11 @@ class BreakdownTests(unittest.TestCase):
                 "lighting": "",
                 "sound": "",
                 "continuity": "",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                },
             }
             return json.dumps({"segments": [segment]}, ensure_ascii=False)
 
@@ -1101,6 +1133,11 @@ class BreakdownTests(unittest.TestCase):
                 "lighting": "",
                 "sound": "",
                 "continuity": "",
+                "evidence_frames": {
+                    "subject": [1, 2],
+                    "scene": [1, 2],
+                    "action": [1, 2],
+                },
             }
             return json.dumps({"segments": [short]}, ensure_ascii=False)
 
@@ -1182,6 +1219,16 @@ class BreakdownTests(unittest.TestCase):
             "sound": "",
             "continuity": "",
         }
+        for segment in (
+            segment_1, duplicate_2, corrected_2, segment_3, segment_4
+        ):
+            segment["evidence_frames"] = {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            }
         self.assertGreaterEqual(
             self.breakdown._reverse_text_similarity(
                 self.breakdown._compose_reverse_segment(segment_1),
@@ -1303,6 +1350,13 @@ class BreakdownTests(unittest.TestCase):
             "lighting": "自然光",
             "sound": "",
             "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
         }
         calls = []
 
@@ -1337,6 +1391,11 @@ class BreakdownTests(unittest.TestCase):
             "lighting": "",
             "sound": "",
             "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
         }
         calls = []
         self.breakdown._chat_multimodal = lambda *args, **kwargs: (
@@ -1362,6 +1421,11 @@ class BreakdownTests(unittest.TestCase):
             "lighting": "",
             "sound": "",
             "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
         }
         self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
             {"segments": [segment]}, ensure_ascii=False
@@ -1396,6 +1460,11 @@ class BreakdownTests(unittest.TestCase):
             "lighting": "",
             "sound": "舒缓背景音乐",
             "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+            },
         }
         calls = []
         self.breakdown._chat_multimodal = lambda *args, **kwargs: (
@@ -1497,31 +1566,31 @@ class BreakdownTests(unittest.TestCase):
                 json.dumps(single_segment, ensure_ascii=False), 8, 4
             )
 
-    def test_reverse_segment_receives_evidence_only_global_continuity(self):
+    def test_reverse_segment_isolated_request_forbids_cross_segment_draft(self):
         _system, user = self.breakdown._reverse_segment_messages(
             "标题", 15.267, "douyin", "", 2, 4,
             "[00:03.8-00:07.6]",
             retry=True,
-            global_continuity=self._global_continuity(),
         )
-        self.assertIn("全片连续性事实（由全部原始帧独立提取，不是历史草稿）", user)
-        self.assertIn("同一名白衣人物，黑色长发", user)
-        self.assertIn("证据原始帧：1、3、5、7", user)
-        self.assertIn("若当前帧显示变化，以当前帧为准", user)
+        self.assertIn("隔离分段取证", user)
+        self.assertIn("跨段连续性将在全部分段通过校验后由代码确定性归纳", user)
         self.assertIn("不要沿用任何历史草稿", user)
         self.assertNotIn("上一轮输出", user)
         self.assertIn('"evidence_frames"', user)
         self.assertIn("action 必须同时引用首尾两帧", user)
-        global_system, global_user = (
-            self.breakdown._reverse_segment_messages(
-                "标题", 15.267, "douyin", "", 1, 4,
-                "[00:00.0-00:03.8]",
-                global_continuity=self._global_continuity(),
+        self.assertIn("continuity_evidence_frames 必须留空", user)
+        self.assertNotIn("同一名白衣人物，黑色长发", user)
+        self.assertTrue(_system)
+        entry = self._reverse_entry()
+        entry["continuity_evidence_frames"] = [1, 3]
+        with self.assertRaisesRegex(ValueError, "不能在隔离分段分析中"):
+            self.breakdown._validate_reverse_segment_evidence(
+                entry,
+                [],
+                ["segment-first.jpg", "segment-last.jpg"],
+                1,
+                require_frame_evidence=True,
             )
-        )
-        self.assertIn("同时引用本段和一个相邻时间段", global_user)
-        self.assertIn("不得只写“与上一段保持一致”", global_user)
-        self.assertTrue(global_system)
 
     def test_reverse_production_segment_requires_auditable_frame_indices(self):
         raw = json.dumps({
@@ -1636,6 +1705,107 @@ class BreakdownTests(unittest.TestCase):
             self.breakdown.BREAKDOWN_ANALYSIS_BUDGET,
             core.KIND_GRACE["breakdown"],
         )
+        self.assertEqual(
+            self.breakdown._reverse_analysis_call_budget(4),
+            {
+                "analysis_deadline_seconds": 540,
+                "max_images_per_request": 2,
+                "global_model_calls": 0,
+                "normal_logical_calls": 4,
+                "worst_logical_calls": 8,
+                "normal_physical_http_attempts": 4,
+                "same_provider_physical_attempts_per_logical": 2,
+                "worst_physical_http_attempts": 16,
+                "provider": "zhipu",
+                "model": "glm-4v-plus",
+                "http_4xx_retry": False,
+                "cross_provider_fallback": False,
+            },
+        )
+
+    def test_reverse_provider_contract_rejects_more_than_two_images(self):
+        with patch.object(
+            self.breakdown, "_chat_multimodal"
+        ) as chat:
+            with self.assertRaisesRegex(ValueError, "最多只能携带2张图片"):
+                self.breakdown._reverse_chat_multimodal(
+                    "system",
+                    "user",
+                    ["frame-%d.jpg" % index for index in range(1, 9)],
+                )
+        chat.assert_not_called()
+
+    def test_reverse_provider_contract_never_falls_back_to_openai(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        failures = [
+            urllib.error.HTTPError(
+                "https://zhipu.test", 400, "bad request", {}, io.BytesIO(b"{}")
+            ),
+            urllib.error.HTTPError(
+                "https://zhipu.test", 503, "unavailable", {}, io.BytesIO(b"{}")
+            ),
+            urllib.error.URLError("network down"),
+            TimeoutError("timed out"),
+        ]
+        for failure in failures:
+            with self.subTest(error=type(failure).__name__), patch.object(
+                self.breakdown, "_post_zhipu", side_effect=failure
+            ), patch.object(
+                self.breakdown, "_post_openai_fallback"
+            ) as fallback:
+                with self.assertRaises(type(failure)):
+                    self.breakdown._reverse_chat_multimodal(
+                        "system", "user", []
+                    )
+                fallback.assert_not_called()
+
+    def test_reverse_zhipu_1210_is_one_http_attempt_without_fallback(self):
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+        error = urllib.error.HTTPError(
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            400,
+            "bad request",
+            {},
+            io.BytesIO(
+                b'{"error":{"code":"1210","message":"image count exceeded"}}'
+            ),
+        )
+        with patch.object(
+            self.breakdown.egress,
+            "post_json_idempotent",
+            side_effect=error,
+        ) as post, patch.object(
+            self.breakdown, "_post_openai_fallback"
+        ) as fallback:
+            with self.assertRaisesRegex(ValueError, "1210") as raised:
+                self.breakdown._reverse_chat_multimodal(
+                    "system", "user", []
+                )
+        self.assertNotIsInstance(raised.exception, TimeoutError)
+        self.assertEqual(post.call_count, 1)
+        fallback.assert_not_called()
+
+    def test_reverse_requests_are_fixed_to_glm_4v_plus(self):
+        captured = []
+        os.environ["REVERSE_ZHIPU_KEY"] = "zhipu-test-key"
+
+        def fake_zhipu(body, api_key):
+            captured.append((body, api_key))
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch.object(
+            self.breakdown, "_post_zhipu", side_effect=fake_zhipu
+        ), patch.object(
+            self.breakdown, "_post_openai_fallback"
+        ) as fallback:
+            self.assertEqual(
+                self.breakdown._reverse_chat_multimodal(
+                    "system", "user", []
+                ),
+                "ok",
+            )
+        self.assertEqual(captured[0][0]["model"], "glm-4v-plus")
+        fallback.assert_not_called()
 
     def test_reverse_model_physical_retry_refreshes_heartbeat(self):
         events = []
@@ -1735,6 +1905,178 @@ class BreakdownTests(unittest.TestCase):
             {item["source_frame_index"] for item in bundle["manifest"]},
             set(range(1, 9)),
         )
+
+    def test_reverse_model_frame_groups_use_two_images_for_one_to_four_segments(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        cases = (
+            (1, [["frame-1.jpg", "frame-8.jpg"]], [[1, 8]]),
+            (
+                2,
+                [
+                    ["frame-1.jpg", "frame-4.jpg"],
+                    ["frame-5.jpg", "frame-8.jpg"],
+                ],
+                [[1, 4], [5, 8]],
+            ),
+            (
+                3,
+                [
+                    ["frame-1.jpg", "frame-3.jpg"],
+                    ["frame-4.jpg", "frame-5.jpg"],
+                    ["frame-6.jpg", "frame-8.jpg"],
+                ],
+                [[1, 3], [4, 5], [6, 8]],
+            ),
+            (
+                4,
+                [
+                    ["frame-1.jpg", "frame-2.jpg"],
+                    ["frame-3.jpg", "frame-4.jpg"],
+                    ["frame-5.jpg", "frame-6.jpg"],
+                    ["frame-7.jpg", "frame-8.jpg"],
+                ],
+                [[1, 2], [3, 4], [5, 6], [7, 8]],
+            ),
+        )
+        for segment_count, expected_frames, expected_sources in cases:
+            with self.subTest(segment_count=segment_count):
+                self.assertEqual(
+                    self.breakdown._reverse_model_frame_groups(
+                        frames, segment_count
+                    ),
+                    expected_frames,
+                )
+                self.assertEqual(
+                    self.breakdown._reverse_frame_bundle(
+                        frames, segment_count
+                    )["segment_model_source_indices"],
+                    expected_sources,
+                )
+        entries = [
+            self._reverse_entry(action="第%d段动作" % index)
+            for index in range(1, 4)
+        ]
+        evidence = self.breakdown._reverse_segment_evidence_manifest(
+            entries,
+            self.breakdown._reverse_segment_windows(8.0),
+            [[1, 2, 3], [4, 5], [6, 7, 8]],
+            [[1, 3], [4, 5], [6, 8]],
+        )
+        self.assertEqual(
+            [
+                item["source_evidence_frames"]["action"]
+                for item in evidence
+            ],
+            [[1, 3], [4, 5], [6, 8]],
+        )
+        self.assertEqual(
+            evidence[2]["segment_source_frames"],
+            [6, 7, 8],
+        )
+
+    def test_reverse_global_continuity_is_zero_image_deterministic_aggregation(self):
+        entries = [
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="树林与石阶",
+                action="人物抬起右手",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="室内床铺",
+                action="人物坐到床边",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+            self._reverse_entry(
+                subject="同一白衣人物位于画面中央",
+                scene="树干近景",
+                action="人物从树后走出",
+                camera="平视中景",
+                lighting="柔和自然光",
+            ),
+        ]
+        with patch.object(
+            self.breakdown, "_chat_multimodal"
+        ) as chat:
+            result = self.breakdown._reverse_global_facts_from_segments(
+                entries,
+                [[1, 3], [4, 5], [6, 8]],
+                8,
+            )
+        chat.assert_not_called()
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(result["image_count"], 0)
+        self.assertEqual(result["segment_count"], 3)
+        self.assertEqual(
+            result["facts"]["subject_identity"],
+            "同一白衣人物位于画面中央",
+        )
+        self.assertEqual(
+            result["evidence_frames"]["subject_identity"],
+            [1, 3, 4, 5, 6, 8],
+        )
+        self.assertEqual(
+            [item["text"] for item in result["changes"]["action"]],
+            ["人物抬起右手", "人物坐到床边", "人物从树后走出"],
+        )
+        self.assertEqual(
+            result["changes"]["scene"][1]["evidence_frames"],
+            [4, 5],
+        )
+
+    def test_reverse_one_to_four_segments_make_only_two_image_requests(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        cases = (
+            (2.0, [[frames[0], frames[7]]]),
+            (5.0, [[frames[0], frames[3]], [frames[4], frames[7]]]),
+            (
+                8.0,
+                [
+                    [frames[0], frames[2]],
+                    [frames[3], frames[4]],
+                    [frames[5], frames[7]],
+                ],
+            ),
+            (
+                11.0,
+                [
+                    [frames[0], frames[1]],
+                    [frames[2], frames[3]],
+                    [frames[4], frames[5]],
+                    [frames[6], frames[7]],
+                ],
+            ),
+        )
+        for duration, expected in cases:
+            calls = []
+            objects = self._detailed_reverse_objects(len(expected))
+
+            def fake_chat(_system, _user, request_frames, **kwargs):
+                calls.append((list(request_frames), kwargs))
+                return json.dumps(
+                    {"segments": [objects[len(calls) - 1]]},
+                    ensure_ascii=False,
+                )
+
+            with self.subTest(duration=duration), patch.object(
+                self.breakdown, "_chat_multimodal", side_effect=fake_chat
+            ):
+                self.breakdown._reverse_prompt_from_frames(
+                    "短视频", duration, "douyin", "", frames
+                )
+            self.assertEqual(
+                [request_frames for request_frames, _kwargs in calls],
+                expected,
+            )
+            self.assertTrue(all(
+                len(request_frames) <= 2
+                and kwargs["model"] == "glm-4v-plus"
+                and kwargs["allow_provider_fallback"] is False
+                for request_frames, kwargs in calls
+            ))
 
     def test_reverse_short_video_reference_indices_survive_persistence(self):
         assets_store = importlib.import_module("content_domains.assets_store")
@@ -1899,11 +2241,18 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown._chat_multimodal = mock.Mock(
             side_effect=AssertionError("single segment must not call global VLM")
         )
-        continuity = self.breakdown._reverse_global_facts_from_frames(
-            "短视频", 2.0, "local", ["frame-%d" % i for i in range(1, 9)]
+        continuity = self.breakdown._reverse_global_facts_from_segments(
+            [self._reverse_entry(
+                camera="中景固定机位",
+                lighting="中性自然光",
+            )],
+            [[1, 8]],
+            8,
         )
         self.assertEqual(continuity["segment_count"], 1)
         self.assertFalse(any(continuity["facts"].values()))
+        self.assertEqual(continuity["model_calls"], 0)
+        self.assertEqual(continuity["image_count"], 0)
         entry = self._reverse_entry(
             camera="中景固定机位",
             lighting="中性自然光",
@@ -1974,7 +2323,13 @@ class BreakdownTests(unittest.TestCase):
         )
         self.assertTrue(all(call[3] == 0.1 for call in calls))
         self.assertTrue(all(
-            call[4] == {"max_tokens": 900, "image_detail": None}
+            call[4] == {
+                "max_tokens": 900,
+                "image_detail": None,
+                "provider": "zhipu",
+                "model": "glm-4v-plus",
+                "allow_provider_fallback": False,
+            }
             for call in calls
         ))
         self.assertIn("不能从图片直接确认", calls[0][1])
@@ -1989,9 +2344,10 @@ class BreakdownTests(unittest.TestCase):
         for body in bodies:
             for label in (
                 "主体：", "场景：", "动作：", "镜头：",
-                "光影：", "衔接：",
+                "光影：",
             ):
                 self.assertIn(label, body)
+            self.assertNotIn("衔接：", body)
             self.assertNotIn("声音：", body)
 
     def test_reverse_segment_contract_handles_ten_concurrent_jobs(self):
@@ -2080,10 +2436,8 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_chat(sysmsg, usermsg, frames, **kwargs):
             reverse_calls.append(list(frames))
-            if len(frames) == 8:
-                return self._global_continuity_response()
             return json.dumps(
-                {"segments": [objects[len(reverse_calls) - 2]]},
+                {"segments": [objects[len(reverse_calls) - 1]]},
                 ensure_ascii=False,
             )
         self.breakdown._chat_multimodal = fake_chat
@@ -2103,8 +2457,6 @@ class BreakdownTests(unittest.TestCase):
 
         self.assertEqual(calls["extract_args"], (8, 1024, 8, True))
         self.assertEqual(reverse_calls, [
-            ["f1.jpg", "f2.jpg", "f3.jpg", "f4.jpg",
-             "f5.jpg", "f6.jpg", "f7.jpg", "f8.jpg"],
             ["f1.jpg", "f2.jpg"],
             ["f3.jpg", "f4.jpg"],
             ["f5.jpg", "f6.jpg"],
