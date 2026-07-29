@@ -247,6 +247,7 @@ def validate_breakdown_payload(payload):
     private_fields = {
         "local_path", "local_media_path", "local_media_type", "upload_token",
         "_username", "_job_id", "_trusted_local_upload",
+        "_local_upload_payment",
     }
     if any(field in payload for field in private_fields):
         raise ValueError("本地素材只能通过专用上传接口提交")

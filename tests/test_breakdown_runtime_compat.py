@@ -1,6 +1,7 @@
 import importlib
 import json
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -52,7 +53,10 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
         self.assertEqual(payload["_resolved_link"]["id"], "1234567890123456789")
 
     def test_public_link_validation_rejects_private_path_and_upload_token(self):
-        for private_field in ("local_path", "local_media_path", "upload_token"):
+        for private_field in (
+            "local_path", "local_media_path", "upload_token",
+            "_local_upload_payment",
+        ):
             with self.subTest(private_field=private_field):
                 with self.assertRaisesRegex(ValueError, "专用上传接口"):
                     self.breakdown.validate_breakdown_payload({
@@ -265,20 +269,87 @@ class BreakdownRuntimeCompatibilityTests(unittest.TestCase):
         self.assertNotIn("seedance-2.0-fast", self.script)
         self.assertNotIn("doubao-seedance-2-0-260128", self.script)
 
-    def test_local_upload_keeps_idempotency_key_until_valid_job_json(self):
+    def test_local_upload_classifies_success_recovery_and_conflict(self):
+        function_source = (
+            "function _localUploadDisposition(response){"
+            + self.script.split(
+                "function _localUploadDisposition(response){", 1
+            )[1].split("function _recoverLocalSubmissionJob(", 1)[0]
+        )
+        cases = [
+            {"s": 200, "d": {"job_id": 7}, "validJson": True},
+            {"s": 200, "d": {}, "validJson": False},
+            {"s": 200, "d": {}, "validJson": True},
+            {
+                "s": 409,
+                "d": {"code": "idempotency_in_progress", "job_id": 8},
+                "validJson": True,
+            },
+            {
+                "s": 409,
+                "d": {"code": "idempotency_in_progress"},
+                "validJson": True,
+            },
+            {
+                "s": 409,
+                "d": {"code": "idempotency_conflict"},
+                "validJson": True,
+            },
+            {"s": 500, "d": {}, "validJson": True},
+        ]
+        probe = (
+            function_source
+            + "\nconst cases="
+            + json.dumps(cases)
+            + ";\nconsole.log(JSON.stringify(cases.map(_localUploadDisposition)));"
+        )
+        result = subprocess.run(
+            ["node", "-e", probe], check=True, capture_output=True,
+            text=True, encoding="utf-8",
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                "job", "recover", "recover", "resume_job", "recover",
+                "conflict", "retry",
+            ],
+        )
+
+    def test_local_upload_key_lifecycle_covers_all_ambiguous_outcomes(self):
         block = self.script.split(
             "function _submitLocalReverse(mediaType,file,btn){", 1
         )[1].split("if(bdImagePick)", 1)[0]
-        parsed = (
-            "r.json().then(function(d){return {s:r.status,d:d};})"
-        )
-        confirmed = "_confirmSubmission(localPending);"
-        self.assertIn(parsed, block)
-        self.assertIn("if(!x.d.job_id)", block)
-        self.assertIn(confirmed, block)
-        self.assertLess(block.index(parsed), block.index(confirmed))
-        self.assertLess(block.index("if(!x.d.job_id)"), block.index(confirmed))
+        self.assertIn("}).then(_readApiResponse).then(function(x){", block)
+        self.assertIn("disposition==='conflict'", block)
+        self.assertIn("disposition==='job'||disposition==='resume_job'", block)
+        self.assertIn("disposition==='recover'", block)
+        self.assertIn("_recoverLocalSubmissionJob(localPending,btn)", block)
+        self.assertIn("已保留原凭证", block)
+        self.assertIn("已保留原提交凭证", block)
         self.assertNotIn("if(response.ok)_confirmSubmission", block)
+        conflict_branch = block.split(
+            "if(disposition==='conflict'){", 1
+        )[1].split("if(disposition==='job'", 1)[0]
+        self.assertIn("_confirmSubmission(localPending)", conflict_branch)
+        catch_block = block.split("}).catch(function(error){", 1)[1]
+        self.assertNotIn("_confirmSubmission(localPending)", catch_block)
+
+        pending = self.script.split(
+            "function _pendingSubmission(scope,payload){", 1
+        )[1].split("function _confirmSubmission(", 1)[0]
+        self.assertIn("saved&&saved.body===body&&saved.key", pending)
+        self.assertIn("key:saved.key", pending)
+
+        recovery = self.script.split(
+            "function _recoverLocalSubmissionJob(pending,btn){", 1
+        )[1].split("function _submitLocalReverse(", 1)[0]
+        self.assertIn(
+            "/api/gen/points/history?days=1&kind=breakdown", recovery
+        )
+        self.assertIn("if(match&&match.task_id)", recovery)
+        self.assertIn("_confirmSubmission(pending)", recovery)
+        self.assertIn("_pollLocalReverse(match.task_id,btn)", recovery)
+        self.assertIn("setTimeout(check,1000)", recovery)
 
     def test_tikhub_retains_safe_length_and_truncation_contract(self):
         source = (self.root / "server/tikhub.py").read_text(encoding="utf-8")

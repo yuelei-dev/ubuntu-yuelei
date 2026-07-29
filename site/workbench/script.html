@@ -386,12 +386,13 @@
   function tok(){ return '__cookie__'; }
   function _readApiResponse(response){
     return response.text().then(function(text){
-      var data={};
+      var data={}, validJson=true;
       try{ data=text?JSON.parse(text):{}; }
       catch(e){
+        validJson=false;
         data={detail:'服务返回异常（HTTP '+response.status+'），请稍后重试'};
       }
-      return {s:response.status,d:data};
+      return {s:response.status,d:data,validJson:validJson};
     });
   }
   function _jobRecoveryHtml(message,jobId){
@@ -409,15 +410,18 @@
     try{ saved=JSON.parse(sessionStorage.getItem(storageKey)||'null'); }
     catch(e){ saved=_pendingSubmissionMemory[storageKey]||null; }
     if(saved&&saved.body===body&&saved.key){
-      return {storageKey:storageKey,body:body,key:saved.key};
+      return {storageKey:storageKey,body:body,key:saved.key,
+        createdAt:Number(saved.createdAt||Date.now())};
     }
     var pending={
       body:body,
-      key:scope+'-'+Date.now()+'-'+Math.random().toString(36).slice(2)
+      key:scope+'-'+Date.now()+'-'+Math.random().toString(36).slice(2),
+      createdAt:Date.now()
     };
     _pendingSubmissionMemory[storageKey]=pending;
     try{ sessionStorage.setItem(storageKey,JSON.stringify(pending)); }catch(e){}
-    return {storageKey:storageKey,body:body,key:pending.key};
+    return {storageKey:storageKey,body:body,key:pending.key,
+      createdAt:pending.createdAt};
   }
   function _confirmSubmission(pending){
     if(!pending) return;
@@ -1126,6 +1130,51 @@
       }).catch(function(){ errors++; if(errors>=10){clearInterval(iv);_localBusy(btn,false);_localFail('网络连接失败，任务可在生成记录继续查看');} });
     },3000);
   }
+  function _localUploadDisposition(response){
+    var data=(response&&response.d)||{}, status=Number(response&&response.s||0);
+    if(response&&response.validJson===false) return 'recover';
+    if(status===401) return 'login';
+    if(status===402) return 'points';
+    if(data.code==='idempotency_conflict') return 'conflict';
+    if(data.code==='idempotency_in_progress'){
+      return data.job_id?'resume_job':'recover';
+    }
+    if(data.job_id) return 'job';
+    if(status>=200&&status<300) return 'recover';
+    return 'retry';
+  }
+  function _recoverLocalSubmissionJob(pending,btn){
+    var attempts=0;
+    var earliest=Math.floor(Number(pending&&pending.createdAt||Date.now())/1000)-10;
+    function check(){
+      attempts++;
+      fetch('/api/gen/points/history?days=1&kind=breakdown&page=1&page_size=10',{
+        credentials:'same-origin',cache:'no-store'
+      }).then(_readApiResponse).then(function(response){
+        if(response.s===401){ _localBusy(btn,false); if(window.HQ)HQ.login(); return; }
+        if(response.s>=400||response.validJson===false) throw new Error('任务恢复查询失败');
+        var items=Array.isArray(response.d&&response.d.items)?response.d.items:[];
+        var match=items.find(function(item){
+          return item&&item.kind==='breakdown'&&Number(item.created_at||0)>=earliest
+            &&['pending','running','done','error','failed'].indexOf(String(item.status||''))>=0;
+        });
+        if(match&&match.task_id){
+          _confirmSubmission(pending);
+          if(bdLocalStatus)bdLocalStatus.textContent='已恢复上传任务，正在查询…';
+          _pollLocalReverse(match.task_id,btn);
+          return;
+        }
+        if(attempts<10){ setTimeout(check,1000); return; }
+        _localBusy(btn,false);
+        _localFail('请求仍在受理，已保留原提交凭证；再次点击会继续使用同一凭证确认');
+      }).catch(function(){
+        if(attempts<10){ setTimeout(check,1000); return; }
+        _localBusy(btn,false);
+        _localFail('暂时无法恢复任务，已保留原提交凭证；再次点击不会重复换键');
+      });
+    }
+    check();
+  }
   function _submitLocalReverse(mediaType,file,btn){
     var isImage=mediaType==='image', max=isImage?20*1024*1024:200*1024*1024;
     if(!file){_localFail('请先选择本地'+(isImage?'图片':'视频'));return;}
@@ -1147,17 +1196,38 @@
         headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name),
           'Idempotency-Key':localPending.key},body:file
       });
-    }).then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});}).then(function(x){
-      if(x.s===401){_localBusy(btn,false);if(window.HQ)HQ.login();return;}
-      if(x.s===402){_localBusy(btn,false);_localFail('点数不足（需要 20 点）');return;}
-      if(!x.d.job_id){_localBusy(btn,false);_localFail((x.d&&x.d.detail)||'提交失败');return;}
-      _confirmSubmission(localPending);
-      if(bdLocalStatus)bdLocalStatus.textContent='上传完成，正在反推…';
-      _pollLocalReverse(x.d.job_id,btn);
+    }).then(_readApiResponse).then(function(x){
+      var disposition=_localUploadDisposition(x);
+      if(disposition==='login'){
+        _confirmSubmission(localPending); _localBusy(btn,false);
+        if(window.HQ)HQ.login(); return;
+      }
+      if(disposition==='points'){
+        _confirmSubmission(localPending); _localBusy(btn,false);
+        _localFail('点数不足（需要 20 点）'); return;
+      }
+      if(disposition==='conflict'){
+        _confirmSubmission(localPending); _localBusy(btn,false);
+        _localFail('提交凭证与当前文件冲突，已终止该凭证；请再次点击重新提交');
+        return;
+      }
+      if(disposition==='job'||disposition==='resume_job'){
+        _confirmSubmission(localPending);
+        if(bdLocalStatus)bdLocalStatus.textContent='上传完成，正在反推…';
+        _pollLocalReverse(x.d.job_id,btn);
+        return;
+      }
+      if(disposition==='recover'){
+        if(bdLocalStatus)bdLocalStatus.textContent='请求已受理，正在恢复任务…';
+        _recoverLocalSubmissionJob(localPending,btn);
+        return;
+      }
+      _localBusy(btn,false);
+      _localFail((x.d&&x.d.detail)||'提交暂未确认，已保留原凭证，请重试');
     }).catch(function(error){
       _localBusy(btn,false);
       if(error&&error.login&&window.HQ)HQ.login();
-      _localFail((error&&error.message)||'上传失败，请重试');
+      _localFail((error&&error.message)||'网络异常，已保留原提交凭证，请重试');
     });
   }
   if(bdImagePick)bdImagePick.onclick=function(){bdLocalImage.click();};
