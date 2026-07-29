@@ -1578,6 +1578,72 @@ class BreakdownTests(unittest.TestCase):
         static_check.assert_not_called()
         self.assertIn("从左侧移到右侧", prompt)
 
+    def test_reverse_unchanged_position_with_color_change_is_not_static(self):
+        segment = {
+            "subject": "画面中央的矩形首帧为白色，尾帧为红色",
+            "scene": "蓝色纯色背景",
+            "action": "矩形位置保持不变，颜色由白色逐渐变为红色",
+            "camera": "固定满幅构图",
+            "lighting": "背景亮度保持均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "矩形变色",
+                2.5,
+                "local",
+                "",
+                ["color-first.jpg", "color-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("位置保持不变，颜色由白色逐渐变为红色", prompt)
+
+    def test_reverse_unchanged_shape_with_motion_is_not_static(self):
+        segment = {
+            "subject": "黑色圆形出现在浅色画面中",
+            "scene": "浅色纯色背景",
+            "action": "圆形形状保持不变，从左侧移动到右侧",
+            "camera": "固定满幅构图",
+            "lighting": "画面亮度均匀",
+            "sound": "",
+            "continuity": "",
+            "evidence_frames": {
+                "subject": [1, 2],
+                "scene": [1, 2],
+                "action": [1, 2],
+                "camera": [1, 2],
+                "lighting": [1, 2],
+            },
+        }
+        self.breakdown._chat_multimodal = lambda *args, **kwargs: json.dumps(
+            {"segments": [segment]}, ensure_ascii=False
+        )
+        with mock.patch.object(
+            self.breakdown, "_frames_are_effectively_static"
+        ) as static_check:
+            prompt = self.breakdown._reverse_prompt_from_frames(
+                "圆形移动",
+                2.5,
+                "local",
+                "",
+                ["motion-first.jpg", "motion-last.jpg"],
+            )
+        static_check.assert_not_called()
+        self.assertIn("形状保持不变，从左侧移动到右侧", prompt)
+
     def test_reverse_non_person_object_remains_the_subject(self):
         segment = {
             "subject": "透明玻璃瓶位于木桌中央，瓶身贴有白色标签",
