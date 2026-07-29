@@ -3,6 +3,7 @@
 import os, json, time, base64, tempfile, subprocess, shutil, math, re
 import urllib.request
 from contextlib import closing
+from difflib import SequenceMatcher
 
 from .core import OPENAI_BASE, OPENAI_KEY, jdb
 from . import egress
@@ -279,13 +280,9 @@ def _normalize_duration_seconds(raw_duration):
 
 
 def _format_timeline_second(seconds):
-    seconds = max(0.0, float(seconds or 0))
-    minutes = int(seconds // 60)
-    remainder = seconds - minutes * 60
-    text = ("%06.3f" % remainder).rstrip("0").rstrip(".")
-    if remainder < 10 and not text.startswith("0"):
-        text = "0" + text
-    return "%02d:%s" % (minutes, text)
+    total_tenths = int(round(max(0.0, float(seconds or 0)) * 10))
+    minutes, remainder_tenths = divmod(total_tenths, 600)
+    return "%02d:%04.1f" % (minutes, remainder_tenths / 10.0)
 
 
 def _fixed_reverse_ranges(duration, max_segments=4):
@@ -377,7 +374,7 @@ def _compose_reverse_segment(value):
 
 
 def _validate_reverse_prompt_lengths(segments):
-    """Enforce the declared 500-800 character contract after local assembly."""
+    """Enforce length and non-repetition contracts after local assembly."""
     if not segments:
         raise ValueError("反推结果为空，请重试")
     minimum = int(math.ceil(500.0 / len(segments)))
@@ -394,6 +391,22 @@ def _validate_reverse_prompt_lengths(segments):
                 "反推结果第%d段过长：最多%d字，实际%d字，请重试"
                 % (index, maximum, length)
             )
+    compact_segments = [
+        re.sub(r"[\W_]+", "", segment or "").lower()
+        for segment in segments
+    ]
+    for index, compact in enumerate(compact_segments):
+        for previous_index, previous in enumerate(compact_segments[:index]):
+            similarity = SequenceMatcher(
+                None, previous, compact, autojunk=False,
+            ).ratio()
+            if compact == previous or (
+                min(len(previous), len(compact)) >= 40 and similarity >= 0.92
+            ):
+                raise ValueError(
+                    "反推结果第%d段与第%d段内容重复，请重试"
+                    % (index + 1, previous_index + 1)
+                )
     total = sum(lengths)
     if total < 500 or total > 800:
         raise ValueError(
