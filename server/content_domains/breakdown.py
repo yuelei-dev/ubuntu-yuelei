@@ -2697,6 +2697,10 @@ def _validate_reverse_segment_evidence(
     sound = fields.get("sound", "")
     continuity = fields.get("continuity", "")
     all_fields = _reverse_segment_field_text(entry)
+    visual_fields = _reverse_segment_field_text(
+        entry,
+        "subject", "scene", "action", "camera", "lighting", "continuity",
+    )
 
     if (
         _reverse_action_has_static_clause(action)
@@ -2714,7 +2718,7 @@ def _validate_reverse_segment_evidence(
     unsupported = next(
         (
             marker for marker in _REVERSE_UNSUPPORTED_INFERENCE_MARKERS
-            if marker in all_fields
+            if marker in visual_fields
         ),
         None,
     )
@@ -2727,7 +2731,7 @@ def _validate_reverse_segment_evidence(
     unreliable_orientation = next(
         (
             marker for marker in _REVERSE_UNRELIABLE_ORIENTATION_MARKERS
-            if marker in all_fields
+            if marker in visual_fields
         ),
         None,
     )

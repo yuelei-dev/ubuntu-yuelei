@@ -374,16 +374,21 @@ class GeminiReverseTests(unittest.TestCase):
 
     def test_verified_sound_and_visible_subtitles_are_never_rewritten(self):
         shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "旁白说“阳光明媚”"
+        shot["facts"]["sound"] = "人物说“阳光明媚”"
         shot["evidence_seconds"]["sound"] = [0.4]
         shot["facts"]["subtitles"] = "字幕写着“绿草如茵，生活仿佛一场旅行”"
         shot["evidence_seconds"]["subtitles"] = [0.4]
         result = self.breakdown._parse_gemini_reverse_result(
             json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
         )
+        self.breakdown._validate_gemini_reverse_entries(
+            result,
+            ["frame-%d.jpg" % index for index in range(8)],
+            "[0.0-1.0] 阳光明媚",
+        )
         entry = result["entries"][0]
         self.assertEqual(
-            entry["fields"]["sound"], "旁白说“阳光明媚”"
+            entry["fields"]["sound"], "人物说“阳光明媚”"
         )
         self.assertEqual(
             entry["fields"]["subtitles"],
