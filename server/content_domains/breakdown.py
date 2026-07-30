@@ -3429,12 +3429,12 @@ def _gemini_request_body(media_part, title, duration, platform, transcript, vali
         }],
         "generationConfig": {
             "temperature": 0.1, "maxOutputTokens": 8192,
-            "responseFormat": {
-                "text": {
-                    "mimeType": "APPLICATION_JSON",
-                    "schema": _gemini_reverse_schema(),
-                },
-            },
+            # Gemini 3.1 Pro Preview has rejected the responseFormat/schema
+            # combination in live REST requests even when the same shape
+            # passes mocked contract tests. JSON mode is sufficient here:
+            # _parse_gemini_reverse_result and the downstream evidence
+            # validators enforce the complete 21-field business contract.
+            "responseMimeType": "application/json",
         },
     }
 

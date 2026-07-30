@@ -83,7 +83,7 @@ class GeminiReverseTests(unittest.TestCase):
         text = json.dumps({"shots": shots})
         return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
-    def test_model_endpoint_video_mime_structured_schema_and_no_fallback(self):
+    def test_model_endpoint_video_mime_json_mode_and_no_fallback(self):
         captured = {}
 
         def fake_request(url, body, api_key, **_kwargs):
@@ -108,19 +108,12 @@ class GeminiReverseTests(unittest.TestCase):
         part = captured["body"]["contents"][0]["parts"][0]
         self.assertEqual(part["inline_data"]["mime_type"], "video/mp4")
         config = captured["body"]["generationConfig"]
-        self.assertEqual(
-            config["responseFormat"],
-            {
-                "text": {
-                    "mimeType": "APPLICATION_JSON",
-                    "schema": self.breakdown._gemini_reverse_schema(),
-                },
-            },
-        )
-        self.assertNotIn("responseMimeType", config)
+        self.assertEqual(config["responseMimeType"], "application/json")
+        self.assertNotIn("responseFormat", config)
+        self.assertNotIn("responseSchema", config)
         self.assertNotIn("responseJsonSchema", config)
 
-    def test_gemini31_request_uses_current_rest_response_format(self):
+    def test_gemini31_request_uses_schema_free_rest_json_mode(self):
         body = self.breakdown._gemini_request_body(
             {"file_data": {
                 "mime_type": "video/mp4",
@@ -129,15 +122,8 @@ class GeminiReverseTests(unittest.TestCase):
             "sample", 15.0, "local", "",
         )
         config = body["generationConfig"]
-        self.assertEqual(
-            config["responseFormat"]["text"]["mimeType"],
-            "APPLICATION_JSON",
-        )
-        self.assertEqual(
-            config["responseFormat"]["text"]["schema"],
-            self.breakdown._gemini_reverse_schema(),
-        )
-        self.assertNotIn("responseMimeType", config)
+        self.assertEqual(config["responseMimeType"], "application/json")
+        self.assertNotIn("responseFormat", config)
         self.assertNotIn("responseSchema", config)
         self.assertNotIn("responseJsonSchema", config)
 
