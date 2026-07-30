@@ -3420,7 +3420,12 @@ def _gemini_request_body(media_part, title, duration, platform, transcript, vali
         }],
         "generationConfig": {
             "temperature": 0.1, "maxOutputTokens": 8192,
-            "responseMimeType": "application/json", "responseJsonSchema": _gemini_reverse_schema(),
+            "responseFormat": {
+                "text": {
+                    "mimeType": "application/json",
+                    "schema": _gemini_reverse_schema(),
+                },
+            },
         },
     }
 
