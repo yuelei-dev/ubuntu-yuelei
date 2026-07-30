@@ -249,7 +249,7 @@ class GeminiReverseTests(unittest.TestCase):
             self.assertIn("generation advice:", prompt)
             self.assertEqual(result["entries"][0]["readiness"]["ready"], 17)
             quality = self.breakdown._gemini_quality_dimensions(result)
-            self.assertGreaterEqual(quality["generation_readiness"]["percent"], 90)
+            self.assertGreaterEqual(quality["generation_readiness"]["percent"], 80)
             self.assertFalse(quality["end_to_end_similarity_claimed"])
 
     def test_truncated_or_non_schema_json_is_rejected_without_guessing(self):
@@ -279,7 +279,12 @@ class GeminiReverseTests(unittest.TestCase):
 
     def test_readiness_error_names_unresolved_slots_without_authorizing_guessing(self):
         shot = self._shot(0.0, 1.0)
-        for key in ("direction_speed", "camera_movement"):
+        for key in (
+            "direction_speed",
+            "camera_movement",
+            "lighting_color",
+            "style_texture",
+        ):
             shot["facts"][key] = "unknown"
             shot["evidence_seconds"][key] = []
         with self.assertRaises(ValueError) as raised:
@@ -287,7 +292,7 @@ class GeminiReverseTests(unittest.TestCase):
                 json.dumps({"shots": [shot]}), 1.0
             )
         message = str(raised.exception)
-        self.assertIn("shot 1 generation readiness is below 90 percent", message)
+        self.assertIn("shot 1 generation readiness is below 80 percent", message)
         self.assertIn("direction_speed", message)
         self.assertIn("camera_movement", message)
         retry = self.breakdown._gemini_reverse_instruction(
@@ -295,6 +300,132 @@ class GeminiReverseTests(unittest.TestCase):
         )
         self.assertIn("only when visible evidence supports them", retry)
         self.assertIn("otherwise keep unknown and allow strict failure", retry)
+
+    def test_eighty_percent_readiness_accepts_unknown_noncritical_details(self):
+        shot = self._shot(0.0, 1.0)
+        for key in ("direction_speed", "camera_movement", "lighting_color"):
+            shot["facts"][key] = "unknown"
+            shot["evidence_seconds"][key] = []
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}), 1.0
+        )
+        quality = self.breakdown._gemini_quality_dimensions(result)
+        self.assertGreaterEqual(
+            quality["generation_readiness"]["percent"], 80
+        )
+        self.assertLess(
+            quality["generation_readiness"]["percent"], 90
+        )
+
+    def test_lightweight_correction_rewrites_visual_prose_without_rejecting_shot(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["lighting_color"] = "阳光明媚，整体暖色"
+        shot["facts"]["background"] = "绿草如茵，远处低矮山坡"
+        shot["facts"]["camera_movement"] = "固定机位；似乎在感受风"
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        self.breakdown._validate_gemini_reverse_entries(
+            result,
+            ["frame-%d.jpg" % index for index in range(8)],
+            "",
+        )
+        entry = result["entries"][0]
+        self.assertIn("明亮日间自然光", entry["fields"]["lighting"])
+        self.assertIn("绿色草地", entry["fields"]["scene"])
+        self.assertIn("固定机位", entry["fields"]["camera"])
+        self.assertNotIn("阳光明媚", entry["text"])
+        self.assertNotIn("绿草如茵", entry["text"])
+        self.assertNotIn("似乎", entry["text"])
+        self.assertEqual(
+            {
+                (item["field"], item["marker"], item["action"])
+                for item in entry["lightweight_corrections"]
+            },
+            {
+                (
+                    "lighting_color",
+                    "阳光明媚",
+                    "rewritten_to_observable",
+                ),
+                (
+                    "background",
+                    "绿草如茵",
+                    "rewritten_to_observable",
+                ),
+                (
+                    "camera_movement",
+                    "似乎",
+                    "dropped_subjective_clause",
+                ),
+            },
+        )
+
+    def test_subjective_only_clause_becomes_unknown_and_still_counts_against_readiness(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["camera_movement"] = "似乎在感受风"
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        entry = result["entries"][0]
+        self.assertIn("camera: ", entry["text"])
+        self.assertNotIn("似乎", entry["text"])
+        self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
+
+    def test_verified_sound_and_visible_subtitles_are_never_rewritten(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "人物说“阳光明媚”"
+        shot["evidence_seconds"]["sound"] = [0.4]
+        shot["facts"]["subtitles"] = "字幕写着“绿草如茵，生活仿佛一场旅行”"
+        shot["evidence_seconds"]["subtitles"] = [0.4]
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        self.breakdown._validate_gemini_reverse_entries(
+            result,
+            ["frame-%d.jpg" % index for index in range(8)],
+            "[0.0-1.0] 阳光明媚",
+        )
+        entry = result["entries"][0]
+        self.assertEqual(
+            entry["fields"]["sound"], "人物说“阳光明媚”"
+        )
+        self.assertEqual(
+            entry["fields"]["subtitles"],
+            "字幕写着“绿草如茵，生活仿佛一场旅行”",
+        )
+        self.assertIn("阳光明媚", entry["text"])
+        self.assertIn("绿草如茵", entry["text"])
+        self.assertIn("仿佛", entry["text"])
+        self.assertNotIn("lightweight_corrections", entry)
+
+    def test_decimal_point_is_not_split_into_a_false_evidence_value(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["camera_movement"] = "镜头距离1.5米似乎偏远"
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        entry = result["entries"][0]
+        self.assertNotIn("镜头距离1", entry["text"])
+        self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
+        self.assertIn(
+            {
+                "field": "camera_movement",
+                "marker": "似乎",
+                "action": "dropped_subjective_clause",
+            },
+            entry["lightweight_corrections"],
+        )
+
+    def test_missing_entire_critical_group_still_fails_at_eighty_percent(self):
+        shot = self._shot(0.0, 1.0)
+        for key in ("subject_identity", "subject_appearance", "position_scale"):
+            shot["facts"][key] = "unknown"
+            shot["evidence_seconds"][key] = []
+        with self.assertRaisesRegex(ValueError, "critical subject"):
+            self.breakdown._parse_gemini_reverse_result(
+                json.dumps({"shots": [shot]}), 1.0
+            )
 
     def test_generation_advice_is_strictly_typed_formatted_and_bounded(self):
         invalid_values = (

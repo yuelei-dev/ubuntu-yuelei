@@ -94,6 +94,20 @@ _REVERSE_UNSUPPORTED_INFERENCE_MARKERS = (
     "似乎", "仿佛", "感受风", "享受微风",
     "阳光明媚", "绿草如茵",
 )
+_REVERSE_SOFT_OBSERVABLE_REWRITES = {
+    "阳光明媚": "明亮日间自然光",
+    "绿草如茵": "绿色草地",
+}
+_REVERSE_SOFT_DROP_CLAUSE_MARKERS = (
+    "似乎", "仿佛", "感受风", "享受微风",
+)
+_GEMINI_SOFT_CORRECTABLE_FACT_FIELDS = {
+    "subject_identity", "subject_appearance", "wardrobe", "position_scale",
+    "action_start", "action_process", "action_end", "direction_speed",
+    "foreground", "midground", "background", "shot_scale", "camera_angle",
+    "camera_movement", "composition", "lighting_color", "style_texture",
+    "rhythm", "continuity",
+}
 _REVERSE_INVALID_SOUND_MARKERS = (
     "未观察到声音", "从画面未观察到声音", "画面没有声音",
     "画面无声音",
@@ -222,14 +236,14 @@ _REVERSE_GENERATION_SLOT_LABELS = {
 _REVERSE_VISUAL_SEMANTIC_CONTRACT = {
     "definition": "visual_semantic_not_pixel",
     "score_scope": "reverse_prompt_source_fidelity_and_generation_readiness",
-    "target_score": 90,
+    "target_score": 80,
     "components": {
         "source_evidence_coverage": {
             "target": 100,
             "definition": "observed_slots_with_valid_source_frame_evidence",
         },
         "generation_readiness": {
-            "target": 90,
+            "target": 80,
             "definition": "observed_applicable_slots_over_all_applicable_slots",
         },
         "factual_consistency": {
@@ -2448,11 +2462,15 @@ def _reverse_validate_generation_structure(
                 )
 
     readiness = int(round(100.0 * len(ready) / max(1, len(applicable))))
-    if readiness < 90:
+    readiness_target = int(
+        _REVERSE_VISUAL_SEMANTIC_CONTRACT["components"]
+        ["generation_readiness"]["target"]
+    )
+    if readiness < readiness_target:
         raise ValueError(
-            "反推结果第%d段生成就绪槽位仅%d%%，至少需要90%%；"
+            "反推结果第%d段生成就绪槽位仅%d%%，至少需要%d%%；"
             "证据不足应写unknown而非编造，但本段仍不足以生成同款"
-            % (index, readiness)
+            % (index, readiness, readiness_target)
         )
 
     motion_type = _reverse_generation_slot(
@@ -2679,6 +2697,10 @@ def _validate_reverse_segment_evidence(
     sound = fields.get("sound", "")
     continuity = fields.get("continuity", "")
     all_fields = _reverse_segment_field_text(entry)
+    visual_fields = _reverse_segment_field_text(
+        entry,
+        "subject", "scene", "action", "camera", "lighting", "continuity",
+    )
 
     if (
         _reverse_action_has_static_clause(action)
@@ -2696,7 +2718,7 @@ def _validate_reverse_segment_evidence(
     unsupported = next(
         (
             marker for marker in _REVERSE_UNSUPPORTED_INFERENCE_MARKERS
-            if marker in all_fields
+            if marker in visual_fields
         ),
         None,
     )
@@ -2709,7 +2731,7 @@ def _validate_reverse_segment_evidence(
     unreliable_orientation = next(
         (
             marker for marker in _REVERSE_UNRELIABLE_ORIENTATION_MARKERS
-            if marker in all_fields
+            if marker in visual_fields
         ),
         None,
     )
@@ -3016,7 +3038,7 @@ def _reverse_segment_messages(
         "generation每个槽位都是{status,value,evidence_frames}："
         "status只能是observed、unknown、not_applicable。observed必须有可直接证明该值的局部帧；"
         "unknown表示证据不足，value写unknown且不带帧；not_applicable只用于画面确实不适用的槽位。"
-        "unknown不会冒充生成就绪，不能为了达到90%%把猜测标为observed。"
+        "unknown不会冒充生成就绪，不能为了达到80%%把猜测标为observed。"
         "主体身份类别不等于真人姓名；只写人物/动物/物体等可见类别。"
         "服装、关联物件必须用可见中性名称；本链路没有独立物件检测器，围巾、披肩、飘带等易混淆配饰"
         "一律写unknown或可观察的中性形状（如“长条织物”），不得让同一次回答中的多个字段互相自证。"
@@ -3545,6 +3567,43 @@ def _gemini_fact_text(value):
     return " ".join(str(value or "").replace("\r", " ").split()).strip()
 
 
+def _soften_gemini_subjective_fact(value):
+    """Rewrite safe visual prose and drop only unsupported subjective clauses."""
+    text = _gemini_fact_text(value)
+    corrections = []
+    for marker, replacement in _REVERSE_SOFT_OBSERVABLE_REWRITES.items():
+        if marker not in text:
+            continue
+        text = text.replace(marker, replacement)
+        corrections.append({
+            "marker": marker,
+            "action": "rewritten_to_observable",
+        })
+
+    pieces = re.split(r"([,，;；。!！?？]|(?<!\d)\.(?!\d))", text)
+    kept = []
+    for offset in range(0, len(pieces), 2):
+        clause = pieces[offset].strip()
+        separator = pieces[offset + 1] if offset + 1 < len(pieces) else ""
+        unsupported = next(
+            (
+                marker for marker in _REVERSE_SOFT_DROP_CLAUSE_MARKERS
+                if marker in clause
+            ),
+            None,
+        )
+        if unsupported:
+            corrections.append({
+                "marker": unsupported,
+                "action": "dropped_subjective_clause",
+            })
+            continue
+        if clause:
+            kept.append(clause + separator)
+    normalized = _gemini_fact_text("".join(kept).strip(" ,，;；。.!！?？"))
+    return normalized, corrections
+
+
 def _gemini_evidence_to_local(times, start, end):
     midpoint = (float(start) + float(end)) / 2.0
     return sorted({1 if float(value) <= midpoint else 2 for value in (times or [])})
@@ -3692,8 +3751,22 @@ def _parse_gemini_reverse_result(raw, duration):
         if not advice["negative_prompt"]:
             raise ValueError("Gemini generation advice negative_prompt is invalid")
         applicable = ready = 0
+        lightweight_corrections = []
         for key in _GEMINI_FACT_FIELDS:
             value = _gemini_fact_text(facts[key])
+            if (
+                key in _GEMINI_SOFT_CORRECTABLE_FACT_FIELDS
+                and value not in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE}
+            ):
+                value, corrections = _soften_gemini_subjective_fact(value)
+                for correction in corrections:
+                    lightweight_corrections.append({
+                        "field": key,
+                        **correction,
+                    })
+                if not value:
+                    value = _GEMINI_UNKNOWN
+                    evidence[key] = []
             facts[key] = value
             if not value:
                 raise ValueError("Gemini shot %d has an invalid %s value" % (index, key))
@@ -3714,21 +3787,40 @@ def _parse_gemini_reverse_result(raw, duration):
                     if not points:
                         raise ValueError("Gemini visible fact lacks evidence time")
                     ready += 1
-        if applicable < 1 or ready / float(applicable) < 0.90:
+        readiness_target = (
+            _REVERSE_VISUAL_SEMANTIC_CONTRACT["components"]
+            ["generation_readiness"]["target"] / 100.0
+        )
+        if applicable < 1 or ready / float(applicable) < readiness_target:
             unresolved = [
                 key for key in _GEMINI_FACT_FIELDS
                 if facts[key] == _GEMINI_UNKNOWN
             ]
             raise ValueError(
-                "Gemini shot %d generation readiness is below 90 percent "
+                "Gemini shot %d generation readiness is below %d percent "
                 "(%d/%d ready; unresolved: %s)"
-                % (index, ready, applicable, ",".join(unresolved) or "none")
+                % (
+                    index,
+                    int(round(readiness_target * 100)),
+                    ready,
+                    applicable,
+                    ",".join(unresolved) or "none",
+                )
             )
-        critical = ("subject_identity", "subject_appearance", "position_scale", "action_start", "action_process",
-                    "action_end", "foreground", "midground", "background", "shot_scale", "camera_angle",
-                    "composition", "lighting_color", "style_texture", "rhythm")
-        if any(facts[key] in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE} for key in critical):
-            raise ValueError("Gemini critical generation fact is not ready")
+        critical_groups = {
+            "subject": ("subject_identity", "subject_appearance", "position_scale"),
+            "action": ("action_start", "action_end"),
+            "scene": ("foreground", "midground", "background"),
+            "camera": ("shot_scale", "camera_angle", "composition"),
+        }
+        for group, keys in critical_groups.items():
+            if all(
+                facts[key] in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE}
+                for key in keys
+            ):
+                raise ValueError(
+                    "Gemini critical %s facts are not ready" % group
+                )
         action_start_frames = _gemini_evidence_to_local(evidence["action_start"], start, end)
         action_end_frames = _gemini_evidence_to_local(evidence["action_end"], start, end)
         if 1 not in action_start_frames or 2 not in action_end_frames:
@@ -3759,6 +3851,8 @@ def _parse_gemini_reverse_result(raw, duration):
             "cut_from_previous": bool(shot["cut_from_previous"]),
             "readiness": {"applicable": applicable, "ready": ready},
         }
+        if lightweight_corrections:
+            entry["lightweight_corrections"] = lightweight_corrections
         entry["text"] = _render_gemini_entry_text(entry)
         entries.append(entry)
         windows.append((start, end, timeline))
