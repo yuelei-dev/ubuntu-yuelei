@@ -61,6 +61,7 @@ def main():
             "CONTENT_ASSET_DB": str(state / "assets.db"),
             "CONTENT_DB": str(state / "content.db"),
             "CONTENT_JOB_DB": str(server / "content_jobs.db"),
+            "CONTENT_OUT": str(state / "content_out"),
             "DIGITAL_IP_DB": str(state / "digital_ip.db"),
             "FEATURE_FLAGS_DB": str(state / "flags.db"),
             "TIKHUB_CACHE_DB": str(state / "tikhub.db"),
