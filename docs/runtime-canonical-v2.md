@@ -15,8 +15,10 @@
 env、密钥、证书、数据库、`content_out`、上传与生成物、日志、缓存和用户数据。
 任何符号链接、疑似凭据内容、重复/越界路径都会使采集失败。
 
-服务器实采必须先将允许范围以只读方式导出到隔离暂存目录；导出工具不得在服务器创建
-文件。随后在本地运行：
+服务器实采必须先用 `capture_test_runtime_readonly.sh` 将允许范围以只读 tar 流导出
+到 `D:\缓存区`。脚本只接受 `8.148.158.106`，强制 BatchMode、关闭转发，并在远端
+选择阶段排除 env、证书、数据库、日志和生成数据；不使用 sudo，也不创建远端文件。
+随后在本地解包并运行：
 
 ```bash
 python scripts/runtime_canonical.py \
@@ -31,9 +33,10 @@ python scripts/runtime_canonical.py \
 
 manifest 的 `content_id` 是除自身外整个规范化 manifest 的 SHA-256。构建器逐文件复核
 哈希后复制到 `releases/<content_id>`；目标已存在就失败，禁止覆盖。切换只允许把
-`current` 符号链接通过同目录 `rename(2)` 原子替换，并用 `EXPECTED_OLD_ID` 做 CAS，
-防止并发或陈旧审批覆盖。回滚与发布使用同一原子原语，目标只能是已有且已验证的
-`content_id`。
+`current` 符号链接通过同目录 `rename(2)` 原子替换。初始化是独立操作；之后激活和
+回滚都强制提供 `EXPECTED_OLD_ID`，并由 `flock` 覆盖读取、比较和替换全过程。切换前
+必须重新验证 server-verified manifest、目录 content ID、全部文件哈希/模式和额外
+文件。回滚与发布使用同一原子原语，目标只能是已有且已验证的 `content_id`。
 
 未来服务器写入窗口的顺序固定为：
 
@@ -47,15 +50,16 @@ manifest 的 `content_id` 是除自身外整个规范化 manifest 的 SHA-256。
 
 ## CI 阻断语义
 
-workflow 没有 `continue-on-error`、容错后缀或可跳过条件。单元测试、manifest 结构、
-逐文件哈希、范围规则和 #146 文件隔离任一失败，job 即失败。仓库管理员仍需把
-`runtime-canonical-v2 / canonical-gates` 配为 `main` 的 required status check；
-这项 GitHub 分支保护设置不在本地 PR 权限范围内，未设置前不能宣称治理已生效。
+workflow 没有 `continue-on-error`、容错后缀或可跳过条件，并拆为三个独立门禁：
+`canonical-unit-gates`、`server-baseline-integrity`、`pr146-isolation`。缺少真实
+`baseline-server.json` 时第二个 job 必须失败；#146 隔离 job 动态读取它的当前 head
+与 base，不维护易过期的手写文件列表。三个 job 都必须配置成 required status check；
+未设置前不能宣称治理已生效。
 
 ## 当前证据缺口
 
 2026-07-30 的只读 SSH 尝试对 `root@8.148.158.106` 和
 `ubuntu@8.148.158.106` 均被认证拒绝。因此本 PR 不能诚实地产生
 `server-read-only` baseline。候选 manifest 只证明工具链可在 `main` 的运行时
-映射上完整工作；CI 的 server-verified gate 必须在取得只读凭据并完成实采后才启用，
-且启用后不得降级或跳过。
+映射上完整工作；`server-baseline-integrity` 当前应保持红灯。取得只读凭据、完成
+实采并独立审核前，禁止创建占位 baseline、放宽断言或合并本 Draft PR。

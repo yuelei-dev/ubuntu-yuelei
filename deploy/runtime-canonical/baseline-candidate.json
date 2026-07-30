@@ -1,25 +1,25 @@
 {
-  "content_id": "98e74ec63dc1c4e42df29fbb20302bd4afc87dcdf634cf682ff369093c5325d7",
+  "content_id": "23a99177ce6dce9ac760e62c1173aa28bb6c8003054640693dbb05f57615336c",
   "excluded": [
     {
-      "path": "deploy/systemd/huangque-content.service.d/doubao.conf.example",
-      "reason": "suffix_not_allowlisted"
+      "reason": "suffix_not_allowlisted",
+      "source_path": "deploy/systemd/huangque-content.service.d/doubao.conf.example"
     },
     {
-      "path": "site/assets/meiye_video.mp4",
-      "reason": "suffix_not_allowlisted"
+      "reason": "suffix_not_allowlisted",
+      "source_path": "site/assets/meiye_video.mp4"
     },
     {
-      "path": "site/stats.json",
-      "reason": "excluded_basename"
+      "reason": "excluded_basename",
+      "source_path": "site/stats.json"
     },
     {
-      "path": "site/workbench/assets/motions/gesture-01.mp4",
-      "reason": "suffix_not_allowlisted"
+      "reason": "suffix_not_allowlisted",
+      "source_path": "site/workbench/assets/motions/gesture-01.mp4"
     },
     {
-      "path": "site/workbench/assets/motions/gesture-03.mp4",
-      "reason": "suffix_not_allowlisted"
+      "reason": "suffix_not_allowlisted",
+      "source_path": "site/workbench/assets/motions/gesture-03.mp4"
     }
   ],
   "files": [
@@ -27,1655 +27,1959 @@
       "mode": "0644",
       "path": "deploy/nginx-huangquechuanmei.conf",
       "sha256": "df95d668f1ef114e0ab2261b23269e6a3cc891f1c3ebec14628d463d6e4f53c2",
-      "size": 7000
+      "size": 7000,
+      "source_path": "deploy/nginx-huangquechuanmei.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-admin.service",
       "sha256": "4ca51ef73bde56911a7095d2ed40b046f4314d7762d4714bf62799bdc0cc90dd",
-      "size": 744
+      "size": 744,
+      "source_path": "deploy/systemd/huangque-admin.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-admin.service.d/hardening.conf",
       "sha256": "36703ca0f5fefcd522b65250b089c39bf8803745b0b5c7c8a86579a81e3965f3",
-      "size": 601
+      "size": 601,
+      "source_path": "deploy/systemd/huangque-admin.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-auth.service",
       "sha256": "c4ecacacbfaf0a93b727234ad07dd29976f6996ad235837741ab8e6b9af9cedb",
-      "size": 324
+      "size": 324,
+      "source_path": "deploy/systemd/huangque-auth.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-auth.service.d/hardening.conf",
       "sha256": "c47aa3fa53e374dd1ea41eb78faeebf2ecd7133e50171e6a0b7456f46e8324bf",
-      "size": 598
+      "size": 598,
+      "source_path": "deploy/systemd/huangque-auth.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-auth.service.d/points.conf",
       "sha256": "581a826c4ca9ea7a85465738c8567e3bc540809b2f50b15121ad88d884c42e77",
-      "size": 532
+      "size": 532,
+      "source_path": "deploy/systemd/huangque-auth.service.d/points.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-content.service",
       "sha256": "4ff6611df4528627d0096395dd49e8b6ecce8b48181b1a723c4e0c6fa882d887",
-      "size": 344
+      "size": 344,
+      "source_path": "deploy/systemd/huangque-content.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-content.service.d/hardening.conf",
       "sha256": "37218cbb7690e372e3412ef45a274999d6681d225ec1244767895a4a90bf7833",
-      "size": 1643
+      "size": 1643,
+      "source_path": "deploy/systemd/huangque-content.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-content.service.d/points.conf",
       "sha256": "3733da6090e23b5e39d9b615e60c2c991b5520ca12fc318dee7a5272f026e465",
-      "size": 618
+      "size": 618,
+      "source_path": "deploy/systemd/huangque-content.service.d/points.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-content.service.d/runninghub.conf",
       "sha256": "0d17a1a7b5e31e6c7700834d6af9771ea6127e36947c2ba1b2a0364415abf59a",
-      "size": 701
+      "size": 701,
+      "source_path": "deploy/systemd/huangque-content.service.d/runninghub.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-content.service.d/whisper.conf",
       "sha256": "0480381eb26ac4df7e23dc856e8ade8adca5b28b425cefc43b14c1e4590fa41f",
-      "size": 875
+      "size": 875,
+      "source_path": "deploy/systemd/huangque-content.service.d/whisper.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-dl.service",
       "sha256": "bcb1ac65028ec129184187b865a5b178b077d9a91bdc4b46ee81de750543e412",
-      "size": 279
+      "size": 279,
+      "source_path": "deploy/systemd/huangque-dl.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-dl.service.d/hardening.conf",
       "sha256": "2738921c1c29e1ecaccf8a97b2ffeef9f84dcb6182d2760e401a6a7168102e2f",
-      "size": 592
+      "size": 592,
+      "source_path": "deploy/systemd/huangque-dl.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-egress-tunnel.service",
       "sha256": "3d630beceaf96792f8d4dcdfd7b25480329fea63b0d7a5f0b68f82da31142201",
-      "size": 999
+      "size": 999,
+      "source_path": "deploy/systemd/huangque-egress-tunnel.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-imggen-api.service",
       "sha256": "42d5f61aa13cfd89a8e41afce1a460b898688865fceaa98a7f0cf20c0a3f71a7",
-      "size": 333
+      "size": 333,
+      "source_path": "deploy/systemd/huangque-imggen-api.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-imggen-api.service.d/hardening.conf",
       "sha256": "5e2146a4762baa41e80ae6f3ad5447f2f24b7f969a31feae8ef6d126a58596cd",
-      "size": 616
+      "size": 616,
+      "source_path": "deploy/systemd/huangque-imggen-api.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-imggen-api.service.d/internal-token.conf",
       "sha256": "5599ad647b5213dacb488572e8f29b23532dc3b132fc50932bc7402e74dc960f",
-      "size": 541
+      "size": 541,
+      "source_path": "deploy/systemd/huangque-imggen-api.service.d/internal-token.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-leadgen-api.service",
       "sha256": "4359bb0577224fe664331a65afef0bd2dc00d8fb274c363d3a8842f1d4980b10",
-      "size": 636
+      "size": 636,
+      "source_path": "deploy/systemd/huangque-leadgen-api.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/huangque-leadgen-api.service.d/hardening.conf",
       "sha256": "4d55fb6cb8b795500c217e17efa67eef7f291a461a15a14f56c7ed4f59ab7107",
-      "size": 619
+      "size": 619,
+      "source_path": "deploy/systemd/huangque-leadgen-api.service.d/hardening.conf"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/leadgen-A.service",
       "sha256": "ad6adb42e5decf35831f86e7b1e4b227f15119e224f74ef942acf956fb9ff0f6",
-      "size": 500
+      "size": 500,
+      "source_path": "deploy/systemd/leadgen-A.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/leadgen-B.service",
       "sha256": "263cfb8433a3f2b48a8643699627410666661df92904ab48469a1a7399d4b69e",
-      "size": 500
+      "size": 500,
+      "source_path": "deploy/systemd/leadgen-B.service"
     },
     {
       "mode": "0644",
       "path": "deploy/systemd/xiaotan.service",
       "sha256": "e31027883311f43c099a8192c854e9c6fb247fc9216025ffef09ef74592f009a",
-      "size": 502
+      "size": 502,
+      "source_path": "deploy/systemd/xiaotan.service"
     },
     {
       "mode": "0644",
       "path": "server/admin.html",
       "sha256": "9c29459918583cf74a34fecc61dc3646340515807bae5a7e35bd79dc73cd2c0c",
-      "size": 8652
+      "size": 8652,
+      "source_path": "server/admin.html"
     },
     {
       "mode": "0644",
       "path": "server/admin_api.py",
       "sha256": "8d46f5f44f580d673a746a30792de94924e33a3bcab486dd526bdcc169b9760e",
-      "size": 55306
+      "size": 55306,
+      "source_path": "server/admin_api.py"
     },
     {
       "mode": "0644",
       "path": "server/app.py",
       "sha256": "d382517cf8d2e73f6680ab935cb20d29ff8f76e8fbf69beaa2e6120e29c77e54",
-      "size": 31253
+      "size": 31253,
+      "source_path": "server/app.py"
     },
     {
       "mode": "0644",
       "path": "server/auth_server.py",
       "sha256": "02503e06d762a3fe8e0eeed7b6b34118b96dd0646b6a6971419cc176aba09a63",
-      "size": 102222
+      "size": 102222,
+      "source_path": "server/auth_server.py"
     },
     {
       "mode": "0644",
       "path": "server/content_api.py",
       "sha256": "4863b104bb51b9cc4bec8f79281a5db41a27869e7f5c8155b55603d7979c6428",
-      "size": 1603
+      "size": 1603,
+      "source_path": "server/content_api.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/__init__.py",
       "sha256": "7b540a4059fce16bc2a9d8f46f6e47e5fd37ca7ad4b16b19bd40432f3eb9f1d2",
-      "size": 51
+      "size": 51,
+      "source_path": "server/content_domains/__init__.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/asset_batch.py",
       "sha256": "03056421c6c11fb5a26a8d7a816962e95c03d733b2d2a90d1b65273522dc688d",
-      "size": 9823
+      "size": 9823,
+      "source_path": "server/content_domains/asset_batch.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/assets_store.py",
       "sha256": "ae3765cfe51b062cfa48af953aec91c94dd2b01663e8067609bdd7b508e2afa3",
-      "size": 13940
+      "size": 13940,
+      "source_path": "server/content_domains/assets_store.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/audio.py",
       "sha256": "c610d9e16536158133e95e82b00191e6e8549bcfe8aa3e224031be43fcc2b5ca",
-      "size": 54721
+      "size": 54721,
+      "source_path": "server/content_domains/audio.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/breakdown.py",
       "sha256": "9ebed9048423f3f5b3363e4cc306f033592a49b1b73cc539e8d92f9251925956",
-      "size": 146401
+      "size": 146401,
+      "source_path": "server/content_domains/breakdown.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/core.py",
       "sha256": "78850bf60c5223f58c0043aa6b71ae1dd34f6315c60a537c0ac6717a1562d820",
-      "size": 101331
+      "size": 101331,
+      "source_path": "server/content_domains/core.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/cos.py",
       "sha256": "90c3819525ba2fe55f68fcd22599cc81c8e2cb18fe2e6898e1bd6238119eafa5",
-      "size": 5379
+      "size": 5379,
+      "source_path": "server/content_domains/cos.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/cosyvoice.py",
       "sha256": "a82239982bc08d77fe92348c7c9ac4caeb5d36058dbe78aa95d5e688c4d5901b",
-      "size": 9265
+      "size": 9265,
+      "source_path": "server/content_domains/cosyvoice.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/egress.py",
       "sha256": "b38a1646eaebfa077d07cd84edbd18ce772362be0c791836b320c1e6ff7fa8e9",
-      "size": 16057
+      "size": 16057,
+      "source_path": "server/content_domains/egress.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/feature_flags.py",
       "sha256": "c319d4d69e99c02d902bace7aae9f925c7a7ebb288bcb9b0316b5799aaf0090d",
-      "size": 5474
+      "size": 5474,
+      "source_path": "server/content_domains/feature_flags.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/image.py",
       "sha256": "f63f2f8d88651948e40c0613536915515f6d3b359e8695c3fb4df06182047f72",
-      "size": 27466
+      "size": 27466,
+      "source_path": "server/content_domains/image.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/jobs_store.py",
       "sha256": "24a826e4aba37cf64930de7054a1c30c0e3ab571e767d1a6c7707fbe67cc6f2d",
-      "size": 5871
+      "size": 5871,
+      "source_path": "server/content_domains/jobs_store.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/leads.py",
       "sha256": "56dc8756f9a93fdf084f47b6badb5a01eea727b4a9fc7b486ab57c958935ace0",
-      "size": 14772
+      "size": 14772,
+      "source_path": "server/content_domains/leads.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/local_reverse_processor.py",
       "sha256": "a1c140851a4a9c48553ff2fabd2b5c7402564af344fa9d116e9136ef8e37e408",
-      "size": 13474
+      "size": 13474,
+      "source_path": "server/content_domains/local_reverse_processor.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/local_reverse_upload.py",
       "sha256": "0cbc94ec0789025df254303a85b0471e5bcdfe3a0d3eb006f96b160863be3b1d",
-      "size": 6659
+      "size": 6659,
+      "source_path": "server/content_domains/local_reverse_upload.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/points.py",
       "sha256": "ab785cb5cacdcd0cdd6e66c20649bdaa78a68c810966f9e3a7b8af232d618445",
-      "size": 14997
+      "size": 14997,
+      "source_path": "server/content_domains/points.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/registry.py",
       "sha256": "330fa002acf7125fc454b19f57955a7687d7169c082c13d44cc3487c9bd3cdff",
-      "size": 264
+      "size": 264,
+      "source_path": "server/content_domains/registry.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/script_to_video.py",
       "sha256": "64ff6a4ec9158b78161607410ff7e9cd00881ab34f3dff03fafa330e6bdb774d",
-      "size": 13390
+      "size": 13390,
+      "source_path": "server/content_domains/script_to_video.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/submission_idempotency.py",
       "sha256": "32a3a654d9ef09a392de8a25dfe46e1d8a580bfeff406c5e1c85ed57ad788a51",
-      "size": 2548
+      "size": 2548,
+      "source_path": "server/content_domains/submission_idempotency.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/talking_asr_cli.py",
       "sha256": "0cc171ec2814f9cc498821e271512034c58415029b7663f170915ca332e26771",
-      "size": 2988
+      "size": 2988,
+      "source_path": "server/content_domains/talking_asr_cli.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/text.py",
       "sha256": "db5914590131f42342b590a84a23419207f8ca3149cf4ecf6b997c47e37744bc",
-      "size": 7347
+      "size": 7347,
+      "source_path": "server/content_domains/text.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/upstream_guard.py",
       "sha256": "87d14b769f5ab6b531db5e2299f6251e2d0fea079b3419b89fe737be8e09ebbe",
-      "size": 8331
+      "size": 8331,
+      "source_path": "server/content_domains/upstream_guard.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/video.py",
       "sha256": "95f5dc9978279c6424278629fc2d8404498c0acf8b0f1540057f1bc1cb346052",
-      "size": 190517
+      "size": 190517,
+      "source_path": "server/content_domains/video.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/video_openrouter.py",
       "sha256": "ab7782df5c9b3e97e7aec939872bcd9937ee6fa208ff38189ee1f4fa6d7b41fc",
-      "size": 8231
+      "size": 8231,
+      "source_path": "server/content_domains/video_openrouter.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/video_xai.py",
       "sha256": "3018017a4654bd085d035548868daa3c813990883e4e3e79fcf94bdeb555063c",
-      "size": 6864
+      "size": 6864,
+      "source_path": "server/content_domains/video_xai.py"
     },
     {
       "mode": "0644",
       "path": "server/content_domains/wavespeed.py",
       "sha256": "ffa0a8bea8b6ce12a10c4cf9d0047d316ebf9fcac3e81bca89db18d90d932d87",
-      "size": 6260
+      "size": 6260,
+      "source_path": "server/content_domains/wavespeed.py"
     },
     {
       "mode": "0644",
       "path": "server/dl_service.py",
       "sha256": "449103e3da8e1aa45334741be8ec2ac38e6320ba8b1985f9ebcbbdedd2fb79ef",
-      "size": 7592
+      "size": 7592,
+      "source_path": "server/dl_service.py"
     },
     {
       "mode": "0644",
       "path": "server/func_names.py",
       "sha256": "60e53d7404cd13eefd4d70960987bae61011746c37e18c490d9162263f2590ad",
-      "size": 8578
+      "size": 8578,
+      "source_path": "server/func_names.py"
     },
     {
       "mode": "0644",
       "path": "server/imggen_api.py",
       "sha256": "2f27a9c022f8213e73985b3b05a7cfc70bee19b40e74ae1c7ae1d7c470fb3950",
-      "size": 33769
+      "size": 33769,
+      "source_path": "server/imggen_api.py"
     },
     {
       "mode": "0644",
       "path": "server/index.html",
       "sha256": "d00ba541c28bd102739ac67dae3428edb20c89b79dd703c08e7051d7f1a3ecb6",
-      "size": 33702
+      "size": 33702,
+      "source_path": "server/index.html"
     },
     {
       "mode": "0644",
       "path": "server/keywords.json",
       "sha256": "3adaaa0dc275fe7bb95b209ed9887c99c9fed155324eff1abcd75078a2bab883",
-      "size": 1288
+      "size": 1288,
+      "source_path": "server/keywords.json"
     },
     {
       "mode": "0644",
       "path": "server/leadgen_api.py",
       "sha256": "0c0be3908625ee48309facac10d5e873f23bf620aa1b55e83f02366862f471da",
-      "size": 33040
+      "size": 33040,
+      "source_path": "server/leadgen_api.py"
     },
     {
       "mode": "0644",
       "path": "server/nginx-huangquechuanmei.conf",
       "sha256": "489bdd4bf917f2a670e8e92cf2a99903c3ade22cd98a13ddf0827c586cd0d93f",
-      "size": 4497
+      "size": 4497,
+      "source_path": "server/nginx-huangquechuanmei.conf"
     },
     {
       "mode": "0644",
       "path": "server/test_wxpay.py",
       "sha256": "b2a9fc8965c3ef97bd5aca51a52e208d62b5d81f13e3514b57305e63e69bd8fe",
-      "size": 4875
+      "size": 4875,
+      "source_path": "server/test_wxpay.py"
     },
     {
       "mode": "0644",
       "path": "server/tikhub.py",
       "sha256": "b076d943175f49cb77703eaa5f25a03656fec6a23d737879af72ccbdc2592dab",
-      "size": 43873
+      "size": 43873,
+      "source_path": "server/tikhub.py"
     },
     {
       "mode": "0644",
       "path": "server/wxpay.py",
       "sha256": "528836c1dc2808f5abab24fbe4cadd763aa0561e433e54bd9e22c915d609758e",
-      "size": 9219
+      "size": 9219,
+      "source_path": "server/wxpay.py"
     },
     {
       "mode": "0644",
       "path": "site/admin/index.html",
       "sha256": "2962681aedb20c31d6823f90968e35e346f53d3058e57c5f7a0e6b1afc6089c0",
-      "size": 37139
+      "size": 37139,
+      "source_path": "site/admin/index.html"
     },
     {
       "mode": "0644",
       "path": "site/api-admin/index.html",
       "sha256": "377a4273e79268c4bde68935f435ba4b2ddc03105691905d7088eb26bb21b909",
-      "size": 16740
+      "size": 16740,
+      "source_path": "site/api-admin/index.html"
     },
     {
       "mode": "0644",
       "path": "site/api-docs/index.html",
       "sha256": "f092d06d51eb9f060815a55626d48127ef21fac6b40ef3ee3ff2b82e07328a49",
-      "size": 3571
+      "size": 3571,
+      "source_path": "site/api-docs/index.html"
     },
     {
       "mode": "0644",
       "path": "site/api-docs/openapi-tikhub.json",
       "sha256": "59f2cd278831c0bfce7fc9cadac737d433d03982e96d26acf62d558df999e10c",
-      "size": 7908
+      "size": 7908,
+      "source_path": "site/api-docs/openapi-tikhub.json"
     },
     {
       "mode": "0644",
       "path": "site/api-docs/openapi.json",
       "sha256": "c2baad3980115042c7680fe22f152e9b8386bf600c7966441d60045facca0bbf",
-      "size": 42789
+      "size": 42789,
+      "source_path": "site/api-docs/openapi.json"
     },
     {
       "mode": "0644",
       "path": "site/assets/brand_v3.webp",
       "sha256": "61253e5277bd470194e3cfd5ea3657baed002d41255f80954e90ad209bcf76c4",
-      "size": 76064
+      "size": 76064,
+      "source_path": "site/assets/brand_v3.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud.css",
       "sha256": "a1deeedb06cd3496febd151491ea41c3aa4b72b7dd17ffa1eebd5f212da278dd",
-      "size": 4474
+      "size": 4474,
+      "source_path": "site/assets/cloud.css"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud.js",
       "sha256": "88e2c10e62c50a98efeb342bf16564e42102e7cee6af7fbc813f59ed1a41c5e9",
-      "size": 3870
+      "size": 3870,
+      "source_path": "site/assets/cloud.js"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud/login-left.png",
       "sha256": "59682e3580402e5b5e27821d828c957bd75ce5756abdae36426413847be7c5fe",
-      "size": 1519944
+      "size": 1519944,
+      "source_path": "site/assets/cloud/login-left.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud/login-scene.png",
       "sha256": "7a721fac98d5e0393d749897134492b1d63308c1b535d64f285dc3095c86a410",
-      "size": 1245749
+      "size": 1245749,
+      "source_path": "site/assets/cloud/login-scene.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud/logo-bird.png",
       "sha256": "b57e9e9489f7662fd0a0106460aa89b333ecabd3a5af8db67ab79ca4634a718a",
-      "size": 2440
+      "size": 2440,
+      "source_path": "site/assets/cloud/logo-bird.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud/logo-full.png",
       "sha256": "bfeccc86b10970fee39b18552bbe3c49d01126d0df910ba1bb4247bcddf48cf5",
-      "size": 99045
+      "size": 99045,
+      "source_path": "site/assets/cloud/logo-full.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/cloud/logo-mark.png",
       "sha256": "78fa4cb8b3c2c9dbc07e7c6ed597e198a556dbbde7d2a02c8e2bb93e15c75b85",
-      "size": 244451
+      "size": 244451,
+      "source_path": "site/assets/cloud/logo-mark.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/comic.webp",
       "sha256": "e5c421100538472122dd99039c192b30457b83b5abb6d8f2e7f1de7a02f3da22",
-      "size": 203112
+      "size": 203112,
+      "source_path": "site/assets/comic.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/cyberpunk.webp",
       "sha256": "f2fbe3e11fac3add2adbecc1c4fe6c5337295eb7ad6428305500a6ff29ffe605",
-      "size": 223412
+      "size": 223412,
+      "source_path": "site/assets/cyberpunk.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/duanwu.webp",
       "sha256": "6a79e2454ff743b43c049c5caaa647d599586fe6ff078812094795e5214fd62b",
-      "size": 106868
+      "size": 106868,
+      "source_path": "site/assets/duanwu.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/README.md",
       "sha256": "21eb2b9eafcea2bdae8703b0eb679f4844a00330123332e99b865d55db157dcd",
-      "size": 462
+      "size": 462,
+      "source_path": "site/assets/fonts/README.md"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/hq-fonts.css",
       "sha256": "916542b0984575ef6269e0ae0f9a76d99135a56f21c097acb9475c859795d13b",
-      "size": 1456
+      "size": 1456,
+      "source_path": "site/assets/fonts/hq-fonts.css"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/jetbrains-mono-400.woff2",
       "sha256": "e9b8afd5dfb79ad174fabd99a4da7f19a2f853740fc3f2810d8cb75d326d68a8",
-      "size": 16924
+      "size": 16924,
+      "source_path": "site/assets/fonts/jetbrains-mono-400.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/jetbrains-mono-500.woff2",
       "sha256": "44e753206bc5ccc893db1ce0c289aa83bdff0222328acb1871219c51d7043c21",
-      "size": 17568
+      "size": 17568,
+      "source_path": "site/assets/fonts/jetbrains-mono-500.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/jetbrains-mono-600.woff2",
       "sha256": "2e2f25aa021a9fd30dfdb88da08908e00449aeeb082634cfe0cee105d27658c8",
-      "size": 17728
+      "size": 17728,
+      "source_path": "site/assets/fonts/jetbrains-mono-600.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/jetbrains-mono-700.woff2",
       "sha256": "a656a755146096d25903b0bf8d6625187401a85880b7d4796fa2d819ae6040dd",
-      "size": 17528
+      "size": 17528,
+      "source_path": "site/assets/fonts/jetbrains-mono-700.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/noto-sans-sc-300.woff2",
       "sha256": "3830b967490615c9e8b74ea4bc36a89ee038a741b61b109c9a93073b3dbde8df",
-      "size": 131316
+      "size": 131316,
+      "source_path": "site/assets/fonts/noto-sans-sc-300.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/noto-sans-sc-400.woff2",
       "sha256": "7933fc247717070fea034a807695a68431cdf341b0fe9d481c854a4451392c9f",
-      "size": 134016
+      "size": 134016,
+      "source_path": "site/assets/fonts/noto-sans-sc-400.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/noto-sans-sc-500.woff2",
       "sha256": "cceb6be11015991a18d65d63b05e77273f584f514349b9e3326e836bf18be53d",
-      "size": 135584
+      "size": 135584,
+      "source_path": "site/assets/fonts/noto-sans-sc-500.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/noto-sans-sc-700.woff2",
       "sha256": "dae53c0cf5ea9477d802b99f80ac84550bd9cb0290784c70c11bc283bdf6b424",
-      "size": 136664
+      "size": 136664,
+      "source_path": "site/assets/fonts/noto-sans-sc-700.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/fonts/noto-sans-sc-900.woff2",
       "sha256": "2bf484a6956d4b7b174bf235ebdf8793a8cc6e3c8da632d5a8d7754443e79920",
-      "size": 135592
+      "size": 135592,
+      "source_path": "site/assets/fonts/noto-sans-sc-900.woff2"
     },
     {
       "mode": "0644",
       "path": "site/assets/guofeng_bg.webp",
       "sha256": "026d1d430a433f8964f991b3a1215d4add5de06b78cbf2bd9c7af691e6d511b3",
-      "size": 75068
+      "size": 75068,
+      "source_path": "site/assets/guofeng_bg.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/guofeng_cube.webp",
       "sha256": "1470e3eae7b2dc600514b914244267e7afe7b06dfc40748103514ab26c5d63ed",
-      "size": 51192
+      "size": 51192,
+      "source_path": "site/assets/guofeng_cube.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/guofeng_search.webp",
       "sha256": "8e9c84a695844f34468467b863162051631c890aff9694be82b9892043007d7b",
-      "size": 41076
+      "size": 41076,
+      "source_path": "site/assets/guofeng_search.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/huangque_poster.webp",
       "sha256": "7a780d33249222b696c8fc1f1cb55527ecc12408978f6a3bb4e9a845c7a9aa3b",
-      "size": 50092
+      "size": 50092,
+      "source_path": "site/assets/huangque_poster.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq-duotone-line.spec.json",
       "sha256": "3ea8144e82ba54aebfa019c537c9e04d5ee3754c5f80cbb8170c5cb88b027a57",
-      "size": 2337
+      "size": 2337,
+      "source_path": "site/assets/icons-duotone/hq-duotone-line.spec.json"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_account.svg",
       "sha256": "813bf02d8b6c26c5c5bb28b35bffc1f45ea712ec2d95f6fca254734c05e26cf3",
-      "size": 806
+      "size": 806,
+      "source_path": "site/assets/icons-duotone/hq_account.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_assets.svg",
       "sha256": "5db81be2b095ca60b9fe5d37af77de2ed414d44829fa2b64b22c402d5249ca1b",
-      "size": 703
+      "size": 703,
+      "source_path": "site/assets/icons-duotone/hq_assets.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_audio.svg",
       "sha256": "ee62f9f569704622e586df8d52243254c7a76b048ca9d31819866bf706760fe7",
-      "size": 863
+      "size": 863,
+      "source_path": "site/assets/icons-duotone/hq_audio.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_board.svg",
       "sha256": "7cc317d4032367cee853732afc741a9b1e40e04646e69b495725f56c09a1dd6a",
-      "size": 735
+      "size": 735,
+      "source_path": "site/assets/icons-duotone/hq_board.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_bot.svg",
       "sha256": "f222cfb22c93f7feb64a4504a9e5e97957e32a56818bd2f97385b01818edbe95",
-      "size": 910
+      "size": 910,
+      "source_path": "site/assets/icons-duotone/hq_bot.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_canvas.svg",
       "sha256": "c642b3c4d1fad0811e89cc298ed65c79b28d01e9fcab4d4b1262f22948d22bf7",
-      "size": 716
+      "size": 716,
+      "source_path": "site/assets/icons-duotone/hq_canvas.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_comments.svg",
       "sha256": "6fc55ac23e6534df6fc446a7d2da9dae8674ed4c2e0b2e71ecc209723ff4068c",
-      "size": 850
+      "size": 850,
+      "source_path": "site/assets/icons-duotone/hq_comments.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_cost.svg",
       "sha256": "c89a6d36bfe1d7acf3761d958e162d16ea6110bf9c3d81aa10cefb6b765d7eb9",
-      "size": 739
+      "size": 739,
+      "source_path": "site/assets/icons-duotone/hq_cost.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_download.svg",
       "sha256": "808fb9db33396da19cb3bc2fb930c23294891f2bbf469dfae7cd2d1ead23cc5b",
-      "size": 683
+      "size": 683,
+      "source_path": "site/assets/icons-duotone/hq_download.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_feishu.svg",
       "sha256": "cf8e1c19edd9e27ab5371b5efd8cfb9b44ef8c60f245a3e8576997431dd2a407",
-      "size": 696
+      "size": 696,
+      "source_path": "site/assets/icons-duotone/hq_feishu.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_human.svg",
       "sha256": "8f8845f57c955599e4b2820049823abec08eb4136d2e18a38a132cad49b3ebbf",
-      "size": 823
+      "size": 823,
+      "source_path": "site/assets/icons-duotone/hq_human.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_imagegen.svg",
       "sha256": "1071728100338a6a5c04ab32398125b1e72f9162a9ca6676c1b52456029d248e",
-      "size": 843
+      "size": 843,
+      "source_path": "site/assets/icons-duotone/hq_imagegen.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_inspiration.svg",
       "sha256": "851c3845dbb8c99e9ddc1d0d3a64621a0460d2d1903a64996a4ec6294d84c6c6",
-      "size": 709
+      "size": 709,
+      "source_path": "site/assets/icons-duotone/hq_inspiration.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_keyword.svg",
       "sha256": "2e6b3289cda33b43f8095f09af1643263d09a23a9d111c8121bdc53af36c138e",
-      "size": 742
+      "size": 742,
+      "source_path": "site/assets/icons-duotone/hq_keyword.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_leads.svg",
       "sha256": "5b8a000ea0d3905da4ed4e80c66e0a188bbe079cd00606d64e323bf33a9d7062",
-      "size": 725
+      "size": 725,
+      "source_path": "site/assets/icons-duotone/hq_leads.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_notify.svg",
       "sha256": "25938dde20715b038103e9ca45bc105f24d55ebc29b07a26599289fb724ad190",
-      "size": 765
+      "size": 765,
+      "source_path": "site/assets/icons-duotone/hq_notify.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_points.svg",
       "sha256": "29159aaf003f8453f740e8166373f77520242524f364ea1683ea46f22bb9c3ed",
-      "size": 761
+      "size": 761,
+      "source_path": "site/assets/icons-duotone/hq_points.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_recharge.svg",
       "sha256": "6c2ece95ef3a2efa27b56310805e7b8663375b233ef25124661007ab7fe4774f",
-      "size": 854
+      "size": 854,
+      "source_path": "site/assets/icons-duotone/hq_recharge.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_script.svg",
       "sha256": "b382944f57c1f8a8bd1584c1deaddf9e3866d6e7ff4bc5e42cad83efb18c6be6",
-      "size": 666
+      "size": 666,
+      "source_path": "site/assets/icons-duotone/hq_script.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_settings.svg",
       "sha256": "baf9635c03ec6d90645134fd60212cf4216353b5082ae45b1ecd1fb35514c142",
-      "size": 855
+      "size": 855,
+      "source_path": "site/assets/icons-duotone/hq_settings.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_team.svg",
       "sha256": "b441d5d723c2d0017bb4538952878bf49dc5702a85cfb95fb7e3502cf6a12f21",
-      "size": 811
+      "size": 811,
+      "source_path": "site/assets/icons-duotone/hq_team.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_template.svg",
       "sha256": "02367ebdaf657c7ba13107435ee77b39aba6571cd28237c32e373daafc7a9ec5",
-      "size": 755
+      "size": 755,
+      "source_path": "site/assets/icons-duotone/hq_template.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_video.svg",
       "sha256": "f95950469fedb7db1b41d0b5df2966dd6ffc97c28377c2705516628d6bb84b63",
-      "size": 648
+      "size": 648,
+      "source_path": "site/assets/icons-duotone/hq_video.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons-duotone/hq_viral.svg",
       "sha256": "0825a4310e36566f5b9fa74c74c5aca84f2dce7266425dfc65b5793be1d62895",
-      "size": 646
+      "size": 646,
+      "source_path": "site/assets/icons-duotone/hq_viral.svg"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_assets.png",
       "sha256": "e2c5a52b14bf3bc07168472efbf091cc9e6d9c1c77cd1ea7f4474b538592c9d6",
-      "size": 61518
+      "size": 61518,
+      "source_path": "site/assets/icons/ic_assets.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_audio.png",
       "sha256": "01de7bc6f8ba56f8ac1e4ce046420c7383467f8154df492af4d0f6910413b9a3",
-      "size": 27395
+      "size": 27395,
+      "source_path": "site/assets/icons/ic_audio.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_banana.png",
       "sha256": "24061623223e69d93ef29ef7df8d4092af9fd08c2d4fff556c3770c6e7c72fb8",
-      "size": 25563
+      "size": 25563,
+      "source_path": "site/assets/icons/ic_banana.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_bots.png",
       "sha256": "911d1f4e89f8b2330f1b19fb1b2b564fcee4958a9e02ee8b96ff7b3695885f86",
-      "size": 59307
+      "size": 59307,
+      "source_path": "site/assets/icons/ic_bots.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_canvas.png",
       "sha256": "6102ea52d462b2d31cfa973a3012377edd579834ea57860234d420f90d028208",
-      "size": 28748
+      "size": 28748,
+      "source_path": "site/assets/icons/ic_canvas.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_makeup.png",
       "sha256": "bdcc8e421e8c3ae7f809068f5d8ba707a6fe9fd66a0b09d3d1b4745e70493139",
-      "size": 74603
+      "size": 74603,
+      "source_path": "site/assets/icons/ic_cat_makeup.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_man.png",
       "sha256": "88a9001d4d99cfda15d0ed96e85d0af84dca010827df6526194aaad109aed4f7",
-      "size": 47614
+      "size": 47614,
+      "source_path": "site/assets/icons/ic_cat_man.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_mask.png",
       "sha256": "b12ab552ce1b3ec06fe50053ce77eae6401b6765e2c0b7a05f85bf3045d7f9de",
-      "size": 63951
+      "size": 63951,
+      "source_path": "site/assets/icons/ic_cat_mask.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_medical.png",
       "sha256": "08961a9086545106472b85da9683bd1e8bf57d0980dd3e963757640a89ab41a6",
-      "size": 59247
+      "size": 59247,
+      "source_path": "site/assets/icons/ic_cat_medical.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_scenery.png",
       "sha256": "70a0d03d0069fd45311e6c352343e94f6ada93cd63f41605ef980149ca1a47e8",
-      "size": 47650
+      "size": 47650,
+      "source_path": "site/assets/icons/ic_cat_scenery.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_serum.png",
       "sha256": "d5877793a71b27fc1f1002482ab79e1adb26aa89cedea21a12d534a36160de64",
-      "size": 37357
+      "size": 37357,
+      "source_path": "site/assets/icons/ic_cat_serum.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_store.png",
       "sha256": "559e8c990ba17bbf0fbdb640390541e522188f1259d09cd02ffd11e810f947bd",
-      "size": 71208
+      "size": 71208,
+      "source_path": "site/assets/icons/ic_cat_store.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_sun.png",
       "sha256": "13e4bf41392fd3d8556c2da1b2bef95a5a30a475bc67faf9f3d62387ab98337e",
-      "size": 58644
+      "size": 58644,
+      "source_path": "site/assets/icons/ic_cat_sun.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cat_woman.png",
       "sha256": "9a62e2e9c1f978146dd67da23607b7e78a5a4ce6fb60e606f1a61ad86fd92c1a",
-      "size": 64791
+      "size": 64791,
+      "source_path": "site/assets/icons/ic_cat_woman.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_collect.png",
       "sha256": "53fd11d99cf4d49d3d92e9c13587189fc63a35dbca0f982e1b3a937512dbd8e9",
-      "size": 56975
+      "size": 56975,
+      "source_path": "site/assets/icons/ic_collect.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_cost.png",
       "sha256": "82d6621661511d76f56430caf3b86510d45c9b9dd1fadaedec2c785414396c01",
-      "size": 70849
+      "size": 70849,
+      "source_path": "site/assets/icons/ic_cost.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_dashboard.png",
       "sha256": "f066ceffcd1c08fe4ec6aae8520f9cd0e0b5836cbbcebc8675d5f91a8001d859",
-      "size": 47936
+      "size": 47936,
+      "source_path": "site/assets/icons/ic_dashboard.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_audio.png",
       "sha256": "23b875208f953adc5c6e428c84ed009b927b17481933fc84abe15970752fcf9e",
-      "size": 43438
+      "size": 43438,
+      "source_path": "site/assets/icons/ic_empty_audio.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_avatar.png",
       "sha256": "3a799b3131d605f4e17ddd9334eeafc321052929bb03fe3d0cc4a06c5952a83c",
-      "size": 66721
+      "size": 66721,
+      "source_path": "site/assets/icons/ic_empty_avatar.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_gallery.png",
       "sha256": "e667eb642522c21d1b382d7c7dbc9358a2aa84efee4cb01e86b0c0dac389ae88",
-      "size": 69815
+      "size": 69815,
+      "source_path": "site/assets/icons/ic_empty_gallery.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_records.png",
       "sha256": "2b6f44574013f681c037cadb20e5b0a1524556e2628a0ba9f78600052303a245",
-      "size": 55030
+      "size": 55030,
+      "source_path": "site/assets/icons/ic_empty_records.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_search.png",
       "sha256": "7b926d0ca5c717a965acf2e114e1799c12584f584c615ea3e892dcdbf6173aa0",
-      "size": 45226
+      "size": 45226,
+      "source_path": "site/assets/icons/ic_empty_search.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_empty_video.png",
       "sha256": "8f86392842d938055d7648c069f0877502b6557e91ad64b49f7926d96318ec31",
-      "size": 73522
+      "size": 73522,
+      "source_path": "site/assets/icons/ic_empty_video.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_help.png",
       "sha256": "cafbe540f397d5c3f697203a6e7dc2015d2f619de58cce79148d5ce65dff460b",
-      "size": 74639
+      "size": 74639,
+      "source_path": "site/assets/icons/ic_help.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_home.png",
       "sha256": "4165d1488a131f519419bb9b97bc1cb5d2f0fb6793ac9d52d41e2a960cdf503b",
-      "size": 58194
+      "size": 58194,
+      "source_path": "site/assets/icons/ic_home.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_inspiration.png",
       "sha256": "c1beb332a135747ae10af27712ff3e7340e037067061d3cd49f11a42bd575602",
-      "size": 49507
+      "size": 49507,
+      "source_path": "site/assets/icons/ic_inspiration.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_leads.png",
       "sha256": "ad6852450be57d4552030c4a49ce941182e48f701bb4b341531c01dc4a33c6d5",
-      "size": 56770
+      "size": 56770,
+      "source_path": "site/assets/icons/ic_leads.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_recharge.png",
       "sha256": "a4c6b5f8fd5be4b6d6638d993b310b97ad094ff845c6ff3f9a86888ccbffccc7",
-      "size": 79960
+      "size": 79960,
+      "source_path": "site/assets/icons/ic_recharge.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_script.png",
       "sha256": "7468a012fb67c84aa8af4802d6ae474c9de26d4393a3639d86532da52793e118",
-      "size": 34732
+      "size": 34732,
+      "source_path": "site/assets/icons/ic_script.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_settings.png",
       "sha256": "724324a74b46859da752f58df1f3f7a6572b37ae60371a0d4bed6fdeab106985",
-      "size": 76708
+      "size": 76708,
+      "source_path": "site/assets/icons/ic_settings.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_video.png",
       "sha256": "a274a32041c5cb12b7142d171eeb9ae5c6ab1ad754d305ac9bd72164a7d2fd7e",
-      "size": 37938
+      "size": 37938,
+      "source_path": "site/assets/icons/ic_video.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/icons/ic_vip.png",
       "sha256": "d269a3e47a98a4c15b3af922524c894f601ef36597af4ae3f9bb190cd9dc081b",
-      "size": 56478
+      "size": 56478,
+      "source_path": "site/assets/icons/ic_vip.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_001.webp",
       "sha256": "ccff80ce542afd5805bcfd9dfc07bad1000980dfdb9f5b8e695db96b741eb51a",
-      "size": 36108
+      "size": 36108,
+      "source_path": "site/assets/inspirations/beauty_001.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_002.webp",
       "sha256": "e09a53fd5fd35994849649c562b1e7a06bce29ec642c3a783081ad036f02d580",
-      "size": 23438
+      "size": 23438,
+      "source_path": "site/assets/inspirations/beauty_002.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_003.webp",
       "sha256": "4da4f8d0beeae7553778d912a9961f63b4610b21627d1b7a61aaf805a8793371",
-      "size": 40202
+      "size": 40202,
+      "source_path": "site/assets/inspirations/beauty_003.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_004.webp",
       "sha256": "4bb8c0ae37463de8cfad2f63091ae9e90ac0a47c9020cbde4f6f6e53b71cbae0",
-      "size": 41368
+      "size": 41368,
+      "source_path": "site/assets/inspirations/beauty_004.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_005.webp",
       "sha256": "185b6633ca0aff9649436ec0f58aae71fbe6b337c6e061a269df016563f4886a",
-      "size": 39870
+      "size": 39870,
+      "source_path": "site/assets/inspirations/beauty_005.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_006.webp",
       "sha256": "03584995da8d0e348f6c473e6f33a755ea85dbfa49fc8af833dcb38b7cf7ec7b",
-      "size": 41414
+      "size": 41414,
+      "source_path": "site/assets/inspirations/beauty_006.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_007.webp",
       "sha256": "1b44402a84324cf1d43af9558c7294b9ef085a49c402a09579f4b01219e4e3de",
-      "size": 24056
+      "size": 24056,
+      "source_path": "site/assets/inspirations/beauty_007.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_008.webp",
       "sha256": "c9c72553a3eb0ef1129545636536c4e8bf4f5c039d77d1d6cdd47987b3ceb138",
-      "size": 52288
+      "size": 52288,
+      "source_path": "site/assets/inspirations/beauty_008.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_009.webp",
       "sha256": "16930f9ee93ed2366c1cee5cff99fc5468329c0f86a983052cb3116c38184748",
-      "size": 88404
+      "size": 88404,
+      "source_path": "site/assets/inspirations/beauty_009.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_010.webp",
       "sha256": "95a0db290f52a0e9aadc57302da9ae8f763f6ff3628f8857551507e438ec4b06",
-      "size": 53740
+      "size": 53740,
+      "source_path": "site/assets/inspirations/beauty_010.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_011.webp",
       "sha256": "4015685d3be5ca834c72603e28699b31a310f9af20e6ffc8508ea811a88f821a",
-      "size": 92422
+      "size": 92422,
+      "source_path": "site/assets/inspirations/beauty_011.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_012.webp",
       "sha256": "1c417dc81e59ae65672cdb23f59899c4816268ede29e9ad640a055d20a05ca32",
-      "size": 44506
+      "size": 44506,
+      "source_path": "site/assets/inspirations/beauty_012.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_013.webp",
       "sha256": "3681815a0d449f7d3dad9ee23e9adc46fcd526582ead8f774cd6a863186c263b",
-      "size": 33266
+      "size": 33266,
+      "source_path": "site/assets/inspirations/beauty_013.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_014.webp",
       "sha256": "50ae8a1981e634e4bc493d13fd9453b4de630b9b8c3b34a07930907b0b8fa508",
-      "size": 25360
+      "size": 25360,
+      "source_path": "site/assets/inspirations/beauty_014.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_015.webp",
       "sha256": "025e2e294c7dacfad049aa854e415385e75c845a346e7a93151e46c75092199c",
-      "size": 58162
+      "size": 58162,
+      "source_path": "site/assets/inspirations/beauty_015.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_016.webp",
       "sha256": "56f2f65ced6e88e7c99cfd89be7ce095e05566297e8ce3575fb930733f2ce02f",
-      "size": 81612
+      "size": 81612,
+      "source_path": "site/assets/inspirations/beauty_016.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_017.webp",
       "sha256": "7fe6366124d3be28e285b49a4da1b9ea07e7d3f2ec0cb98431765607a1db22f0",
-      "size": 53248
+      "size": 53248,
+      "source_path": "site/assets/inspirations/beauty_017.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_018.webp",
       "sha256": "528f8bcce3b9d2ddb87644984ba1fbc77f00819dd5acb40ff837d93e98b7be82",
-      "size": 40944
+      "size": 40944,
+      "source_path": "site/assets/inspirations/beauty_018.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_019.webp",
       "sha256": "55f0ddf26cf43141d4de958d8f2a24fae5b7bc64202043f1e88c668bb056db9b",
-      "size": 41942
+      "size": 41942,
+      "source_path": "site/assets/inspirations/beauty_019.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_020.webp",
       "sha256": "a68d31f4b2b60356a116d91c1b59fb8c627b41ea80299e28a9152110cac1d87b",
-      "size": 60968
+      "size": 60968,
+      "source_path": "site/assets/inspirations/beauty_020.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_021.webp",
       "sha256": "daad0373fac847c13ef6b8b1d81e215c72e57216878a97f6dfc1f038ad866cf7",
-      "size": 48630
+      "size": 48630,
+      "source_path": "site/assets/inspirations/beauty_021.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_022.webp",
       "sha256": "4a9cceb5e6bf129fc8dad08924a9fc200921e3c8588f4a2debf299a0ea1c5ccc",
-      "size": 42744
+      "size": 42744,
+      "source_path": "site/assets/inspirations/beauty_022.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_023.webp",
       "sha256": "3791983b744e946482f79c9e5bca0d2e7439ad001829c236ae9ff9d3afcca6c7",
-      "size": 64926
+      "size": 64926,
+      "source_path": "site/assets/inspirations/beauty_023.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_024.webp",
       "sha256": "56adc022b8599022a45f55dd96171562ac24852fbf3fac6586be84156a54cd93",
-      "size": 51004
+      "size": 51004,
+      "source_path": "site/assets/inspirations/beauty_024.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_025.webp",
       "sha256": "d4233a4863a662b4e2a92afc11001aff576a6ee288a4ff1a55a948eb5509c555",
-      "size": 31112
+      "size": 31112,
+      "source_path": "site/assets/inspirations/beauty_025.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_026.webp",
       "sha256": "7adf1aa76a8303a54a1e5bf498b71f0c0c16de2c9d2dafad41d868aa5334b07f",
-      "size": 41216
+      "size": 41216,
+      "source_path": "site/assets/inspirations/beauty_026.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_027.webp",
       "sha256": "d6706e5d0035ce666033bd561118e748e2427d2250c8f98c8f52d067c09bbbab",
-      "size": 51304
+      "size": 51304,
+      "source_path": "site/assets/inspirations/beauty_027.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_028.webp",
       "sha256": "b285697d2b7a916fa2fd4cc32efb6fbcad28d4516fa379d860295436aa015065",
-      "size": 66252
+      "size": 66252,
+      "source_path": "site/assets/inspirations/beauty_028.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_029.webp",
       "sha256": "ceafb9853c8bba0a395a89dcf87ce9df3d9c00cfaca90c7815e9cc1c3b1ca7b2",
-      "size": 54154
+      "size": 54154,
+      "source_path": "site/assets/inspirations/beauty_029.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_030.webp",
       "sha256": "712dd7c9a0092d4a98f5978d73cd9c0ade6176cf80ebce836230f29c6f61dc40",
-      "size": 74718
+      "size": 74718,
+      "source_path": "site/assets/inspirations/beauty_030.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_031.webp",
       "sha256": "56b3bea5b25f375ec9e85ce27df25ed9da86f81d62856a1bd2cdcae81375af6b",
-      "size": 45808
+      "size": 45808,
+      "source_path": "site/assets/inspirations/beauty_031.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_032.webp",
       "sha256": "f154cc4513e458bd4488d4845f94e5659c26a80efad7e94770886c468d87fe50",
-      "size": 61008
+      "size": 61008,
+      "source_path": "site/assets/inspirations/beauty_032.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_033.webp",
       "sha256": "82bd3b1fae6fb8b9cd708f4f425c825b309bc3a03f0fd9748a0b52d38133ad15",
-      "size": 44296
+      "size": 44296,
+      "source_path": "site/assets/inspirations/beauty_033.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_034.webp",
       "sha256": "9620d11529cc6c8834c6be9ed29fcf52da51bbe44994c07c5dca524ab7b3b525",
-      "size": 45210
+      "size": 45210,
+      "source_path": "site/assets/inspirations/beauty_034.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_035.webp",
       "sha256": "e959e22146ff542d2fe5b95ba080164d0dc216c2bb4125fe8b33e20bb709e9ee",
-      "size": 60078
+      "size": 60078,
+      "source_path": "site/assets/inspirations/beauty_035.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_036.webp",
       "sha256": "fed10ee11039fb89bb4cd075f0599a22703a4549adc0ee80d975b6e075504566",
-      "size": 50224
+      "size": 50224,
+      "source_path": "site/assets/inspirations/beauty_036.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_037.webp",
       "sha256": "7e758c7c2d9d73267fd80c6f81f86b14c26798bc7a3aede04e7767aecc4e84d2",
-      "size": 42120
+      "size": 42120,
+      "source_path": "site/assets/inspirations/beauty_037.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_038.webp",
       "sha256": "2378eb5ce46ca792612512398927b8afd981c3a681fb406d6fd9daba0e302557",
-      "size": 75872
+      "size": 75872,
+      "source_path": "site/assets/inspirations/beauty_038.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_039.webp",
       "sha256": "29941e9cc4e778b35220e3b08759aebfde782f3b676cb240afc859e20603a909",
-      "size": 85878
+      "size": 85878,
+      "source_path": "site/assets/inspirations/beauty_039.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_040.webp",
       "sha256": "1b2c0f8c65e332c7341f7f998c2d104d4f716ab60ab9c465cdcda00a3515400e",
-      "size": 52252
+      "size": 52252,
+      "source_path": "site/assets/inspirations/beauty_040.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_041.webp",
       "sha256": "aa61b687720ed3cefed5f4b39955c4cad869e28f16b9ac4a152f154d8c74bdda",
-      "size": 45756
+      "size": 45756,
+      "source_path": "site/assets/inspirations/beauty_041.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_042.webp",
       "sha256": "2993fd8f38092f64a802eeb43926c03026370904de73db68a6e558695db57754",
-      "size": 109352
+      "size": 109352,
+      "source_path": "site/assets/inspirations/beauty_042.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_043.webp",
       "sha256": "dc3aa3c25b6ebd9445cc97a2905c0c9269efcb7836ff2f7765faa63c87f3ecb6",
-      "size": 47618
+      "size": 47618,
+      "source_path": "site/assets/inspirations/beauty_043.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_044.webp",
       "sha256": "7e0f271a1b88248cd04aa0cf49c811bc9c98ef03e20f5faa732b51134a379098",
-      "size": 95072
+      "size": 95072,
+      "source_path": "site/assets/inspirations/beauty_044.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_045.webp",
       "sha256": "973de92ae2e023fd06f9a17a1933f8ba6922f307951cb604521c95e6f59e9067",
-      "size": 57570
+      "size": 57570,
+      "source_path": "site/assets/inspirations/beauty_045.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_046.webp",
       "sha256": "d80cf65289258c2fdd10d11b81d6fbe07e87a6d3b2f71a05ee6dd77b9aa425f0",
-      "size": 103570
+      "size": 103570,
+      "source_path": "site/assets/inspirations/beauty_046.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_047.webp",
       "sha256": "28cc6b0ca857d2ae17172262f695e06ec98d2fb3fb192d04b5f1c1795b1ccfac",
-      "size": 51316
+      "size": 51316,
+      "source_path": "site/assets/inspirations/beauty_047.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_048.webp",
       "sha256": "2f263134ca26f5cf90e7d55780da5f28008635cb4c744093d1c8471d480e75ab",
-      "size": 102990
+      "size": 102990,
+      "source_path": "site/assets/inspirations/beauty_048.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_049.webp",
       "sha256": "e1656fe70456d27cd7c27082f574dd43293d2b4e438b227ab54f38979111d707",
-      "size": 113744
+      "size": 113744,
+      "source_path": "site/assets/inspirations/beauty_049.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_050.webp",
       "sha256": "0f841876578bb2f6ae9d7a8123044d377fe389bafeaa02208bb457dc41581cf3",
-      "size": 217644
+      "size": 217644,
+      "source_path": "site/assets/inspirations/beauty_050.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_051.webp",
       "sha256": "ca46839f09d2d30cabc8634280b498fb00db287256406203eb0cd68c0b628598",
-      "size": 160626
+      "size": 160626,
+      "source_path": "site/assets/inspirations/beauty_051.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_052.webp",
       "sha256": "0219acf62a5aef130fd515d8b988bc1e9a16a7110f2d1126bf74ec8b5ca3217c",
-      "size": 95124
+      "size": 95124,
+      "source_path": "site/assets/inspirations/beauty_052.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_053.webp",
       "sha256": "0864cb56fff72ab4083c189a6692030172d3c3a8c68a5155df37d2dc9053ef7e",
-      "size": 116676
+      "size": 116676,
+      "source_path": "site/assets/inspirations/beauty_053.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_054.webp",
       "sha256": "72f7dd94aa075046df65d750a5590c497c9e2643d4151f0393adbf7c04f9f84e",
-      "size": 315636
+      "size": 315636,
+      "source_path": "site/assets/inspirations/beauty_054.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_055.webp",
       "sha256": "87a5dab1b28fd3b9dfec1d1722a4bebc5549f4694c4898da6964ac10e051f484",
-      "size": 182020
+      "size": 182020,
+      "source_path": "site/assets/inspirations/beauty_055.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_056.webp",
       "sha256": "0abc91741185e713fb7953940ff2df1df681a6c95c9c7d95575dff5e88fe83c3",
-      "size": 80432
+      "size": 80432,
+      "source_path": "site/assets/inspirations/beauty_056.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_057.webp",
       "sha256": "1b0d69d3c25613c5337c23ba23e46b3101865d7d711389e194598545eb9cd193",
-      "size": 275118
+      "size": 275118,
+      "source_path": "site/assets/inspirations/beauty_057.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/beauty_058.webp",
       "sha256": "a529d4dbbdcd4fee923a9190544d063fe4649c4dfd8c29d0591c32026d0545b6",
-      "size": 214790
+      "size": 214790,
+      "source_path": "site/assets/inspirations/beauty_058.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/inspiration_diverse_001.webp",
       "sha256": "f55f7db99ba46071860c222f482d84ba795747cb9a624654d02ea95c7b35b043",
-      "size": 102814
+      "size": 102814,
+      "source_path": "site/assets/inspirations/inspiration_diverse_001.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/inspiration_diverse_002.webp",
       "sha256": "73766409701144d98125c906cb9afbcc1e41da556eb47afcf3697f186bc9dd9a",
-      "size": 117454
+      "size": 117454,
+      "source_path": "site/assets/inspirations/inspiration_diverse_002.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/inspiration_diverse_003.webp",
       "sha256": "c515ee464692342dcc7184717719a39f9042137fd16dfd654bcae3a1f29c07a3",
-      "size": 270644
+      "size": 270644,
+      "source_path": "site/assets/inspirations/inspiration_diverse_003.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/inspirations/inspiration_diverse_004.webp",
       "sha256": "e83f5b04efde4ff8eedad6dc87481656a453b218f0a06093e147b2529c27cbf8",
-      "size": 116408
+      "size": 116408,
+      "source_path": "site/assets/inspirations/inspiration_diverse_004.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/layer_bg.webp",
       "sha256": "4fd0eb94ed798e9966621e8deca7ea1d978d69d6f8e9f3f6a3392a35af30a2d4",
-      "size": 74606
+      "size": 74606,
+      "source_path": "site/assets/layer_bg.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/layer_cube.webp",
       "sha256": "747d2dd128e72673c8990b5453c708abbb37a586065fa071488f279c33d6c8a9",
-      "size": 115842
+      "size": 115842,
+      "source_path": "site/assets/layer_cube.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/layer_search.webp",
       "sha256": "89f3efcfa3a6c5c316061d793dfdb50c0db213b1f49478661319a67521e55eea",
-      "size": 95892
+      "size": 95892,
+      "source_path": "site/assets/layer_search.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/logo_sparrow.png",
       "sha256": "d6a9813ba694ce61d5e511a32352e8e884943a6c9a4bd54cf95885ce29624dc6",
-      "size": 3181
+      "size": 3181,
+      "source_path": "site/assets/logo_sparrow.png"
     },
     {
       "mode": "0644",
       "path": "site/assets/logo_sparrow.webp",
       "sha256": "9eed764e49b42eba4c6266aaa728dd2d4f7182908d53f43e4b839ee874535a72",
-      "size": 3888
+      "size": 3888,
+      "source_path": "site/assets/logo_sparrow.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/meiye_poster.webp",
       "sha256": "2acd63ccb055e0b284e780069fdbbe73a3b5f0d9e3f583e63476829b726210ec",
-      "size": 62724
+      "size": 62724,
+      "source_path": "site/assets/meiye_poster.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/midautumn.webp",
       "sha256": "067a721bd19e762cc63af881c8e4aa7c68d00eb3d8360ae2688e654fb28a2f9a",
-      "size": 248184
+      "size": 248184,
+      "source_path": "site/assets/midautumn.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-assets.webp",
       "sha256": "09489cfae26473fbcec068139c0070d464973190402a1a684d585fcf439f79c8",
-      "size": 47710
+      "size": 47710,
+      "source_path": "site/assets/tutorials/huangque-ai-assets.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-audio.webp",
       "sha256": "cc60907ad47e75cfaf8d11a576d3264bd71aa12aff8f385062b87ff7544683a0",
-      "size": 42220
+      "size": 42220,
+      "source_path": "site/assets/tutorials/huangque-ai-audio.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-canvas.webp",
       "sha256": "bff5524bcba770360a781fae5a5bda897dacb2c80582fc0e1de03d203897d2ba",
-      "size": 16266
+      "size": 16266,
+      "source_path": "site/assets/tutorials/huangque-ai-canvas.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-content-crawl.webp",
       "sha256": "ddfb445f409cce9b9c8fb7480a0473713921cb4eb4a363e6af1a02efae95dcdc",
-      "size": 11620
+      "size": 11620,
+      "source_path": "site/assets/tutorials/huangque-ai-content-crawl.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-getting-started.webp",
       "sha256": "8264ff4e98580a551671bbb04c20fab1d6d45ad5e0b8a70d9ffd8a34bef72d53",
-      "size": 25922
+      "size": 25922,
+      "source_path": "site/assets/tutorials/huangque-ai-getting-started.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-image.webp",
       "sha256": "1eefcbd74d480083c33dd254d28fb7a4c98e2c4e8c4b2afccedb1d39a960b941",
-      "size": 10568
+      "size": 10568,
+      "source_path": "site/assets/tutorials/huangque-ai-image.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-leads.webp",
       "sha256": "454c19ecd645843fc99be5bb05b989f51a0d2c276894b761599647bec174fc53",
-      "size": 86558
+      "size": 86558,
+      "source_path": "site/assets/tutorials/huangque-ai-leads.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-overview-flow.webp",
       "sha256": "699a8b623a0bb08a78976cd366af7fc8b288a5618747f024220ff8aed7b1a36a",
-      "size": 12320
+      "size": 12320,
+      "source_path": "site/assets/tutorials/huangque-ai-overview-flow.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-script.webp",
       "sha256": "3c58655c62de09c885504b5954f3a76bcb137d6c4b73feb8d51af11e290b1163",
-      "size": 15494
+      "size": 15494,
+      "source_path": "site/assets/tutorials/huangque-ai-script.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/tutorials/huangque-ai-video.webp",
       "sha256": "4970d9f06a2a761c4a15bb6679aa1814b0027aff169bbe42b0a4498f4d3221f0",
-      "size": 41144
+      "size": 41144,
+      "source_path": "site/assets/tutorials/huangque-ai-video.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/wechat_matrix.webp",
       "sha256": "ac479630d526570fc4f9436e228d976e0d2459a67026dcf6639e6038a6985f8b",
-      "size": 79124
+      "size": 79124,
+      "source_path": "site/assets/wechat_matrix.webp"
     },
     {
       "mode": "0644",
       "path": "site/assets/workbench_preview.png",
       "sha256": "10caaac3b6c1abfc9bd0431aa0d2c92472488f90eb1657ba733225403aa2a3ac",
-      "size": 332314
+      "size": 332314,
+      "source_path": "site/assets/workbench_preview.png"
     },
     {
       "mode": "0644",
       "path": "site/index.html",
       "sha256": "1c44d1ce926c26930fcbf52a9844f621be90d42c4df7d770c5720ef9e6e746b4",
-      "size": 1067
+      "size": 1067,
+      "source_path": "site/index.html"
     },
     {
       "mode": "0644",
       "path": "site/login.html",
       "sha256": "9604e93cbdb7ddf674f185f31092ea16747a95aebdd26550db848ce3a63972f3",
-      "size": 25304
+      "size": 25304,
+      "source_path": "site/login.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets.html",
       "sha256": "1927c9805dc77786346b05fb6c1c12884b11fdcb95b43ef01a4c7925d8fba029",
-      "size": 150851
+      "size": 150851,
+      "source_path": "site/workbench/assets.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/logo_sparrow.png",
       "sha256": "d6a9813ba694ce61d5e511a32352e8e884943a6c9a4bd54cf95885ce29624dc6",
-      "size": 3181
+      "size": 3181,
+      "source_path": "site/workbench/assets/logo_sparrow.png"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/logo_sparrow.webp",
       "sha256": "9eed764e49b42eba4c6266aaa728dd2d4f7182908d53f43e4b839ee874535a72",
-      "size": 3888
+      "size": 3888,
+      "source_path": "site/workbench/assets/logo_sparrow.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/mock_result_1.webp",
       "sha256": "2acd63ccb055e0b284e780069fdbbe73a3b5f0d9e3f583e63476829b726210ec",
-      "size": 62724
+      "size": 62724,
+      "source_path": "site/workbench/assets/mock_result_1.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/mock_result_2.webp",
       "sha256": "e5c421100538472122dd99039c192b30457b83b5abb6d8f2e7f1de7a02f3da22",
-      "size": 203112
+      "size": 203112,
+      "source_path": "site/workbench/assets/mock_result_2.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/mock_thumb_1.webp",
       "sha256": "8e9c84a695844f34468467b863162051631c890aff9694be82b9892043007d7b",
-      "size": 41076
+      "size": 41076,
+      "source_path": "site/workbench/assets/mock_thumb_1.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/mock_thumb_2.webp",
       "sha256": "7a780d33249222b696c8fc1f1cb55527ecc12408978f6a3bb4e9a845c7a9aa3b",
-      "size": 50092
+      "size": 50092,
+      "source_path": "site/workbench/assets/mock_thumb_2.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/mock_thumb_3.webp",
       "sha256": "067a721bd19e762cc63af881c8e4aa7c68d00eb3d8360ae2688e654fb28a2f9a",
-      "size": 248184
+      "size": 248184,
+      "source_path": "site/workbench/assets/mock_thumb_3.webp"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/motions/gesture-01.jpg",
       "sha256": "00d5ea936b370fc56dc58d1d18c258515579d732c634b2a84458bbf698700de7",
-      "size": 41109
+      "size": 41109,
+      "source_path": "site/workbench/assets/motions/gesture-01.jpg"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/motions/gesture-03.jpg",
       "sha256": "45b89b4e2d74768cefbc0bb60d07bb91770790dce1ba3d634b784aa095c30864",
-      "size": 21853
+      "size": 21853,
+      "source_path": "site/workbench/assets/motions/gesture-03.jpg"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/motions/index.json",
       "sha256": "1ac47e4ee005d7cb03533a75f748f1421a2c072baf8ca785bcdec01de9f0cac6",
-      "size": 206
+      "size": 206,
+      "source_path": "site/workbench/assets/motions/index.json"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/tpl-preview/bar.png",
       "sha256": "2893f749ab7d1cf86c829be728f8ea0c207b3318fefcfa56b8492fe1e38cf7af",
-      "size": 77660
+      "size": 77660,
+      "source_path": "site/workbench/assets/tpl-preview/bar.png"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/tpl-preview/variety.png",
       "sha256": "4c8aa3af76e0c6c8532aa867c4da29bc093398d98339c6a6df680e475a284f01",
-      "size": 78683
+      "size": 78683,
+      "source_path": "site/workbench/assets/tpl-preview/variety.png"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/tpl-preview/wg_red.png",
       "sha256": "d7b10e2ff76d10a9beb20b8a9c4610b6a82974a986570f73a133feba773f0f6d",
-      "size": 80460
+      "size": 80460,
+      "source_path": "site/workbench/assets/tpl-preview/wg_red.png"
     },
     {
       "mode": "0644",
       "path": "site/workbench/assets/tpl-preview/white.png",
       "sha256": "bc9420dc7731b4fa0f2c69d48c1172b3e253566112cdd8f35bb4bcfcd7189d95",
-      "size": 78279
+      "size": 78279,
+      "source_path": "site/workbench/assets/tpl-preview/white.png"
     },
     {
       "mode": "0644",
       "path": "site/workbench/audio.html",
       "sha256": "e10e67d319cd8ce299746f880669c81119ad87311a1db9eb9d4f28c14655b965",
-      "size": 24757
+      "size": 24757,
+      "source_path": "site/workbench/audio.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/auth-guard.js",
       "sha256": "079001dfdc49939af924c2c6b158a52b39e8f48435d0a5decbddc7047e60ef3a",
-      "size": 434
+      "size": 434,
+      "source_path": "site/workbench/auth-guard.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/banana.html",
       "sha256": "07fd36ef7cf0e2078a461a7ef0b871ec40ec8cf88ca76a37a9fc536d3f3d7839",
-      "size": 82797
+      "size": 82797,
+      "source_path": "site/workbench/banana.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/bots.html",
       "sha256": "3cf32e043eb0bec65bd6d621a0a5927bccb70ad525337ddb4f2eac072371e912",
-      "size": 1675
+      "size": 1675,
+      "source_path": "site/workbench/bots.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/canvas-collab-sync.js",
       "sha256": "57b82bebd77d8073904c51d0c0b2d7ae0136dcdcc8c688f481b14f91c79903fe",
-      "size": 15118
+      "size": 15118,
+      "source_path": "site/workbench/canvas-collab-sync.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/canvas.html",
       "sha256": "30df3fa2f90f04e723f51b8410f62ca6c7e88d4f8e8ccf16cad52a91a9e9abc6",
-      "size": 209494
+      "size": 209494,
+      "source_path": "site/workbench/canvas.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/cloud-shell.js",
       "sha256": "8b9615dcc3247725197b43c7c4c99b7688638782b3364eea389f459cfdaa3462",
-      "size": 69174
+      "size": 69174,
+      "source_path": "site/workbench/cloud-shell.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/collect.html",
       "sha256": "72c7c49215dd2c4ea1794f273b22cb943525e06ff4153b2930c019167dce62a7",
-      "size": 61775
+      "size": 61775,
+      "source_path": "site/workbench/collect.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/cost.html",
       "sha256": "9621eedc7c599a39ec845fdd7dc985cdb8eccae69aea8e1dc742bafbb430ccb1",
-      "size": 30423
+      "size": 30423,
+      "source_path": "site/workbench/cost.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/dashboard.html",
       "sha256": "8e272fc1a78dd1af7d39db7a6b370f04f25a4946b4d107517c77046ab54298c5",
-      "size": 42329
+      "size": 42329,
+      "source_path": "site/workbench/dashboard.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/hq-icons-duotone.js",
       "sha256": "53f8e30c00714923eb6e55eb77547da11888e56a5f969f02304b3f4875046ddb",
-      "size": 4051
+      "size": 4051,
+      "source_path": "site/workbench/hq-icons-duotone.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/inspiration.html",
       "sha256": "f20d3c71d3eb05665c6187f4c20e4710e49881b5f5620a3829c014d076d4a2de",
-      "size": 22936
+      "size": 22936,
+      "source_path": "site/workbench/inspiration.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/inspirations.json",
       "sha256": "aeb32383adb7de151e8f91308e3643a02406f0d06f1dc4ce67cd49abdef7f118",
-      "size": 34487
+      "size": 34487,
+      "source_path": "site/workbench/inspirations.json"
     },
     {
       "mode": "0644",
       "path": "site/workbench/leads.html",
       "sha256": "9b0e60ddb4a5179748ac87e1ea126386da437ff209a0f7f7de93aa081ef7756a",
-      "size": 33815
+      "size": 33815,
+      "source_path": "site/workbench/leads.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/qrcode.min.js",
       "sha256": "c541ef06327885a8415bca8df6071e14189b4855336def4f36db54bde8484f36",
-      "size": 19927
+      "size": 19927,
+      "source_path": "site/workbench/qrcode.min.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/recharge.html",
       "sha256": "e0c39aa1fb9ac7d4589794a97d785026e9380d2996ab9cf0c6a06f2cd6d13f14",
-      "size": 29340
+      "size": 29340,
+      "source_path": "site/workbench/recharge.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/script.html",
       "sha256": "e0e49d646299edfcb831eefad0b259664fc8df47c89b9cc39f9be2450aa85f23",
-      "size": 141095
+      "size": 141095,
+      "source_path": "site/workbench/script.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/settings.html",
       "sha256": "3f00e98bbed6ec19506dca6587b3d28c95240800f7880c4191e660973cb22a8d",
-      "size": 63345
+      "size": 63345,
+      "source_path": "site/workbench/settings.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/shell.css",
       "sha256": "9fcfd80cba1b58842f9c20c04eac00e82953fa996d4dd39f407f5b3dffee45ae",
-      "size": 21868
+      "size": 21868,
+      "source_path": "site/workbench/shell.css"
     },
     {
       "mode": "0644",
       "path": "site/workbench/tasks.js",
       "sha256": "8160486f4c574570ee8b9c3f4f03b492dc2bda821372d3da08bb099c8315dc65",
-      "size": 8200
+      "size": 8200,
+      "source_path": "site/workbench/tasks.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/theme-init.js",
       "sha256": "74e3b3c924726ac865dadc6b832748447e26831ada7fbc63dd4a42eff0fd56b8",
-      "size": 1364
+      "size": 1364,
+      "source_path": "site/workbench/theme-init.js"
     },
     {
       "mode": "0644",
       "path": "site/workbench/theme.css",
       "sha256": "86db28ee507858f127abaf86bb70bbb3069d867f62fb56e72ffda5132abfba68",
-      "size": 16620
+      "size": 16620,
+      "source_path": "site/workbench/theme.css"
     },
     {
       "mode": "0644",
       "path": "site/workbench/tutorials.html",
       "sha256": "09e334d813cfebd621decd5a41a13d26df06988bf5da9fb563d2c78586cf5827",
-      "size": 13504
+      "size": 13504,
+      "source_path": "site/workbench/tutorials.html"
     },
     {
       "mode": "0644",
       "path": "site/workbench/tutorials.json",
       "sha256": "104a48d95e21e22b7b6dfcadfc8801c004c9e8f537e6be7c860372f20a14c92d",
-      "size": 5092
+      "size": 5092,
+      "source_path": "site/workbench/tutorials.json"
     },
     {
       "mode": "0644",
       "path": "site/workbench/video.html",
       "sha256": "11b7afca918f20ed1e33dfbf4c957c79dd6de87c1d2123bb67b79e638fd99fa1",
-      "size": 196605
+      "size": 196605,
+      "source_path": "site/workbench/video.html"
     }
   ],
   "provenance": {
     "capture_kind": "repository-candidate",
-    "captured_at_utc": "2026-07-30T05:07:32.032685+00:00",
+    "captured_at_utc": "2026-07-30T05:23:32.967825+00:00",
     "production_accessed": false,
     "server_address": "8.148.158.106",
     "server_role": "test",
     "source_revision": "5bc6dfacfb09ef6b885b48cefa35b164a5df522f"
   },
-  "schema_version": 2,
-  "scope_sha256": "55695321e6be46f93e4d100f5e395c6b2bd9cc2c8412003820c232bab704df15"
+  "roots": [
+    {
+      "included_bytes": 1071890,
+      "included_file_count": 41,
+      "kind": "repository-runtime",
+      "source": "/server",
+      "target": "server"
+    },
+    {
+      "included_bytes": 15300546,
+      "included_file_count": 211,
+      "kind": "repository-runtime",
+      "source": "/site",
+      "target": "site"
+    },
+    {
+      "included_bytes": 13097,
+      "included_file_count": 21,
+      "kind": "repository-runtime",
+      "source": "/deploy/systemd",
+      "target": "deploy/systemd"
+    },
+    {
+      "included_bytes": 7000,
+      "included_file_count": 1,
+      "kind": "repository-runtime",
+      "source": "/deploy/nginx-huangquechuanmei.conf",
+      "target": "deploy/nginx-huangquechuanmei.conf"
+    }
+  ],
+  "schema_version": 3,
+  "scope_sha256": "48cdabc09a32a3226a8980544d8d21d911e1def3b8e06331e4d962aba5b9a591"
 }

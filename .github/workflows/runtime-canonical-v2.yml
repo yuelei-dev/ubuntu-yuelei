@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  canonical-gates:
+  canonical-unit-gates:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -19,9 +19,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Unit gates
+      - name: Unit and adversarial gates
         run: python -m unittest discover -v -s tests -p test_runtime_canonical_v2.py
-      - name: Candidate manifest is canonical and complete
+      - name: Candidate manifest remains reproducible
         run: |
           python scripts/runtime_canonical.py \
             --scope deploy/runtime-canonical/scope.json \
@@ -32,12 +32,59 @@ jobs:
             verify \
             --source . \
             --manifest deploy/runtime-canonical/baseline-candidate.json
-      - name: Isolation from Gemini PR 146
+
+  server-baseline-integrity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require independently captured test-server baseline
+        run: |
+          test -f deploy/runtime-canonical/baseline-server.json || {
+            echo "BLOCKED: test-server read-only baseline has not been captured" >&2
+            exit 1
+          }
+          python scripts/runtime_canonical.py \
+            --scope deploy/runtime-canonical/scope.json \
+            validate-manifest \
+            --manifest deploy/runtime-canonical/baseline-server.json \
+            --require-server-verified
+
+  pr146-isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch prohibited refs read-only
+        run: |
+          git fetch --no-tags origin \
+            '+refs/pull/146/head:refs/remotes/isolation/pr-146' \
+            '+refs/heads/runtime/biandao-141-142:refs/remotes/isolation/runtime-base'
+      - name: Enforce ancestry and dynamic file isolation
         shell: bash
         run: |
-          forbidden='^(\.github/workflows/runtime-biandao-gemini\.yml|deploy/runtime-manifest\.json|deploy/runtime-test/env-contract\.json|deploy/runtime-test/gemini31-reverse-validation\.md|scripts/compare_runtime_test_outcomes\.py|scripts/runtime_unittest_snapshot\.py|server/content_domains/breakdown\.py|tests/test_breakdown_gemini31\.py)$'
-          changed=$(git diff --name-only "${{ github.event.pull_request.base.sha || 'HEAD^' }}" HEAD)
-          if grep -E "$forbidden" <<<"$changed"; then
-            echo "PR #146 isolation boundary violated" >&2
+          set -euo pipefail
+          if git merge-base --is-ancestor refs/remotes/isolation/runtime-base HEAD; then
+            echo "BLOCKED: prohibited runtime branch is an ancestor" >&2
+            exit 1
+          fi
+          if git merge-base --is-ancestor refs/remotes/isolation/pr-146 HEAD; then
+            echo "BLOCKED: PR #146 head is an ancestor" >&2
+            exit 1
+          fi
+          base="${{ github.event.pull_request.base.sha || 'HEAD^' }}"
+          git diff --name-only "$base" HEAD | sort -u > /tmp/ours
+          git diff --name-only \
+            refs/remotes/isolation/runtime-base...refs/remotes/isolation/pr-146 \
+            | sort -u > /tmp/pr146
+          overlap=$(comm -12 /tmp/ours /tmp/pr146)
+          if [[ -n "$overlap" ]]; then
+            echo "BLOCKED: PR #146 file overlap:" >&2
+            printf '%s\n' "$overlap" >&2
             exit 1
           fi

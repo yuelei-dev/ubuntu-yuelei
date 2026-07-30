@@ -3,6 +3,7 @@
   "server_role": "test",
   "server_address": "8.148.158.106",
   "production_address": "129.204.166.13",
+  "max_text_file_bytes": 33554432,
   "roots": [
     {"source": "/home/ubuntu/content-api", "target": "server", "kind": "backend"},
     {"source": "/home/ubuntu/auth-service", "target": "runtime/auth-service", "kind": "backend"},
