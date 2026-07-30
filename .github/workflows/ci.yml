@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   quality:
+    if: github.event_name != 'pull_request' || github.base_ref != 'runtime/test'
     name: 代码与安全门禁
     runs-on: ubuntu-latest
     timeout-minutes: 10

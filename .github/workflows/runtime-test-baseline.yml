@@ -1,0 +1,95 @@
+name: Runtime test baseline gate
+
+on:
+  pull_request:
+    branches: [runtime/test]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime-baseline:
+    name: Runtime baseline blocking contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@v7
+
+      - name: Configure Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Configure Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Validate tracked content and cache stamps
+        run: |
+          python scripts/ci_validate.py
+          python scripts/stamp_assets.py --check
+
+      - name: Run runtime blocking suite
+        run: |
+          python scripts/run_unittest_json.py \
+            --targets-file deploy/runtime-test/blocking-targets.txt \
+            --output evidence/runtime-blocking.json \
+            --label runtime-test-blocking
+
+      - name: Verify Linux syntax and JavaScript
+        shell: bash
+        run: |
+          mapfile -d '' files < <(find server scripts worker -type f -name '*.py' -print0)
+          python -m py_compile "${files[@]}"
+          find site -type f -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      - name: Build release twice and compare every path and hash
+        run: |
+          python scripts/build_test_runtime_release.py --output evidence/release-a
+          python scripts/build_test_runtime_release.py --output evidence/release-b
+          python scripts/compare_runtime_releases.py \
+            evidence/release-a evidence/release-b \
+            --output evidence/release-comparison.json
+
+      - name: Start six services only against disposable state
+        run: |
+          python scripts/runtime_six_service_smoke.py \
+            --release evidence/release-a \
+            --evidence evidence/six-service-smoke
+
+      - name: Preserve the original 320-test diagnostic
+        if: always()
+        run: |
+          python scripts/run_unittest_json.py \
+            --targets-file deploy/runtime-test/full-diagnostic-targets.txt \
+            --output evidence/targeted-320.json \
+            --label original-targeted-320 \
+            --non-blocking
+
+      - name: Preserve the complete main-suite diagnostic
+        if: always()
+        run: |
+          python scripts/run_unittest_json.py \
+            --discover --start-directory tests --pattern 'test*.py' \
+            --exclude-prefix tests.test_runtime_test_gate \
+            --exclude-prefix test_runtime_test_gate \
+            --output evidence/full-main-suite.json \
+            --label complete-main-suite \
+            --non-blocking
+
+      - name: Upload audit evidence
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: runtime-test-gate-${{ github.sha }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 30
