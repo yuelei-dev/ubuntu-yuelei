@@ -60,6 +60,8 @@ def exclusion_reason(relative: Path | PurePosixPath, scope: dict) -> str | None:
     name = relative.name.lower()
     if name in {item.lower() for item in scope["exclude_basenames"]}:
         return "excluded_basename"
+    if any(re.fullmatch(pattern, relative.name) for pattern in scope["exclude_name_patterns"]):
+        return "excluded_backup_artifact"
     if any(name.endswith(suffix.lower()) for suffix in scope["exclude_suffixes"]):
         return "excluded_suffix"
     return None
@@ -102,6 +104,7 @@ def add_tree(
     scope: dict,
     provenance: dict,
     patterns: list[re.Pattern[str]],
+    mode_map: dict[str, str] | None,
     files: list[dict],
     exclusions: list[dict],
 ) -> dict:
@@ -140,11 +143,15 @@ def add_tree(
             })
             continue
         assert_safe_content(physical_path, scope, patterns)
-        mode = (
-            0o644
-            if provenance["capture_kind"] == "repository-candidate"
-            else stat.S_IMODE(physical_path.stat().st_mode)
-        )
+        if provenance["capture_kind"] == "repository-candidate":
+            mode = 0o644
+        elif mode_map is not None:
+            mapped_mode = mode_map.get(source_path.as_posix())
+            if mapped_mode is None or not re.fullmatch(r"0[0-7]{3}", mapped_mode):
+                raise GateError(f"missing or invalid captured mode: {source_path.as_posix()}")
+            mode = int(mapped_mode, 8)
+        else:
+            mode = stat.S_IMODE(physical_path.stat().st_mode)
         size = physical_path.stat().st_size
         files.append({
             "source_path": source_path.as_posix(),
@@ -164,7 +171,12 @@ def add_tree(
     }
 
 
-def inventory(source_root: Path, scope: dict, provenance: dict) -> dict:
+def inventory(
+    source_root: Path,
+    scope: dict,
+    provenance: dict,
+    mode_map: dict[str, str] | None = None,
+) -> dict:
     if not source_root.is_dir():
         raise GateError(f"source root does not exist: {source_root}")
     patterns = [re.compile(item) for item in scope["forbidden_content_patterns"]]
@@ -209,6 +221,7 @@ def inventory(source_root: Path, scope: dict, provenance: dict) -> dict:
                     scope=scope,
                     provenance=provenance,
                     patterns=patterns,
+                    mode_map=mode_map,
                     files=files,
                     exclusions=exclusions,
                 ))
@@ -224,6 +237,7 @@ def inventory(source_root: Path, scope: dict, provenance: dict) -> dict:
                 scope=scope,
                 provenance=provenance,
                 patterns=patterns,
+                mode_map=mode_map,
                 files=files,
                 exclusions=exclusions,
             ))
@@ -309,7 +323,15 @@ def validate_manifest(manifest: dict, scope: dict, require_server_verified: bool
 
 def verify_tree(source_root: Path, manifest: dict, scope: dict) -> None:
     validate_manifest(manifest, scope, require_server_verified=False)
-    actual = inventory(source_root, scope, manifest["provenance"])
+    captured_modes = None
+    if manifest["provenance"]["capture_kind"] == "server-read-only":
+        captured_modes = {item["source_path"]: item["mode"] for item in manifest["files"]}
+    actual = inventory(
+        source_root,
+        scope,
+        manifest["provenance"],
+        mode_map=captured_modes,
+    )
     for key in ("roots", "files", "excluded"):
         if actual[key] != manifest[key]:
             raise GateError(f"runtime drift in {key}")
@@ -410,6 +432,7 @@ def main() -> int:
     inv.add_argument("--output", type=Path, required=True)
     inv.add_argument("--capture-kind", choices=["repository-candidate", "server-read-only"], required=True)
     inv.add_argument("--source-revision", required=True)
+    inv.add_argument("--mode-map", type=Path)
     val = sub.add_parser("validate-manifest")
     val.add_argument("--manifest", type=Path, required=True)
     val.add_argument("--require-server-verified", action="store_true")
@@ -437,7 +460,12 @@ def main() -> int:
                 "production_accessed": False,
                 "source_revision": args.source_revision,
             }
-            result = inventory(args.source, scope, provenance)
+            mode_map = None
+            if args.mode_map:
+                mode_map = load_json(args.mode_map)
+            if args.capture_kind == "server-read-only" and mode_map is None:
+                raise GateError("server-read-only inventory requires --mode-map")
+            result = inventory(args.source, scope, provenance, mode_map=mode_map)
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_bytes(canonical_json(result))
         elif args.command == "validate-manifest":

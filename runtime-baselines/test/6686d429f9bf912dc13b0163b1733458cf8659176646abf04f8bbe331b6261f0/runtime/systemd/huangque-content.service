@@ -1,0 +1,93 @@
+# /etc/systemd/system/huangque-content.service
+[Unit]
+Description=Huangque Content API (image/copy/video gen + points)
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/content-api
+EnvironmentFile=/home/ubuntu/content-api/content.env
+ExecStart=/usr/bin/python3 /home/ubuntu/content-api/content_api.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/huangque-content.service.d/hardening.conf
+# huangque-content 启动加固（崩溃风暴限速 + 抢占残留端口 + 优雅停机）
+# 落地：/etc/systemd/system/huangque-content.service.d/hardening.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-content
+#
+# ExecStartPre 的 fuser 是给「上次没停干净、端口还被占着」兜底的：
+# 前缀 '-' 表示失败不阻止启动；'|| true' 保证没有占用者时也返回 0。
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+ExecStartPre=-/bin/sh -c 'fuser -k 8096/tcp 2>/dev/null || true'
+KillMode=mixed
+RestartSec=5
+
+# ⚠️ 优雅停机的【另一半】。代码里的 drain 写得再好，systemd 15 秒后照样 SIGKILL —— 白做。
+#
+# 原来这里是 TimeoutStopSec=15，而视频任务要跑 5~15 分钟。每次部署，正在生成的任务
+# 全部被 SIGKILL 杀死；下次启动 reclaim_orphaned_running() 把它们判失败退点。
+# 线上近 14 天 53 条任务是这么死的，涉及 8 个功能。
+#
+# 现在 content_api.py 装了 SIGTERM 处理：停止收新提交 → 等在飞任务跑完 → 退出。
+# 这里必须给够时间，否则 systemd 会在它排空到一半时把它砍了。
+#
+#   1860s = 代码里的 CONTENT_DRAIN_TIMEOUT(1800s) + 60s 余量
+#   两者必须【配套改】：只改一个，另一个就成了新的天花板。
+#
+# 代价：部署最坏要等最后一条剧情视频跑完（约 30 分钟）。这是对的取舍 ——
+# 一次部署慢几分钟，换的是用户的任务不被杀（排空期间读接口不受影响，见 drain_and_exit）。急着回滚时：
+#   sudo systemctl kill -s SIGTERM huangque-content   # 第二次 SIGTERM = 立刻退出
+TimeoutStopSec=1860
+
+# /etc/systemd/system/huangque-content.service.d/points.conf
+# huangque-content 读取内部点数接口令牌（T6 点数收敛用）
+# 落地：/etc/systemd/system/huangque-content.service.d/points.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-content
+#
+# content_api 调 auth 的 /api/auth/points/{deduct,refund} 需带 HQ_INTERNAL_TOKEN。
+# 该令牌与 huangque-auth 共享同一个 /home/ubuntu/auth-service/auth.env（root/ubuntu 600，不进 git）。
+# 两个服务必须用同一个令牌，否则 content 调不通 → 点数操作 500 → 生成任务无法提交。
+[Service]
+EnvironmentFile=-/home/ubuntu/auth-service/auth.env
+
+# /etc/systemd/system/huangque-content.service.d/runninghub.conf
+# huangque-content 的 RunningHub 配置（F8 换装换背景用）
+# 服务器落地路径：/etc/systemd/system/huangque-content.service.d/runninghub.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-content
+#
+# 说明（2026-07-04）：
+# - F8「换装换背景」(kind=tryon) 走 RunningHub 两段式，代码读环境变量 RUNNINGHUB_API_KEY。
+# - 真实密钥放服务器本地 /etc/huangque/runninghub.env（权限 600，root，**永不进 git**）：
+#     RUNNINGHUB_API_KEY=<真实key>
+# - 还需在服务器 pip 装 SDK：pip3 install --user runninghub_sdk（ubuntu 用户，服务 User=ubuntu）。
+[Service]
+EnvironmentFile=/etc/huangque/runninghub.env
+
+# /etc/systemd/system/huangque-content.service.d/sora-beta.conf
+# 主站 Sora 2 限时测试的服务器门；后台功能开关仍默认关闭，需上线时单独开启。
+# 代码会在 2026-09-24 自动停止收单。
+[Service]
+Environment=<redacted>
+
+# /etc/systemd/system/huangque-content.service.d/whisper.conf
+# huangque-content 的 whisper 配置（F4 口播字幕用）
+# 服务器落地路径：/etc/systemd/system/huangque-content.service.d/whisper.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-content
+#
+# 为什么这么配（2026-07-04）：
+# - F4 字幕代码默认 WHISPER_MODEL=base，但服务器上 base 未缓存，
+#   且服务器连不上 huggingface（国内网络），无法下载 base。
+# - 服务器已缓存 small 模型（faster-whisper-small，之前转写功能用的），中文识别还更准。
+# - 故固定用 small，并强制离线（HF_HUB_OFFLINE=1）避免运行时联网卡住/失败。
+# 若将来服务器能联网并预热了 base，可去掉本文件回退默认。
+[Service]
+Environment=<redacted>
+Environment=<redacted>

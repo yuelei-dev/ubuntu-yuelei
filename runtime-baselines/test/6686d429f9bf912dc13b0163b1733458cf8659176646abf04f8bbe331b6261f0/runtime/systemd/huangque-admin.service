@@ -1,0 +1,40 @@
+# /etc/systemd/system/huangque-admin.service
+[Unit]
+Description=Huangque Admin API
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/content-api
+# 真实 env 路径（systemd 以 root 读取，可读 root:600 的密钥文件）
+EnvironmentFile=-/home/ubuntu/content-api/content.env
+EnvironmentFile=-/etc/huangque/runninghub.env
+EnvironmentFile=-/home/ubuntu/auth-service/auth.env
+EnvironmentFile=-/etc/leadgen-secrets.env
+# 8099 被 nginx zhipu-proxy 占用，改用 8098
+Environment=<redacted>
+Environment=<redacted>
+Environment=<redacted>
+ExecStart=/usr/bin/python3 /home/ubuntu/content-api/admin_api.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/huangque-admin.service.d/hardening.conf
+# huangque-admin 启动加固（崩溃风暴限速 + 抢占残留端口 + 优雅停机）
+# 落地：/etc/systemd/system/huangque-admin.service.d/hardening.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-admin
+#
+# ExecStartPre 的 fuser 是给「上次没停干净、端口还被占着」兜底的：
+# 前缀 '-' 表示失败不阻止启动；'|| true' 保证没有占用者时也返回 0。
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+ExecStartPre=-/bin/sh -c 'fuser -k 8098/tcp 2>/dev/null || true'
+KillMode=mixed
+TimeoutStopSec=15
+RestartSec=5

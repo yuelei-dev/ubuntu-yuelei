@@ -1,0 +1,9 @@
+# /etc/systemd/system/huangque-repo-sync.service
+[Unit]
+Description=Refresh the Huangque test-server Git baseline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/huangque-repo-sync

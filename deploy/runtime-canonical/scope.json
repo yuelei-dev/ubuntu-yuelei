@@ -23,13 +23,16 @@
     "huangque-auth.service",
     "huangque-content.service",
     "huangque-dl.service",
+    "huangque-egress-tunnel.service",
     "huangque-imggen-api.service",
-    "huangque-leadgen-api.service"
+    "huangque-leadgen-api.service",
+    "huangque-repo-sync.service",
+    "huangque-repo-sync.timer"
   ],
   "include_suffixes": [
     ".conf", ".css", ".html", ".ico", ".jpg", ".jpeg", ".js", ".json",
     ".md", ".mjs", ".png", ".py", ".service", ".sh", ".svg", ".txt",
-    ".webp", ".woff2", ".xml", ".yaml", ".yml"
+    ".timer", ".webp", ".woff2", ".xml", ".yaml", ".yml"
   ],
   "exclude_path_segments": [
     ".git", ".pytest_cache", "__pycache__", "backups", "browser_data",
@@ -42,6 +45,9 @@
   ],
   "exclude_basenames": [
     "stats.json"
+  ],
+  "exclude_name_patterns": [
+    "(?i).*backup.*\\.json$"
   ],
   "forbidden_content_patterns": [
     "-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",

@@ -23,6 +23,11 @@ host=${remote##*@}
   echo "BLOCKED: output already exists: $output" >&2
   exit 66
 }
+config_dir="${output}.configs"
+[[ ! -e "$config_dir" ]] || {
+  echo "BLOCKED: config output already exists: $config_dir" >&2
+  exit 66
+}
 
 ssh_options=(
   -o BatchMode=yes
@@ -40,8 +45,13 @@ remote_hostname=$(ssh "${ssh_options[@]}" "$remote" 'hostname')
 }
 
 partial="${output}.partial.$$"
-cleanup() { rm -f -- "$partial"; }
+partial_configs="${config_dir}.partial.$$"
+cleanup() {
+  rm -f -- "$partial"
+  rm -rf -- "$partial_configs"
+}
 trap cleanup EXIT
+mkdir -- "$partial_configs"
 
 # GNU tar writes the archive only to stdout. It creates no remote files.
 ssh "${ssh_options[@]}" "$remote" \
@@ -50,24 +60,57 @@ ssh "${ssh_options[@]}" "$remote" \
     --exclude='*.p12' --exclude='*.db' --exclude='*.db-*' --exclude='*.sqlite*' \
     --exclude='*.log' --exclude='*.pid' --exclude='stats.json' \
     --exclude='*/content_out' --exclude='*/content_out/*' \
+    --exclude='*/backups' --exclude='*/backups/*' \
     --exclude='*/uploads' --exclude='*/uploads/*' \
     --exclude='*/generated' --exclude='*/generated/*' \
     --exclude='*/logs' --exclude='*/logs/*' \
     --exclude='*/cache' --exclude='*/cache/*' \
+    --exclude='*/data' --exclude='*/data/*' \
     --exclude='*/__pycache__' --exclude='*/__pycache__/*' \
     --exclude='*/browser_data' --exclude='*/browser_data/*' \
     --exclude='*/user_data' --exclude='*/user_data/*' \
     home/ubuntu/content-api \
     home/ubuntu/auth-service \
     home/ubuntu/dl-service \
-    var/www/huangquechuanmei \
-    etc/systemd/system \
-    etc/nginx" > "$partial"
+    var/www/huangquechuanmei" > "$partial"
 
 [[ -s "$partial" ]] || {
   echo "BLOCKED: capture archive is empty" >&2
   exit 68
 }
+units=(
+  huangque-admin.service
+  huangque-auth.service
+  huangque-content.service
+  huangque-dl.service
+  huangque-egress-tunnel.service
+  huangque-imggen-api.service
+  huangque-leadgen-api.service
+  huangque-repo-sync.service
+  huangque-repo-sync.timer
+)
+for unit in "${units[@]}"; do
+  ssh "${ssh_options[@]}" "$remote" \
+    "systemctl cat -- '$unit' | sed -E \
+      's/^[[:space:]]*Environment=.*/Environment=<redacted>/; \
+       s/(--(token|password|api-key|secret)[ =])[^ ]+/\\1<redacted>/gI'" \
+    > "$partial_configs/$unit"
+  [[ -s "$partial_configs/$unit" ]] || {
+    echo "BLOCKED: empty sanitized unit output: $unit" >&2
+    exit 69
+  }
+done
+ssh "${ssh_options[@]}" "$remote" \
+  "nginx -T 2>&1 | sed -E \
+    's/(--(token|password|api-key|secret)[ =])[^ ]+/\\1<redacted>/gI'" \
+  > "$partial_configs/nginx-T.conf"
+[[ -s "$partial_configs/nginx-T.conf" ]] || {
+  echo "BLOCKED: empty nginx -T output" >&2
+  exit 69
+}
+
 mv -- "$partial" "$output"
+mv -- "$partial_configs" "$config_dir"
 trap - EXIT
-printf 'captured_host=%s archive=%s\n' "$remote_hostname" "$output"
+printf 'captured_host=%s archive=%s configs=%s\n' \
+  "$remote_hostname" "$output" "$config_dir"

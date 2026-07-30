@@ -52,6 +52,13 @@ jobs:
             validate-manifest \
             --manifest deploy/runtime-canonical/baseline-server.json \
             --require-server-verified
+          content_id=$(python -c \
+            'import json; print(json.load(open("deploy/runtime-canonical/baseline-server.json", encoding="utf-8"))["content_id"])')
+          python scripts/runtime_canonical.py \
+            --scope deploy/runtime-canonical/scope.json \
+            verify-release \
+            --release "runtime-baselines/test/$content_id" \
+            --require-server-verified
 
   pr146-isolation:
     runs-on: ubuntu-latest

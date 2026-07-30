@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>画布 · 节点生产 · 黄雀 AI 工作台</title>
+<link rel="icon" href="../assets/cloud/logo-bird.png">
+<link rel="stylesheet" href="../assets/fonts/hq-fonts.css">
+<link rel="stylesheet" href="../assets/cloud.css?v=8">
+<script src="theme-init.js?v=11eb385e"></script>
+<link rel="stylesheet" href="canvas/canvas.css?v=d84ea6bf">
+<link rel="stylesheet" href="canvas/canvas-short-drama.css?v=66787790">
+<link rel="stylesheet" href="canvas/canvas-short-drama-production.css?v=1215029d">
+<link rel="stylesheet" href="canvas/canvas-short-drama-voice.css?v=41589c99">
+<link rel="stylesheet" href="canvas/canvas-short-drama-video.css?v=8dde549d">
+<link rel="stylesheet" href="canvas/canvas-short-drama-assembly.css?v=00e77754">
+<link rel="stylesheet" href="theme.css?v=5873a2f4">
+</head>
+<body>
+<div class="hq-bg"><div class="glow"></div><div class="grid"></div><canvas></canvas></div>
+
+<div class="hq-app"><div class="hq-content" data-active="canvas">
+  <div class="nc-wrap">
+    <div id="ncBoardHome" class="nc-board-home">
+      <div class="nc-board-head">
+        <div class="nc-tabs" aria-label="画布分类">
+          <button class="nc-tab on" type="button" data-board-tab="mine">我的画布</button>
+          <button class="nc-tab" type="button" data-board-tab="collab">协作画布</button>
+          <button class="nc-tab" type="button" data-board-tab="templates">模板库</button>
+        </div>
+        <div class="nc-board-tools">
+          <select id="ncBoardSort" class="nc-select" title="排序">
+            <option value="updated_desc">按更新时间</option>
+            <option value="name_asc">按名称</option>
+          </select>
+          <input id="ncBoardSearch" class="nc-name nc-board-search" type="search" name="hq_canvas_search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="搜索画布" placeholder="请输入画布名称">
+        </div>
+      </div>
+      <div id="ncBoardGrid" class="nc-board-grid" aria-label="画布列表"></div>
+    </div>
+    <div id="ncEditorView" class="nc-editor-view">
+    <div class="nc-hero">
+      <div class="nc-title">
+        <span style="display:flex; width:22px; color:#e7b24c;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M12 2l9 5-9 5-9-5z"/><path d="M3 12l9 5 9-5M3 17l9 5 9-5"/></svg></span>
+        <div>
+          <strong>节点生产画布</strong>
+          <span>把提示词、图片、反推和作图拼成一条可复用的内容流水线。</span>
+        </div>
+      </div>
+      <div class="nc-stats" aria-label="画布状态">
+        <div class="nc-stat"><b id="ncNodeCount">0</b><span>节点</span></div>
+        <div class="nc-stat"><b id="ncEdgeCount">0</b><span>连线</span></div>
+        <div class="nc-stat"><b id="ncRunState">就绪</b><span>状态</span></div>
+      </div>
+    </div>
+    <div class="nc-bar">
+      <div class="nc-group" aria-label="添加节点">
+        <span class="nc-group-label">添加节点</span>
+        <button class="nc-add" data-add="text" title="添加文本提示词节点">+ 文本</button>
+        <button class="nc-add" data-add="image" title="上传或粘贴素材图">+ 图片</button>
+        <button class="nc-add" data-add="reverse" title="根据图片生成提示词">+ 反推</button>
+        <button class="nc-add" data-add="gen" title="根据提示词和参考图生成图片">+ 作图</button>
+        <button class="nc-add" data-add="video" title="根据提示词和参考图生成视频">+ 视频</button>
+        <button class="nc-add" data-add="shortDrama" title="创建短剧项目">+ 短剧</button>
+      </div>
+      <div class="nc-group" aria-label="编辑操作">
+        <span class="nc-group-label">编辑操作</span>
+        <button id="ncBackHome" class="nc-ghost">返回列表</button>
+        <button id="ncUndo" class="nc-ghost" disabled>撤销</button>
+        <button id="ncRedo" class="nc-ghost" disabled>重做</button>
+        <button id="ncCopy" class="nc-ghost">复制</button>
+        <button id="ncPaste" class="nc-ghost">粘贴</button>
+        <button id="ncLayout" class="nc-ghost">自动整理</button>
+      </div>
+      <div class="nc-group" aria-label="视图操作">
+        <span class="nc-group-label">视图操作</span>
+        <button id="ncZoomOut" class="nc-ghost" title="缩小">-</button>
+        <input id="ncZoomLabel" class="nc-ghost nc-zoom" value="100%" inputmode="decimal" aria-label="缩放比例">
+        <button id="ncZoomIn" class="nc-ghost" title="放大">+</button>
+        <button id="ncZoomFit" class="nc-ghost">适应</button>
+        <button id="ncFullscreen" class="nc-ghost">全屏</button>
+      </div>
+      <div class="nc-group" aria-label="模板操作">
+        <span class="nc-group-label">模板操作</span>
+        <select id="ncTemplateSelect" class="nc-select" title="模板"></select>
+        <input id="ncTemplateName" class="nc-name" placeholder="模板名">
+        <button id="ncTplSave" class="nc-ghost">保存模板</button>
+        <button id="ncTplLoad" class="nc-ghost">载入</button>
+        <button id="ncTplDelete" class="nc-ghost">删除模板</button>
+        <button id="ncTplExport" class="nc-ghost">导出模板</button>
+        <button id="ncTplImport" class="nc-ghost">导入模板</button>
+        <input id="ncTplImportFile" class="nc-file" type="file" accept="application/json,.json">
+      </div>
+      <div class="nc-group" aria-label="画布操作">
+        <span class="nc-group-label">画布操作</span>
+        <button id="ncResetDemo" class="nc-ghost">重置示例</button>
+        <button id="ncCleanupStorage" class="nc-ghost" title="清理生成结果并压缩当前画布图片">清理空间</button>
+        <button id="ncClear" class="nc-ghost">清空画布</button>
+        <a class="nc-ghost" href="banana.html">打开作图页</a>
+        <button id="ncRunAll" class="nc-run">▶ 运行全部（并行）</button>
+      </div>
+      <span class="nc-help"><i></i>先点右侧输出口，再点左侧输入口即可连线。</span>
+    </div>
+    <div class="nc-canvas-shell">
+      <div id="ncCanvas" class="nc-canvas">
+        <div id="ncInner" class="nc-inner">
+          <svg id="ncEdges" class="nc-edges"></svg>
+          <div id="ncSelectedRegion" class="nc-selected-region" aria-hidden="true"></div>
+          <div id="ncSelectionBox" class="nc-selection-box" aria-hidden="true"></div>
+          <div id="ncEmpty" class="nc-empty">
+            <div class="nc-empty-card">
+              <b>从一个节点开始搭流程</b>
+              <p>添加文本、图片、反推或作图节点，连起来后可以一键并行运行。</p>
+              <button class="nc-add" data-add="text" title="添加文本提示词节点">+ 文本</button>
+              <button class="nc-add" data-add="gen" title="根据提示词和参考图生成图片">+ 作图</button>
+              <button class="nc-add" data-add="video" title="根据提示词和参考图生成视频">+ 视频</button>
+              <button class="nc-add" data-add="shortDrama" title="创建短剧项目">+ 短剧</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="ncMap" class="nc-map" title="点击快速移动视图">
+        <svg id="ncMapSvg" viewBox="0 0 164 104" aria-hidden="true"></svg>
+      </div>
+      <div id="ncMenu" class="nc-menu" role="menu"></div>
+      <div id="ncSideTools" class="nc-side-tools" aria-label="画布导航工具">
+        <button class="nc-side-tool" type="button" data-side="nodes" title="节点管理" aria-label="节点管理"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="2.4"></circle><circle cx="18" cy="6" r="2.4"></circle><circle cx="12" cy="18" r="2.4"></circle><path d="M8.1 7.4 10.8 15"></path><path d="M15.9 7.4 13.2 15"></path><path d="M8.4 6h7.2"></path></svg><span>节点</span></button>
+        <button class="nc-side-tool" type="button" data-side="assets" title="我的资产" aria-label="我的资产"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.8 7.8a2 2 0 0 1 2-2h4.1l1.8 2h6.5a2 2 0 0 1 2 2v7.4a2 2 0 0 1-2 2H5.8a2 2 0 0 1-2-2Z"></path><path d="M8 14h8"></path><path d="M12 10v8"></path></svg><span>资产</span></button>
+        <button class="nc-side-tool" type="button" data-side="export" title="导出全局预览" aria-label="导出全局预览"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11"></path><path d="m7.5 9.5 4.5 4.5 4.5-4.5"></path><path d="M5 17.5v1.7a1.8 1.8 0 0 0 1.8 1.8h10.4a1.8 1.8 0 0 0 1.8-1.8v-1.7"></path></svg><span>导出</span></button>
+        <button id="ncSideTplMenu" class="nc-side-tool" type="button" title="模板功能" aria-label="模板功能"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.8h12a1.8 1.8 0 0 1 1.8 1.8v12.8a1.8 1.8 0 0 1-1.8 1.8H6a1.8 1.8 0 0 1-1.8-1.8V5.6A1.8 1.8 0 0 1 6 3.8Z"></path><path d="M8 8h8"></path><path d="M8 12h8"></path><path d="M8 16h5"></path></svg><span>模板</span></button>
+        <button id="ncSideMore" class="nc-side-tool" type="button" title="更多" aria-label="更多"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="5.5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="18.5" cy="12" r="1.6"></circle></svg><span>更多</span></button>
+      </div>
+      <div id="ncSidePanel" class="nc-side-panel" aria-hidden="true">
+        <div class="nc-side-head">
+          <strong id="ncSideTitle">节点管理</strong>
+          <button id="ncSideClose" class="nc-side-close" type="button" title="关闭">×</button>
+        </div>
+        <div id="ncSideBody" class="nc-side-body"></div>
+      </div>
+      <div id="ncFsDock" class="nc-fs-dock" aria-label="全屏画布工具栏">
+        <div class="nc-fs-row">
+          <div class="nc-fs-group">
+            <button id="ncFsAdd" class="nc-fs-btn icon" type="button" title="添加节点">+</button>
+          </div>
+          <div class="nc-fs-group">
+            <button id="ncFsUndo" class="nc-fs-btn icon" type="button" title="撤销">↶</button>
+            <button id="ncFsRedo" class="nc-fs-btn icon" type="button" title="重做">↷</button>
+          </div>
+          <div class="nc-fs-group">
+            <button id="ncFsZoomOut" class="nc-fs-btn icon" type="button" title="缩小">−</button>
+            <input id="ncFsZoomLabel" class="nc-fs-btn nc-fs-zoom" value="100%" inputmode="decimal" aria-label="缩放比例">
+            <button id="ncFsZoomIn" class="nc-fs-btn icon" type="button" title="放大">+</button>
+            <button id="ncFsFit" class="nc-fs-btn" type="button">适应</button>
+          </div>
+          <div class="nc-fs-group nc-fs-side-moved" aria-label="模板功能">
+            <button id="ncFsTplMenu" class="nc-fs-btn" type="button" title="模板功能">模板</button>
+          </div>
+          <div class="nc-fs-group">
+            <button id="ncFsMore" class="nc-fs-btn icon nc-fs-side-moved" type="button" title="更多">···</button>
+            <button id="ncFsRun" class="nc-fs-btn primary" type="button">运行全部</button>
+            <span id="ncSaveState" class="nc-save-state">已保存</span>
+            <span id="ncOnlineState" class="nc-online-state" hidden>1 人在线</span>
+            <button id="ncFsExit" class="nc-fs-btn" type="button">返回</button>
+          </div>
+        </div>
+      </div>
+      <div class="nc-float">
+        <span class="nc-mini">拖动节点</span>
+        <span class="nc-mini">点击端口连线</span>
+        <span class="nc-mini">上传图可粘贴</span>
+      </div>
+      <div class="nc-legend">
+        <span><i></i>提示词</span>
+        <span class="img"><i></i>图片</span>
+      </div>
+    </div>
+  </div>
+  </div>
+</div></div>
+
+<script src="../assets/cloud.js?v=8"></script>
+<script src="cloud-shell.js?v=642453c4"></script>
+<script src="canvas/canvas-graph.js?v=73a01417"></script>
+<script src="canvas/canvas-state.js?v=cfaffabd"></script>
+<script src="canvas/canvas-storage.js?v=1e36cac0"></script>
+<script src="canvas/canvas-api.js?v=7a897750"></script>
+<script src="canvas/canvas-export.js?v=78e0da20"></script>
+<script src="canvas-collab-sync.js?v=d0a1fe63"></script>
+<script src="canvas/canvas-short-drama-production.js?v=15388652"></script>
+<script src="canvas/canvas-short-drama-voice.js?v=d1bed78e"></script>
+<script src="canvas/canvas-short-drama-video.js?v=6b3d7e61"></script>
+<script src="canvas/canvas-short-drama-assembly.js?v=7e1c53d6"></script>
+<script src="canvas/canvas-short-drama.js?v=263fa181"></script>
+<script src="canvas/canvas-app.js?v=e84c57c4"></script>
+</body>
+</html>

@@ -16,9 +16,10 @@ env、密钥、证书、数据库、`content_out`、上传与生成物、日志�
 任何符号链接、疑似凭据内容、重复/越界路径都会使采集失败。
 
 服务器实采必须先用 `capture_test_runtime_readonly.sh` 将允许范围以只读 tar 流导出
-到 `D:\缓存区`。脚本只接受 `8.148.158.106`，强制 BatchMode、关闭转发，并在远端
-选择阶段排除 env、证书、数据库、日志和生成数据；不使用 sudo，也不创建远端文件。
-随后在本地解包并运行：
+到 `D:\缓存区`。脚本只接受 `8.148.158.106`，强制 BatchMode、host-key 校验、关闭
+转发，并在远端选择阶段排除 env、证书、数据库、日志、备份和生成数据；不使用 sudo，
+也不创建远端文件。systemd 使用明确 allowlist，并在传输阶段脱敏 `Environment=`；
+nginx 使用只读 `nginx -T` 输出，不复制证书或私钥。随后在本地解包并运行：
 
 ```bash
 python scripts/runtime_canonical.py \
@@ -26,7 +27,8 @@ python scripts/runtime_canonical.py \
   inventory --source SNAPSHOT_ROOT \
   --output baseline-server.json \
   --capture-kind server-read-only \
-  --source-revision 'test:8.148.158.106@UTC_TIMESTAMP'
+  --source-revision 'test:8.148.158.106@UTC_TIMESTAMP' \
+  --mode-map CAPTURED_TAR_MODE_MAP.json
 ```
 
 ## 不可变 release
@@ -56,10 +58,10 @@ workflow 没有 `continue-on-error`、容错后缀或可跳过条件，并拆为
 与 base，不维护易过期的手写文件列表。三个 job 都必须配置成 required status check；
 未设置前不能宣称治理已生效。
 
-## 当前证据缺口
+## 当前只读证据
 
-2026-07-30 的只读 SSH 尝试对 `root@8.148.158.106` 和
-`ubuntu@8.148.158.106` 均被认证拒绝。因此本 PR 不能诚实地产生
-`server-read-only` baseline。候选 manifest 只证明工具链可在 `main` 的运行时
-映射上完整工作；`server-baseline-integrity` 当前应保持红灯。取得只读凭据、完成
-实采并独立审核前，禁止创建占位 baseline、放宽断言或合并本 Draft PR。
+2026-07-30 已通过只读 SSH 对 `8.148.158.106` 完成实采。原始业务/静态归档
+SHA-256 为 `5ae75ed2f397d0147211378bbdd0188de9536cb7a023ab8c91cd341058491abe`；
+远端读取阶段没有纳入 env、密钥、证书、数据库、备份、日志、上传、生成物或用户数据。
+完整脱敏 payload 存放在 `runtime-baselines/test/<content-id>/`，不覆盖 live source
+路径，不部署、不切换，也不作为 PR #146 的 base。

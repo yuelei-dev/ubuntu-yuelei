@@ -1,0 +1,13 @@
+# /etc/systemd/system/huangque-repo-sync.timer
+[Unit]
+Description=Periodically refresh the Huangque test-server Git baseline
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+RandomizedDelaySec=60
+Persistent=true
+Unit=huangque-repo-sync.service
+
+[Install]
+WantedBy=timers.target

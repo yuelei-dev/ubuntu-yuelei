@@ -1,0 +1,42 @@
+# /etc/systemd/system/huangque-auth.service
+[Unit]
+Description=Huangque Auth Service
+After=network.target
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/auth-service
+EnvironmentFile=-/home/ubuntu/auth-service/auth.env
+ExecStart=/usr/bin/python3 /home/ubuntu/auth-service/auth_server.py
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/huangque-auth.service.d/hardening.conf
+# huangque-auth 启动加固（崩溃风暴限速 + 抢占残留端口 + 优雅停机）
+# 落地：/etc/systemd/system/huangque-auth.service.d/hardening.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-auth
+#
+# ExecStartPre 的 fuser 是给「上次没停干净、端口还被占着」兜底的：
+# 前缀 '-' 表示失败不阻止启动；'|| true' 保证没有占用者时也返回 0。
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=8
+
+[Service]
+ExecStartPre=-/bin/sh -c 'fuser -k 8095/tcp 2>/dev/null || true'
+KillMode=mixed
+TimeoutStopSec=15
+RestartSec=5
+
+# /etc/systemd/system/huangque-auth.service.d/points.conf
+# huangque-auth 读取内部点数接口令牌
+# 落地：/etc/systemd/system/huangque-auth.service.d/points.conf
+# 部署后：sudo systemctl daemon-reload && sudo systemctl restart huangque-auth
+#
+# auth_server 用 HQ_INTERNAL_TOKEN 校验 /api/auth/points/{deduct,refund} 的调用方
+# （secrets.compare_digest）。令牌为空时这两个端点一律 403 —— content/imggen/leadgen
+# 的扣点退点会全部失败并静默回退，审计流水随之消失。
+[Service]
+EnvironmentFile=-/home/ubuntu/auth-service/auth.env

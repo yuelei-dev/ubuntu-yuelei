@@ -1,5 +1,5 @@
 {
-  "content_id": "23a99177ce6dce9ac760e62c1173aa28bb6c8003054640693dbb05f57615336c",
+  "content_id": "b0ec9a2645abab3f0fa65c6b8a999e2e01c6a49c4887da68c5755096bf9d3979",
   "excluded": [
     {
       "reason": "suffix_not_allowlisted",
@@ -1944,7 +1944,7 @@
   ],
   "provenance": {
     "capture_kind": "repository-candidate",
-    "captured_at_utc": "2026-07-30T05:23:32.967825+00:00",
+    "captured_at_utc": "2026-07-30T05:50:37.403302+00:00",
     "production_accessed": false,
     "server_address": "8.148.158.106",
     "server_role": "test",
@@ -1981,5 +1981,5 @@
     }
   ],
   "schema_version": 3,
-  "scope_sha256": "48cdabc09a32a3226a8980544d8d21d911e1def3b8e06331e4d962aba5b9a591"
+  "scope_sha256": "33fb2eeed9238bb9f15a74adb5b242296734e2f96dbccf4183a0bdd068593d18"
 }
