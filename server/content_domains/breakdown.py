@@ -3430,7 +3430,7 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
             "The previous response failed validation: %s. Re-analyze the original media; "
             "do not reuse the rejected draft. If unresolved slots are named, fill them only "
             "when visible evidence supports them; otherwise keep unknown and allow strict failure. "
-            % str(retry_error)[:300]
+            % str(retry_error)[:900]
         )
     output_contract = (
         'Return only one complete minified JSON object with exactly the root key "shots"; '
@@ -3734,6 +3734,37 @@ def _gemini_quality_dimensions(prompt_result):
     }
 
 
+def _gemini_validation_retry_error(error, parsed):
+    message = str(error or "")
+    match = re.search(r"第(\d+)段与第(\d+)段内容重复", message)
+    windows = list((parsed or {}).get("windows") or [])
+    if not match:
+        return message
+    current_index = int(match.group(1))
+    previous_index = int(match.group(2))
+    if not (
+        1 <= current_index <= len(windows)
+        and 1 <= previous_index <= len(windows)
+    ):
+        return message
+    current = windows[current_index - 1]
+    previous = windows[previous_index - 1]
+    return (
+        "%s. Rewatch the original video intervals for shot %d (%.1f-%.1fs) "
+        "and shot %d (%.1f-%.1fs) independently. Do not copy either rejected "
+        "shot text. If there is no evidence-backed cut or visual difference, "
+        "merge the intervals into one shot and return a gap-free timeline. "
+        "If they are distinct shots, describe at least one directly visible "
+        "difference in subject, action, scene, camera, or lighting, with "
+        "evidence_seconds inside the corresponding interval. Never invent a "
+        "difference merely to pass validation."
+    ) % (
+        message,
+        previous_index, float(previous[0]), float(previous[1]),
+        current_index, float(current[0]), float(current[1]),
+    )
+
+
 def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform, transcript,
                                       deadline=None, heartbeat=None):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -3759,6 +3790,7 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
             response = _gemini_json_request(
                 _GEMINI_API_BASE + "/v1beta/models/" + _GEMINI_REVERSE_MODEL + ":generateContent",
                 body, api_key, deadline=deadline, heartbeat=heartbeat)
+            parsed = None
             try:
                 parsed = _parse_gemini_reverse_result(_gemini_candidate_text(response), duration)
                 # Run deterministic duplicate/length checks while the original
@@ -3772,7 +3804,9 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
                 parsed.update({"provider": "google", "model": _GEMINI_REVERSE_MODEL, "attempts": attempt + 1})
                 return parsed
             except ValueError as error:
-                validation_error = str(error)
+                validation_error = _gemini_validation_retry_error(
+                    error, parsed,
+                )
                 if attempt:
                     raise
         raise ValueError("Gemini reverse validation failed")

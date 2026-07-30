@@ -533,6 +533,11 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertEqual(result["attempts"], 2)
         retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
         self.assertIn("内容重复", retry_prompt)
+        self.assertIn("shot 1 (0.0-1.0s)", retry_prompt)
+        self.assertIn("shot 2 (1.0-2.0s)", retry_prompt)
+        self.assertIn("merge the intervals into one shot", retry_prompt)
+        self.assertIn("Never invent a difference", retry_prompt)
+        self.assertNotIn(first["candidates"][0]["content"]["parts"][0]["text"], retry_prompt)
 
     def test_duplicate_guard_compares_structured_facts_not_shared_scaffolding(self):
         response = self._provider_response(count=2)
