@@ -793,6 +793,45 @@ class BreakdownTests(unittest.TestCase):
         sys.modules["tikhub"] = FakeTikHub
         return calls
 
+    def _gemini_reverse_result(self, duration=18.0, count=4):
+        shots = []
+        labels = (
+            "A" * 24,
+            "B" * 24,
+            "C" * 24,
+            "D" * 24,
+        )
+        segment_duration = float(duration) / count
+        for index in range(count):
+            start = round(index * segment_duration, 1)
+            end = round(duration if index == count - 1 else (index + 1) * segment_duration, 1)
+            facts = {}
+            evidence = {}
+            for key in self.breakdown._GEMINI_FACT_FIELDS:
+                if key in self.breakdown._GEMINI_OPTIONAL_FACT_FIELDS:
+                    facts[key] = "not_applicable"
+                    evidence[key] = []
+                else:
+                    facts[key] = "%s-%s" % (labels[index], key)
+                    evidence[key] = [round(start + 0.1, 1)]
+            evidence["action_end"] = [round(end - 0.1, 1)]
+            shots.append({
+                "start_seconds": start,
+                "end_seconds": end,
+                "cut_from_previous": index > 0,
+                "facts": facts,
+                "evidence_seconds": evidence,
+                "generation_advice": {
+                    "aspect_ratio": "16:9",
+                    "fps": "24",
+                    "camera_control": "preserve observed camera motion",
+                    "negative_prompt": "no extra subjects",
+                },
+            })
+        return self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": shots}), duration,
+        )
+
     def test_do_breakdown_returns_analysis_and_requests_it_in_prompt(self):
         calls = self._install_fake_env(
             '{"scenes":[{"dur":"3s","scene":"门店门头","line":"今天带你看一家店"}],"analysis":"这是一条团购探店口播视频"}'
@@ -943,46 +982,33 @@ class BreakdownTests(unittest.TestCase):
             "fake-frame-dir",
             [thumb.name] * 8,
         )
-        objects = self._detailed_reverse_objects()
-        reverse_calls = []
-
-        def fake_reverse_chat(sysmsg, usermsg, frames, temp=0.7, **kwargs):
-            reverse_calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
-            item = objects[len(reverse_calls) - 1]
-            return json.dumps({"segments": [item]}, ensure_ascii=False)
-
-        self.breakdown._chat_multimodal = fake_reverse_chat
-
         try:
-            result = self.breakdown._do_breakdown(
-                {"_job_id": 14, "mode": "reverse_prompt"},
-                {"platform": "douyin", "id": "rev-1"},
-                "https://example.test/post/reverse",
-                "reverse_prompt",
-            )
+            with patch.object(
+                self.breakdown,
+                "_gemini_reverse_prompt_from_media",
+                return_value=self._gemini_reverse_result(),
+            ) as gemini:
+                result = self.breakdown._do_breakdown(
+                    {"_job_id": 14, "mode": "reverse_prompt"},
+                    {"platform": "douyin", "id": "rev-1"},
+                    "https://example.test/post/reverse",
+                    "reverse_prompt",
+                )
         finally:
             os.unlink(thumb.name)
 
         self.assertEqual(result["type"], "breakdown_reverse")
         self.assertEqual(result["source_platform"], "douyin")
-        self.assertIn("黑色长发、白色长衣", result["prompt"])
-        self.assertIn("生成建议（非源画面事实）", result["prompt"])
+        self.assertIn("subject:", result["prompt"])
+        self.assertIn("generation advice:", result["prompt"])
         self.assertEqual(result["frame_count"], 8)
         self.assertEqual(len(result["frame_thumbnails"]), 8)
         self.assertTrue(result["frame_thumbnails"][0].startswith("data:image/jpeg;base64,"))
         self.assertFalse(result["asr_failed"])
-        self.assertEqual(len(reverse_calls), 4)
-        self.assertTrue(all(
-            call[2] == [thumb.name, thumb.name] for call in reverse_calls
-        ))
-        self.assertIn("只属于当前时间段", reverse_calls[0][1])
-        self.assertIn("准确性高于完整性和篇幅", reverse_calls[0][0])
-        self.assertFalse(any(
-            call[4]["allow_provider_fallback"] for call in reverse_calls
-        ))
-        self.assertTrue(all(
-            call[4]["model"] == "glm-4v-plus" for call in reverse_calls
-        ))
+        gemini.assert_called_once()
+        self.assertEqual(gemini.call_args.args[1], "video/mp4")
+        self.assertIsNotNone(gemini.call_args.kwargs["deadline"])
+        self.assertTrue(callable(gemini.call_args.kwargs["heartbeat"]))
         self.assertEqual(
             result["reference_frame_strategy"],
             "explicit_indices_one_per_segment",
@@ -1028,24 +1054,20 @@ class BreakdownTests(unittest.TestCase):
             persisted_meta["sections"]["reverse_audit"]["frame_manifest"],
             result["frame_manifest"],
         )
-        deadlines = [call[4].get("deadline") for call in reverse_calls]
-        self.assertTrue(all(deadline is not None for deadline in deadlines))
-        self.assertEqual(len(set(deadlines)), 1)
-        self.assertTrue(all(callable(call[4].get("heartbeat")) for call in reverse_calls))
-        self.assertIn("全局连续性事实", result["prompt"])
         self.assertEqual(result["global_continuity"]["model_calls"], 0)
         self.assertEqual(result["global_continuity"]["image_count"], 0)
         self.assertEqual(result["analysis_call_budget"], {
             "analysis_deadline_seconds": 540,
-            "max_images_per_request": 2,
+            "max_images_per_request": 0,
+            "max_video_inputs_per_request": 1,
             "global_model_calls": 0,
-            "normal_logical_calls": 4,
-            "worst_logical_calls": 8,
-            "normal_physical_http_attempts": 4,
+            "normal_logical_calls": 1,
+            "worst_logical_calls": 2,
+            "normal_physical_http_attempts": 1,
             "same_provider_physical_attempts_per_logical": 2,
-            "worst_physical_http_attempts": 16,
-            "provider": "zhipu",
-            "model": "glm-4v-plus",
+            "worst_physical_http_attempts": 4,
+            "provider": "google",
+            "model": "gemini-3.1-pro-preview",
             "http_4xx_retry": False,
             "cross_provider_fallback": False,
         })
@@ -2837,15 +2859,16 @@ class BreakdownTests(unittest.TestCase):
             self.breakdown._reverse_analysis_call_budget(4),
             {
                 "analysis_deadline_seconds": 540,
-                "max_images_per_request": 2,
+                "max_images_per_request": 0,
+                "max_video_inputs_per_request": 1,
                 "global_model_calls": 0,
-                "normal_logical_calls": 4,
-                "worst_logical_calls": 8,
-                "normal_physical_http_attempts": 4,
+                "normal_logical_calls": 1,
+                "worst_logical_calls": 2,
+                "normal_physical_http_attempts": 1,
                 "same_provider_physical_attempts_per_logical": 2,
-                "worst_physical_http_attempts": 16,
-                "provider": "zhipu",
-                "model": "glm-4v-plus",
+                "worst_physical_http_attempts": 4,
+                "provider": "google",
+                "model": "gemini-3.1-pro-preview",
                 "http_4xx_retry": False,
                 "cross_provider_fallback": False,
             },
@@ -3590,23 +3613,18 @@ class BreakdownTests(unittest.TestCase):
         had_pair = hasattr(self.breakdown, "_pair_reverse_frames")
         original_pair = getattr(self.breakdown, "_pair_reverse_frames", None)
         self.breakdown._pair_reverse_frames = fake_pair
-        objects = self._detailed_reverse_objects()
-        reverse_calls = []
-
-        def fake_chat(sysmsg, usermsg, frames, **kwargs):
-            reverse_calls.append(list(frames))
-            return json.dumps(
-                {"segments": [objects[len(reverse_calls) - 1]]},
-                ensure_ascii=False,
-            )
-        self.breakdown._chat_multimodal = fake_chat
         try:
-            result = self.breakdown._do_breakdown(
-                {"_job_id": 80, "mode": "reverse_prompt"},
-                {"platform": "douyin", "id": "detail-depth"},
-                "https://example.test/detail-depth",
-                "reverse_prompt",
-            )
+            with patch.object(
+                self.breakdown,
+                "_gemini_reverse_prompt_from_media",
+                return_value=self._gemini_reverse_result(),
+            ) as gemini:
+                result = self.breakdown._do_breakdown(
+                    {"_job_id": 80, "mode": "reverse_prompt"},
+                    {"platform": "douyin", "id": "detail-depth"},
+                    "https://example.test/detail-depth",
+                    "reverse_prompt",
+                )
         finally:
             self.breakdown._frame_thumbnails = original_thumbnails
             if had_pair:
@@ -3615,12 +3633,8 @@ class BreakdownTests(unittest.TestCase):
                 delattr(self.breakdown, "_pair_reverse_frames")
 
         self.assertEqual(calls["extract_args"], (8, 1024, 8, True))
-        self.assertEqual(reverse_calls, [
-            ["f1.jpg", "f2.jpg"],
-            ["f3.jpg", "f4.jpg"],
-            ["f5.jpg", "f6.jpg"],
-            ["f7.jpg", "f8.jpg"],
-        ])
+        gemini.assert_called_once()
+        self.assertEqual(gemini.call_args.args[1], "video/mp4")
         self.assertEqual(result["frame_count"], 8)
 
     def test_pair_reverse_frames_preserves_time_order(self):

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """爆款拆解：竞品视频链接 → 下载 → 抽帧 → ASR → 智谱多模态（GPT 安全回退）→ 分镜脚本"""
-import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.parse
+import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.parse, urllib.request
 import hashlib
 import http.client
 import urllib.error
@@ -31,6 +31,18 @@ BREAKDOWN_ANALYSIS_BUDGET = max(
         int(os.environ.get("BREAKDOWN_ANALYSIS_BUDGET", "540") or "540"),
     ),
 )
+_GEMINI_REVERSE_MODEL = "gemini-3.1-pro-preview"
+_GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
+_GEMINI_INLINE_MAX_BYTES = 14 * 1024 * 1024
+_GEMINI_INLINE_MAX_DURATION = 15.0
+_GEMINI_MAX_MEDIA_BYTES = 200 * 1024 * 1024
+_GEMINI_INLINE_MAX_REQUEST_BYTES = 18_000_000
+_GEMINI_MAX_RESPONSE_BYTES = 64 * 1024
+_GEMINI_REQUEST_TIMEOUT = max(
+    30, min(240, int(os.environ.get("BREAKDOWN_GEMINI_TIMEOUT", "180") or "180"))
+)
+_GEMINI_UNKNOWN = "unknown"
+_GEMINI_NOT_APPLICABLE = "not_applicable"
 _REVERSE_MAX_SEGMENT_CHARS = 1200
 _REVERSE_MAX_TOTAL_CHARS = 4800
 _REVERSE_DUPLICATE_SEQUENCE_THRESHOLD = 0.80
@@ -645,16 +657,17 @@ def _do_breakdown(payload, info, url, mode=None):
         if mode == _BREAKDOWN_MODE_REVERSE_PROMPT:
             analysis_deadline = time.monotonic() + BREAKDOWN_ANALYSIS_BUDGET
             analysis_heartbeat = lambda: _heartbeat(job_id, "analyzing")
-            prompt_result = _reverse_prompt_from_frames(
+            prompt_result = _gemini_reverse_prompt_from_media(
+                tmp_video.name,
+                "video/mp4",
                 title,
                 duration,
                 platform,
                 script_text,
-                model_frames,
-                return_details=True,
                 deadline=analysis_deadline,
                 heartbeat=analysis_heartbeat,
             )
+            _validate_gemini_reverse_entries(prompt_result, frames, script_text)
             frame_bundle = _reverse_frame_bundle(
                 frames, len(prompt_result["windows"])
             )
@@ -667,6 +680,7 @@ def _do_breakdown(payload, info, url, mode=None):
                 prompt_result["entries"],
                 prompt_result["windows"],
                 global_continuity,
+                enforce_length_limits=False,
             )
             quality_score = _score_reverse_generation_coverage(
                 prompt_result["entries"],
@@ -704,6 +718,10 @@ def _do_breakdown(payload, info, url, mode=None):
                 "global_continuity": global_continuity,
                 "segment_evidence": segment_evidence,
                 "analysis_call_budget": call_budget,
+                "quality_dimensions": _gemini_quality_dimensions(prompt_result),
+                "model_provider": prompt_result.get("provider"),
+                "model_id": prompt_result.get("model"),
+                "model_attempts": prompt_result.get("attempts"),
                 "quality_contract": _reverse_quality_contract(),
                 "quality_score": quality_score,
             }
@@ -803,6 +821,12 @@ def _do_local_reverse(payload, upload_token):
                 scale_width=1024, min_frames=8, uniform=True,
             )
         _heartbeat(job_id, "analyzing")
+        suffix = str(row["suffix"] or "").lower()
+        media_mime = {
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png", ".webp": "image/webp",
+            ".mp4": "video/mp4", ".mov": "video/quicktime",
+        }.get(suffix, "video/mp4" if media_type == "video" else "image/jpeg")
         return _reverse_result_from_frames(
             payload,
             frames,
@@ -810,6 +834,8 @@ def _do_local_reverse(payload, upload_token):
             title=os.path.basename(path),
             platform="local",
             duration=duration,
+            media_path=path,
+            media_mime=media_mime,
         )
     finally:
         if frame_dir:
@@ -861,22 +887,25 @@ def _remove_trusted_upload(token, username, job_id, path):
 
 def _reverse_result_from_frames(
     payload, frames, source_url="", title="", platform="", duration=0,
-    script_text="", asr_failed=False,
+    script_text="", asr_failed=False, media_path=None, media_mime="video/mp4",
 ):
     """Run the audited reverse engine for a validated local upload."""
     job_id = (payload or {}).get("_job_id")
     analysis_deadline = time.monotonic() + BREAKDOWN_ANALYSIS_BUDGET
     analysis_heartbeat = lambda: _heartbeat(job_id, "analyzing")
-    prompt_result = _reverse_prompt_from_frames(
+    if not media_path:
+        raise ValueError("Gemini reverse requires the original media file")
+    prompt_result = _gemini_reverse_prompt_from_media(
+        media_path,
+        media_mime,
         title,
         duration,
         platform,
         script_text,
-        frames,
-        return_details=True,
         deadline=analysis_deadline,
         heartbeat=analysis_heartbeat,
     )
+    _validate_gemini_reverse_entries(prompt_result, frames, script_text)
     frame_bundle = _reverse_frame_bundle(
         frames, len(prompt_result["windows"])
     )
@@ -889,6 +918,7 @@ def _reverse_result_from_frames(
         prompt_result["entries"],
         prompt_result["windows"],
         global_continuity,
+        enforce_length_limits=False,
     )
     quality_score = _score_reverse_generation_coverage(
         prompt_result["entries"],
@@ -926,6 +956,10 @@ def _reverse_result_from_frames(
         "global_continuity": global_continuity,
         "segment_evidence": segment_evidence,
         "analysis_call_budget": call_budget,
+        "quality_dimensions": _gemini_quality_dimensions(prompt_result),
+        "model_provider": prompt_result.get("provider"),
+        "model_id": prompt_result.get("model"),
+        "model_attempts": prompt_result.get("attempts"),
         "quality_contract": _reverse_quality_contract(),
         "quality_score": quality_score,
     }
@@ -1342,6 +1376,10 @@ def _reverse_segment_evidence_manifest(
             "validation_summary": json.loads(json.dumps(
                 entry.get("validation_summary") or {}, ensure_ascii=False
             )),
+            "evidence_seconds": entry.get("evidence_seconds") or {},
+            "generation_advice": entry.get("generation_advice") or {},
+            "cut_from_previous": bool(entry.get("cut_from_previous")),
+            "generation_readiness": entry.get("readiness") or {},
             "continuity_source_frames": entry.get(
                 "continuity_evidence_frames", []
             ),
@@ -2551,12 +2589,13 @@ def _validate_reverse_segment_evidence(
     entry, previous_entries, frame_paths, index, transcript="",
     require_frame_evidence=False, global_continuity=None,
     require_generation_readiness=False, pair_ssim=None,
+    enforce_length_limit=True,
 ):
     text = entry.get("text", "")
     compact = _compact_reverse_text(text)
     if not compact:
         raise ValueError("反推结果第%d段为空，请重试" % index)
-    if len(compact) > _REVERSE_MAX_SEGMENT_CHARS:
+    if enforce_length_limit and len(compact) > _REVERSE_MAX_SEGMENT_CHARS:
         raise ValueError(
             "反推结果第%d段过长：最多%d字，实际%d字，请重试"
             % (index, _REVERSE_MAX_SEGMENT_CHARS, len(compact))
@@ -2784,13 +2823,16 @@ def _validate_reverse_segment_evidence(
     return entry
 
 
-def _validate_reverse_prompt_lengths(segments, check_duplicates=True):
+def _validate_reverse_prompt_lengths(
+    segments, check_duplicates=True, enforce_length_limits=True,
+    enforce_total_length_limit=True,
+):
     """Keep a generous output cap and strict duplicate guard; no minimum length."""
     if not segments:
         raise ValueError("反推结果为空，请重试")
     lengths = [len(re.sub(r"\s+", "", segment or "")) for segment in segments]
     for index, length in enumerate(lengths, 1):
-        if length > _REVERSE_MAX_SEGMENT_CHARS:
+        if enforce_length_limits and length > _REVERSE_MAX_SEGMENT_CHARS:
             raise ValueError(
                 "反推结果第%d段过长：最多%d字，实际%d字，请重试"
                 % (index, _REVERSE_MAX_SEGMENT_CHARS, length)
@@ -2805,7 +2847,7 @@ def _validate_reverse_prompt_lengths(segments, check_duplicates=True):
                         % (index + 1, previous_index + 1)
                     )
     total = sum(lengths)
-    if total > _REVERSE_MAX_TOTAL_CHARS:
+    if enforce_total_length_limit and total > _REVERSE_MAX_TOTAL_CHARS:
         raise ValueError(
             "反推结果总长度最多%d字，实际%d字，请重试"
             % (_REVERSE_MAX_TOTAL_CHARS, total)
@@ -3062,7 +3104,10 @@ def _score_reverse_generation_coverage(entries, global_continuity, windows):
     }
 
 
-def _assemble_reverse_prompt(entries, windows, global_continuity=None):
+def _assemble_reverse_prompt(
+    entries, windows, global_continuity=None, enforce_length_limits=True,
+    enforce_total_length_limit=True,
+):
     raw_segments = []
     for entry, (start, end, _timeline_range) in zip(entries, windows):
         if entry.get("generation"):
@@ -3079,6 +3124,8 @@ def _assemble_reverse_prompt(entries, windows, global_continuity=None):
     segments = _validate_reverse_prompt_lengths(
         raw_segments,
         check_duplicates=not all(entry.get("generation") for entry in entries),
+        enforce_length_limits=enforce_length_limits,
+        enforce_total_length_limit=enforce_total_length_limit,
     )
     global_facts = _compose_reverse_global_facts(global_continuity)
     lines = []
@@ -3091,23 +3138,534 @@ def _assemble_reverse_prompt(entries, windows, global_continuity=None):
     return "\n".join(lines)
 
 
+_GEMINI_FACT_FIELDS = (
+    "subject_identity", "subject_appearance", "wardrobe", "position_scale",
+    "action_start", "action_process", "action_end", "direction_speed",
+    "foreground", "midground", "background", "shot_scale", "camera_angle",
+    "camera_movement", "composition", "lighting_color", "style_texture",
+    "rhythm", "sound", "subtitles", "continuity",
+)
+_GEMINI_OPTIONAL_FACT_FIELDS = {"wardrobe", "sound", "subtitles", "continuity"}
+
+
+def _gemini_reverse_schema():
+    evidence_properties = {
+        key: {"type": "array", "items": {"type": "number", "minimum": 0}, "maxItems": 3}
+        for key in _GEMINI_FACT_FIELDS
+    }
+    return {
+        "type": "object", "additionalProperties": False, "required": ["shots"],
+        "properties": {"shots": {
+            "type": "array", "minItems": 1, "maxItems": 4,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["start_seconds", "end_seconds", "cut_from_previous", "facts", "evidence_seconds", "generation_advice"],
+                "properties": {
+                    "start_seconds": {"type": "number", "minimum": 0},
+                    "end_seconds": {"type": "number", "minimum": 0},
+                    "cut_from_previous": {"type": "boolean"},
+                    "facts": {
+                        "type": "object", "additionalProperties": False,
+                        "required": list(_GEMINI_FACT_FIELDS),
+                        "properties": {key: {"type": "string"} for key in _GEMINI_FACT_FIELDS},
+                    },
+                    "evidence_seconds": {
+                        "type": "object", "additionalProperties": False,
+                        "required": list(_GEMINI_FACT_FIELDS), "properties": evidence_properties,
+                    },
+                    "generation_advice": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["aspect_ratio", "fps", "camera_control", "negative_prompt"],
+                        "properties": {
+                            "aspect_ratio": {"type": "string"},
+                            "fps": {"type": "string"},
+                            "camera_control": {"type": "string"},
+                            "negative_prompt": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }},
+    }
+
+
+def _redact_sensitive_text(value, limit=240):
+    text = str(value or "")
+    text = re.sub(r"https?://\S+", "[redacted-url]", text)
+    text = re.sub(
+        r"(?i)\b(authorization)\b\s*[:=]\s*(?:bearer\s+)?[\"']?[^,\s;\"'}]+",
+        r"\1: [redacted-credential]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{6,}",
+        "Bearer [redacted-credential]",
+        text,
+    )
+    text = re.sub(
+        r"(?i)\b(api[_ -]?key|access[_ -]?token|token|secret)\b"
+        r"\s*[:=]\s*[\"']?[^,\s;\"'}]+",
+        r"\1=[redacted-credential]",
+        text,
+    )
+    text = re.sub(
+        r"\b(?:AIza|AQ\.)[A-Za-z0-9._-]{8,}\b",
+        "[redacted-credential]",
+        text,
+    )
+    return text[:max(0, int(limit))]
+
+
+def _gemini_http_error_summary(error):
+    code = int(getattr(error, "code", 0) or 0)
+    status = ""
+    message = ""
+    try:
+        raw = error.read(8193)
+        if len(raw) <= 8192:
+            payload = json.loads(raw.decode("utf-8"))
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(detail, dict):
+                code = int(detail.get("code") or code)
+                status = str(detail.get("status") or "")
+                message = _gemini_fact_text(detail.get("message"))
+    except Exception:
+        pass
+    status = status if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", status) else ""
+    message = _redact_sensitive_text(message)
+    parts = ["Gemini HTTP %d" % code]
+    if status:
+        parts.append(status)
+    if message:
+        parts.append(message)
+    return ": ".join(parts)
+
+
+
+
+def _gemini_timeout(deadline):
+    remaining = _analysis_remaining(deadline)
+    if remaining is None:
+        return _GEMINI_REQUEST_TIMEOUT
+    return max(1, min(_GEMINI_REQUEST_TIMEOUT, int(remaining - 1)))
+
+
+def _gemini_open(request, deadline=None, heartbeat=None, retry_transient=True):
+    attempts = 2 if retry_transient else 1
+    last_error = None
+    for attempt in range(attempts):
+        _analysis_remaining(deadline)
+        if heartbeat:
+            heartbeat()
+        try:
+            return urllib.request.urlopen(request, timeout=_gemini_timeout(deadline))
+        except urllib.error.HTTPError as error:
+            last_error = error
+            code = int(getattr(error, "code", 0) or 0)
+            if attempt + 1 < attempts and (code == 429 or 500 <= code < 600):
+                continue
+            raise RuntimeError(_gemini_http_error_summary(error)) from error
+        except (urllib.error.URLError, TimeoutError, OSError) as error:
+            last_error = error
+            if attempt + 1 < attempts:
+                continue
+            raise RuntimeError("Gemini request failed: %s" % type(error).__name__) from error
+    raise RuntimeError("Gemini request failed") from last_error
+
+
+def _gemini_json_request(url, body, api_key, deadline=None, heartbeat=None):
+    request = urllib.request.Request(
+        url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key}, method="POST",
+    )
+    with _gemini_open(request, deadline=deadline, heartbeat=heartbeat) as response:
+        raw = response.read()
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception as error:
+        raise ValueError("Gemini returned invalid JSON transport response") from error
+
+
+def _gemini_upload_file(path, mime_type, api_key, deadline=None, heartbeat=None):
+    size = os.path.getsize(path)
+    if size <= 0 or size > _GEMINI_MAX_MEDIA_BYTES:
+        raise ValueError("Gemini reverse media size is outside the allowed range")
+    start = urllib.request.Request(
+        _GEMINI_API_BASE + "/upload/v1beta/files",
+        data=json.dumps({"file": {"display_name": "breakdown-reverse-input"}}).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json", "x-goog-api-key": api_key,
+            "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(size),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+        }, method="POST",
+    )
+    with _gemini_open(start, deadline=deadline, heartbeat=heartbeat) as response:
+        upload_url = response.headers.get("X-Goog-Upload-URL")
+    if not upload_url or not str(upload_url).startswith(_GEMINI_API_BASE + "/"):
+        raise RuntimeError("Gemini Files API did not return a trusted upload URL")
+    with open(path, "rb") as source:
+        payload = source.read(_GEMINI_MAX_MEDIA_BYTES + 1)
+    if len(payload) != size:
+        raise ValueError("Gemini reverse media changed during upload")
+    finalize = urllib.request.Request(
+        upload_url, data=payload,
+        headers={"Content-Type": mime_type, "x-goog-api-key": api_key,
+                 "X-Goog-Upload-Offset": "0", "X-Goog-Upload-Command": "upload, finalize"},
+        method="POST",
+    )
+    with _gemini_open(finalize, deadline=deadline, heartbeat=heartbeat) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    file_info = result.get("file") or result
+    name = str(file_info.get("name") or "")
+    uri = str(file_info.get("uri") or "")
+    if not re.fullmatch(r"files/[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", name) or not uri.startswith("https://"):
+        raise RuntimeError("Gemini Files API returned an invalid file reference")
+    return {"name": name, "uri": uri, "mime_type": mime_type}
+
+
+def _gemini_wait_for_file_active(file_info, api_key, deadline=None, heartbeat=None):
+    request = urllib.request.Request(
+        _GEMINI_API_BASE + "/v1beta/" + file_info["name"],
+        headers={"x-goog-api-key": api_key},
+        method="GET",
+    )
+    for _attempt in range(30):
+        with _gemini_open(
+            request, deadline=deadline, heartbeat=heartbeat, retry_transient=True,
+        ) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        state = str(result.get("state") or "").upper()
+        if state == "ACTIVE":
+            active = dict(file_info)
+            active["uri"] = str(result.get("uri") or active["uri"])
+            return active
+        if state in {"FAILED", "ERROR"}:
+            raise RuntimeError("Gemini Files API could not process the media")
+        _analysis_remaining(deadline)
+        time.sleep(1)
+    raise RuntimeError("Gemini Files API media processing did not complete")
+
+
+def _gemini_delete_file(file_info, api_key, deadline=None, heartbeat=None):
+    if not file_info:
+        return
+    request = urllib.request.Request(
+        _GEMINI_API_BASE + "/v1beta/" + file_info["name"],
+        headers={"x-goog-api-key": api_key}, method="DELETE",
+    )
+    try:
+        with _gemini_open(request, deadline=deadline, heartbeat=heartbeat, retry_transient=False) as response:
+            response.read()
+    except Exception:
+        print("[breakdown] Gemini temporary file cleanup failed", flush=True)
+
+
+def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartbeat=None,
+                       inline_payload_bytes=None, title="", platform="", transcript=""):
+    size = os.path.getsize(path)
+    if size <= 0 or size > _GEMINI_MAX_MEDIA_BYTES:
+        raise ValueError("Gemini reverse media size is outside the allowed range")
+    if inline_payload_bytes is None:
+        inline_payload_bytes = _gemini_inline_payload_bytes(
+            path, mime_type, title, duration, platform, transcript,
+        )
+    projected = int(inline_payload_bytes)
+    if (size <= _GEMINI_INLINE_MAX_BYTES
+            and float(duration or 0) <= _GEMINI_INLINE_MAX_DURATION
+            and projected <= _GEMINI_INLINE_MAX_REQUEST_BYTES):
+        with open(path, "rb") as source:
+            payload = source.read(_GEMINI_INLINE_MAX_BYTES + 1)
+        if len(payload) != size:
+            raise ValueError("Gemini reverse media changed during read")
+        return {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(payload).decode("ascii")}}, None
+    uploaded = _gemini_upload_file(path, mime_type, api_key, deadline=deadline, heartbeat=heartbeat)
+    return {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}, uploaded
+
+
+def _gemini_reverse_instruction(title, duration, platform, transcript, retry_error=""):
+    retry = ""
+    if retry_error:
+        retry = ("The previous response failed validation: %s. Re-analyze the original media; do not reuse the rejected draft. "
+                 % str(retry_error)[:300])
+    return (
+        "Analyze the complete original video. Detect hard cuts first. Return 1-4 gap-free shots "
+        "covering 0.0 through %.1f seconds with 0.1-second precision. Facts and generation advice "
+        "must remain separate. Every visible fact must cite evidence_seconds inside its shot. "
+        "Use exactly 'unknown' when evidence is insufficient and 'not_applicable' only for wardrobe, "
+        "sound, subtitles, or continuity. Do not infer identity, brand, emotion, place, sound, text, "
+        "or intent. Describe subject appearance and clothing; action start, process, end, direction "
+        "and speed; foreground, midground and background; shot scale, angle, movement and composition; "
+        "lighting, color, style, texture and rhythm. Quote only visible subtitles or verified ASR. "
+        "Do not merge different shots, repeat template prose, or prioritize length over accuracy. "
+        "Write fact values and generation advice in Chinese, except the two exact sentinel values. "
+        "Title: %s. Platform: %s. Verified ASR: %s. %s"
+    ) % (max(0.1, float(duration or 0.1)), str(title or "")[:200], str(platform or "")[:40],
+         str(transcript or "(none)")[:3000], retry)
+
+
+def _gemini_request_body(media_part, title, duration, platform, transcript, validation_error=""):
+    return {
+        "systemInstruction": {
+            "parts": [{"text": "You are an evidence-bound video prompt reverse director."}],
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [
+                media_part,
+                {"text": _gemini_reverse_instruction(
+                    title, duration, platform, transcript, validation_error,
+                )},
+            ],
+        }],
+        "generationConfig": {
+            "temperature": 0.1, "maxOutputTokens": 8192,
+            "responseMimeType": "application/json", "responseJsonSchema": _gemini_reverse_schema(),
+        },
+    }
+
+
+def _gemini_inline_payload_bytes(path, mime_type, title, duration, platform, transcript):
+    size = os.path.getsize(path)
+    encoded_size = 4 * ((size + 2) // 3)
+    placeholder = {"inline_data": {"mime_type": mime_type, "data": ""}}
+    body = _gemini_request_body(
+        placeholder, title, duration, platform, transcript, "x" * 300,
+    )
+    return len(json.dumps(body, ensure_ascii=False).encode("utf-8")) + encoded_size
+
+
+def _gemini_candidate_text(response):
+    try:
+        text = response["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise RuntimeError("Gemini returned no structured candidate") from error
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("Gemini returned an empty structured candidate")
+    if len(text.encode("utf-8")) > _GEMINI_MAX_RESPONSE_BYTES:
+        raise ValueError("Gemini structured candidate exceeds the total output limit")
+    return text.strip()
+
+
+def _gemini_fact_text(value):
+    return " ".join(str(value or "").replace("\r", " ").split()).strip()
+
+
+def _gemini_evidence_to_local(times, start, end):
+    midpoint = (float(start) + float(end)) / 2.0
+    return sorted({1 if float(value) <= midpoint else 2 for value in (times or [])})
+
+
+def _parse_gemini_reverse_result(raw, duration):
+    try:
+        result = json.loads(str(raw or ""))
+    except Exception as error:
+        raise ValueError("Gemini reverse output is not complete JSON") from error
+    if not isinstance(result, dict) or set(result) != {"shots"}:
+        raise ValueError("Gemini reverse output root does not match schema")
+    shots = result.get("shots")
+    if not isinstance(shots, list) or not 1 <= len(shots) <= 4:
+        raise ValueError("Gemini reverse output must contain 1-4 shots")
+    expected_duration = max(0.1, round(float(duration or 0.1), 1))
+    entries, windows = [], []
+    previous_end = 0.0
+    for index, shot in enumerate(shots, 1):
+        required = {"start_seconds", "end_seconds", "cut_from_previous", "facts", "evidence_seconds", "generation_advice"}
+        if not isinstance(shot, dict) or set(shot) != required:
+            raise ValueError("Gemini shot %d does not match schema" % index)
+        start, end = round(float(shot["start_seconds"]), 1), round(float(shot["end_seconds"]), 1)
+        if abs(start - previous_end) > 0.11 or end <= start:
+            raise ValueError("Gemini shot timeline is not gap-free")
+        if index == 1 and bool(shot["cut_from_previous"]):
+            raise ValueError("The first Gemini shot cannot cut from a previous shot")
+        facts, evidence, advice = shot["facts"], shot["evidence_seconds"], shot["generation_advice"]
+        if not isinstance(facts, dict) or set(facts) != set(_GEMINI_FACT_FIELDS):
+            raise ValueError("Gemini shot facts do not match schema")
+        if not isinstance(evidence, dict) or set(evidence) != set(_GEMINI_FACT_FIELDS):
+            raise ValueError("Gemini shot evidence does not match schema")
+        if not isinstance(advice, dict) or set(advice) != {"aspect_ratio", "fps", "camera_control", "negative_prompt"}:
+            raise ValueError("Gemini generation advice does not match schema")
+        for key in ("aspect_ratio", "fps", "camera_control", "negative_prompt"):
+            if not isinstance(advice[key], str):
+                raise ValueError("Gemini generation advice %s must be a string" % key)
+            advice[key] = _gemini_fact_text(advice[key])
+        if not re.fullmatch(r"(?:1:1|3:4|4:3|9:16|16:9|21:9|source|original)", advice["aspect_ratio"]):
+            raise ValueError("Gemini generation advice aspect_ratio is invalid")
+        if not re.fullmatch(r"(?:24|25|30|50|60)(?:\s*fps)?", advice["fps"], re.IGNORECASE):
+            raise ValueError("Gemini generation advice fps is invalid")
+        if not advice["camera_control"]:
+            raise ValueError("Gemini generation advice camera_control is invalid")
+        if not advice["negative_prompt"]:
+            raise ValueError("Gemini generation advice negative_prompt is invalid")
+        applicable = ready = 0
+        for key in _GEMINI_FACT_FIELDS:
+            value = _gemini_fact_text(facts[key])
+            facts[key] = value
+            if not value:
+                raise ValueError("Gemini shot %d has an invalid %s value" % (index, key))
+            if value == _GEMINI_NOT_APPLICABLE and key not in _GEMINI_OPTIONAL_FACT_FIELDS:
+                raise ValueError("Gemini marked a required visual fact not_applicable")
+            points = evidence[key]
+            if not isinstance(points, list) or len(points) > 3:
+                raise ValueError("Gemini shot evidence is invalid")
+            for point in points:
+                if float(point) < start - 0.11 or float(point) > end + 0.11:
+                    raise ValueError("Gemini evidence time is outside its shot")
+            if value != _GEMINI_NOT_APPLICABLE:
+                applicable += 1
+                if value != _GEMINI_UNKNOWN:
+                    if not points:
+                        raise ValueError("Gemini visible fact lacks evidence time")
+                    ready += 1
+        if applicable < 1 or ready / float(applicable) < 0.90:
+            raise ValueError("Gemini generation readiness is below 90 percent")
+        critical = ("subject_identity", "subject_appearance", "position_scale", "action_start", "action_process",
+                    "action_end", "foreground", "midground", "background", "shot_scale", "camera_angle",
+                    "composition", "lighting_color", "style_texture", "rhythm")
+        if any(facts[key] in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE} for key in critical):
+            raise ValueError("Gemini critical generation fact is not ready")
+        action_start_frames = _gemini_evidence_to_local(evidence["action_start"], start, end)
+        action_end_frames = _gemini_evidence_to_local(evidence["action_end"], start, end)
+        if 1 not in action_start_frames or 2 not in action_end_frames:
+            raise ValueError("Gemini action does not cite both shot endpoints")
+        subject = "; ".join(facts[key] for key in ("subject_identity", "subject_appearance", "wardrobe", "position_scale")
+                            if facts[key] != _GEMINI_NOT_APPLICABLE)
+        action = "; ".join(facts[key] for key in ("action_start", "action_process", "action_end", "direction_speed"))
+        scene = "; ".join(facts[key] for key in ("foreground", "midground", "background"))
+        camera = "; ".join(facts[key] for key in ("shot_scale", "camera_angle", "camera_movement", "composition"))
+        lighting = "; ".join(facts[key] for key in ("lighting_color", "style_texture", "rhythm"))
+        sound = facts["sound"] if facts["sound"] != _GEMINI_NOT_APPLICABLE else ""
+        subtitles = facts["subtitles"] if facts["subtitles"] != _GEMINI_NOT_APPLICABLE else ""
+        local_evidence = {
+            "subject": _gemini_evidence_to_local(evidence["subject_identity"] + evidence["subject_appearance"], start, end) or [1],
+            "scene": _gemini_evidence_to_local(evidence["foreground"] + evidence["midground"] + evidence["background"], start, end) or [1],
+            "action": sorted(set(action_start_frames + action_end_frames)),
+            "camera": _gemini_evidence_to_local(evidence["shot_scale"] + evidence["camera_angle"] + evidence["composition"], start, end) or [1],
+            "lighting": _gemini_evidence_to_local(evidence["lighting_color"], start, end) or [1],
+        }
+        timeline = "%.1f-%.1fs" % (start, end)
+        parts = ["subject: " + subject, "action: " + action, "scene: " + scene,
+                 "camera: " + camera, "lighting/style: " + lighting]
+        if sound:
+            parts.append("verified sound/ASR: " + sound)
+        if subtitles:
+            parts.append("visible subtitles/text: " + subtitles)
+        parts.append("generation advice: aspect ratio %s; fps %s; camera control %s; negative prompt %s"
+                     % (advice["aspect_ratio"], advice["fps"], advice["camera_control"], advice["negative_prompt"]))
+        entries.append({
+            "text": "; ".join(parts),
+            "fields": {"subject": subject, "scene": scene, "action": action, "camera": camera,
+                       "lighting": lighting, "sound": sound,
+                       "continuity": ""},
+            "evidence_frames": local_evidence, "continuity_evidence_frames": [],
+            "evidence_seconds": evidence, "generation_advice": advice,
+            "cut_from_previous": bool(shot["cut_from_previous"]),
+            "readiness": {"applicable": applicable, "ready": ready},
+        })
+        windows.append((start, end, timeline))
+        previous_end = end
+    if abs(previous_end - expected_duration) > 0.11:
+        raise ValueError("Gemini shot timeline does not cover the full media duration")
+    return {"entries": entries, "windows": windows}
+
+
+def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
+    entries = prompt_result.get("entries") or []
+    windows = prompt_result.get("windows") or []
+    frame_groups = _reverse_model_frame_groups(frames, len(windows))
+    accepted = []
+    for index, (entry, window, frame_group) in enumerate(
+        zip(entries, windows, frame_groups), 1
+    ):
+        transcript = _segment_transcript(script_text, window[0], window[1])
+        _validate_reverse_segment_evidence(
+            entry, accepted, frame_group, index,
+            transcript=transcript, require_frame_evidence=True,
+            enforce_length_limit=False,
+        )
+        accepted.append(entry)
+    if len(accepted) != len(entries) or len(entries) != len(windows):
+        raise ValueError("Gemini reverse evidence grouping is incomplete")
+    return prompt_result
+
+
+def _gemini_quality_dimensions(prompt_result):
+    entries = list((prompt_result or {}).get("entries") or [])
+    applicable = sum(int((entry.get("readiness") or {}).get("applicable") or 0) for entry in entries)
+    ready = sum(int((entry.get("readiness") or {}).get("ready") or 0) for entry in entries)
+    readiness = round(100.0 * ready / applicable, 1) if applicable else 0.0
+    cited = sum(
+        1 for entry in entries for points in (entry.get("evidence_seconds") or {}).values()
+        if points
+    )
+    return {
+        "source_evidence_coverage": {"cited_fact_slots": cited, "validated": bool(entries)},
+        "generation_readiness": {"ready": ready, "applicable": applicable, "percent": readiness},
+        "factual_consistency": {"validated": bool(entries), "strict_failure_on_error": True},
+        "end_to_end_similarity_claimed": False,
+    }
+
+
+def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform, transcript,
+                                      deadline=None, heartbeat=None):
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
+    uploaded = None
+    try:
+        media_part, uploaded = _gemini_media_part(
+            path, mime_type, duration, api_key,
+            deadline=deadline, heartbeat=heartbeat,
+            title=title, platform=platform, transcript=transcript,
+        )
+        if uploaded:
+            uploaded = _gemini_wait_for_file_active(
+                uploaded, api_key, deadline=deadline, heartbeat=heartbeat,
+            )
+            media_part = {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}
+        validation_error = ""
+        for attempt in range(2):
+            body = _gemini_request_body(
+                media_part, title, duration, platform, transcript, validation_error,
+            )
+            response = _gemini_json_request(
+                _GEMINI_API_BASE + "/v1beta/models/" + _GEMINI_REVERSE_MODEL + ":generateContent",
+                body, api_key, deadline=deadline, heartbeat=heartbeat)
+            try:
+                parsed = _parse_gemini_reverse_result(_gemini_candidate_text(response), duration)
+                parsed.update({"provider": "google", "model": _GEMINI_REVERSE_MODEL, "attempts": attempt + 1})
+                return parsed
+            except ValueError as error:
+                validation_error = str(error)
+                if attempt:
+                    raise
+        raise ValueError("Gemini reverse validation failed")
+    finally:
+        # An exhausted analysis deadline must not suppress provider cleanup.
+        # Cleanup is best-effort and never masks the primary exception.
+        if uploaded:
+            _gemini_delete_file(
+                uploaded, api_key,
+                deadline=time.monotonic() + 15,
+                heartbeat=None,
+            )
+
+
 def _reverse_analysis_call_budget(segment_count):
     """Expose the bounded call cost under one shared 540-second deadline."""
     segment_count = max(1, min(4, int(segment_count or 1)))
     return {
         "analysis_deadline_seconds": BREAKDOWN_ANALYSIS_BUDGET,
-        "max_images_per_request": 2,
+        "max_images_per_request": 0,
+        "max_video_inputs_per_request": 1,
         "global_model_calls": 0,
-        "normal_logical_calls": segment_count,
-        "worst_logical_calls": segment_count * 2,
-        "normal_physical_http_attempts": segment_count,
+        "normal_logical_calls": 1,
+        "worst_logical_calls": 2,
+        "normal_physical_http_attempts": 1,
         "same_provider_physical_attempts_per_logical": 2,
-        # Reverse prompting is pinned to glm-4v-plus. Each logical call can
-        # make at most two same-provider physical attempts and never falls
-        # back to another provider.
-        "worst_physical_http_attempts": segment_count * 2 * 2,
-        "provider": "zhipu",
-        "model": "glm-4v-plus",
+        "worst_physical_http_attempts": 4,
+        "provider": "google",
+        "model": _GEMINI_REVERSE_MODEL,
         "http_4xx_retry": False,
         "cross_provider_fallback": False,
     }
