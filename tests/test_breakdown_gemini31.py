@@ -62,7 +62,24 @@ class GeminiReverseTests(unittest.TestCase):
         }
 
     def _provider_response(self, count=1):
-        shots = [self._shot(float(i), float(i + 1), i > 0) for i in range(count)]
+        shots = []
+        for i in range(count):
+            shot = self._shot(float(i), float(i + 1), i > 0)
+            facts = [
+                {
+                    "key": key,
+                    "value": shot["facts"][key],
+                    "evidence_seconds": shot["evidence_seconds"][key],
+                }
+                for key in self.breakdown._GEMINI_FACT_FIELDS
+            ]
+            shots.append({
+                "start_seconds": shot["start_seconds"],
+                "end_seconds": shot["end_seconds"],
+                "cut_from_previous": shot["cut_from_previous"],
+                "facts": facts,
+                "generation_advice": shot["generation_advice"],
+            })
         text = json.dumps({"shots": shots})
         return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
@@ -123,6 +140,37 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertNotIn("responseMimeType", config)
         self.assertNotIn("responseSchema", config)
         self.assertNotIn("responseJsonSchema", config)
+
+    def test_provider_schema_uses_compact_fact_rows_without_duplicate_evidence_tree(self):
+        schema = self.breakdown._gemini_reverse_schema()
+        shot_schema = schema["properties"]["shots"]["items"]
+        self.assertEqual(
+            shot_schema["required"],
+            [
+                "start_seconds", "end_seconds", "cut_from_previous", "facts",
+                "generation_advice",
+            ],
+        )
+        self.assertNotIn("evidence_seconds", shot_schema["properties"])
+        facts_schema = shot_schema["properties"]["facts"]
+        self.assertEqual(facts_schema["minItems"], len(self.breakdown._GEMINI_FACT_FIELDS))
+        self.assertEqual(facts_schema["maxItems"], len(self.breakdown._GEMINI_FACT_FIELDS))
+        self.assertEqual(
+            facts_schema["items"]["properties"]["key"]["enum"],
+            list(self.breakdown._GEMINI_FACT_FIELDS),
+        )
+        self.assertLess(len(json.dumps(schema).encode("utf-8")), 4000)
+
+    def test_compact_fact_rows_expand_deterministically_and_reject_duplicates(self):
+        response = self._provider_response()
+        raw = response["candidates"][0]["content"]["parts"][0]["text"]
+        parsed = self.breakdown._parse_gemini_reverse_result(raw, 1.0)
+        self.assertEqual(parsed["entries"][0]["readiness"]["ready"], 17)
+
+        payload = json.loads(raw)
+        payload["shots"][0]["facts"][-1]["key"] = payload["shots"][0]["facts"][0]["key"]
+        with self.assertRaisesRegex(ValueError, "unique and complete"):
+            self.breakdown._parse_gemini_reverse_result(json.dumps(payload), 1.0)
 
     def test_one_to_four_shots_are_gap_free_and_directly_assembled(self):
         for count in range(1, 5):
