@@ -720,10 +720,18 @@
     bindSceneHandoffs();
     syncModeUi();
   }
+  function reverseLegacyPrompt(sections){
+    if(!sections||typeof sections!=='object'||Array.isArray(sections)) return '';
+    var labels={subject:'主体',scene:'场景',composition:'构图',action:'动作',lighting:'光影',style:'风格',parameters:'参数'};
+    return Object.keys(labels).map(function(key){
+      var value=sections[key];
+      return value===undefined||value===null||!String(value).trim()?'':labels[key]+'：'+String(value).trim();
+    }).filter(Boolean).join('\n');
+  }
   function renderBreakdownReverse(bd){
     lastBreakdownReverse=bd;
     bdEditing=false; if(bdEditBtn) bdEditBtn.textContent='✏️ 编辑分镜'; if(bdEditCancelBtn) bdEditCancelBtn.style.display='none';
-    var prompt=((bd&&bd.prompt)||'').trim();
+    var prompt=((bd&&bd.prompt)||'').trim()||reverseLegacyPrompt(bd&&bd.sections);
     if(meta) meta.innerHTML='<span style="color:#a78bfa;">反推</span><span style="color:#5c6b82;">·</span><span>'+esc((bd&&bd.source_title)||'视频提示词反推')+'</span><span style="color:#5c6b82;">·</span><span>'+esc(platformText(bd&&bd.source_platform))+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+esc(String(fmtDur((bd&&bd.duration)||'')))+'s</span>';
     scenes.innerHTML=prompt
       ? '<div id="bdReverseResult" class="sc-card" style="display:block;">'

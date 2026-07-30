@@ -43,7 +43,10 @@ class ReversePromptRenderTests(unittest.TestCase):
         if not shutil.which("node"):
             raise unittest.SkipTest("node is required for reverse prompt rendering contracts")
         html = SCRIPT_HTML.read_text(encoding="utf-8")
-        cls.functions = _extract_function(html, "renderBreakdownReverse")
+        cls.functions = "\n".join(
+            _extract_function(html, name)
+            for name in ("reverseLegacyPrompt", "renderBreakdownReverse")
+        )
 
     def _render(self, payload):
         harness = f"""
@@ -165,6 +168,22 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn('id="bdReversePromptText"', html)
         self.assertNotIn("display:none", html)
         self.assertIn("display:block", html)
+        self.assertEqual(html.count('class="sc-card"'), 1)
+
+    def test_sections_only_legacy_history_falls_back_to_one_text_card(self):
+        html = self._render(
+            {
+                "prompt": "",
+                "sections": {
+                    "subject": "legacy subject",
+                    "scene": "legacy scene",
+                    "parameters": "legacy parameters",
+                },
+            }
+        )
+        self.assertIn("主体：legacy subject", html)
+        self.assertIn("场景：legacy scene", html)
+        self.assertIn("参数：legacy parameters", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
 
     def test_empty_or_abnormal_sections_fall_back_to_prompt(self):
