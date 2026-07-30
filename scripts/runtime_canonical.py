@@ -321,6 +321,7 @@ def verify_release(
     scope: dict,
     require_server_verified: bool,
     require_matching_directory: bool = True,
+    expect_read_only: bool = True,
 ) -> None:
     validate_manifest(manifest, scope, require_server_verified)
     if require_matching_directory and release.name != manifest["content_id"]:
@@ -344,7 +345,10 @@ def verify_release(
         if path.stat().st_size != item["size"] or sha256_file(path) != item["sha256"]:
             raise GateError(f"release file mismatch: {relative}")
         mode = stat.S_IMODE(path.stat().st_mode)
-        if os.name == "posix" and mode != int(item["mode"], 8):
+        expected_mode = int(item["mode"], 8)
+        if expect_read_only:
+            expected_mode &= ~0o222
+        if os.name == "posix" and mode != expected_mode:
             raise GateError(f"release mode mismatch: {relative}")
         found.add(relative)
     missing = sorted(set(expected) - found)
@@ -387,6 +391,7 @@ def build_release(source_root: Path, manifest: dict, scope: dict, releases_root:
             scope,
             require_server_verified=False,
             require_matching_directory=False,
+            expect_read_only=False,
         )
         os.replace(staging, release)
         make_read_only(release)
