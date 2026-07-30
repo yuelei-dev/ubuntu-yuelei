@@ -121,7 +121,33 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn("display:block", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
 
-    def test_legacy_display_sections_still_render_cards_and_hide_prompt(self):
+    def test_task_3268_gemini_audit_result_keeps_generated_prompt_visible(self):
+        html = self._render(
+            {
+                "type": "breakdown_reverse",
+                "prompt": "3268 GENERATED GEMINI PROMPT",
+                "sections": {
+                    "reverse_audit": {
+                        "model_provider": "google",
+                        "model_id": "gemini-3.1-pro-preview",
+                        "model_attempts": 2,
+                        "segment_evidence": [
+                            {
+                                "omitted_unsupported_fields": [
+                                    {"field": "sound", "reason": "no_segment_asr"}
+                                ]
+                            }
+                        ],
+                    }
+                },
+            }
+        )
+        self.assertIn("3268 GENERATED GEMINI PROMPT", html)
+        self.assertIn('id="bdReversePromptText"', html)
+        self.assertIn("display:block", html)
+        self.assertEqual(html.count('class="sc-card"'), 1)
+
+    def test_legacy_display_sections_render_cards_without_hiding_prompt(self):
         html = self._render(
             {
                 "prompt": "LEGACY FULL PROMPT",
@@ -138,8 +164,10 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         )
         self.assertIn("legacy subject", html)
         self.assertIn("legacy parameters", html)
+        self.assertIn("LEGACY FULL PROMPT", html)
         self.assertIn('id="bdReversePromptText"', html)
-        self.assertIn("display:none", html)
+        self.assertNotIn("display:none", html)
+        self.assertIn("display:block", html)
         self.assertEqual(html.count('class="sc-card"'), 8)
 
     def test_empty_or_abnormal_sections_fall_back_to_prompt(self):

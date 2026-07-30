@@ -739,7 +739,7 @@
       +sectionOrder.map(function(key){ var value=displaySections[key]||''; return '<div class="sc-card" style="display:block;"><div style="font-size:12px;font-weight:700;color:#c4b5fd;margin-bottom:7px;">'+labels[key]+'</div><div style="font-size:13px;line-height:1.75;color:#f5f3ff;">'+esc(value)+'</div></div>'; }).join('')+'</div>':'';
     if(meta) meta.innerHTML='<span style="color:#a78bfa;">反推</span><span style="color:#5c6b82;">·</span><span>'+esc((bd&&bd.source_title)||'视频提示词反推')+'</span><span style="color:#5c6b82;">·</span><span>'+esc(platformText(bd&&bd.source_platform))+'</span><span style="color:#5c6b82;">·</span><span class="mono">'+esc(String(fmtDur((bd&&bd.duration)||'')))+'s</span>';
     scenes.innerHTML=prompt
-      ? sectionHtml+'<div id="bdReverseResult" class="sc-card" style="display:'+(sectionHtml?'none':'block')+';">'
+      ? sectionHtml+'<div id="bdReverseResult" class="sc-card" style="display:block;">'
         +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:12px;font-weight:700;color:#c4b5fd;"><span>✨</span><span>反推提示词</span></div>'
         +'<div id="bdReversePromptText" style="font-size:14px;line-height:1.85;color:#f5f3ff;white-space:pre-wrap;word-break:break-word;">'+esc(prompt)+'</div>'
         +'</div>'
