@@ -3024,6 +3024,38 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(captured["max_attempts"], 2)
         self.assertLessEqual(captured["timeout"] * 2, 539)
 
+    def test_post_zhipu_accepts_deployed_egress_without_timeout_parameter(self):
+        calls = []
+
+        def deployed_post(
+            official_base, fallback_base, path, data, headers, log=None,
+            max_attempts=2,
+        ):
+            calls.append({
+                "official_base": official_base,
+                "fallback_base": fallback_base,
+                "path": path,
+                "max_attempts": max_attempts,
+            })
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with patch.object(
+            self.breakdown.egress, "post_json_idempotent", deployed_post,
+        ), patch.object(
+            self.breakdown.time, "monotonic", side_effect=[100.0, 101.0],
+        ):
+            response = self.breakdown._post_zhipu(
+                {"model": "glm-4v-plus"},
+                "key",
+                deadline=640.0,
+                heartbeat=lambda: None,
+            )
+
+        self.assertEqual(response["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["path"], "/chat/completions")
+        self.assertEqual(calls[0]["max_attempts"], 2)
+
     def test_reverse_model_normal_attempt_refreshes_heartbeat(self):
         heartbeats = []
         with patch.object(
