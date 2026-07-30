@@ -43,10 +43,7 @@ class ReversePromptRenderTests(unittest.TestCase):
         if not shutil.which("node"):
             raise unittest.SkipTest("node is required for reverse prompt rendering contracts")
         html = SCRIPT_HTML.read_text(encoding="utf-8")
-        cls.functions = "\n".join(
-            _extract_function(html, name)
-            for name in ("reverseLegacyDisplaySections", "renderBreakdownReverse")
-        )
+        cls.functions = _extract_function(html, "renderBreakdownReverse")
 
     def _render(self, payload):
         harness = f"""
@@ -147,7 +144,7 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn("display:block", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
 
-    def test_legacy_display_sections_render_cards_without_hiding_prompt(self):
+    def test_legacy_display_sections_are_not_rendered_as_seven_cards(self):
         html = self._render(
             {
                 "prompt": "LEGACY FULL PROMPT",
@@ -162,13 +159,13 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
                 },
             }
         )
-        self.assertIn("legacy subject", html)
-        self.assertIn("legacy parameters", html)
+        self.assertNotIn("legacy subject", html)
+        self.assertNotIn("legacy parameters", html)
         self.assertIn("LEGACY FULL PROMPT", html)
         self.assertIn('id="bdReversePromptText"', html)
         self.assertNotIn("display:none", html)
         self.assertIn("display:block", html)
-        self.assertEqual(html.count('class="sc-card"'), 8)
+        self.assertEqual(html.count('class="sc-card"'), 1)
 
     def test_empty_or_abnormal_sections_fall_back_to_prompt(self):
         for sections in ({}, [], "invalid", {"subject": "", "scene": None}):
