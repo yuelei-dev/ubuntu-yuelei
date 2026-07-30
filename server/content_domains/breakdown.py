@@ -101,6 +101,13 @@ _REVERSE_SOFT_OBSERVABLE_REWRITES = {
 _REVERSE_SOFT_DROP_CLAUSE_MARKERS = (
     "似乎", "仿佛", "感受风", "享受微风",
 )
+_GEMINI_SOFT_CORRECTABLE_FACT_FIELDS = {
+    "subject_identity", "subject_appearance", "wardrobe", "position_scale",
+    "action_start", "action_process", "action_end", "direction_speed",
+    "foreground", "midground", "background", "shot_scale", "camera_angle",
+    "camera_movement", "composition", "lighting_color", "style_texture",
+    "rhythm", "continuity",
+}
 _REVERSE_INVALID_SOUND_MARKERS = (
     "未观察到声音", "从画面未观察到声音", "画面没有声音",
     "画面无声音",
@@ -3569,7 +3576,7 @@ def _soften_gemini_subjective_fact(value):
             "action": "rewritten_to_observable",
         })
 
-    pieces = re.split(r"([,，;；。.!！?？])", text)
+    pieces = re.split(r"([,，;；。!！?？]|(?<!\d)\.(?!\d))", text)
     kept = []
     for offset in range(0, len(pieces), 2):
         clause = pieces[offset].strip()
@@ -3743,7 +3750,10 @@ def _parse_gemini_reverse_result(raw, duration):
         lightweight_corrections = []
         for key in _GEMINI_FACT_FIELDS:
             value = _gemini_fact_text(facts[key])
-            if value not in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE}:
+            if (
+                key in _GEMINI_SOFT_CORRECTABLE_FACT_FIELDS
+                and value not in {_GEMINI_UNKNOWN, _GEMINI_NOT_APPLICABLE}
+            ):
                 value, corrections = _soften_gemini_subjective_fact(value)
                 for correction in corrections:
                     lightweight_corrections.append({

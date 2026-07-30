@@ -372,6 +372,46 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertNotIn("似乎", entry["text"])
         self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
 
+    def test_verified_sound_and_visible_subtitles_are_never_rewritten(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "旁白说“阳光明媚”"
+        shot["evidence_seconds"]["sound"] = [0.4]
+        shot["facts"]["subtitles"] = "字幕写着“绿草如茵，生活仿佛一场旅行”"
+        shot["evidence_seconds"]["subtitles"] = [0.4]
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        entry = result["entries"][0]
+        self.assertEqual(
+            entry["fields"]["sound"], "旁白说“阳光明媚”"
+        )
+        self.assertEqual(
+            entry["fields"]["subtitles"],
+            "字幕写着“绿草如茵，生活仿佛一场旅行”",
+        )
+        self.assertIn("阳光明媚", entry["text"])
+        self.assertIn("绿草如茵", entry["text"])
+        self.assertIn("仿佛", entry["text"])
+        self.assertNotIn("lightweight_corrections", entry)
+
+    def test_decimal_point_is_not_split_into_a_false_evidence_value(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["camera_movement"] = "镜头距离1.5米似乎偏远"
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
+        )
+        entry = result["entries"][0]
+        self.assertNotIn("镜头距离1", entry["text"])
+        self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
+        self.assertIn(
+            {
+                "field": "camera_movement",
+                "marker": "似乎",
+                "action": "dropped_subjective_clause",
+            },
+            entry["lightweight_corrections"],
+        )
+
     def test_missing_entire_critical_group_still_fails_at_eighty_percent(self):
         shot = self._shot(0.0, 1.0)
         for key in ("subject_identity", "subject_appearance", "position_scale"):
