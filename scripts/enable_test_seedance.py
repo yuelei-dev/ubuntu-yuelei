@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import pathlib
@@ -36,7 +37,7 @@ def _backup_database(
     if backup_path.exists():
         raise FileExistsError("refusing to overwrite an existing backup")
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(backup_path)) as destination:
+    with contextlib.closing(sqlite3.connect(str(backup_path))) as destination:
         source.backup(destination)
 
 

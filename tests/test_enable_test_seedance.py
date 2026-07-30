@@ -1,3 +1,4 @@
+import contextlib
 import importlib.util
 import pathlib
 import sqlite3
@@ -13,7 +14,7 @@ SPEC.loader.exec_module(MODULE)
 
 
 def _create_database(path):
-    with sqlite3.connect(str(path)) as connection:
+    with contextlib.closing(sqlite3.connect(str(path))) as connection:
         connection.execute(
             """CREATE TABLE feature_flags(
                    feature TEXT PRIMARY KEY,
@@ -49,7 +50,7 @@ class EnableTestSeedanceTests(unittest.TestCase):
             self.assertTrue(result["changed"])
             self.assertFalse(result["service_restart_required"])
             self.assertTrue(backup_path.is_file())
-            with sqlite3.connect(str(db_path)) as connection:
+            with contextlib.closing(sqlite3.connect(str(db_path))) as connection:
                 self.assertEqual(
                     connection.execute(
                         "SELECT enabled, updated_by, updated_at "
@@ -64,7 +65,7 @@ class EnableTestSeedanceTests(unittest.TestCase):
                     ).fetchone(),
                     (0,),
                 )
-            with sqlite3.connect(str(backup_path)) as backup:
+            with contextlib.closing(sqlite3.connect(str(backup_path))) as backup:
                 self.assertIsNone(
                     backup.execute(
                         "SELECT enabled FROM feature_flags WHERE feature=?",
@@ -78,7 +79,7 @@ class EnableTestSeedanceTests(unittest.TestCase):
             db_path = root / "feature_flags.db"
             backup_path = root / "before.db"
             _create_database(db_path)
-            with sqlite3.connect(str(db_path)) as connection:
+            with contextlib.closing(sqlite3.connect(str(db_path))) as connection:
                 connection.execute(
                     "INSERT INTO feature_flags VALUES(?,?,?,?)",
                     (MODULE.FEATURE, 1, "previous", 11),
@@ -133,7 +134,7 @@ class EnableTestSeedanceTests(unittest.TestCase):
                 )
 
             bad_db = root / "bad.db"
-            with sqlite3.connect(str(bad_db)) as connection:
+            with contextlib.closing(sqlite3.connect(str(bad_db))) as connection:
                 connection.execute("CREATE TABLE feature_flags(feature TEXT)")
                 connection.commit()
             with self.assertRaisesRegex(RuntimeError, "schema is incompatible"):
