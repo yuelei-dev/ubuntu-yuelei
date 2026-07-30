@@ -393,17 +393,105 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertEqual(result["entries"][0]["fields"]["sound"], "")
         self.assertIn("visible subtitles/text", result["entries"][0]["text"])
 
-    def test_unrelated_sound_is_rejected_against_current_shot_asr(self):
+    def test_unrelated_sound_is_omitted_against_current_shot_asr(self):
         shot = self._shot(0.0, 1.0)
         shot["facts"]["sound"] = "\u6fc0\u6602\u6447\u6eda\u4e50"
         shot["evidence_seconds"]["sound"] = [0.4]
         result = self.breakdown._parse_gemini_reverse_result(
             json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
         )
-        with self.assertRaises(ValueError):
-            self.breakdown._validate_gemini_reverse_entries(
-                result, ["frame-%d.jpg" % index for index in range(8)], "\u6b22\u8fce\u5149\u4e34"
-            )
+        before = dict(result["entries"][0]["readiness"])
+        self.breakdown._bind_gemini_sound_evidence(
+            result, "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
+        )
+        entry = result["entries"][0]
+        self.assertEqual(entry["fields"]["sound"], "")
+        self.assertEqual(entry["evidence_seconds"]["sound"], [])
+        self.assertNotIn("\u6fc0\u6602\u6447\u6eda\u4e50", entry["text"])
+        self.assertEqual(entry["readiness"]["applicable"], before["applicable"] - 1)
+        self.assertEqual(entry["readiness"]["ready"], before["ready"] - 1)
+        self.assertIn(
+            {"field": "sound", "reason": "segment_asr_mismatch"},
+            entry["omitted_unsupported_fields"],
+        )
+        self.breakdown._validate_gemini_reverse_entries(
+            result,
+            ["frame-%d.jpg" % index for index in range(8)],
+            "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
+        )
+
+    def test_sound_without_segment_asr_is_omitted_without_claiming_silence(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "\u8212\u7f13\u80cc\u666f\u97f3\u4e50"
+        shot["evidence_seconds"]["sound"] = [0.4]
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
+        )
+        self.breakdown._bind_gemini_sound_evidence(result, "")
+        entry = result["entries"][0]
+        self.assertEqual(entry["fields"]["sound"], "")
+        self.assertEqual(entry["evidence_seconds"]["sound"], [])
+        self.assertNotIn("verified sound/ASR", entry["text"])
+        self.assertNotIn("\u672a\u68c0\u6d4b\u5230\u58f0\u97f3", entry["text"])
+        self.assertIn(
+            {"field": "sound", "reason": "no_segment_asr"},
+            entry["omitted_unsupported_fields"],
+        )
+        self.breakdown._validate_gemini_reverse_entries(
+            result,
+            ["frame-%d.jpg" % index for index in range(8)],
+            "",
+        )
+
+    def test_unknown_sound_omission_does_not_decrement_ready_twice(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "unknown"
+        shot["evidence_seconds"]["sound"] = []
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
+        )
+        entry = result["entries"][0]
+        self.assertEqual(
+            entry["readiness"],
+            {"applicable": 18, "ready": 17},
+        )
+
+        self.breakdown._bind_gemini_sound_evidence(result, "")
+
+        self.assertEqual(entry["fields"]["sound"], "")
+        self.assertEqual(
+            entry["readiness"],
+            {"applicable": 17, "ready": 17},
+        )
+        self.assertIn(
+            {"field": "sound", "reason": "no_segment_asr"},
+            entry["omitted_unsupported_fields"],
+        )
+        quality = self.breakdown._gemini_quality_dimensions(result)
+        self.assertEqual(
+            quality["generation_readiness"],
+            {"ready": 17, "applicable": 17, "percent": 100.0},
+        )
+
+    def test_sound_matching_current_segment_asr_is_retained(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "\u4eba\u7269\u8bf4\u51fa\u201c\u6b22\u8fce\u5149\u4e34\u201d"
+        shot["evidence_seconds"]["sound"] = [0.4]
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
+        )
+        before = dict(result["entries"][0]["readiness"])
+        self.breakdown._bind_gemini_sound_evidence(
+            result, "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
+        )
+        entry = result["entries"][0]
+        self.assertEqual(
+            entry["fields"]["sound"],
+            "\u4eba\u7269\u8bf4\u51fa\u201c\u6b22\u8fce\u5149\u4e34\u201d",
+        )
+        self.assertIn("verified sound/ASR", entry["text"])
+        self.assertEqual(entry["readiness"], before)
+        self.assertNotIn("omitted_unsupported_fields", entry)
 
     def test_4xx_has_no_retry_and_429_retries_same_provider_once(self):
         request = self.breakdown.urllib.request.Request("https://example.invalid")
