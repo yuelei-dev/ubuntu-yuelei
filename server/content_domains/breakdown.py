@@ -1377,6 +1377,10 @@ def _reverse_segment_evidence_manifest(
             "validation_summary": json.loads(json.dumps(
                 entry.get("validation_summary") or {}, ensure_ascii=False
             )),
+            "omitted_unsupported_fields": json.loads(json.dumps(
+                entry.get("omitted_unsupported_fields") or [],
+                ensure_ascii=False,
+            )),
             "evidence_seconds": entry.get("evidence_seconds") or {},
             "generation_advice": entry.get("generation_advice") or {},
             "cut_from_previous": bool(entry.get("cut_from_previous")),
@@ -3546,6 +3550,73 @@ def _gemini_evidence_to_local(times, start, end):
     return sorted({1 if float(value) <= midpoint else 2 for value in (times or [])})
 
 
+def _render_gemini_entry_text(entry):
+    fields = entry.get("fields") or {}
+    advice = entry.get("generation_advice") or {}
+    parts = [
+        "subject: " + str(fields.get("subject") or ""),
+        "action: " + str(fields.get("action") or ""),
+        "scene: " + str(fields.get("scene") or ""),
+        "camera: " + str(fields.get("camera") or ""),
+        "lighting/style: " + str(fields.get("lighting") or ""),
+    ]
+    if fields.get("sound"):
+        parts.append("verified sound/ASR: " + str(fields["sound"]))
+    if fields.get("subtitles"):
+        parts.append("visible subtitles/text: " + str(fields["subtitles"]))
+    parts.append(
+        "generation advice: aspect ratio %s; fps %s; camera control %s; "
+        "negative prompt %s"
+        % (
+            advice.get("aspect_ratio") or "",
+            advice.get("fps") or "",
+            advice.get("camera_control") or "",
+            advice.get("negative_prompt") or "",
+        )
+    )
+    return "; ".join(parts)
+
+
+def _omit_unsupported_gemini_sound(entry, reason):
+    fields = entry.get("fields") or {}
+    if not fields.get("sound"):
+        return False
+    fields["sound"] = ""
+    evidence = entry.get("evidence_seconds") or {}
+    evidence["sound"] = []
+    readiness = entry.get("readiness") or {}
+    readiness["applicable"] = max(
+        0, int(readiness.get("applicable") or 0) - 1,
+    )
+    readiness["ready"] = max(
+        0, int(readiness.get("ready") or 0) - 1,
+    )
+    omitted = entry.setdefault("omitted_unsupported_fields", [])
+    notice = {"field": "sound", "reason": reason}
+    if notice not in omitted:
+        omitted.append(notice)
+    summary = dict(entry.get("validation_summary") or {})
+    summary["omitted_unsupported_fields"] = list(omitted)
+    entry["validation_summary"] = summary
+    entry["text"] = _render_gemini_entry_text(entry)
+    return True
+
+
+def _bind_gemini_sound_evidence(prompt_result, script_text):
+    entries = list((prompt_result or {}).get("entries") or [])
+    windows = list((prompt_result or {}).get("windows") or [])
+    for entry, window in zip(entries, windows):
+        sound = str((entry.get("fields") or {}).get("sound") or "").strip()
+        if not sound:
+            continue
+        transcript = _segment_transcript(script_text, window[0], window[1])
+        if not transcript.strip():
+            _omit_unsupported_gemini_sound(entry, "no_segment_asr")
+        elif not _reverse_sound_matches_transcript(sound, transcript):
+            _omit_unsupported_gemini_sound(entry, "segment_asr_mismatch")
+    return prompt_result
+
+
 def _gemini_expand_fact_rows(rows):
     if not isinstance(rows, list) or len(rows) != len(_GEMINI_FACT_FIELDS):
         raise ValueError("Gemini shot facts do not match schema")
@@ -3672,24 +3743,18 @@ def _parse_gemini_reverse_result(raw, duration):
             "lighting": _gemini_evidence_to_local(evidence["lighting_color"], start, end) or [1],
         }
         timeline = "%.1f-%.1fs" % (start, end)
-        parts = ["subject: " + subject, "action: " + action, "scene: " + scene,
-                 "camera: " + camera, "lighting/style: " + lighting]
-        if sound:
-            parts.append("verified sound/ASR: " + sound)
-        if subtitles:
-            parts.append("visible subtitles/text: " + subtitles)
-        parts.append("generation advice: aspect ratio %s; fps %s; camera control %s; negative prompt %s"
-                     % (advice["aspect_ratio"], advice["fps"], advice["camera_control"], advice["negative_prompt"]))
-        entries.append({
-            "text": "; ".join(parts),
+        entry = {
+            "text": "",
             "fields": {"subject": subject, "scene": scene, "action": action, "camera": camera,
-                       "lighting": lighting, "sound": sound,
+                       "lighting": lighting, "sound": sound, "subtitles": subtitles,
                        "continuity": ""},
             "evidence_frames": local_evidence, "continuity_evidence_frames": [],
             "evidence_seconds": evidence, "generation_advice": advice,
             "cut_from_previous": bool(shot["cut_from_previous"]),
             "readiness": {"applicable": applicable, "ready": ready},
-        })
+        }
+        entry["text"] = _render_gemini_entry_text(entry)
+        entries.append(entry)
         windows.append((start, end, timeline))
         previous_end = end
     if abs(previous_end - expected_duration) > 0.11:
@@ -3698,6 +3763,7 @@ def _parse_gemini_reverse_result(raw, duration):
 
 
 def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
+    _bind_gemini_sound_evidence(prompt_result, script_text)
     entries = prompt_result.get("entries") or []
     windows = prompt_result.get("windows") or []
     frame_groups = _reverse_model_frame_groups(frames, len(windows))
@@ -3793,6 +3859,7 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
             parsed = None
             try:
                 parsed = _parse_gemini_reverse_result(_gemini_candidate_text(response), duration)
+                _bind_gemini_sound_evidence(parsed, transcript)
                 # Run deterministic duplicate/length checks while the original
                 # media is still available for the one allowed validation
                 # retry. Do not salvage or rewrite provider content.
