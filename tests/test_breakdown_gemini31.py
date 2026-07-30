@@ -572,6 +572,56 @@ class GeminiReverseTests(unittest.TestCase):
             entries[1], entries[0],
         ))
 
+    def test_full_segment_validation_accepts_distinct_shots_with_shared_scaffolding(self):
+        response = self._provider_response(count=2)
+        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
+        first_rows = payload["shots"][0]["facts"]
+        second_rows = payload["shots"][1]["facts"]
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+
+        distinct = {
+            "subject_identity": "粉色连帽裙人物",
+            "subject_appearance": "粉色几何人物轮廓位于画面中央",
+            "foreground": "下方深灰色地面横带",
+            "midground": "粉色人物占据中央区域",
+            "background": "深蓝夜空与四盏橙色灯笼",
+        }
+        for row in second_rows:
+            if row["key"] in distinct:
+                row["value"] = distinct[row["key"]]
+        entries = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        )["entries"]
+
+        # The deterministic labels, advice, camera, lighting, and action remain
+        # shared, reproducing the high rendered-text similarity seen in the
+        # isolated run. Observable subject and scene facts still distinguish
+        # the shots and must control the duplicate decision.
+        self.assertGreaterEqual(
+            self.breakdown._reverse_text_similarity(
+                entries[1]["text"], entries[0]["text"],
+            ),
+            self.breakdown._REVERSE_DUPLICATE_SEQUENCE_THRESHOLD,
+        )
+        self.breakdown._validate_reverse_segment_evidence(
+            entries[0], [], [], 1, enforce_length_limit=False,
+        )
+        self.breakdown._validate_reverse_segment_evidence(
+            entries[1], [entries[0]], [], 2, enforce_length_limit=False,
+        )
+
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+        identical = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        with self.assertRaisesRegex(ValueError, "内容重复"):
+            self.breakdown._validate_reverse_segment_evidence(
+                identical[1], [identical[0]], [], 2,
+                enforce_length_limit=False,
+            )
+
     def test_media_size_limit_fails_before_upload_or_generation(self):
         with mock.patch.object(self.breakdown.os.path, "getsize", return_value=self.breakdown._GEMINI_MAX_MEDIA_BYTES + 1), \
                 mock.patch.object(self.breakdown, "_gemini_upload_file") as upload:
