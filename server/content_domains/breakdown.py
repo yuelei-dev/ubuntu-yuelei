@@ -3579,8 +3579,13 @@ def _render_gemini_entry_text(entry):
 
 def _omit_unsupported_gemini_sound(entry, reason):
     fields = entry.get("fields") or {}
-    if not fields.get("sound"):
+    sound = _gemini_fact_text(fields.get("sound"))
+    if not sound:
         return False
+    sound_was_ready = sound not in {
+        _GEMINI_UNKNOWN,
+        _GEMINI_NOT_APPLICABLE,
+    }
     fields["sound"] = ""
     evidence = entry.get("evidence_seconds") or {}
     evidence["sound"] = []
@@ -3588,9 +3593,10 @@ def _omit_unsupported_gemini_sound(entry, reason):
     readiness["applicable"] = max(
         0, int(readiness.get("applicable") or 0) - 1,
     )
-    readiness["ready"] = max(
-        0, int(readiness.get("ready") or 0) - 1,
-    )
+    if sound_was_ready:
+        readiness["ready"] = max(
+            0, int(readiness.get("ready") or 0) - 1,
+        )
     omitted = entry.setdefault("omitted_unsupported_fields", [])
     notice = {"field": "sound", "reason": reason}
     if notice not in omitted:

@@ -443,6 +443,36 @@ class GeminiReverseTests(unittest.TestCase):
             "",
         )
 
+    def test_unknown_sound_omission_does_not_decrement_ready_twice(self):
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["sound"] = "unknown"
+        shot["evidence_seconds"]["sound"] = []
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
+        )
+        entry = result["entries"][0]
+        self.assertEqual(
+            entry["readiness"],
+            {"applicable": 18, "ready": 17},
+        )
+
+        self.breakdown._bind_gemini_sound_evidence(result, "")
+
+        self.assertEqual(entry["fields"]["sound"], "")
+        self.assertEqual(
+            entry["readiness"],
+            {"applicable": 17, "ready": 17},
+        )
+        self.assertIn(
+            {"field": "sound", "reason": "no_segment_asr"},
+            entry["omitted_unsupported_fields"],
+        )
+        quality = self.breakdown._gemini_quality_dimensions(result)
+        self.assertEqual(
+            quality["generation_readiness"],
+            {"ready": 17, "applicable": 17, "percent": 100.0},
+        )
+
     def test_sound_matching_current_segment_asr_is_retained(self):
         shot = self._shot(0.0, 1.0)
         shot["facts"]["sound"] = "\u4eba\u7269\u8bf4\u51fa\u201c\u6b22\u8fce\u5149\u4e34\u201d"
