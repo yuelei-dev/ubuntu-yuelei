@@ -3149,9 +3149,18 @@ _GEMINI_OPTIONAL_FACT_FIELDS = {"wardrobe", "sound", "subtitles", "continuity"}
 
 
 def _gemini_reverse_schema():
-    evidence_properties = {
-        key: {"type": "array", "items": {"type": "number", "minimum": 0}, "maxItems": 3}
-        for key in _GEMINI_FACT_FIELDS
+    fact_row = {
+        "type": "object", "additionalProperties": False,
+        "required": ["key", "value", "evidence_seconds"],
+        "properties": {
+            "key": {"type": "string", "enum": list(_GEMINI_FACT_FIELDS)},
+            "value": {"type": "string"},
+            "evidence_seconds": {
+                "type": "array",
+                "items": {"type": "number", "minimum": 0},
+                "maxItems": 3,
+            },
+        },
     }
     return {
         "type": "object", "additionalProperties": False, "required": ["shots"],
@@ -3159,19 +3168,16 @@ def _gemini_reverse_schema():
             "type": "array", "minItems": 1, "maxItems": 4,
             "items": {
                 "type": "object", "additionalProperties": False,
-                "required": ["start_seconds", "end_seconds", "cut_from_previous", "facts", "evidence_seconds", "generation_advice"],
+                "required": ["start_seconds", "end_seconds", "cut_from_previous", "facts", "generation_advice"],
                 "properties": {
                     "start_seconds": {"type": "number", "minimum": 0},
                     "end_seconds": {"type": "number", "minimum": 0},
                     "cut_from_previous": {"type": "boolean"},
                     "facts": {
-                        "type": "object", "additionalProperties": False,
-                        "required": list(_GEMINI_FACT_FIELDS),
-                        "properties": {key: {"type": "string"} for key in _GEMINI_FACT_FIELDS},
-                    },
-                    "evidence_seconds": {
-                        "type": "object", "additionalProperties": False,
-                        "required": list(_GEMINI_FACT_FIELDS), "properties": evidence_properties,
+                        "type": "array",
+                        "minItems": len(_GEMINI_FACT_FIELDS),
+                        "maxItems": len(_GEMINI_FACT_FIELDS),
+                        "items": fact_row,
                     },
                     "generation_advice": {
                         "type": "object", "additionalProperties": False,
@@ -3392,6 +3398,8 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         "Analyze the complete original video. Detect hard cuts first. Return 1-4 gap-free shots "
         "covering 0.0 through %.1f seconds with 0.1-second precision. Facts and generation advice "
         "must remain separate. Every visible fact must cite evidence_seconds inside its shot. "
+        "Return facts as exactly one row per required key; each row contains key, value, and "
+        "evidence_seconds. Never repeat or omit a fact key. "
         "Use exactly 'unknown' when evidence is insufficient and 'not_applicable' only for wardrobe, "
         "sound, subtitles, or continuity. Do not infer identity, brand, emotion, place, sound, text, "
         "or intent. Describe subject appearance and clothing; action start, process, end, direction "
@@ -3461,6 +3469,24 @@ def _gemini_evidence_to_local(times, start, end):
     return sorted({1 if float(value) <= midpoint else 2 for value in (times or [])})
 
 
+def _gemini_expand_fact_rows(rows):
+    if not isinstance(rows, list) or len(rows) != len(_GEMINI_FACT_FIELDS):
+        raise ValueError("Gemini shot facts do not match schema")
+    facts = {}
+    evidence = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"key", "value", "evidence_seconds"}:
+            raise ValueError("Gemini shot fact row does not match schema")
+        key = row["key"]
+        if key not in _GEMINI_FACT_FIELDS or key in facts:
+            raise ValueError("Gemini shot fact keys must be unique and complete")
+        facts[key] = row["value"]
+        evidence[key] = row["evidence_seconds"]
+    if set(facts) != set(_GEMINI_FACT_FIELDS):
+        raise ValueError("Gemini shot fact keys must be unique and complete")
+    return facts, evidence
+
+
 def _parse_gemini_reverse_result(raw, duration):
     try:
         result = json.loads(str(raw or ""))
@@ -3475,15 +3501,24 @@ def _parse_gemini_reverse_result(raw, duration):
     entries, windows = [], []
     previous_end = 0.0
     for index, shot in enumerate(shots, 1):
-        required = {"start_seconds", "end_seconds", "cut_from_previous", "facts", "evidence_seconds", "generation_advice"}
-        if not isinstance(shot, dict) or set(shot) != required:
+        compact_required = {
+            "start_seconds", "end_seconds", "cut_from_previous", "facts",
+            "generation_advice",
+        }
+        legacy_required = compact_required | {"evidence_seconds"}
+        if (not isinstance(shot, dict)
+                or (set(shot) != compact_required and set(shot) != legacy_required)):
             raise ValueError("Gemini shot %d does not match schema" % index)
         start, end = round(float(shot["start_seconds"]), 1), round(float(shot["end_seconds"]), 1)
         if abs(start - previous_end) > 0.11 or end <= start:
             raise ValueError("Gemini shot timeline is not gap-free")
         if index == 1 and bool(shot["cut_from_previous"]):
             raise ValueError("The first Gemini shot cannot cut from a previous shot")
-        facts, evidence, advice = shot["facts"], shot["evidence_seconds"], shot["generation_advice"]
+        if set(shot) == compact_required:
+            facts, evidence = _gemini_expand_fact_rows(shot["facts"])
+        else:
+            facts, evidence = shot["facts"], shot["evidence_seconds"]
+        advice = shot["generation_advice"]
         if not isinstance(facts, dict) or set(facts) != set(_GEMINI_FACT_FIELDS):
             raise ValueError("Gemini shot facts do not match schema")
         if not isinstance(evidence, dict) or set(evidence) != set(_GEMINI_FACT_FIELDS):
