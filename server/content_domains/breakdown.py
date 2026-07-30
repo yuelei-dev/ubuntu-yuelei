@@ -3,6 +3,7 @@
 import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.parse, urllib.request
 import hashlib
 import http.client
+import inspect
 import urllib.error
 from contextlib import closing
 from difflib import SequenceMatcher
@@ -4062,6 +4063,35 @@ def _analysis_attempt_log(message, deadline=None, heartbeat=None):
         heartbeat()
 
 
+def _post_json_idempotent_compat(
+    official_base, fallback_base, path, data, headers, *,
+    log, max_attempts, timeout,
+):
+    """Use per-request timeout when the deployed egress ABI supports it."""
+    kwargs = {"log": log, "max_attempts": max_attempts}
+    try:
+        parameters = inspect.signature(
+            egress.post_json_idempotent
+        ).parameters
+    except (TypeError, ValueError):
+        parameters = {"timeout": None}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+        if hasattr(parameter, "kind")
+    )
+    if "timeout" in parameters or accepts_kwargs:
+        kwargs["timeout"] = timeout
+    else:
+        print(
+            "[breakdown] egress timeout ABI unavailable; using runtime default",
+            flush=True,
+        )
+    return egress.post_json_idempotent(
+        official_base, fallback_base, path, data, headers, **kwargs
+    )
+
+
 def _post_zhipu(body, api_key, deadline=None, heartbeat=None):
     base = os.environ.get(
         "REVERSE_ZHIPU_BASE", "https://open.bigmodel.cn/api/paas/v4"
@@ -4083,7 +4113,7 @@ def _post_zhipu(body, api_key, deadline=None, heartbeat=None):
     if heartbeat:
         heartbeat()
     try:
-        response = egress.post_json_idempotent(
+        response = _post_json_idempotent_compat(
             base, base, "/chat/completions",
             json.dumps(body, ensure_ascii=False).encode(),
             {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
@@ -4125,7 +4155,7 @@ def _post_openai_fallback(body, deadline=None, heartbeat=None):
     remaining = _analysis_remaining(deadline)
     if heartbeat:
         heartbeat()
-    response = egress.post_json_idempotent(
+    response = _post_json_idempotent_compat(
         OPENAI_OFFICIAL_BASE,
         OPENAI_BASE,
         "/v1/chat/completions",
