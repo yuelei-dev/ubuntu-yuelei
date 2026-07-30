@@ -15,6 +15,7 @@
 - Credential source: environment variable `GEMINI_API_KEY` only.
 - Small input: inline video/image, at most 14 MiB and, for video, at most 15 seconds.
 - Larger input: resumable Files API upload, poll to `ACTIVE`, then delete in `finally`.
+- Once upload returns a file handle, every success/failure path performs exactly one best-effort DELETE under an independent cleanup deadline; sanitized cleanup failures never mask the primary error.
 - Structured output: JSON MIME plus a strict JSON Schema; incomplete or extra-root JSON is rejected.
 - Retry: one same-provider physical retry for network/429/5xx; HTTP 4xx is not retried.
 - Validation retry: at most one new analysis of the original media and validation error; rejected draft text is not sent back.
@@ -40,7 +41,7 @@ Official references checked during implementation:
 
 ## Local evidence
 
-- `tests.test_breakdown_gemini31` plus `tests.test_breakdown_content_compat`: 22 passed.
+- `tests.test_breakdown_gemini31` plus `tests.test_breakdown_content_compat`: 26 passed.
 - Runtime manifest verification/reproduction: 4 passed.
 - Workbench display/copy/downstream mapping tests: 69 passed.
 - Python syntax and `git diff --check`: passed.

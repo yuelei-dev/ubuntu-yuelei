@@ -2306,12 +2306,7 @@ def _gemini_upload_file(path, mime_type, api_key, deadline=None, heartbeat=None)
     uri = str(file_info.get("uri") or "")
     if not re.fullmatch(r"files/[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", name) or not uri.startswith("https://"):
         raise RuntimeError("Gemini Files API returned an invalid file reference")
-    return _gemini_wait_for_file_active(
-        {"name": name, "uri": uri, "mime_type": mime_type},
-        api_key,
-        deadline=deadline,
-        heartbeat=heartbeat,
-    )
+    return {"name": name, "uri": uri, "mime_type": mime_type}
 
 
 def _gemini_wait_for_file_active(file_info, api_key, deadline=None, heartbeat=None):
@@ -2547,9 +2542,17 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
-    media_part, uploaded = _gemini_media_part(path, mime_type, duration, api_key,
-                                              deadline=deadline, heartbeat=heartbeat)
+    uploaded = None
     try:
+        media_part, uploaded = _gemini_media_part(
+            path, mime_type, duration, api_key,
+            deadline=deadline, heartbeat=heartbeat,
+        )
+        if uploaded:
+            uploaded = _gemini_wait_for_file_active(
+                uploaded, api_key, deadline=deadline, heartbeat=heartbeat,
+            )
+            media_part = {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}
         validation_error = ""
         for attempt in range(2):
             body = {
@@ -2572,7 +2575,14 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
                     raise
         raise ValueError("Gemini reverse validation failed")
     finally:
-        _gemini_delete_file(uploaded, api_key, deadline=deadline, heartbeat=heartbeat)
+        # An exhausted analysis deadline must not suppress provider cleanup.
+        # Cleanup is best-effort and never masks the primary exception.
+        if uploaded:
+            _gemini_delete_file(
+                uploaded, api_key,
+                deadline=time.monotonic() + 15,
+                heartbeat=None,
+            )
 
 
 def _reverse_analysis_call_budget(segment_count):

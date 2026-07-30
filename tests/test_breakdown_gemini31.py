@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -198,6 +199,7 @@ class GeminiReverseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
                 mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
                 mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
+                mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", return_value=uploaded), \
                 mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=RuntimeError("provider failed")), \
                 mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
             media_path = Path(temp_dir) / "sample.mp4"
@@ -206,7 +208,73 @@ class GeminiReverseTests(unittest.TestCase):
                 self.breakdown._gemini_reverse_prompt_from_media(
                     str(media_path), "video/mp4", "sample", 20.0, "local", ""
                 )
-        cleanup.assert_called_once_with(uploaded, "mock-key", deadline=None, heartbeat=None)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args, (uploaded, "mock-key"))
+        self.assertIsNone(cleanup.call_args.kwargs["heartbeat"])
+
+    def test_uploaded_file_cleanup_covers_poll_and_deadline_failures(self):
+        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
+        failures = (
+            RuntimeError("Gemini Files API media processing did not complete"),
+            RuntimeError("Gemini Files API could not process the media"),
+            TimeoutError("analysis deadline exhausted"),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__ + str(failure)):
+                with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
+                        mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
+                        mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", side_effect=failure), \
+                        mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
+                    with self.assertRaises(type(failure)):
+                        self.breakdown._gemini_reverse_prompt_from_media(
+                            "unused.mp4", "video/mp4", "sample", 20.0, "local", ""
+                        )
+                cleanup.assert_called_once()
+                self.assertEqual(cleanup.call_args.args, (uploaded, "mock-key"))
+
+    def test_uploaded_file_cleanup_covers_schema_failure_and_success(self):
+        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
+        invalid = {"candidates": [{"content": {"parts": [{"text": "not-json"}]}}]}
+        cases = (([invalid, invalid], ValueError), ([self._provider_response()], None))
+        for responses, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
+                        mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
+                        mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", return_value=uploaded), \
+                        mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=responses), \
+                        mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
+                    if expected_error:
+                        with self.assertRaises(expected_error):
+                            self.breakdown._gemini_reverse_prompt_from_media(
+                                "unused.mp4", "video/mp4", "sample", 1.0, "local", ""
+                            )
+                    else:
+                        result = self.breakdown._gemini_reverse_prompt_from_media(
+                            "unused.mp4", "video/mp4", "sample", 1.0, "local", ""
+                        )
+                        self.assertEqual(result["model"], "gemini-3.1-pro-preview")
+                cleanup.assert_called_once()
+
+    def test_upload_failure_has_no_delete(self):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
+                mock.patch.object(self.breakdown, "_gemini_media_part", side_effect=RuntimeError("upload failed")), \
+                mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
+            with self.assertRaisesRegex(RuntimeError, "upload failed"):
+                self.breakdown._gemini_reverse_prompt_from_media(
+                    "unused.mp4", "video/mp4", "sample", 20.0, "local", ""
+                )
+        cleanup.assert_not_called()
+
+    def test_delete_failure_is_sanitized_and_does_not_raise(self):
+        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
+        output = io.StringIO()
+        with mock.patch.object(self.breakdown, "_gemini_open", side_effect=RuntimeError("secret-url-and-key")), \
+                redirect_stdout(output):
+            self.breakdown._gemini_delete_file(uploaded, "mock-secret-key")
+        logged = output.getvalue()
+        self.assertIn("cleanup failed", logged)
+        self.assertNotIn("mock-secret-key", logged)
+        self.assertNotIn(uploaded["uri"], logged)
 
     def test_files_api_waits_until_active(self):
         pending = _Response(json.dumps({"state": "PROCESSING"}).encode())
