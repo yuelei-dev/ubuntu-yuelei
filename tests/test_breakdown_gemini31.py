@@ -140,17 +140,33 @@ class GeminiReverseTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "generation advice"):
                     self.breakdown._parse_gemini_reverse_result(json.dumps({"shots": [shot]}), 1.0)
 
-    def test_provider_schema_has_no_field_length_limit_but_total_output_is_bounded(self):
+    def test_gemini_field_length_limits_stay_removed_through_final_prompt_assembly(self):
         schema_text = json.dumps(self.breakdown._gemini_reverse_schema())
         self.assertNotIn("maxLength", schema_text)
         shot = self._shot(0.0, 1.0)
-        shot["facts"]["subject_appearance"] = "x" * 1000
+        shot["facts"]["subject_appearance"] = "x" * 2500
         shot["generation_advice"]["camera_control"] = "y" * 1000
         shot["generation_advice"]["negative_prompt"] = "z" * 1000
         result = self.breakdown._parse_gemini_reverse_result(
             json.dumps({"shots": [shot]}), 1.0,
         )
-        self.assertIn("x" * 1000, result["entries"][0]["fields"]["subject"])
+        self.assertGreater(
+            len(result["entries"][0]["text"]),
+            self.breakdown._REVERSE_MAX_SEGMENT_CHARS,
+        )
+        prompt = self.breakdown._assemble_reverse_prompt(
+            result["entries"],
+            result["windows"],
+            enforce_length_limits=False,
+        )
+        self.assertIn("x" * 2500, prompt)
+        with self.assertRaises(ValueError):
+            self.breakdown._assemble_reverse_prompt(
+                result["entries"],
+                result["windows"],
+            )
+
+    def test_gemini_total_response_has_only_a_transport_safety_bound(self):
         oversized = {"candidates": [{"content": {"parts": [{
             "text": "x" * (self.breakdown._GEMINI_MAX_RESPONSE_BYTES + 1),
         }]}}]}

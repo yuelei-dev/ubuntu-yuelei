@@ -569,6 +569,7 @@ def _do_breakdown(payload, info, url, mode=None):
                 prompt_result["entries"],
                 prompt_result["windows"],
                 global_continuity,
+                enforce_length_limits=False,
             )
             quality_score = _score_reverse_generation_coverage(
                 prompt_result["entries"],
@@ -806,6 +807,7 @@ def _reverse_result_from_frames(
         prompt_result["entries"],
         prompt_result["windows"],
         global_continuity,
+        enforce_length_limits=False,
     )
     quality_score = _score_reverse_generation_coverage(
         prompt_result["entries"],
@@ -1767,12 +1769,13 @@ def _reverse_sound_matches_transcript(sound, transcript):
 def _validate_reverse_segment_evidence(
     entry, previous_entries, frame_paths, index, transcript="",
     require_frame_evidence=False, global_continuity=None,
+    enforce_length_limit=True,
 ):
     text = entry.get("text", "")
     compact = _compact_reverse_text(text)
     if not compact:
         raise ValueError("反推结果第%d段为空，请重试" % index)
-    if len(compact) > _REVERSE_MAX_SEGMENT_CHARS:
+    if enforce_length_limit and len(compact) > _REVERSE_MAX_SEGMENT_CHARS:
         raise ValueError(
             "反推结果第%d段过长：最多%d字，实际%d字，请重试"
             % (index, _REVERSE_MAX_SEGMENT_CHARS, len(compact))
@@ -1986,13 +1989,13 @@ def _validate_reverse_segment_evidence(
     return entry
 
 
-def _validate_reverse_prompt_lengths(segments):
+def _validate_reverse_prompt_lengths(segments, enforce_length_limits=True):
     """Keep a generous output cap and strict duplicate guard; no minimum length."""
     if not segments:
         raise ValueError("反推结果为空，请重试")
     lengths = [len(re.sub(r"\s+", "", segment or "")) for segment in segments]
     for index, length in enumerate(lengths, 1):
-        if length > _REVERSE_MAX_SEGMENT_CHARS:
+        if enforce_length_limits and length > _REVERSE_MAX_SEGMENT_CHARS:
             raise ValueError(
                 "反推结果第%d段过长：最多%d字，实际%d字，请重试"
                 % (index, _REVERSE_MAX_SEGMENT_CHARS, length)
@@ -2006,7 +2009,7 @@ def _validate_reverse_prompt_lengths(segments):
                     % (index + 1, previous_index + 1)
                 )
     total = sum(lengths)
-    if total > _REVERSE_MAX_TOTAL_CHARS:
+    if enforce_length_limits and total > _REVERSE_MAX_TOTAL_CHARS:
         raise ValueError(
             "反推结果总长度最多%d字，实际%d字，请重试"
             % (_REVERSE_MAX_TOTAL_CHARS, total)
@@ -2164,10 +2167,12 @@ def _score_reverse_generation_coverage(entries, global_continuity, windows):
     return {"total": sum(parts.values()), "parts": parts}
 
 
-def _assemble_reverse_prompt(entries, windows, global_continuity=None):
+def _assemble_reverse_prompt(
+    entries, windows, global_continuity=None, enforce_length_limits=True,
+):
     segments = _validate_reverse_prompt_lengths([
         entry["text"] for entry in entries
-    ])
+    ], enforce_length_limits=enforce_length_limits)
     global_facts = _compose_reverse_global_facts(global_continuity)
     lines = []
     for index, ((_start, _end, timeline_range), segment) in enumerate(
@@ -2597,6 +2602,7 @@ def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
         _validate_reverse_segment_evidence(
             entry, accepted, frame_group, index,
             transcript=transcript, require_frame_evidence=True,
+            enforce_length_limit=False,
         )
         accepted.append(entry)
     if len(accepted) != len(entries) or len(entries) != len(windows):
