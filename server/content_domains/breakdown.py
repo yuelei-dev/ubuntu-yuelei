@@ -2043,8 +2043,22 @@ def _reverse_segments_are_duplicate(current, previous):
                 )
             ):
                 return False
-    current_text = current.get("text", "")
-    previous_text = previous.get("text", "")
+    semantic_keys = ("subject", "action", "scene", "camera", "lighting")
+    current_fields = current.get("fields") or {}
+    previous_fields = previous.get("fields") or {}
+    structured_comparison = (
+        sum(bool(current_fields.get(key)) for key in semantic_keys) >= 3
+        and sum(bool(previous_fields.get(key)) for key in semantic_keys) >= 3
+    )
+    if structured_comparison:
+        # Compare observable values, not repeated rendering labels or
+        # generation-advice scaffolding. An identical action alone must not
+        # make a different subject/scene a duplicate.
+        current_text = _reverse_segment_field_text(current, *semantic_keys)
+        previous_text = _reverse_segment_field_text(previous, *semantic_keys)
+    else:
+        current_text = current.get("text", "")
+        previous_text = previous.get("text", "")
     current_compact = _compact_reverse_text(current_text)
     previous_compact = _compact_reverse_text(previous_text)
     if not current_compact or not previous_compact:
@@ -2062,6 +2076,9 @@ def _reverse_segments_are_duplicate(current, previous):
             >= _REVERSE_DUPLICATE_SHINGLE_THRESHOLD
         ):
             return True
+
+    if structured_comparison:
+        return False
 
     current_action = current.get("fields", {}).get("action", "")
     previous_action = previous.get("fields", {}).get("action", "")
@@ -3433,7 +3450,11 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         "Return facts as exactly one row per required key; each row contains key, value, and "
         "evidence_seconds. Never repeat or omit a fact key. "
         "Use exactly 'unknown' when evidence is insufficient and 'not_applicable' only for wardrobe, "
-        "sound, subtitles, or continuity. Do not infer identity, brand, emotion, place, sound, text, "
+        "sound, subtitles, or continuity. For those four optional facts use not_applicable when the "
+        "feature is absent: wardrobe for a non-person/no visible clothing; sound when Verified ASR is "
+        "(none) or has no text in this shot; subtitles when no text is visibly readable; continuity "
+        "for the first shot or when no evidence-backed relation exists. Their evidence_seconds must "
+        "then be []. Do not infer identity, brand, emotion, place, sound, text, "
         "or intent. Do not use unknown for an observable absence or static state: a visible non-person "
         "object or geometric shape is the subject; describe an unchanged subject at action start, "
         "process, and end as static with endpoint evidence; describe each depth layer using the "

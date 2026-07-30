@@ -162,6 +162,11 @@ class GeminiReverseTests(unittest.TestCase):
             "[] for unknown/not_applicable",
             instruction,
         )
+        self.assertIn("wardrobe for a non-person/no visible clothing", instruction)
+        self.assertIn("sound when Verified ASR is (none)", instruction)
+        self.assertIn("subtitles when no text is visibly readable", instruction)
+        self.assertIn("continuity for the first shot", instruction)
+        self.assertIn("Their evidence_seconds must then be []", instruction)
         self.assertIn("visible non-person object or geometric shape is the subject", instruction)
         self.assertIn("unchanged subject at action start", instruction)
         self.assertIn("shot-specific visible object, color, position, or empty image region", instruction)
@@ -528,6 +533,44 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertEqual(result["attempts"], 2)
         retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
         self.assertIn("内容重复", retry_prompt)
+
+    def test_duplicate_guard_compares_structured_facts_not_shared_scaffolding(self):
+        response = self._provider_response(count=2)
+        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
+        first_rows = payload["shots"][0]["facts"]
+        second_rows = payload["shots"][1]["facts"]
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+        identical = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        self.assertTrue(self.breakdown._reverse_segments_are_duplicate(
+            identical[1], identical[0],
+        ))
+
+        distinct = {
+            "subject_identity": "粉色连帽裙人物",
+            "subject_appearance": "粉色几何人物轮廓位于画面中央",
+            "foreground": "下方深灰色地面横带",
+            "midground": "粉色人物占据中央区域",
+            "background": "深蓝夜空与四盏橙色灯笼",
+        }
+        for row in second_rows:
+            if row["key"] in distinct:
+                row["value"] = distinct[row["key"]]
+        entries = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        self.assertEqual(
+            self.breakdown._reverse_text_similarity(
+                entries[1]["fields"]["action"],
+                entries[0]["fields"]["action"],
+            ),
+            1.0,
+        )
+        self.assertFalse(self.breakdown._reverse_segments_are_duplicate(
+            entries[1], entries[0],
+        ))
 
     def test_media_size_limit_fails_before_upload_or_generation(self):
         with mock.patch.object(self.breakdown.os.path, "getsize", return_value=self.breakdown._GEMINI_MAX_MEDIA_BYTES + 1), \
