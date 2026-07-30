@@ -1,0 +1,43 @@
+name: runtime-canonical-v2
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  canonical-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit gates
+        run: python -m unittest discover -v -s tests -p test_runtime_canonical_v2.py
+      - name: Candidate manifest is canonical and complete
+        run: |
+          python scripts/runtime_canonical.py \
+            --scope deploy/runtime-canonical/scope.json \
+            validate-manifest \
+            --manifest deploy/runtime-canonical/baseline-candidate.json
+          python scripts/runtime_canonical.py \
+            --scope deploy/runtime-canonical/scope.json \
+            verify \
+            --source . \
+            --manifest deploy/runtime-canonical/baseline-candidate.json
+      - name: Isolation from Gemini PR 146
+        shell: bash
+        run: |
+          forbidden='^(\.github/workflows/runtime-biandao-gemini\.yml|deploy/runtime-manifest\.json|deploy/runtime-test/env-contract\.json|deploy/runtime-test/gemini31-reverse-validation\.md|scripts/compare_runtime_test_outcomes\.py|scripts/runtime_unittest_snapshot\.py|server/content_domains/breakdown\.py|tests/test_breakdown_gemini31\.py)$'
+          changed=$(git diff --name-only "${{ github.event.pull_request.base.sha || 'HEAD^' }}" HEAD)
+          if grep -E "$forbidden" <<<"$changed"; then
+            echo "PR #146 isolation boundary violated" >&2
+            exit 1
+          fi

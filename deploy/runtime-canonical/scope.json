@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "server_role": "test",
+  "server_address": "8.148.158.106",
+  "production_address": "129.204.166.13",
+  "roots": [
+    {"source": "/home/ubuntu/content-api", "target": "server", "kind": "backend"},
+    {"source": "/home/ubuntu/auth-service", "target": "runtime/auth-service", "kind": "backend"},
+    {"source": "/home/ubuntu/dl-service", "target": "runtime/dl-service", "kind": "backend"},
+    {"source": "/var/www/huangquechuanmei", "target": "site", "kind": "static"},
+    {"source": "/etc/systemd/system", "target": "runtime/systemd", "kind": "startup-config"},
+    {"source": "/etc/nginx", "target": "runtime/nginx", "kind": "startup-config"}
+  ],
+  "repository_include_prefixes": [
+    "server",
+    "site",
+    "deploy/systemd",
+    "deploy/nginx-huangquechuanmei.conf"
+  ],
+  "systemd_unit_allowlist": [
+    "huangque-admin.service",
+    "huangque-auth.service",
+    "huangque-content.service",
+    "huangque-dl.service",
+    "huangque-imggen-api.service",
+    "huangque-leadgen-api.service"
+  ],
+  "include_suffixes": [
+    ".conf", ".css", ".html", ".ico", ".jpg", ".jpeg", ".js", ".json",
+    ".md", ".mjs", ".png", ".py", ".service", ".sh", ".svg", ".txt",
+    ".webp", ".woff2", ".xml", ".yaml", ".yml"
+  ],
+  "exclude_path_segments": [
+    ".git", ".pytest_cache", "__pycache__", "backups", "browser_data",
+    "cache", "certs", "content_out", "data", "generated", "logs",
+    "node_modules", "private", "secrets", "tmp", "uploads", "user_data"
+  ],
+  "exclude_suffixes": [
+    ".bak", ".crt", ".db", ".db-shm", ".db-wal", ".env", ".key", ".log",
+    ".pem", ".pid", ".p12", ".sqlite", ".sqlite3", ".swp", ".tmp"
+  ],
+  "exclude_basenames": [
+    "stats.json"
+  ],
+  "forbidden_content_patterns": [
+    "-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    "(?i)(?:api[_-]?key|client[_-]?secret|access[_-]?token|password)\\s*=\\s*['\\\"][A-Za-z0-9_./+\\-=]{24,}['\\\"]",
+    "(?:sk|ghp|github_pat|AKIA)[-_A-Za-z0-9]{20,}"
+  ]
+}
