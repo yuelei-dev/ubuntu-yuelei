@@ -127,6 +127,29 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertNotIn("responseSchema", config)
         self.assertNotIn("responseJsonSchema", config)
 
+    def test_schema_free_instruction_carries_the_complete_strict_output_contract(self):
+        instruction = self.breakdown._gemini_reverse_instruction(
+            "sample", 4.0, "local", "",
+        )
+        self.assertIn('exactly the root key "shots"', instruction)
+        self.assertIn("no markdown or wrapper", instruction)
+        self.assertIn(
+            "start_seconds, end_seconds, cut_from_previous, facts, and generation_advice",
+            instruction,
+        )
+        self.assertIn(
+            "key, value, and evidence_seconds",
+            instruction,
+        )
+        self.assertIn(
+            "aspect_ratio, fps, camera_control, and negative_prompt",
+            instruction,
+        )
+        self.assertIn(
+            ", ".join(self.breakdown._GEMINI_FACT_FIELDS),
+            instruction,
+        )
+
     def test_provider_schema_uses_compact_fact_rows_without_duplicate_evidence_tree(self):
         schema = self.breakdown._gemini_reverse_schema()
         shot_schema = schema["properties"]["shots"]["items"]

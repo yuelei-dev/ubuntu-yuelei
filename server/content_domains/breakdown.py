@@ -3395,6 +3395,13 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
     if retry_error:
         retry = ("The previous response failed validation: %s. Re-analyze the original media; do not reuse the rejected draft. "
                  % str(retry_error)[:300])
+    output_contract = (
+        'Return only one complete JSON object with exactly the root key "shots"; no markdown or wrapper. '
+        'Each shots item must have exactly start_seconds, end_seconds, cut_from_previous, facts, '
+        'and generation_advice. facts must be an array with exactly one row for every key, in this order: %s. '
+        'Each fact row must have exactly key, value, and evidence_seconds. generation_advice must have exactly '
+        'aspect_ratio, fps, camera_control, and negative_prompt. '
+    ) % ", ".join(_GEMINI_FACT_FIELDS)
     return (
         "Analyze the complete original video. Detect hard cuts first. Return 1-4 gap-free shots "
         "covering 0.0 through %.1f seconds with 0.1-second precision. Facts and generation advice "
@@ -3407,10 +3414,16 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         "and speed; foreground, midground and background; shot scale, angle, movement and composition; "
         "lighting, color, style, texture and rhythm. Quote only visible subtitles or verified ASR. "
         "Do not merge different shots, repeat template prose, or prioritize length over accuracy. "
-        "Write fact values and generation advice in Chinese, except the two exact sentinel values. "
+        "Write fact values and generation advice in Chinese, except the two exact sentinel values. %s"
         "Title: %s. Platform: %s. Verified ASR: %s. %s"
-    ) % (max(0.1, float(duration or 0.1)), str(title or "")[:200], str(platform or "")[:40],
-         str(transcript or "(none)")[:3000], retry)
+    ) % (
+        max(0.1, float(duration or 0.1)),
+        output_contract,
+        str(title or "")[:200],
+        str(platform or "")[:40],
+        str(transcript or "(none)")[:3000],
+        retry,
+    )
 
 
 def _gemini_request_body(media_part, title, duration, platform, transcript, validation_error=""):
