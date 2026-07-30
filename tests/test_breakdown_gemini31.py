@@ -83,7 +83,7 @@ class GeminiReverseTests(unittest.TestCase):
         text = json.dumps({"shots": shots})
         return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
-    def test_model_endpoint_video_mime_structured_schema_and_no_fallback(self):
+    def test_model_endpoint_video_mime_json_mode_and_no_fallback(self):
         captured = {}
 
         def fake_request(url, body, api_key, **_kwargs):
@@ -108,19 +108,17 @@ class GeminiReverseTests(unittest.TestCase):
         part = captured["body"]["contents"][0]["parts"][0]
         self.assertEqual(part["inline_data"]["mime_type"], "video/mp4")
         config = captured["body"]["generationConfig"]
+        self.assertEqual(config["responseMimeType"], "application/json")
+        self.assertEqual(config["maxOutputTokens"], 32768)
+        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "medium"})
+        self.assertNotIn("responseFormat", config)
+        self.assertNotIn("responseSchema", config)
         self.assertEqual(
-            config["responseFormat"],
-            {
-                "text": {
-                    "mimeType": "APPLICATION_JSON",
-                    "schema": self.breakdown._gemini_reverse_schema(),
-                },
-            },
+            config["responseJsonSchema"],
+            self.breakdown._gemini_reverse_provider_schema(),
         )
-        self.assertNotIn("responseMimeType", config)
-        self.assertNotIn("responseJsonSchema", config)
 
-    def test_gemini31_request_uses_current_rest_response_format(self):
+    def test_gemini31_request_uses_compatible_rest_json_schema(self):
         body = self.breakdown._gemini_request_body(
             {"file_data": {
                 "mime_type": "video/mp4",
@@ -129,17 +127,62 @@ class GeminiReverseTests(unittest.TestCase):
             "sample", 15.0, "local", "",
         )
         config = body["generationConfig"]
-        self.assertEqual(
-            config["responseFormat"]["text"]["mimeType"],
-            "APPLICATION_JSON",
-        )
-        self.assertEqual(
-            config["responseFormat"]["text"]["schema"],
-            self.breakdown._gemini_reverse_schema(),
-        )
-        self.assertNotIn("responseMimeType", config)
+        self.assertEqual(config["responseMimeType"], "application/json")
+        self.assertEqual(config["maxOutputTokens"], 32768)
+        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "medium"})
+        self.assertNotIn("responseFormat", config)
         self.assertNotIn("responseSchema", config)
-        self.assertNotIn("responseJsonSchema", config)
+        self.assertEqual(
+            config["responseJsonSchema"],
+            self.breakdown._gemini_reverse_provider_schema(),
+        )
+
+    def test_instruction_carries_the_complete_strict_output_contract(self):
+        instruction = self.breakdown._gemini_reverse_instruction(
+            "sample", 4.0, "local", "",
+        )
+        self.assertIn('exactly the root key "shots"', instruction)
+        self.assertIn("no markdown or wrapper", instruction)
+        self.assertIn("complete minified JSON object", instruction)
+        self.assertIn("no indentation or line breaks", instruction)
+        self.assertIn("do not repeat the same description", instruction)
+        self.assertIn(
+            "start_seconds, end_seconds, cut_from_previous, facts, and generation_advice",
+            instruction,
+        )
+        self.assertIn(
+            "key, value, and evidence_seconds",
+            instruction,
+        )
+        self.assertIn(
+            "1-3 timestamps inside the current shot",
+            instruction,
+        )
+        self.assertIn(
+            "[] for unknown/not_applicable",
+            instruction,
+        )
+        self.assertIn("wardrobe for a non-person/no visible clothing", instruction)
+        self.assertIn("sound when Verified ASR is (none)", instruction)
+        self.assertIn("subtitles when no text is visibly readable", instruction)
+        self.assertIn("continuity for the first shot", instruction)
+        self.assertIn("Their evidence_seconds must then be []", instruction)
+        self.assertIn("visible non-person object or geometric shape is the subject", instruction)
+        self.assertIn("unchanged subject at action start", instruction)
+        self.assertIn("shot-specific visible object, color, position, or empty image region", instruction)
+        self.assertIn("instead of a generic 'no distinct layer' template", instruction)
+        self.assertIn("Never invent a person, wardrobe, object, depth layer, or motion", instruction)
+        self.assertIn("compare every shot pair", instruction)
+        self.assertIn("every non-sentinel value must contain shot-specific visible evidence", instruction)
+        self.assertIn("never invent differences merely to avoid duplication", instruction)
+        self.assertIn(
+            "aspect_ratio, fps, camera_control, and negative_prompt",
+            instruction,
+        )
+        self.assertIn(
+            ", ".join(self.breakdown._GEMINI_FACT_FIELDS),
+            instruction,
+        )
 
     def test_provider_schema_uses_compact_fact_rows_without_duplicate_evidence_tree(self):
         schema = self.breakdown._gemini_reverse_schema()
@@ -160,6 +203,23 @@ class GeminiReverseTests(unittest.TestCase):
             list(self.breakdown._GEMINI_FACT_FIELDS),
         )
         self.assertLess(len(json.dumps(schema).encode("utf-8")), 4000)
+
+    def test_provider_schema_omits_only_live_incompatible_array_bounds(self):
+        schema = self.breakdown._gemini_reverse_provider_schema()
+        encoded = json.dumps(schema)
+        self.assertNotIn('"minItems"', encoded)
+        self.assertNotIn('"maxItems"', encoded)
+        self.assertIn('"additionalProperties": false', encoded)
+        self.assertIn('"enum"', encoded)
+        self.assertIn('"minimum"', encoded)
+        self.assertEqual(
+            schema["properties"]["shots"]["items"]["required"],
+            [
+                "start_seconds", "end_seconds", "cut_from_previous", "facts",
+                "generation_advice",
+            ],
+        )
+        self.assertLess(len(encoded.encode("utf-8")), 1500)
 
     def test_compact_fact_rows_expand_deterministically_and_reject_duplicates(self):
         response = self._provider_response()
@@ -198,6 +258,17 @@ class GeminiReverseTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "root does not match schema"):
             self.breakdown._parse_gemini_reverse_result('{"shots":[],"draft":"x"}', 1.0)
 
+    def test_more_than_three_evidence_timestamps_is_rejected_with_field_name(self):
+        shot = self._shot(0.0, 1.0)
+        shot["evidence_seconds"]["subject_identity"] = [0.1, 0.2, 0.3, 0.4]
+        with self.assertRaisesRegex(
+            ValueError,
+            "shot 1 subject_identity evidence must contain at most 3 timestamps",
+        ):
+            self.breakdown._parse_gemini_reverse_result(
+                json.dumps({"shots": [shot]}), 1.0
+            )
+
     def test_action_requires_evidence_at_both_shot_endpoints(self):
         shot = self._shot(0.0, 1.0)
         shot["evidence_seconds"]["action_end"] = [0.2]
@@ -205,6 +276,25 @@ class GeminiReverseTests(unittest.TestCase):
             self.breakdown._parse_gemini_reverse_result(
                 json.dumps({"shots": [shot]}), 1.0
             )
+
+    def test_readiness_error_names_unresolved_slots_without_authorizing_guessing(self):
+        shot = self._shot(0.0, 1.0)
+        for key in ("direction_speed", "camera_movement"):
+            shot["facts"][key] = "unknown"
+            shot["evidence_seconds"][key] = []
+        with self.assertRaises(ValueError) as raised:
+            self.breakdown._parse_gemini_reverse_result(
+                json.dumps({"shots": [shot]}), 1.0
+            )
+        message = str(raised.exception)
+        self.assertIn("shot 1 generation readiness is below 90 percent", message)
+        self.assertIn("direction_speed", message)
+        self.assertIn("camera_movement", message)
+        retry = self.breakdown._gemini_reverse_instruction(
+            "sample", 1.0, "local", "", message,
+        )
+        self.assertIn("only when visible evidence supports them", retry)
+        self.assertIn("otherwise keep unknown and allow strict failure", retry)
 
     def test_generation_advice_is_strictly_typed_formatted_and_bounded(self):
         invalid_values = (
@@ -266,6 +356,14 @@ class GeminiReverseTests(unittest.TestCase):
         }]}}]}
         with self.assertRaisesRegex(ValueError, "total output limit"):
             self.breakdown._gemini_candidate_text(oversized)
+
+    def test_gemini_max_tokens_finish_reason_is_rejected_without_salvage(self):
+        truncated = {"candidates": [{
+            "finishReason": "MAX_TOKENS",
+            "content": {"parts": [{"text": '{"shots":['}]},
+        }]}
+        with self.assertRaisesRegex(ValueError, "truncated at the output token limit"):
+            self.breakdown._gemini_candidate_text(truncated)
 
     def test_projected_inline_payload_over_safety_limit_uses_files_api(self):
         source_bytes = 14_172_348
@@ -409,6 +507,125 @@ class GeminiReverseTests(unittest.TestCase):
         retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
         self.assertIn("failed validation", retry_prompt)
         self.assertNotIn("REJECTED-DRAFT", retry_prompt)
+
+    def test_duplicate_prompt_is_rejected_inside_the_single_validation_retry(self):
+        first = self._provider_response(count=2)
+        payload = json.loads(first["candidates"][0]["content"]["parts"][0]["text"])
+        for index, row in enumerate(payload["shots"][1]["facts"]):
+            row["value"] = payload["shots"][0]["facts"][index]["value"]
+        first["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(payload)
+        responses = iter([first, self._provider_response(count=2)])
+        captured = []
+
+        def fake_request(_url, body, _api_key, **_kwargs):
+            captured.append(body)
+            return next(responses)
+
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
+                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
+                mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=fake_request):
+            media_path = Path(temp_dir) / "sample.mp4"
+            media_path.write_bytes(b"not-a-real-video")
+            result = self.breakdown._gemini_reverse_prompt_from_media(
+                str(media_path), "video/mp4", "sample", 2.0, "local", ""
+            )
+        self.assertEqual(result["attempts"], 2)
+        retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
+        self.assertIn("内容重复", retry_prompt)
+        self.assertIn("shot 1 (0.0-1.0s)", retry_prompt)
+        self.assertIn("shot 2 (1.0-2.0s)", retry_prompt)
+        self.assertIn("merge the intervals into one shot", retry_prompt)
+        self.assertIn("Never invent a difference", retry_prompt)
+        self.assertNotIn(first["candidates"][0]["content"]["parts"][0]["text"], retry_prompt)
+
+    def test_duplicate_guard_compares_structured_facts_not_shared_scaffolding(self):
+        response = self._provider_response(count=2)
+        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
+        first_rows = payload["shots"][0]["facts"]
+        second_rows = payload["shots"][1]["facts"]
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+        identical = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        self.assertTrue(self.breakdown._reverse_segments_are_duplicate(
+            identical[1], identical[0],
+        ))
+
+        distinct = {
+            "subject_identity": "粉色连帽裙人物",
+            "subject_appearance": "粉色几何人物轮廓位于画面中央",
+            "foreground": "下方深灰色地面横带",
+            "midground": "粉色人物占据中央区域",
+            "background": "深蓝夜空与四盏橙色灯笼",
+        }
+        for row in second_rows:
+            if row["key"] in distinct:
+                row["value"] = distinct[row["key"]]
+        entries = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        self.assertEqual(
+            self.breakdown._reverse_text_similarity(
+                entries[1]["fields"]["action"],
+                entries[0]["fields"]["action"],
+            ),
+            1.0,
+        )
+        self.assertFalse(self.breakdown._reverse_segments_are_duplicate(
+            entries[1], entries[0],
+        ))
+
+    def test_full_segment_validation_accepts_distinct_shots_with_shared_scaffolding(self):
+        response = self._provider_response(count=2)
+        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
+        first_rows = payload["shots"][0]["facts"]
+        second_rows = payload["shots"][1]["facts"]
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+
+        distinct = {
+            "subject_identity": "粉色连帽裙人物",
+            "subject_appearance": "粉色几何人物轮廓位于画面中央",
+            "foreground": "下方深灰色地面横带",
+            "midground": "粉色人物占据中央区域",
+            "background": "深蓝夜空与四盏橙色灯笼",
+        }
+        for row in second_rows:
+            if row["key"] in distinct:
+                row["value"] = distinct[row["key"]]
+        entries = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload, ensure_ascii=False), 2.0,
+        )["entries"]
+
+        # The deterministic labels, advice, camera, lighting, and action remain
+        # shared, reproducing the high rendered-text similarity seen in the
+        # isolated run. Observable subject and scene facts still distinguish
+        # the shots and must control the duplicate decision.
+        self.assertGreaterEqual(
+            self.breakdown._reverse_text_similarity(
+                entries[1]["text"], entries[0]["text"],
+            ),
+            self.breakdown._REVERSE_DUPLICATE_SEQUENCE_THRESHOLD,
+        )
+        self.breakdown._validate_reverse_segment_evidence(
+            entries[0], [], [], 1, enforce_length_limit=False,
+        )
+        self.breakdown._validate_reverse_segment_evidence(
+            entries[1], [entries[0]], [], 2, enforce_length_limit=False,
+        )
+
+        for index, row in enumerate(second_rows):
+            row["value"] = first_rows[index]["value"]
+        identical = self.breakdown._parse_gemini_reverse_result(
+            json.dumps(payload), 2.0,
+        )["entries"]
+        with self.assertRaisesRegex(ValueError, "内容重复"):
+            self.breakdown._validate_reverse_segment_evidence(
+                identical[1], [identical[0]], [], 2,
+                enforce_length_limit=False,
+            )
 
     def test_media_size_limit_fails_before_upload_or_generation(self):
         with mock.patch.object(self.breakdown.os.path, "getsize", return_value=self.breakdown._GEMINI_MAX_MEDIA_BYTES + 1), \

@@ -2043,8 +2043,22 @@ def _reverse_segments_are_duplicate(current, previous):
                 )
             ):
                 return False
-    current_text = current.get("text", "")
-    previous_text = previous.get("text", "")
+    semantic_keys = ("subject", "action", "scene", "camera", "lighting")
+    current_fields = current.get("fields") or {}
+    previous_fields = previous.get("fields") or {}
+    structured_comparison = (
+        sum(bool(current_fields.get(key)) for key in semantic_keys) >= 3
+        and sum(bool(previous_fields.get(key)) for key in semantic_keys) >= 3
+    )
+    if structured_comparison:
+        # Compare observable values, not repeated rendering labels or
+        # generation-advice scaffolding. An identical action alone must not
+        # make a different subject/scene a duplicate.
+        current_text = _reverse_segment_field_text(current, *semantic_keys)
+        previous_text = _reverse_segment_field_text(previous, *semantic_keys)
+    else:
+        current_text = current.get("text", "")
+        previous_text = previous.get("text", "")
     current_compact = _compact_reverse_text(current_text)
     previous_compact = _compact_reverse_text(previous_text)
     if not current_compact or not previous_compact:
@@ -2062,6 +2076,9 @@ def _reverse_segments_are_duplicate(current, previous):
             >= _REVERSE_DUPLICATE_SHINGLE_THRESHOLD
         ):
             return True
+
+    if structured_comparison:
+        return False
 
     current_action = current.get("fields", {}).get("action", "")
     previous_action = previous.get("fields", {}).get("action", "")
@@ -3196,6 +3213,22 @@ def _gemini_reverse_schema():
     }
 
 
+def _gemini_reverse_provider_schema():
+    """Drop only live-API-incompatible array bounds; parser retains them."""
+    def compatible(value):
+        if isinstance(value, dict):
+            return {
+                key: compatible(item)
+                for key, item in value.items()
+                if key not in {"minItems", "maxItems"}
+            }
+        if isinstance(value, list):
+            return [compatible(item) for item in value]
+        return value
+
+    return compatible(_gemini_reverse_schema())
+
+
 def _redact_sensitive_text(value, limit=240):
     text = str(value or "")
     text = re.sub(r"https?://\S+", "[redacted-url]", text)
@@ -3393,8 +3426,23 @@ def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartb
 def _gemini_reverse_instruction(title, duration, platform, transcript, retry_error=""):
     retry = ""
     if retry_error:
-        retry = ("The previous response failed validation: %s. Re-analyze the original media; do not reuse the rejected draft. "
-                 % str(retry_error)[:300])
+        retry = (
+            "The previous response failed validation: %s. Re-analyze the original media; "
+            "do not reuse the rejected draft. If unresolved slots are named, fill them only "
+            "when visible evidence supports them; otherwise keep unknown and allow strict failure. "
+            % str(retry_error)[:900]
+        )
+    output_contract = (
+        'Return only one complete minified JSON object with exactly the root key "shots"; '
+        'no markdown or wrapper; no indentation or line breaks. Keep every value concise and evidence-bound; '
+        'do not repeat the same description in multiple fact values. '
+        'Each shots item must have exactly start_seconds, end_seconds, cut_from_previous, facts, '
+        'and generation_advice. facts must be an array with exactly one row for every key, in this order: %s. '
+        'Each fact row must have exactly key, value, and evidence_seconds. evidence_seconds must be an array '
+        'of 1-3 timestamps inside the current shot for an observed value, or [] for unknown/not_applicable. '
+        'generation_advice must have exactly '
+        'aspect_ratio, fps, camera_control, and negative_prompt. '
+    ) % ", ".join(_GEMINI_FACT_FIELDS)
     return (
         "Analyze the complete original video. Detect hard cuts first. Return 1-4 gap-free shots "
         "covering 0.0 through %.1f seconds with 0.1-second precision. Facts and generation advice "
@@ -3402,15 +3450,36 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         "Return facts as exactly one row per required key; each row contains key, value, and "
         "evidence_seconds. Never repeat or omit a fact key. "
         "Use exactly 'unknown' when evidence is insufficient and 'not_applicable' only for wardrobe, "
-        "sound, subtitles, or continuity. Do not infer identity, brand, emotion, place, sound, text, "
-        "or intent. Describe subject appearance and clothing; action start, process, end, direction "
+        "sound, subtitles, or continuity. For those four optional facts use not_applicable when the "
+        "feature is absent: wardrobe for a non-person/no visible clothing; sound when Verified ASR is "
+        "(none) or has no text in this shot; subtitles when no text is visibly readable; continuity "
+        "for the first shot or when no evidence-backed relation exists. Their evidence_seconds must "
+        "then be []. Do not infer identity, brand, emotion, place, sound, text, "
+        "or intent. Do not use unknown for an observable absence or static state: a visible non-person "
+        "object or geometric shape is the subject; describe an unchanged subject at action start, "
+        "process, and end as static with endpoint evidence; describe each depth layer using the "
+        "shot-specific visible object, color, position, or empty image region. If a layer is absent, "
+        "state its observable absence together with that scene-specific region instead of a generic "
+        "'no distinct layer' template. "
+        "Never invent a person, wardrobe, object, depth layer, or motion to replace an observed absence. "
+        "Describe subject appearance and clothing; action start, process, end, direction "
         "and speed; foreground, midground and background; shot scale, angle, movement and composition; "
         "lighting, color, style, texture and rhythm. Quote only visible subtitles or verified ASR. "
         "Do not merge different shots, repeat template prose, or prioritize length over accuracy. "
-        "Write fact values and generation advice in Chinese, except the two exact sentinel values. "
+        "Before returning, compare every shot pair: do not copy the same subject/action/scene/camera/"
+        "lighting sentence across shots. If a scene returns later, describe only evidence-backed "
+        "temporal differences; every non-sentinel value must contain shot-specific visible evidence, "
+        "and never invent differences merely to avoid duplication. "
+        "Write fact values and generation advice in Chinese, except the two exact sentinel values. %s"
         "Title: %s. Platform: %s. Verified ASR: %s. %s"
-    ) % (max(0.1, float(duration or 0.1)), str(title or "")[:200], str(platform or "")[:40],
-         str(transcript or "(none)")[:3000], retry)
+    ) % (
+        max(0.1, float(duration or 0.1)),
+        output_contract,
+        str(title or "")[:200],
+        str(platform or "")[:40],
+        str(transcript or "(none)")[:3000],
+        retry,
+    )
 
 
 def _gemini_request_body(media_part, title, duration, platform, transcript, validation_error=""):
@@ -3428,13 +3497,17 @@ def _gemini_request_body(media_part, title, duration, platform, transcript, vali
             ],
         }],
         "generationConfig": {
-            "temperature": 0.1, "maxOutputTokens": 8192,
-            "responseFormat": {
-                "text": {
-                    "mimeType": "APPLICATION_JSON",
-                    "schema": _gemini_reverse_schema(),
-                },
-            },
+            "temperature": 0.1,
+            # Gemini 3.1 Pro defaults to high thinking. Reserve enough of the
+            # model's 65,536-token output capacity for the complete JSON while
+            # retaining balanced reasoning for evidence-bound video analysis.
+            "maxOutputTokens": 32768,
+            "thinkingConfig": {"thinkingLevel": "medium"},
+            # The live endpoint rejects minItems/maxItems in this nested
+            # schema. The provider schema omits only those two constraints;
+            # the parser still enforces 1-4 shots and exactly 21 fact rows.
+            "responseMimeType": "application/json",
+            "responseJsonSchema": _gemini_reverse_provider_schema(),
         },
     }
 
@@ -3451,9 +3524,12 @@ def _gemini_inline_payload_bytes(path, mime_type, title, duration, platform, tra
 
 def _gemini_candidate_text(response):
     try:
-        text = response["candidates"][0]["content"]["parts"][0]["text"]
+        candidate = response["candidates"][0]
+        text = candidate["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as error:
         raise RuntimeError("Gemini returned no structured candidate") from error
+    if str(candidate.get("finishReason") or "").upper() == "MAX_TOKENS":
+        raise ValueError("Gemini structured candidate was truncated at the output token limit")
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError("Gemini returned an empty structured candidate")
     if len(text.encode("utf-8")) > _GEMINI_MAX_RESPONSE_BYTES:
@@ -3548,7 +3624,10 @@ def _parse_gemini_reverse_result(raw, duration):
                 raise ValueError("Gemini marked a required visual fact not_applicable")
             points = evidence[key]
             if not isinstance(points, list) or len(points) > 3:
-                raise ValueError("Gemini shot evidence is invalid")
+                raise ValueError(
+                    "Gemini shot %d %s evidence must contain at most 3 timestamps"
+                    % (index, key)
+                )
             for point in points:
                 if float(point) < start - 0.11 or float(point) > end + 0.11:
                     raise ValueError("Gemini evidence time is outside its shot")
@@ -3559,7 +3638,15 @@ def _parse_gemini_reverse_result(raw, duration):
                         raise ValueError("Gemini visible fact lacks evidence time")
                     ready += 1
         if applicable < 1 or ready / float(applicable) < 0.90:
-            raise ValueError("Gemini generation readiness is below 90 percent")
+            unresolved = [
+                key for key in _GEMINI_FACT_FIELDS
+                if facts[key] == _GEMINI_UNKNOWN
+            ]
+            raise ValueError(
+                "Gemini shot %d generation readiness is below 90 percent "
+                "(%d/%d ready; unresolved: %s)"
+                % (index, ready, applicable, ",".join(unresolved) or "none")
+            )
         critical = ("subject_identity", "subject_appearance", "position_scale", "action_start", "action_process",
                     "action_end", "foreground", "midground", "background", "shot_scale", "camera_angle",
                     "composition", "lighting_color", "style_texture", "rhythm")
@@ -3647,6 +3734,37 @@ def _gemini_quality_dimensions(prompt_result):
     }
 
 
+def _gemini_validation_retry_error(error, parsed):
+    message = str(error or "")
+    match = re.search(r"第(\d+)段与第(\d+)段内容重复", message)
+    windows = list((parsed or {}).get("windows") or [])
+    if not match:
+        return message
+    current_index = int(match.group(1))
+    previous_index = int(match.group(2))
+    if not (
+        1 <= current_index <= len(windows)
+        and 1 <= previous_index <= len(windows)
+    ):
+        return message
+    current = windows[current_index - 1]
+    previous = windows[previous_index - 1]
+    return (
+        "%s. Rewatch the original video intervals for shot %d (%.1f-%.1fs) "
+        "and shot %d (%.1f-%.1fs) independently. Do not copy either rejected "
+        "shot text. If there is no evidence-backed cut or visual difference, "
+        "merge the intervals into one shot and return a gap-free timeline. "
+        "If they are distinct shots, describe at least one directly visible "
+        "difference in subject, action, scene, camera, or lighting, with "
+        "evidence_seconds inside the corresponding interval. Never invent a "
+        "difference merely to pass validation."
+    ) % (
+        message,
+        previous_index, float(previous[0]), float(previous[1]),
+        current_index, float(current[0]), float(current[1]),
+    )
+
+
 def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform, transcript,
                                       deadline=None, heartbeat=None):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -3672,12 +3790,23 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
             response = _gemini_json_request(
                 _GEMINI_API_BASE + "/v1beta/models/" + _GEMINI_REVERSE_MODEL + ":generateContent",
                 body, api_key, deadline=deadline, heartbeat=heartbeat)
+            parsed = None
             try:
                 parsed = _parse_gemini_reverse_result(_gemini_candidate_text(response), duration)
+                # Run deterministic duplicate/length checks while the original
+                # media is still available for the one allowed validation
+                # retry. Do not salvage or rewrite provider content.
+                _assemble_reverse_prompt(
+                    parsed["entries"],
+                    parsed["windows"],
+                    enforce_length_limits=False,
+                )
                 parsed.update({"provider": "google", "model": _GEMINI_REVERSE_MODEL, "attempts": attempt + 1})
                 return parsed
             except ValueError as error:
-                validation_error = str(error)
+                validation_error = _gemini_validation_retry_error(
+                    error, parsed,
+                )
                 if attempt:
                     raise
         raise ValueError("Gemini reverse validation failed")
