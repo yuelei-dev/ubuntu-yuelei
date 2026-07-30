@@ -52,26 +52,26 @@ jobs:
         if: always()
         run: >-
           python head/scripts/runtime_unittest_snapshot.py
-          --root base --output head/.runtime-delta/base.json
+          --root base --output head/runtime-delta/base.json
 
       - name: Snapshot head outcomes
         if: always()
         run: >-
           python head/scripts/runtime_unittest_snapshot.py
-          --root head --output head/.runtime-delta/head.json
+          --root head --output head/runtime-delta/head.json
 
       - name: Enforce strict base-to-head delta
         if: always()
         run: >-
           python head/scripts/compare_runtime_test_outcomes.py
-          --base head/.runtime-delta/base.json
-          --head head/.runtime-delta/head.json
-          --report head/.runtime-delta/report.json
+          --base head/runtime-delta/base.json
+          --head head/runtime-delta/head.json
+          --report head/runtime-delta/report.json
 
       - name: Upload machine-auditable delta
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: runtime-biandao-gemini-delta
-          path: head/.runtime-delta/*.json
+          path: head/runtime-delta/*.json
           if-no-files-found: error
