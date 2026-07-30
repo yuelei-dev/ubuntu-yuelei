@@ -103,7 +103,13 @@ def inventory(source_root: Path, scope: dict, provenance: dict) -> dict:
             exclusions.append({"path": relative.as_posix(), "reason": "suffix_not_allowlisted"})
             continue
         assert_safe_content(path, patterns)
-        mode = stat.S_IMODE(path.stat().st_mode)
+        if provenance.get("capture_kind") == "repository-candidate":
+            # Windows does not expose Git's POSIX mode bits. Repository
+            # candidates use the portable non-executable runtime default;
+            # server captures retain the actual mode observed on Linux.
+            mode = 0o644
+        else:
+            mode = stat.S_IMODE(path.stat().st_mode)
         files.append({
             "path": relative.as_posix(),
             "sha256": sha256_file(path),
