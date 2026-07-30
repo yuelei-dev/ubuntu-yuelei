@@ -95,7 +95,7 @@ class GeminiReverseTests(unittest.TestCase):
             config["responseFormat"],
             {
                 "text": {
-                    "mimeType": "application/json",
+                    "mimeType": "APPLICATION_JSON",
                     "schema": self.breakdown._gemini_reverse_schema(),
                 },
             },
@@ -114,7 +114,7 @@ class GeminiReverseTests(unittest.TestCase):
         config = body["generationConfig"]
         self.assertEqual(
             config["responseFormat"]["text"]["mimeType"],
-            "application/json",
+            "APPLICATION_JSON",
         )
         self.assertEqual(
             config["responseFormat"]["text"]["schema"],
