@@ -45,7 +45,7 @@ class ReversePromptRenderTests(unittest.TestCase):
         html = SCRIPT_HTML.read_text(encoding="utf-8")
         cls.functions = "\n".join(
             _extract_function(html, name)
-            for name in ("reverseLegacyDisplaySections", "renderBreakdownReverse")
+            for name in ("reverseLegacyPrompt", "renderBreakdownReverse")
         )
 
     def _render(self, payload):
@@ -147,7 +147,7 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn("display:block", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
 
-    def test_legacy_display_sections_render_cards_without_hiding_prompt(self):
+    def test_legacy_display_sections_are_not_rendered_as_seven_cards(self):
         html = self._render(
             {
                 "prompt": "LEGACY FULL PROMPT",
@@ -162,13 +162,29 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
                 },
             }
         )
-        self.assertIn("legacy subject", html)
-        self.assertIn("legacy parameters", html)
+        self.assertNotIn("legacy subject", html)
+        self.assertNotIn("legacy parameters", html)
         self.assertIn("LEGACY FULL PROMPT", html)
         self.assertIn('id="bdReversePromptText"', html)
         self.assertNotIn("display:none", html)
         self.assertIn("display:block", html)
-        self.assertEqual(html.count('class="sc-card"'), 8)
+        self.assertEqual(html.count('class="sc-card"'), 1)
+
+    def test_sections_only_legacy_history_falls_back_to_one_text_card(self):
+        html = self._render(
+            {
+                "prompt": "",
+                "sections": {
+                    "subject": "legacy subject",
+                    "scene": "legacy scene",
+                    "parameters": "legacy parameters",
+                },
+            }
+        )
+        self.assertIn("主体：legacy subject", html)
+        self.assertIn("场景：legacy scene", html)
+        self.assertIn("参数：legacy parameters", html)
+        self.assertEqual(html.count('class="sc-card"'), 1)
 
     def test_empty_or_abnormal_sections_fall_back_to_prompt(self):
         for sections in ({}, [], "invalid", {"subject": "", "scene": None}):
