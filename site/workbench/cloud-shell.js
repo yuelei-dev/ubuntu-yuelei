@@ -111,7 +111,7 @@
     {k:'dashboard',l:'今日',i:'home', admin:true}, {k:'inspiration',l:'灵感设计',i:'sparkles'},
     {k:'leads',l:'平台获客',i:'search'}, {k:'collect',l:'内容爬取',i:'link'}, {k:'banana',l:'图片生成',i:'image'},
     {k:'video',l:'视频生成',i:'video'}, {k:'audio',l:'音频生成',i:'mic'}, {k:'script',l:'文案编导',i:'edit'},
-    {k:'canvas',l:'无限画布',i:'layers'}, {k:'assets',l:'我的资产',i:'folder'},
+    {k:'canvas',l:'无限画布',i:'layers'}, {k:'assets',l:'我的资产',i:'folder'}, {k:'invite',l:'邀请中心',i:'users'},
     {k:'cost',l:'成本',i:'coins', admin:true}, {k:'tutorials',l:'教程视频',i:'play'}, {k:'settings',l:'通用设置',i:'gear'}
   ];
 
@@ -482,6 +482,34 @@
     }
     return noticePage(x.kind);
   }
+  function ip12ProgressNotices(payload){
+    var openModuleSteps=[5,5,5,5,4,3,3,4], openStepKeys=[];
+    openModuleSteps.forEach(function(stepCount,moduleIndex){
+      for(var stepIndex=0;stepIndex<stepCount;stepIndex++) openStepKeys.push(moduleIndex+'-'+stepIndex);
+    });
+    var projects=(payload&&payload.items)||[];
+    var notices=[];
+    projects.forEach(function(project){
+      var questionnaire=project&&project.state&&project.state.questionnaire_state;
+      var answers=questionnaire&&questionnaire.answers;
+      if(!project||!project.id||!answers||typeof answers!=='object') return;
+      var progressed=openStepKeys.filter(function(key){var answer=answers[key];return answer&&(answer.confirmed||answer.skipped);}).length;
+      var skipped=openStepKeys.filter(function(key){return answers[key]&&answers[key].skipped;}).sort(function(a,b){
+        var aa=a.split('-').map(Number), bb=b.split('-').map(Number); return aa[0]-bb[0]||aa[1]-bb[1];
+      });
+      if(progressed>=34&&!skipped.length) return;
+      var target=skipped.length?skipped[0]:openStepKeys.find(function(key){var answer=answers[key];return !(answer&&(answer.confirmed||answer.skipped));})||'0-0';
+      var indexes=target.split('-').map(Number), moduleIndex=indexes[0], stepIndex=indexes[1];
+      notices.push({
+        id:'ip12-progress-'+project.id+'-'+progressed+'-'+skipped.length,kind:'system',title:skipped.length?'IP12 有 '+skipped.length+' 项待补':'继续完善 IP12',
+        detail:(project.title||'数字化 IP')+' · 首轮进度 '+progressed+'/34'+(skipped.length?'，补齐后方案会更准确。':'，继续完成即可解锁定制方案。'),
+        time:Number(project.updated_at||project.created_at||0)*1000,
+        href:'ip12.html?project='+encodeURIComponent(project.id)+'&module='+encodeURIComponent(moduleIndex+1)+'&step='+encodeURIComponent(stepIndex+1),
+        action:skipped.length?'去回补':'继续填写',tone:'info'
+      });
+    });
+    return notices;
+  }
   function buildNotices(data){
     var read=readNoticeIds(), items=[];
     var stored=readAccountJson('hq_preferences_v1',currentUser()), prefs=stored.notifications||{};
@@ -502,7 +530,13 @@
           action:'查看明细',points:true,tone:x.refunded?'success':'points'});
       }
     });
-    if(enabled('systemNotices',true)) _systemNotices.forEach(function(x){ items.push(x); });
+    if(enabled('systemNotices',true)){
+      (data&&data.ip12_skips||[]).forEach(function(x){ items.push(x); });
+      (data&&data.system_notices||[]).forEach(function(x){
+        items.push({id:'server-notice-'+x.id,kind:'system',title:x.title||'系统通知',detail:x.detail||'',time:Number(x.created_at||0)*1000});
+      });
+      _systemNotices.forEach(function(x){ items.push(x); });
+    }
     items.forEach(function(x){ x.read=read.indexOf(x.id)>=0; });
     return items.sort(function(a,b){ return Number(b.time||0)-Number(a.time||0); });
   }
@@ -578,9 +612,15 @@
   function loadNotices(){
     ensureNotificationPanel(); if(_noticeState.loading) return;
     _noticeState.loading=true;
-    fetch('/api/gen/points/history?days=30&page=1&page_size=20',{credentials:'same-origin',cache:'no-store',headers:authHeaders()})
-      .then(function(r){ if(r.status===401) return {items:[]}; return r.ok?r.json():Promise.reject(new Error('读取通知失败')); })
-      .then(function(d){ _noticeState.items=buildNotices(d||{}); renderNotices(); })
+    Promise.all([
+      fetch('/api/gen/points/history?days=30&page=1&page_size=20',{credentials:'same-origin',cache:'no-store',headers:authHeaders()})
+        .then(function(r){ if(r.status===401) return {items:[]}; return r.ok?r.json():Promise.reject(new Error('读取任务通知失败')); }).catch(function(){return {items:[]};}),
+      fetch('/api/auth/notifications?limit=50',{credentials:'same-origin',cache:'no-store',headers:authHeaders()})
+        .then(function(r){ if(r.status===401) return {items:[]}; return r.ok?r.json():Promise.reject(new Error('读取系统通知失败')); }).catch(function(){return {items:[]};}),
+      fetch('/api/gen/digital-ip/projects',{credentials:'same-origin',cache:'no-store',headers:authHeaders()})
+        .then(function(r){ if(r.status===401) return {items:[]}; return r.ok?r.json():Promise.reject(new Error('读取 IP12 提醒失败')); }).catch(function(){return {items:[]};})
+    ])
+      .then(function(all){ var d=all[0]||{}; d.system_notices=(all[1]&&all[1].items)||[]; d.ip12_skips=ip12ProgressNotices(all[2]); _noticeState.items=buildNotices(d); renderNotices(); })
       .catch(function(){ _noticeState.items=buildNotices({items:[]}); renderNotices(); })
       .finally(function(){ _noticeState.loading=false; });
   }
@@ -641,17 +681,19 @@
       '<div id="hqTitle" style="font-size:20px;font-weight:600;">欢迎回来</div>'+
       '<div id="hqSubtitle" style="font-size:13px;color:#9a9ba2;margin-top:8px;">登录后开启智能获客与内容创作</div>'+
       '<div class="hqlt" id="hqTabs" role="tablist" aria-label="登录方式"><button type="button" role="tab" aria-selected="true" class="on" id="hqTP">手机号登录</button><button type="button" role="tab" aria-selected="false" id="hqTW">密码登录</button></div>'+
-      '<div style="margin-top:20px;display:flex;flex-direction:column;gap:12px;">'+
-        '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></span><input id="hqU" placeholder="请输入手机号 / 账号"></div>'+
-        '<div id="hqRP" style="display:flex;gap:10px;"><div class="hqlf" style="flex:1;"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M22 11v1a10 10 0 1 1-5.9-9.1"/><path d="M22 4L12 14l-3-3"/></svg></span><input id="hqC" placeholder="请输入验证码"></div><button type="button" id="hqGc" style="height:48px;padding:0 14px;white-space:nowrap;font-size:13px;color:#e7b24c;background:rgba(231,178,76,.08);border:1px solid rgba(231,178,76,.26);border-radius:13px;cursor:pointer;font-family:inherit;">获取验证码</button></div>'+
-        '<div id="hqRW" class="hqlf" style="display:none;"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><input id="hqP" type="password" placeholder="请输入密码"></div>'+
-        '<div id="hqRegFields" style="display:none;flex-direction:column;gap:12px;">'+
-          '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><input id="hqP2" type="password" placeholder="请再次输入密码"></div>'+
-          '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg></span><input id="hqD" maxlength="32" placeholder="昵称（可选，最多32字）"></div>'+
+      '<form id="hqLoginForm">'+
+        '<div style="margin-top:20px;display:flex;flex-direction:column;gap:12px;">'+
+          '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></span><input id="hqU" name="username" type="text" autocomplete="username" maxlength="64" placeholder="请输入手机号 / 账号"></div>'+
+          '<div id="hqRP" style="display:flex;gap:10px;"><div class="hqlf" style="flex:1;"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M22 11v1a10 10 0 1 1-5.9-9.1"/><path d="M22 4L12 14l-3-3"/></svg></span><input id="hqC" name="one-time-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="请输入验证码"></div><button type="button" id="hqGc" style="height:48px;padding:0 14px;white-space:nowrap;font-size:13px;color:#e7b24c;background:rgba(231,178,76,.08);border:1px solid rgba(231,178,76,.26);border-radius:13px;cursor:pointer;font-family:inherit;">获取验证码</button></div>'+
+          '<div id="hqRW" class="hqlf" style="display:none;"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><input id="hqP" name="password" type="password" autocomplete="current-password" maxlength="128" placeholder="请输入密码" disabled></div>'+
+          '<div id="hqRegFields" style="display:none;flex-direction:column;gap:12px;">'+
+            '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><input id="hqP2" name="password_confirm" type="password" autocomplete="new-password" maxlength="128" placeholder="请再次输入密码" disabled></div>'+
+            '<div class="hqlf"><span style="'+SI+'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg></span><input id="hqD" name="display_name" type="text" maxlength="32" autocomplete="nickname" placeholder="昵称（可选，最多32字）" disabled></div>'+
+          '</div>'+
         '</div>'+
-      '</div>'+
-      '<button type="button" class="hqlb" id="hqSub">登 录</button>'+
-      '<div id="hqMsg" style="text-align:center;font-size:12.5px;margin-top:11px;min-height:15px;color:#f4708a;"></div>'+
+        '<button type="submit" class="hqlb" id="hqSub">登 录</button>'+
+        '<div id="hqMsg" style="text-align:center;font-size:12.5px;margin-top:11px;min-height:15px;color:#f4708a;"></div>'+
+      '</form>'+
       '<button type="button" id="hqTeam" style="display:block;width:100%;text-align:center;font-size:13.5px;color:#e7b24c;cursor:pointer;font-weight:500;margin-top:6px;border:0;background:transparent;font-family:inherit;padding:0;">团队口令登录 →</button>'+
       '<div style="text-align:center;font-size:11px;color:#65666c;margin-top:16px;">登录即代表您同意《用户协议》与《隐私政策》</div>'+
       '</div>';
@@ -662,15 +704,14 @@
     tP.onclick=function(){_hqPhone=true;setLoginMode('login');};
     tW.onclick=function(){_hqPhone=false;setLoginMode('login');};
     document.getElementById('hqGc').onclick=function(){ hqMsg('验证码登录即将上线，请用密码登录','err'); };
-    document.getElementById('hqSub').onclick=function(){ if(_hqMode==='register') hqDoRegister(); else hqDoLogin(); };
+    document.getElementById('hqLoginForm').onsubmit=function(e){ e.preventDefault(); if(_hqMode==='register') hqDoRegister(); else hqDoLogin(); };
     document.getElementById('hqTeam').onclick=function(){ if(_hqMode==='register') setLoginMode('login'); else hqDoLogin(); };
-    ['hqU','hqC','hqP','hqP2','hqD'].forEach(function(id){var el=document.getElementById(id);if(el)el.addEventListener('keydown',function(e){if(e.key==='Enter'){ if(_hqMode==='register') hqDoRegister(); else hqDoLogin(); }});});
   }
   function setLoginMode(mode){
     buildLoginModal(); _hqMode=mode==='register'?'register':'login';
     var title=document.getElementById('hqTitle'), sub=document.getElementById('hqSubtitle'), tabs=document.getElementById('hqTabs');
     var tP=document.getElementById('hqTP'), tW=document.getElementById('hqTW'), rP=document.getElementById('hqRP'), rW=document.getElementById('hqRW');
-    var reg=document.getElementById('hqRegFields'), btn=document.getElementById('hqSub'), team=document.getElementById('hqTeam'), u=document.getElementById('hqU'), p=document.getElementById('hqP');
+    var reg=document.getElementById('hqRegFields'), btn=document.getElementById('hqSub'), team=document.getElementById('hqTeam'), u=document.getElementById('hqU'), c=document.getElementById('hqC'), p=document.getElementById('hqP'), p2=document.getElementById('hqP2'), d=document.getElementById('hqD');
     hqMsg('');
     if(_hqMode==='register'){
       if(title) title.textContent='注册账号';
@@ -682,7 +723,11 @@
       if(btn) btn.textContent='注 册';
       if(team) team.textContent='已有账号，返回登录';
       if(u) u.placeholder='请输入账号';
-      if(p) p.placeholder='请输入密码（至少6位）';
+      if(p){ p.placeholder='请输入密码（至少6位）'; p.setAttribute('autocomplete','new-password'); }
+      if(c) c.disabled=true;
+      if(p) p.disabled=false;
+      if(p2) p2.disabled=false;
+      if(d) d.disabled=false;
       return;
     }
     if(title) title.textContent='欢迎回来';
@@ -699,7 +744,11 @@
     if(rP) rP.style.display=_hqPhone?'flex':'none';
     if(rW) rW.style.display=_hqPhone?'none':'flex';
     if(u) u.placeholder=_hqPhone?'请输入手机号 / 账号':'请输入账号';
-    if(p) p.placeholder='请输入密码';
+    if(p){ p.placeholder='请输入密码'; p.setAttribute('autocomplete','current-password'); }
+    if(c) c.disabled=!_hqPhone;
+    if(p) p.disabled=_hqPhone;
+    if(p2) p2.disabled=true;
+    if(d) d.disabled=true;
   }
   function hqMsg(t,k){ var m=document.getElementById('hqMsg'); if(m){ m.textContent=t||''; m.style.color=k==='ok'?'#2bd576':'#f4708a'; } }
   function openLogin(mode){ setLoginMode(mode); var ov=document.getElementById('hqLoginOv'); if(ov){ ov.classList.add('on'); var u=document.getElementById('hqU'); if(u) setTimeout(function(){try{u.focus();}catch(e){}},60); } }
@@ -753,6 +802,11 @@
 
   // ===== 用户登录态显示（左下侧栏卡 + 右上注册/登录）=====
   function currentUser(){ try{ return JSON.parse(localStorage.getItem('hq_user')||'null'); }catch(e){ return null; } }
+  function membershipRoleName(user){
+    if(user&&user.role==='admin') return '管理员';
+    if(!user||!user.membership_active) return '非会员';
+    return user.membership_name||({experience:'体验官',partner:'合伙人',initiator:'发起人'}[user.membership_tier])||'会员等级待同步';
+  }
   function accountStorageKey(prefix,user){ return prefix+':'+(user&&user.username?user.username:'guest'); }
   function readAccountJson(prefix,user){
     try{ var value=JSON.parse(localStorage.getItem(accountStorageKey(prefix,user))||'{}'); return value&&typeof value==='object'?value:{}; }catch(e){ return {}; }
@@ -770,7 +824,7 @@
     if(inn){
       var name=profile.nickname||(u&&(u.name||u.nickname||u.username))||'我的账号', ch=(String(name).trim()[0]||'我').toUpperCase();
       var safeName=escapeHtml(name), safeCh=escapeHtml(ch);
-      var role=(u&&u.role==='admin')?'管理员':'会员';
+      var role=membershipRoleName(u);
       if(card) card.innerHTML='<div class="hq-user-row" title="'+safeName+'" style="display:flex;align-items:center;gap:10px;padding:8px 6px;border-radius:10px;">'+
         '<div style="width:34px;height:34px;border-radius:50%;flex:none;background:'+av+';box-shadow:inset 0 1px 0 rgba(255,255,255,.45), inset 0 -2px 4px rgba(0,0,0,.28), 0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;color:#1a1206;font-size:13px;font-weight:600;">'+safeCh+'</div>'+
         '<div class="hq-user-copy" style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+safeName+'</div><div style="font-size:11px;color:#e7b24c;">'+role+'</div></div>'+
