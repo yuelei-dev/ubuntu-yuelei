@@ -52,7 +52,7 @@ def main():
     output = args.output.resolve()
     os.chdir(root)
     sys.path[:0] = [str(root), str(root / "server")]
-    suite = unittest.defaultTestLoader.discover(str(root / "tests"), top_level_dir=str(root))
+    suite = unittest.defaultTestLoader.discover("tests")
     result = unittest.TextTestRunner(
         stream=io.StringIO(), verbosity=0, resultclass=SnapshotResult,
     ).run(suite)
