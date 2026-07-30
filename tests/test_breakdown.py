@@ -1020,7 +1020,7 @@ class BreakdownTests(unittest.TestCase):
             [2, 4, 6, 8, 1, 3, 5, 7],
         )
         self.assertEqual(result["quality_score"]["total"], 100)
-        self.assertEqual(result["quality_contract"]["target_score"], 90)
+        self.assertEqual(result["quality_contract"]["target_score"], 80)
         self.assertEqual(len(result["segment_evidence"]), 4)
         self.assertEqual(
             result["segment_evidence"][0][
@@ -2209,7 +2209,7 @@ class BreakdownTests(unittest.TestCase):
             contract["score_scope"],
             "reverse_prompt_source_fidelity_and_generation_readiness",
         )
-        self.assertEqual(contract["target_score"], 90)
+        self.assertEqual(contract["target_score"], 80)
         self.assertTrue(contract["requires_reference_guidance"])
         self.assertEqual(
             set(contract["components"]),
@@ -2348,7 +2348,32 @@ class BreakdownTests(unittest.TestCase):
                 pair_ssim=0.80,
             )
 
-    def test_generation_readiness_counts_unknown_but_excludes_not_applicable(self):
+    def test_generation_readiness_uses_eighty_percent_without_counting_not_applicable(self):
+        below_target = self._generation_entry()
+        for path in (
+            "camera.camera_position",
+            "camera.movement",
+            "camera.viewing_angle",
+            "lighting.color_tone",
+            "style.texture",
+        ):
+            group, key = path.split(".")
+            below_target["generation"][group][key] = {
+                "status": "unknown",
+                "value": "unknown",
+                "evidence_frames": [],
+            }
+        with self.assertRaisesRegex(ValueError, "至少需要80%"):
+            self.breakdown._validate_reverse_segment_evidence(
+                below_target,
+                [],
+                ["first.jpg", "last.jpg"],
+                1,
+                require_frame_evidence=True,
+                require_generation_readiness=True,
+                pair_ssim=0.80,
+            )
+
         ready = self._generation_entry()
         for path in (
             "camera.camera_position",
@@ -2361,25 +2386,8 @@ class BreakdownTests(unittest.TestCase):
                 "value": "unknown",
                 "evidence_frames": [],
             }
-        with self.assertRaisesRegex(ValueError, "生成就绪槽位仅87%"):
-            self.breakdown._validate_reverse_segment_evidence(
-                ready,
-                [],
-                ["first.jpg", "last.jpg"],
-                1,
-                require_frame_evidence=True,
-                require_generation_readiness=True,
-                pair_ssim=0.80,
-            )
-
-        one_unknown = self._generation_entry()
-        one_unknown["generation"]["camera"]["movement"] = {
-            "status": "unknown",
-            "value": "unknown",
-            "evidence_frames": [],
-        }
         validated = self.breakdown._validate_reverse_segment_evidence(
-            one_unknown,
+            ready,
             [],
             ["first.jpg", "last.jpg"],
             1,
@@ -2388,10 +2396,10 @@ class BreakdownTests(unittest.TestCase):
             pair_ssim=0.80,
         )
         self.assertGreaterEqual(
-            validated["validation_summary"]["generation_readiness"], 90
+            validated["validation_summary"]["generation_readiness"], 80
         )
         self.assertEqual(
-            one_unknown["generation"]["camera"]["movement"]["value"], "unknown"
+            ready["generation"]["camera"]["movement"]["value"], "unknown"
         )
 
     def test_dynamic_and_static_generation_contracts_use_first_last_and_ssim(self):
@@ -2545,12 +2553,17 @@ class BreakdownTests(unittest.TestCase):
 
     def test_attempt_audit_persists_hash_attempt_and_validation_without_raw(self):
         invalid = self._generation_ready_structure()
-        for key in ("camera_position", "movement"):
+        for key in ("camera_position", "movement", "viewing_angle"):
             invalid["generation"]["camera"][key] = {
                 "status": "unknown",
                 "value": "unknown",
                 "evidence_frames": [],
             }
+        invalid["generation"]["lighting"]["color_tone"] = {
+            "status": "unknown",
+            "value": "unknown",
+            "evidence_frames": [],
+        }
         invalid["generation"]["style"]["texture"] = {
             "status": "unknown",
             "value": "unknown",
