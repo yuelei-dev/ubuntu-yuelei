@@ -186,7 +186,10 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("} else if(result.type==='breakdown_reverse'){", self.html)
         self.assertIn("switchBreakdownTool('reverse_prompt')", self.html)
         self.assertIn("document.getElementById('bdReversePromptText')", self.html)
-        self.assertIn("return prompt && prompt!==sourceUrl ? prompt : '';", self.html)
+        self.assertIn("function validReversePromptText(value, sourceUrl)", self.html)
+        self.assertIn("if(card) return validReversePromptText(card.textContent,sourceUrl);", self.html)
+        self.assertIn("bdReverseCopyBtn.onclick=copyReversePrompt", self.html)
+        self.assertIn("return copyText(prompt,function()", self.html)
         self.assertIn("location.href=handoffUrl('banana.html',prompt)", self.html)
         self.assertIn("if(currentMode==='breakdown' && isBreakdownReverseTool()) txt=reversePromptText();", self.html)
         self.assertIn("提示词反推暂仅支持单条视频链接", self.html)
@@ -200,8 +203,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("saveBreakdownHistory(item);", self.html)
 
     def test_reverse_history_is_saved_and_restored(self):
-        self.assertIn("prompt:(bd.prompt||'')", self.html)
-        self.assertIn("return !!((Array.isArray(meta.scenes)&&meta.scenes.length)||String(meta.prompt||'').trim());", self.html)
+        self.assertIn("prompt:isReverse?reverseResultPrompt(bd):(bd.prompt||'')", self.html)
+        self.assertIn("if(!isBreakdownHistoryMeta(savedMeta)) return;", self.html)
         self.assertIn("renderBreakdownReverse(result); saveBreakdownHistory(result); loadHistory();", self.html)
         self.assertIn("isReverse?'反推':'拆解'", self.html)
 
