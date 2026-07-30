@@ -65,14 +65,17 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="reverseVideoPickClose"', self.html)
         self.assertIn('id="reverseVideoConfirm"', self.html)
         self.assertIn("confirm.disabled=true", self.html)
-        self.assertIn("if(submitted) return;", self.html)
+        self.assertIn("if(submitted||confirm.disabled) return;", self.html)
         self.assertIn("dismiss();\n      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
         self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
 
     def test_reverse_video_picker_ignores_stale_avatar_responses(self):
         self.assertIn("var reverseVideoPickerRequest=0", self.html)
-        self.assertIn("var requestId=++reverseVideoPickerRequest", self.html)
-        self.assertGreaterEqual(self.html.count("if(requestId!==reverseVideoPickerRequest) return;"), 2)
+        self.assertIn("var invocationId=++reverseVideoPickerRequest", self.html)
+        self.assertGreaterEqual(
+            self.html.count("if(invocationId!==reverseVideoPickerRequest"),
+            3,
+        )
 
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
@@ -145,6 +148,13 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertNotIn("micro: seedance-2.0-fast", self.html)
         self.assertIn("channel:'micro'", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
+
+    def test_reverse_video_checks_seedance_health_before_no_avatar_submit(self):
+        self.assertIn('id="reverseVideoSeedanceStatus"', self.html)
+        self.assertIn("fetch('/api/gen/health')", self.html)
+        self.assertIn("d&&d.seedance_video_enabled===true", self.html)
+        self.assertIn("noAvatar.disabled=!seedanceReady", self.html)
+        self.assertIn("if(submitted||confirm.disabled) return", self.html)
 
     def test_reverse_history_preserves_explicit_reference_indices(self):
         self.assertIn(
