@@ -1,0 +1,71 @@
+name: runtime-biandao-gemini
+
+on:
+  pull_request:
+    branches: [runtime/biandao-141-142]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  strict-runtime-delta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout head
+        uses: actions/checkout@v7
+        with:
+          path: head
+          fetch-depth: 1
+
+      - name: Checkout exact runtime base
+        uses: actions/checkout@v7
+        with:
+          ref: 0c1e4d18b0e5556034eeec9afe29ccc0e0b7d0e2
+          path: base
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Blocking Gemini and runtime targets
+        working-directory: head
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python -m unittest -v \
+            tests.test_breakdown_gemini31 \
+            tests.test_breakdown_content_compat \
+            tests.test_runtime_manifest \
+            tests.test_script_actions_ui \
+            tests.test_script_prompt \
+            tests.test_script_to_video
+          python scripts/stamp_assets.py --check
+
+      - name: Snapshot exact base outcomes
+        run: >-
+          python head/scripts/runtime_unittest_snapshot.py
+          --root base --output head/.runtime-delta/base.json
+
+      - name: Snapshot head outcomes
+        run: >-
+          python head/scripts/runtime_unittest_snapshot.py
+          --root head --output head/.runtime-delta/head.json
+
+      - name: Enforce strict base-to-head delta
+        run: >-
+          python head/scripts/compare_runtime_test_outcomes.py
+          --base head/.runtime-delta/base.json
+          --head head/.runtime-delta/head.json
+          --report head/.runtime-delta/report.json
+
+      - name: Upload machine-auditable delta
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: runtime-biandao-gemini-delta
+          path: head/.runtime-delta/*.json
+          if-no-files-found: error

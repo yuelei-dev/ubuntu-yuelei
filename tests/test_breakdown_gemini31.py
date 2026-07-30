@@ -124,6 +124,24 @@ class GeminiReverseTests(unittest.TestCase):
                 json.dumps({"shots": [shot]}), 1.0
             )
 
+    def test_generation_advice_is_strictly_typed_formatted_and_bounded(self):
+        invalid_values = (
+            ("aspect_ratio", 169),
+            ("aspect_ratio", "wide"),
+            ("fps", None),
+            ("fps", "29.97"),
+            ("camera_control", ""),
+            ("camera_control", "x" * 161),
+            ("negative_prompt", ""),
+            ("negative_prompt", "x" * 241),
+        )
+        for key, value in invalid_values:
+            with self.subTest(key=key, value_type=type(value).__name__):
+                shot = self._shot(0.0, 1.0)
+                shot["generation_advice"][key] = value
+                with self.assertRaisesRegex(ValueError, "generation advice"):
+                    self.breakdown._parse_gemini_reverse_result(json.dumps({"shots": [shot]}), 1.0)
+
     def test_visible_subtitles_do_not_masquerade_as_asr_sound(self):
         shot = self._shot(0.0, 1.0)
         shot["facts"]["subtitles"] = "\u753b\u9762\u6587\u5b57\u201c\u65b0\u54c1\u53d1\u5e03\u201d"
@@ -161,6 +179,38 @@ class GeminiReverseTests(unittest.TestCase):
             response = self.breakdown._gemini_open(request)
         self.assertIsInstance(response, _Response)
         self.assertEqual(opened.call_count, 2)
+
+    def test_transient_error_matrix_retries_once_without_provider_fallback(self):
+        request = self.breakdown.urllib.request.Request("https://example.invalid")
+        transient = (
+            urllib.error.HTTPError(request.full_url, 429, "limited", {}, io.BytesIO()),
+            urllib.error.HTTPError(request.full_url, 500, "server", {}, io.BytesIO()),
+            urllib.error.URLError("network"),
+            TimeoutError("timeout"),
+        )
+        for error in transient:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(
+                    self.breakdown.urllib.request, "urlopen", side_effect=[error, _Response()],
+                ) as opened, mock.patch.object(
+                    self.breakdown, "_chat_multimodal",
+                    side_effect=AssertionError("GLM/OpenAI fallback forbidden"),
+                ):
+                    self.assertIsInstance(self.breakdown._gemini_open(request), _Response)
+                self.assertEqual(opened.call_count, 2)
+
+    def test_non_retryable_4xx_never_calls_other_provider(self):
+        request = self.breakdown.urllib.request.Request("https://example.invalid")
+        error = urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO())
+        with mock.patch.object(
+            self.breakdown.urllib.request, "urlopen", side_effect=error,
+        ) as opened, mock.patch.object(
+            self.breakdown, "_chat_multimodal",
+            side_effect=AssertionError("GLM/OpenAI fallback forbidden"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
+                self.breakdown._gemini_open(request)
+        self.assertEqual(opened.call_count, 1)
 
     def test_validation_retry_reuses_original_media_not_rejected_draft(self):
         captured = []

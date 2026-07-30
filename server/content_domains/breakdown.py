@@ -2429,6 +2429,18 @@ def _parse_gemini_reverse_result(raw, duration):
             raise ValueError("Gemini shot evidence does not match schema")
         if not isinstance(advice, dict) or set(advice) != {"aspect_ratio", "fps", "camera_control", "negative_prompt"}:
             raise ValueError("Gemini generation advice does not match schema")
+        for key in ("aspect_ratio", "fps", "camera_control", "negative_prompt"):
+            if not isinstance(advice[key], str):
+                raise ValueError("Gemini generation advice %s must be a string" % key)
+            advice[key] = _gemini_fact_text(advice[key])
+        if not re.fullmatch(r"(?:1:1|3:4|4:3|9:16|16:9|21:9|source|original)", advice["aspect_ratio"]):
+            raise ValueError("Gemini generation advice aspect_ratio is invalid")
+        if not re.fullmatch(r"(?:24|25|30|50|60)(?:\s*fps)?", advice["fps"], re.IGNORECASE):
+            raise ValueError("Gemini generation advice fps is invalid")
+        if not 1 <= len(advice["camera_control"]) <= 160:
+            raise ValueError("Gemini generation advice camera_control is invalid")
+        if not 1 <= len(advice["negative_prompt"]) <= 240:
+            raise ValueError("Gemini generation advice negative_prompt is invalid")
         applicable = ready = 0
         for key in _GEMINI_FACT_FIELDS:
             value = _gemini_fact_text(facts[key])
