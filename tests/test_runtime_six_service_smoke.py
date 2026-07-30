@@ -27,6 +27,24 @@ class RuntimeSixServiceSmokeFixtureTests(unittest.TestCase):
             '"CONTENT_OUT": "/home/ubuntu/content-api/content_out"',
             harness,
         )
+        self.assertIn(
+            '"CONTENT_JOB_DB": str(state / "content_jobs.db")',
+            harness,
+        )
+        self.assertNotIn(
+            '"CONTENT_JOB_DB": str(server / "content_jobs.db")',
+            harness,
+        )
+
+    def test_smoke_uses_writable_instance_without_mutating_release(self):
+        harness = (ROOT / "scripts/runtime_six_service_smoke.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("release_before = tree_fingerprint(release)", harness)
+        self.assertIn("shutil.copytree(release, runtime)", harness)
+        self.assertIn("release_after = tree_fingerprint(release)", harness)
+        self.assertIn('"source_release_unchanged": source_release_unchanged', harness)
+        self.assertIn('and payload["source_release_unchanged"]', harness)
 
 
 if __name__ == "__main__":

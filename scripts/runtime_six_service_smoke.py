@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,6 +27,20 @@ SERVICES = (
 )
 
 
+def tree_fingerprint(root):
+    digest = hashlib.sha256()
+    files = 0
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = path.relative_to(root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files += 1
+    return {"sha256": digest.hexdigest(), "file_count": files}
+
+
 def port_available(port):
     with socket.socket() as sock:
         try:
@@ -40,9 +56,14 @@ def main():
     parser.add_argument("--evidence", required=True, type=Path)
     args = parser.parse_args()
     release = args.release.resolve()
-    server = release / "server"
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
+    release_before = tree_fingerprint(release)
+    runtime = evidence / "runtime-instance"
+    if runtime.exists():
+        shutil.rmtree(runtime)
+    shutil.copytree(release, runtime)
+    server = runtime / "server"
     state = evidence / "external-state"
     state.mkdir(parents=True, exist_ok=True)
     unavailable = [port for _, _, port, _, _ in SERVICES if not port_available(port)]
@@ -60,7 +81,7 @@ def main():
             "AUTH_DB": str(state / "auth.db"),
             "CONTENT_ASSET_DB": str(state / "assets.db"),
             "CONTENT_DB": str(state / "content.db"),
-            "CONTENT_JOB_DB": str(server / "content_jobs.db"),
+            "CONTENT_JOB_DB": str(state / "content_jobs.db"),
             "CONTENT_OUT": str(state / "content_out"),
             "DIGITAL_IP_DB": str(state / "digital_ip.db"),
             "FEATURE_FLAGS_DB": str(state / "flags.db"),
@@ -140,9 +161,15 @@ def main():
         for handle in handles:
             handle.close()
 
+    release_after = tree_fingerprint(release)
+    source_release_unchanged = release_before == release_after
     payload = {
         "server_role": "local-isolation",
         "paid_model_calls": 0,
+        "source_release_before": release_before,
+        "source_release_after": release_after,
+        "source_release_unchanged": source_release_unchanged,
+        "runtime_instance": str(runtime),
         "results": sorted(results, key=lambda item: item["service"]),
         "all_healthy": len(results) == 6
         and all(
@@ -157,7 +184,13 @@ def main():
         encoding="utf-8",
     )
     print(json.dumps(payload, ensure_ascii=False))
-    return 0 if payload["all_healthy"] and payload["processes_stopped"] else 1
+    return (
+        0
+        if payload["all_healthy"]
+        and payload["processes_stopped"]
+        and payload["source_release_unchanged"]
+        else 1
+    )
 
 
 if __name__ == "__main__":
