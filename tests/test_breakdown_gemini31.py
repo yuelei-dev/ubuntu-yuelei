@@ -131,9 +131,7 @@ class GeminiReverseTests(unittest.TestCase):
             ("fps", None),
             ("fps", "29.97"),
             ("camera_control", ""),
-            ("camera_control", "x" * 161),
             ("negative_prompt", ""),
-            ("negative_prompt", "x" * 241),
         )
         for key, value in invalid_values:
             with self.subTest(key=key, value_type=type(value).__name__):
@@ -141,6 +139,41 @@ class GeminiReverseTests(unittest.TestCase):
                 shot["generation_advice"][key] = value
                 with self.assertRaisesRegex(ValueError, "generation advice"):
                     self.breakdown._parse_gemini_reverse_result(json.dumps({"shots": [shot]}), 1.0)
+
+    def test_provider_schema_has_no_field_length_limit_but_total_output_is_bounded(self):
+        schema_text = json.dumps(self.breakdown._gemini_reverse_schema())
+        self.assertNotIn("maxLength", schema_text)
+        shot = self._shot(0.0, 1.0)
+        shot["facts"]["subject_appearance"] = "x" * 1000
+        shot["generation_advice"]["camera_control"] = "y" * 1000
+        shot["generation_advice"]["negative_prompt"] = "z" * 1000
+        result = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [shot]}), 1.0,
+        )
+        self.assertIn("x" * 1000, result["entries"][0]["fields"]["subject"])
+        oversized = {"candidates": [{"content": {"parts": [{
+            "text": "x" * (self.breakdown._GEMINI_MAX_RESPONSE_BYTES + 1),
+        }]}}]}
+        with self.assertRaisesRegex(ValueError, "total output limit"):
+            self.breakdown._gemini_candidate_text(oversized)
+
+    def test_projected_inline_payload_over_safety_limit_uses_files_api(self):
+        source_bytes = 14_172_348
+        with mock.patch.object(self.breakdown.os.path, "getsize", return_value=source_bytes):
+            projected = self.breakdown._gemini_inline_payload_bytes(
+                "unused", "video/mp4", "sample", 15.0, "local", "",
+            )
+        self.assertGreater(projected, self.breakdown._GEMINI_INLINE_MAX_REQUEST_BYTES)
+        uploaded = {"name": "files/test", "uri": "https://files.example/test"}
+        with mock.patch.object(self.breakdown.os.path, "getsize", return_value=source_bytes), \
+                mock.patch.object(self.breakdown, "_gemini_upload_file", return_value=uploaded) as upload:
+            part, result = self.breakdown._gemini_media_part(
+                "unused", "video/mp4", 15.0, "mock-key", inline_payload_bytes=projected,
+            )
+        upload.assert_called_once()
+        self.assertEqual(result, uploaded)
+        self.assertIn("file_data", part)
+
 
     def test_visible_subtitles_do_not_masquerade_as_asr_sound(self):
         shot = self._shot(0.0, 1.0)
@@ -211,6 +244,26 @@ class GeminiReverseTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
                 self.breakdown._gemini_open(request)
         self.assertEqual(opened.call_count, 1)
+
+    def test_http_error_summary_keeps_safe_google_fields_and_redacts_secrets(self):
+        request = self.breakdown.urllib.request.Request("https://example.invalid/private")
+        body = json.dumps({"error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "bad schema at https://secret.example/path api_key=AQ.secret-value-123456789",
+        }}).encode()
+        error = urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(body))
+        with mock.patch.object(self.breakdown.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(RuntimeError) as raised:
+                self.breakdown._gemini_open(request)
+        message = str(raised.exception)
+        self.assertIn("Gemini HTTP 400", message)
+        self.assertIn("INVALID_ARGUMENT", message)
+        self.assertIn("[redacted-url]", message)
+        self.assertIn("[redacted-credential]", message)
+        self.assertNotIn("secret.example", message)
+        self.assertNotIn("AQ.secret", message)
+
 
     def test_validation_retry_reuses_original_media_not_rejected_draft(self):
         captured = []

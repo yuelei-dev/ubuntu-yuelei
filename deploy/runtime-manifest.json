@@ -92,8 +92,8 @@
     {
       "runtime_source_path": "/home/ubuntu/content-api/content_domains/breakdown.py",
       "git_path": "server/content_domains/breakdown.py",
-      "sha256": "0dc7d6091490ec1169716c4e3189d72f8a8c105ca0a150d8534ee6e7dbb29ad4",
-      "size": 131958,
+      "sha256": "20eb82744657111d60b5cedd8c865e02457d2d47ae171778cf881b7d34e1f5ef",
+      "size": 134368,
       "mode": "0o644",
       "classification": "feature_pr_gemini31_reverse_only",
       "source_commit": null,

@@ -35,6 +35,8 @@ _GEMINI_API_BASE = "https://generativelanguage.googleapis.com"
 _GEMINI_INLINE_MAX_BYTES = 14 * 1024 * 1024
 _GEMINI_INLINE_MAX_DURATION = 15.0
 _GEMINI_MAX_MEDIA_BYTES = 200 * 1024 * 1024
+_GEMINI_INLINE_MAX_REQUEST_BYTES = 18_000_000
+_GEMINI_MAX_RESPONSE_BYTES = 64 * 1024
 _GEMINI_REQUEST_TIMEOUT = max(
     30, min(240, int(os.environ.get("BREAKDOWN_GEMINI_TIMEOUT", "180") or "180"))
 )
@@ -2206,7 +2208,7 @@ def _gemini_reverse_schema():
                     "facts": {
                         "type": "object", "additionalProperties": False,
                         "required": list(_GEMINI_FACT_FIELDS),
-                        "properties": {key: {"type": "string", "maxLength": 180} for key in _GEMINI_FACT_FIELDS},
+                        "properties": {key: {"type": "string"} for key in _GEMINI_FACT_FIELDS},
                     },
                     "evidence_seconds": {
                         "type": "object", "additionalProperties": False,
@@ -2216,16 +2218,45 @@ def _gemini_reverse_schema():
                         "type": "object", "additionalProperties": False,
                         "required": ["aspect_ratio", "fps", "camera_control", "negative_prompt"],
                         "properties": {
-                            "aspect_ratio": {"type": "string", "maxLength": 32},
-                            "fps": {"type": "string", "maxLength": 32},
-                            "camera_control": {"type": "string", "maxLength": 160},
-                            "negative_prompt": {"type": "string", "maxLength": 240},
+                            "aspect_ratio": {"type": "string"},
+                            "fps": {"type": "string"},
+                            "camera_control": {"type": "string"},
+                            "negative_prompt": {"type": "string"},
                         },
                     },
                 },
             },
         }},
     }
+def _gemini_http_error_summary(error):
+    code = int(getattr(error, "code", 0) or 0)
+    status = ""
+    message = ""
+    try:
+        raw = error.read(8193)
+        if len(raw) <= 8192:
+            payload = json.loads(raw.decode("utf-8"))
+            detail = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(detail, dict):
+                code = int(detail.get("code") or code)
+                status = str(detail.get("status") or "")
+                message = _gemini_fact_text(detail.get("message"))
+    except Exception:
+        pass
+    status = status if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", status) else ""
+    message = re.sub(r"https?://\S+", "[redacted-url]", message)
+    message = re.sub(r"\b(?:AIza|AQ\.)[A-Za-z0-9._-]{8,}\b", "[redacted-credential]", message)
+    message = re.sub(
+        r"(?i)(api[_ -]?key\s*[=:]\s*)\S+", r"\1[redacted-credential]", message,
+    )[:240]
+    parts = ["Gemini HTTP %d" % code]
+    if status:
+        parts.append(status)
+    if message:
+        parts.append(message)
+    return ": ".join(parts)
+
+
 
 
 def _gemini_timeout(deadline):
@@ -2249,7 +2280,7 @@ def _gemini_open(request, deadline=None, heartbeat=None, retry_transient=True):
             code = int(getattr(error, "code", 0) or 0)
             if attempt + 1 < attempts and (code == 429 or 500 <= code < 600):
                 continue
-            raise RuntimeError("Gemini HTTP %d" % code) from error
+            raise RuntimeError(_gemini_http_error_summary(error)) from error
         except (urllib.error.URLError, TimeoutError, OSError) as error:
             last_error = error
             if attempt + 1 < attempts:
@@ -2346,11 +2377,19 @@ def _gemini_delete_file(file_info, api_key, deadline=None, heartbeat=None):
         print("[breakdown] Gemini temporary file cleanup failed", flush=True)
 
 
-def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartbeat=None):
+def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartbeat=None,
+                       inline_payload_bytes=None, title="", platform="", transcript=""):
     size = os.path.getsize(path)
     if size <= 0 or size > _GEMINI_MAX_MEDIA_BYTES:
         raise ValueError("Gemini reverse media size is outside the allowed range")
-    if size <= _GEMINI_INLINE_MAX_BYTES and float(duration or 0) <= _GEMINI_INLINE_MAX_DURATION:
+    if inline_payload_bytes is None:
+        inline_payload_bytes = _gemini_inline_payload_bytes(
+            path, mime_type, title, duration, platform, transcript,
+        )
+    projected = int(inline_payload_bytes)
+    if (size <= _GEMINI_INLINE_MAX_BYTES
+            and float(duration or 0) <= _GEMINI_INLINE_MAX_DURATION
+            and projected <= _GEMINI_INLINE_MAX_REQUEST_BYTES):
         with open(path, "rb") as source:
             payload = source.read(_GEMINI_INLINE_MAX_BYTES + 1)
         if len(payload) != size:
@@ -2381,6 +2420,37 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
          str(transcript or "(none)")[:3000], retry)
 
 
+def _gemini_request_body(media_part, title, duration, platform, transcript, validation_error=""):
+    return {
+        "systemInstruction": {
+            "parts": [{"text": "You are an evidence-bound video prompt reverse director."}],
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [
+                media_part,
+                {"text": _gemini_reverse_instruction(
+                    title, duration, platform, transcript, validation_error,
+                )},
+            ],
+        }],
+        "generationConfig": {
+            "temperature": 0.1, "maxOutputTokens": 8192,
+            "responseMimeType": "application/json", "responseJsonSchema": _gemini_reverse_schema(),
+        },
+    }
+
+
+def _gemini_inline_payload_bytes(path, mime_type, title, duration, platform, transcript):
+    size = os.path.getsize(path)
+    encoded_size = 4 * ((size + 2) // 3)
+    placeholder = {"inline_data": {"mime_type": mime_type, "data": ""}}
+    body = _gemini_request_body(
+        placeholder, title, duration, platform, transcript, "x" * 300,
+    )
+    return len(json.dumps(body, ensure_ascii=False).encode("utf-8")) + encoded_size
+
+
 def _gemini_candidate_text(response):
     try:
         text = response["candidates"][0]["content"]["parts"][0]["text"]
@@ -2388,6 +2458,8 @@ def _gemini_candidate_text(response):
         raise RuntimeError("Gemini returned no structured candidate") from error
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError("Gemini returned an empty structured candidate")
+    if len(text.encode("utf-8")) > _GEMINI_MAX_RESPONSE_BYTES:
+        raise ValueError("Gemini structured candidate exceeds the total output limit")
     return text.strip()
 
 
@@ -2437,15 +2509,15 @@ def _parse_gemini_reverse_result(raw, duration):
             raise ValueError("Gemini generation advice aspect_ratio is invalid")
         if not re.fullmatch(r"(?:24|25|30|50|60)(?:\s*fps)?", advice["fps"], re.IGNORECASE):
             raise ValueError("Gemini generation advice fps is invalid")
-        if not 1 <= len(advice["camera_control"]) <= 160:
+        if not advice["camera_control"]:
             raise ValueError("Gemini generation advice camera_control is invalid")
-        if not 1 <= len(advice["negative_prompt"]) <= 240:
+        if not advice["negative_prompt"]:
             raise ValueError("Gemini generation advice negative_prompt is invalid")
         applicable = ready = 0
         for key in _GEMINI_FACT_FIELDS:
             value = _gemini_fact_text(facts[key])
             facts[key] = value
-            if not value or len(value) > 180:
+            if not value:
                 raise ValueError("Gemini shot %d has an invalid %s value" % (index, key))
             if value == _GEMINI_NOT_APPLICABLE and key not in _GEMINI_OPTIONAL_FACT_FIELDS:
                 raise ValueError("Gemini marked a required visual fact not_applicable")
@@ -2559,6 +2631,7 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
         media_part, uploaded = _gemini_media_part(
             path, mime_type, duration, api_key,
             deadline=deadline, heartbeat=heartbeat,
+            title=title, platform=platform, transcript=transcript,
         )
         if uploaded:
             uploaded = _gemini_wait_for_file_active(
@@ -2567,13 +2640,9 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
             media_part = {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}
         validation_error = ""
         for attempt in range(2):
-            body = {
-                "systemInstruction": {"parts": [{"text": "You are an evidence-bound video prompt reverse director."}]},
-                "contents": [{"role": "user", "parts": [media_part, {"text": _gemini_reverse_instruction(
-                    title, duration, platform, transcript, validation_error)}]}],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 8192,
-                    "responseMimeType": "application/json", "responseJsonSchema": _gemini_reverse_schema()},
-            }
+            body = _gemini_request_body(
+                media_part, title, duration, platform, transcript, validation_error,
+            )
             response = _gemini_json_request(
                 _GEMINI_API_BASE + "/v1beta/models/" + _GEMINI_REVERSE_MODEL + ":generateContent",
                 body, api_key, deadline=deadline, heartbeat=heartbeat)

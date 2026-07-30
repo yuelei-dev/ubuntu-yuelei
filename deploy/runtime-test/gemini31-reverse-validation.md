@@ -13,10 +13,11 @@
 
 - Reverse model: `gemini-3.1-pro-preview` through the official Gemini Developer API.
 - Credential source: environment variable `GEMINI_API_KEY` only.
-- Small input: inline video/image, at most 14 MiB and, for video, at most 15 seconds.
+- Small input: inline video/image only when the estimated complete JSON payload is at most 18,000,000 bytes and video duration is at most 15 seconds.
 - Larger input: resumable Files API upload, poll to `ACTIVE`, then delete in `finally`.
 - Once upload returns a file handle, every success/failure path performs exactly one best-effort DELETE under an independent cleanup deadline; sanitized cleanup failures never mask the primary error.
-- Structured output: JSON MIME plus a strict JSON Schema; incomplete or extra-root JSON is rejected.
+- Structured output: JSON MIME plus a compatible JSON Schema; provider-side per-field length keywords are omitted, while non-empty/format/evidence rules remain strict.
+- Field text has no individual character ceiling; a 64 KiB total candidate limit prevents unbounded output.
 - Retry: one same-provider physical retry for network/429/5xx; HTTP 4xx is not retried.
 - Validation retry: at most one new analysis of the original media and validation error; rejected draft text is not sent back.
 - Cross-provider fallback: disabled; reverse_prompt does not call GLM or OpenAI.
@@ -41,7 +42,7 @@ Official references checked during implementation:
 
 ## Local evidence
 
-- `tests.test_breakdown_gemini31` plus `tests.test_breakdown_content_compat`: 26 passed.
+- `tests.test_breakdown_gemini31` plus `tests.test_breakdown_content_compat`: 32 passed.
 - Runtime manifest verification/reproduction: 4 passed.
 - Workbench display/copy/downstream mapping tests: 69 passed.
 - Python syntax and `git diff --check`: passed.

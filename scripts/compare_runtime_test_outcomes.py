@@ -35,7 +35,7 @@ def main():
         "skip_count_not_increased": head["skipped"] <= base["skipped"],
         "base_passes_do_not_regress": not base_pass_regressions,
         "head_only_failure_error_zero": not head_only_bad,
-        "gemini_tests_discovered": len(gemini) >= 19,
+        "gemini_tests_discovered": len(gemini) >= 22,
         "gemini_tests_all_pass": bool(gemini) and set(gemini.values()) == {"passed"},
     }
     report = {
