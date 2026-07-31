@@ -91,6 +91,74 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
             self.assertEqual(result["prompt"], "完整提示词")
             self.assertFalse(image.exists())
 
+    def test_local_video_uses_shared_gemini_reverse_engine(self):
+        breakdown = importlib.import_module("content_domains.breakdown")
+        original_out = self.processor.OUT_DIR
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            self.processor.OUT_DIR = root
+            upload_dir = root / "reverse_uploads"
+            upload_dir.mkdir()
+            video = upload_dir / "input.webm"
+            video.write_bytes(b"webm-video")
+            frame_dir = root / "frames"
+            frame_dir.mkdir()
+            frames = [str(frame_dir / ("frame-%d.jpg" % index))
+                      for index in range(1, 9)]
+            for frame in frames:
+                pathlib.Path(frame).write_bytes(b"frame")
+            expected = {
+                "type": "breakdown_reverse",
+                "prompt": "shared Gemini prompt",
+                "sections": {"reverse_audit": {}},
+            }
+            try:
+                with mock.patch.object(
+                    breakdown, "_extract_frames",
+                    return_value=(str(frame_dir), frames),
+                ), mock.patch.object(
+                    breakdown, "_format_transcript",
+                    return_value="[0.0-1.0] visible narration",
+                ), mock.patch.object(
+                    breakdown, "_speech_chars", return_value=20,
+                ), mock.patch.object(
+                    breakdown, "_reverse_transcript_is_abnormal",
+                    return_value=False,
+                ), mock.patch.object(
+                    breakdown, "_reverse_result_from_frames",
+                    return_value=expected,
+                ) as shared_reverse, mock.patch.object(
+                    self.processor, "_structured_prompt",
+                    side_effect=AssertionError(
+                        "local video must not use the legacy seven-section engine"
+                    ),
+                ), mock.patch.object(
+                    sys.modules["tikhub"], "transcript",
+                    return_value={"text": "visible narration"},
+                ):
+                    result = self.processor.gen_local_reverse({
+                        "local_media_path": str(video),
+                        "local_media_type": "video",
+                        "source_title": "input.webm",
+                        "duration": 16.0,
+                        "_job_id": 42,
+                    })
+            finally:
+                self.processor.OUT_DIR = original_out
+
+            self.assertEqual(result, expected)
+            shared_reverse.assert_called_once()
+            args, kwargs = shared_reverse.call_args
+            self.assertEqual(args[1], frames)
+            self.assertEqual(kwargs["platform"], "local")
+            self.assertEqual(kwargs["media_path"], str(video))
+            self.assertEqual(kwargs["media_mime"], "video/webm")
+            self.assertEqual(
+                kwargs["script_text"], "[0.0-1.0] visible narration"
+            )
+            self.assertFalse(video.exists())
+            self.assertFalse(frame_dir.exists())
+
     def test_video_prompt_prioritizes_visual_motion_over_transcript(self):
         captured = {}
         sections = self._valid_video_data()

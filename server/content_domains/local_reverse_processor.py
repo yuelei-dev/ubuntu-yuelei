@@ -199,7 +199,8 @@ subject_evidence 和 timeline 可以输出 JSON 字符串数组，其余字段�
 def gen_local_reverse(payload):
     import tikhub
     from .breakdown import (
-        _extract_frames, _format_transcript, _heartbeat, _pair_reverse_frames,
+        _extract_frames, _format_transcript, _heartbeat,
+        _reverse_result_from_frames, _reverse_transcript_is_abnormal,
         _speech_chars,
     )
     path = _upload_path(payload)
@@ -220,8 +221,6 @@ def gen_local_reverse(payload):
                 str(path), 8, duration or 1, scale_width=1024, min_frames=8)
             if not frames:
                 raise ValueError("视频关键帧读取失败，请确认文件完整")
-            overview = _reverse_overview(frame_dir, frames)
-            model_frames = [overview] + _pair_reverse_frames(frame_dir, frames)
         script_text = ""
         asr_failed = False
         if media_type == "video":
@@ -232,11 +231,29 @@ def gen_local_reverse(payload):
                 script_text = _format_transcript(transcript)
                 if _speech_chars(script_text) < 8:
                     script_text = ""
-                elif _transcript_is_abnormal(script_text, duration):
+                elif _reverse_transcript_is_abnormal(script_text, duration):
                     script_text = ""
             except Exception:
                 asr_failed = True
         _heartbeat(job_id, "analyzing")
+        if media_type == "video":
+            media_mime = {
+                ".mp4": "video/mp4",
+                ".mov": "video/quicktime",
+                ".webm": "video/webm",
+            }.get(path.suffix.lower(), "video/mp4")
+            return _reverse_result_from_frames(
+                payload,
+                frames,
+                source_url="",
+                title=title,
+                platform="local",
+                duration=duration,
+                script_text=script_text,
+                asr_failed=asr_failed,
+                media_path=str(path),
+                media_mime=media_mime,
+            )
         thumbs = _thumbnails(frames)
         sections, prompt = _structured_prompt(
             media_type, title, duration, script_text, model_frames)
