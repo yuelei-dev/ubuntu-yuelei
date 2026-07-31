@@ -45,7 +45,13 @@ class ReversePromptRenderTests(unittest.TestCase):
         html = SCRIPT_HTML.read_text(encoding="utf-8")
         cls.functions = "\n".join(
             _extract_function(html, name)
-            for name in ("reverseLegacyPrompt", "renderBreakdownReverse")
+            for name in (
+                "isReversePromptErrorText",
+                "validReversePromptText",
+                "reverseResultPrompt",
+                "reverseLegacyPrompt",
+                "renderBreakdownReverse",
+            )
         )
 
     def _render(self, payload):
@@ -185,6 +191,17 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn("场景：legacy scene", html)
         self.assertIn("参数：legacy parameters", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
+
+    def test_failure_message_is_not_rendered_as_a_reverse_prompt(self):
+        html = self._render(
+            {
+                "type": "breakdown_reverse",
+                "prompt": "反推失败：模型返回异常 · 已退点",
+                "source_url": "https://example.invalid/video",
+            }
+        )
+        self.assertNotIn('id="bdReversePromptText"', html)
+        self.assertIn("反推结果为空，请重试", html)
 
     def test_empty_or_abnormal_sections_fall_back_to_prompt(self):
         for sections in ({}, [], "invalid", {"subject": "", "scene": None}):
