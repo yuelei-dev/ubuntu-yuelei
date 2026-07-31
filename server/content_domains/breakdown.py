@@ -4245,6 +4245,37 @@ _SCENE_DETAIL_SCHEMA_ONLY_RE = re.compile(
     r"场景|地点|道具|前景|中景|背景|关系|镜头|景别|机位|视角|"
     r"构图|运镜|方式|光影|光源|软硬|明暗|色温|主色调|和|与|及|等))+$"
 )
+_SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL = {
+    "主体": re.compile(
+        r"(?:位于|处于|站在|站立|坐在|坐着|躺在|进入|离开|"
+        r"穿着|身穿|佩戴|手持|拿着|占据|约占|呈现|朝向|面向)"
+    ),
+    "动作": re.compile(
+        r"(?:移动|行走|走向|跑|抬起|举起|放下|拿起|转身|转向|"
+        r"起身|坐下|站起|靠近|离开|进入|退出|停留|保持静止|"
+        r"保持站立|保持坐姿|保持姿势|"
+        r"位置变化|形态变化|轮廓变化|旋转|挥动|伸出|弯曲|跳起|落下)"
+    ),
+    "场景": re.compile(
+        r"(?:位于|处在|构成|形成|填满|分布|排列|延伸|环绕|"
+        r"覆盖|占据|连接|包围|作为前景|作为中景|作为背景)"
+    ),
+    "镜头": re.compile(
+        r"(?:特写|近景|中景|全景|远景|俯拍|仰拍|平视|正面机位|"
+        r"侧面机位|固定机位|手持机位|居中构图|对称构图|跟随|"
+        r"推进|拉远|横移|摇镜|环绕|运镜)"
+    ),
+    "光影": re.compile(
+        r"(?:自然光|逆光|侧光|顶光|正面光|柔光|硬光|阴影|"
+        r"亮度|明暗|色温|色调|高光|曝光|照亮|投影|轮廓光|主色)"
+    ),
+}
+_SCENE_DETAIL_POSITIVE_FACT_RE = re.compile(
+    "|".join(
+        "(?:%s)" % pattern.pattern
+        for pattern in _SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL.values()
+    )
+)
 
 
 def _scene_detail_compact(value):
@@ -4260,7 +4291,7 @@ def _scene_detail_clauses(value):
     ]
 
 
-def _scene_detail_clause_observed_fact(clause):
+def _scene_detail_clause_observed_fact(clause, label=None):
     if _SCENE_DETAIL_UNCERTAIN_FAMILY_RE.search(clause):
         return ""
     matched = _SCENE_DETAIL_OBSERVED_CLAIM_RE.match(clause)
@@ -4271,25 +4302,32 @@ def _scene_detail_clause_observed_fact(clause):
         return ""
     if _SCENE_DETAIL_SCHEMA_ONLY_RE.fullmatch(compact):
         return ""
+    positive_contract = (
+        _SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL.get(label)
+        if label
+        else _SCENE_DETAIL_POSITIVE_FACT_RE
+    )
+    if positive_contract is None or not positive_contract.search(compact):
+        return ""
     return compact
 
 
-def _scene_detail_observed_facts(value):
+def _scene_detail_observed_facts(value, label=None):
     return [
         fact
         for fact in (
-            _scene_detail_clause_observed_fact(clause)
+            _scene_detail_clause_observed_fact(clause, label=label)
             for clause in _scene_detail_clauses(value)
         )
         if fact
     ]
 
 
-def _scene_detail_value_is_unknown(value):
+def _scene_detail_value_is_unknown(value, label=None):
     compact = _scene_detail_compact(value)
     if not compact:
         return True
-    return not _scene_detail_observed_facts(value)
+    return not _scene_detail_observed_facts(value, label=label)
 
 
 def _strip_scene_detail_observation_markers(scene_text):
@@ -4342,11 +4380,11 @@ def _scene_breakdown_detail_error(scene_text):
     ]
     if repetitive:
         return "存在低信息重复填充：" + "、".join(repetitive)
-    substantive = [
-        "，".join(_scene_detail_observed_facts(value))
-        for value in values.values()
-        if _scene_detail_observed_facts(value)
-    ]
+    substantive = []
+    for label, value in values.items():
+        observed_facts = _scene_detail_observed_facts(value, label=label)
+        if observed_facts:
+            substantive.append("，".join(observed_facts))
     if len(substantive) < 3:
         return "至少三个栏目需要可观察的实质信息"
     if _scene_detail_distinct_value_count(substantive) < 3:

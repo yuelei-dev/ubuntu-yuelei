@@ -1070,6 +1070,28 @@ class BreakdownTests(unittest.TestCase):
                 require_detail=True,
             )
 
+    def test_scene_detail_contract_requires_positive_facts_not_model_markers(self):
+        scene = (
+            "主体：可见事实：未提供相关信息，身份外观位置与画面占比字段均为空白；"
+            "动作：可见事实：未提供相关信息，动作起点过程结果方向速度字段均为空白；"
+            "场景：可见事实：未提供相关信息，地点道具前中后景字段均为空白；"
+            "镜头：可见事实：未提供相关信息，景别机位视角构图运镜字段均为空白；"
+            "光影：可见事实：未提供相关信息，光源软硬明暗色温主色字段均为空白。"
+        )
+        values = re.findall(
+            r"(主体|动作|场景|镜头|光影)：([^；]+)", scene
+        )
+        self.assertEqual(len(values), 5)
+        self.assertTrue(all(
+            self.breakdown._scene_detail_value_is_unknown(value, label=label)
+            for label, value in values
+        ))
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
     def test_scene_detail_contract_accepts_plain_language_fact_after_unknown(self):
         scene = (
             "主体：无法确认身份，但可见事实：一名女性站在窗边，穿深色上衣，位于画面右侧；"
