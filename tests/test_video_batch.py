@@ -266,6 +266,27 @@ class VideoBatchIntegrationGuardTests(unittest.TestCase):
 
 
 class VideoSingleRouteSubLimitTests(unittest.TestCase):
+    def test_seedance_health_prefers_official_probe_and_fails_closed(self):
+        from content_domains import core
+
+        class OfficialSeedance:
+            XIAOLEVIDEO_API_KEY = "legacy-key-must-not-override-official-probe"
+
+            @staticmethod
+            def seedance_video_is_open():
+                return False
+
+        with patch.object(core.feature_flags, "is_enabled", return_value=True):
+            self.assertFalse(core._seedance_video_health_enabled(OfficialSeedance()))
+
+        class BrokenSeedance:
+            @staticmethod
+            def seedance_video_is_open():
+                raise RuntimeError("provider probe failed")
+
+        with patch.object(core.feature_flags, "is_enabled", return_value=True):
+            self.assertFalse(core._seedance_video_health_enabled(BrokenSeedance()))
+
     def test_single_video_routes_use_kind_specific_caps_before_deduct(self):
         from content_domains import core
 
@@ -295,6 +316,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             "_domains": core._domains,
             "verify": core.verify,
             "require_enabled": core.feature_flags.require_enabled,
+            "is_enabled": core.feature_flags.is_enabled,
             "max_active": core.MAX_USER_ACTIVE_JOBS,
             "max_xiaole": core.MAX_USER_ACTIVE_XIAOLE_VIDEO,
             "max_tryon": core.MAX_USER_ACTIVE_TRYON,
@@ -302,6 +324,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             "validate_video": video.validate_video_payload,
             "validate_tryon": video.validate_tryon_payload,
             "validate_xiaole": video.validate_xiaole_video_payload,
+            "xiaole_key": video.XIAOLEVIDEO_API_KEY,
         }
         fake = FakePoints()
         server = None
@@ -310,6 +333,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             core.AUDIO_DB = str(pathlib.Path(td) / "assets.db")
             core.verify = lambda token: {"username": "fang", "must_change": False}
             core.feature_flags.require_enabled = lambda kind: None
+            core.feature_flags.is_enabled = lambda kind: kind == "seedance_video"
             core.MAX_USER_ACTIVE_JOBS = 5
             core.MAX_USER_ACTIVE_XIAOLE_VIDEO = 3
             core.MAX_USER_ACTIVE_TRYON = 1
@@ -317,6 +341,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             video.validate_video_payload = lambda body, username: body
             video.validate_tryon_payload = lambda body: body
             video.validate_xiaole_video_payload = lambda body: body
+            video.XIAOLEVIDEO_API_KEY = "configured"
             try:
                 with closing(sqlite3.connect(core.JOB_DB)) as db:
                     db.execute("""CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,username TEXT,cost INTEGER,
@@ -377,6 +402,12 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                     health = json.loads(response.read())
                 self.assertEqual(3, health["max_user_active_xiaole_video"])
                 self.assertEqual(1, health["max_user_active_tryon"])
+                self.assertIs(health["seedance_video_enabled"], True)
+
+                core.feature_flags.is_enabled = lambda kind: False
+                with urllib.request.urlopen(base + "/api/gen/health", timeout=5) as response:
+                    disabled_health = json.loads(response.read())
+                self.assertIs(disabled_health["seedance_video_enabled"], False)
             finally:
                 if server:
                     server.shutdown()
@@ -386,6 +417,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 core._domains = originals["_domains"]
                 core.verify = originals["verify"]
                 core.feature_flags.require_enabled = originals["require_enabled"]
+                core.feature_flags.is_enabled = originals["is_enabled"]
                 core.MAX_USER_ACTIVE_JOBS = originals["max_active"]
                 core.MAX_USER_ACTIVE_XIAOLE_VIDEO = originals["max_xiaole"]
                 core.MAX_USER_ACTIVE_TRYON = originals["max_tryon"]
@@ -393,6 +425,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 video.validate_video_payload = originals["validate_video"]
                 video.validate_tryon_payload = originals["validate_tryon"]
                 video.validate_xiaole_video_payload = originals["validate_xiaole"]
+                video.XIAOLEVIDEO_API_KEY = originals["xiaole_key"]
 
 
 if __name__ == "__main__":

@@ -151,7 +151,7 @@ class ScriptActionsUiTests(unittest.TestCase):
 
     def test_reverse_video_checks_seedance_health_before_no_avatar_submit(self):
         self.assertIn('id="reverseVideoSeedanceStatus"', self.html)
-        self.assertIn("fetch('/api/gen/health')", self.html)
+        self.assertIn("fetch('/api/gen/health',{cache:'no-store'})", self.html)
         self.assertIn("d&&d.seedance_video_enabled===true", self.html)
         self.assertIn("noAvatar.disabled=!seedanceReady", self.html)
         self.assertIn("if(submitted||confirm.disabled) return", self.html)

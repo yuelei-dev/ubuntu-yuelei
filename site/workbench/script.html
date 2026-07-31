@@ -1579,7 +1579,7 @@
         });
     }
     function loadSeedanceAvailability(){
-      fetch('/api/gen/health')
+      fetch('/api/gen/health',{cache:'no-store'})
         .then(function(r){ return r.ok?r.json():Promise.reject(); })
         .then(function(d){
           if(invocationId!==reverseVideoPickerRequest) return;

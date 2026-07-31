@@ -135,9 +135,10 @@ function createHarness() {
       getElementById: (id) => ids[id] || null,
       createElement: (tagName) => new FakeElement(tagName),
     },
-    fetch: (url) => {
+    fetch: (url, options) => {
       const request = deferred();
       request.url = url;
+      request.options = options || {};
       requests.push(request);
       return request.promise;
     },
@@ -161,6 +162,7 @@ test('confirm dismisses before firing its callback exactly once', async () => {
 
   assert.equal(ids.reverseVideoConfirm.disabled, true, 'no-avatar submit waits for channel health');
   assert.equal(requests[1].url, '/api/gen/health');
+  assert.equal(requests[1].options.cache, 'no-store');
   requests[1].resolve(jsonResponse({seedance_video_enabled: true}));
   await settlePromises();
 
