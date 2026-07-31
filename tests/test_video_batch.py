@@ -282,6 +282,9 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
         from content_domains import feature_flags
 
         self.assertIn("seedance_video", feature_flags.CATALOG_MAP)
+        self.assertFalse(feature_flags.CATALOG_MAP["sora_video"]["default_enabled"])
+        self.assertFalse(feature_flags.CATALOG_MAP["omni_video"]["default_enabled"])
+        self.assertTrue(feature_flags.CATALOG_MAP["seedance_video"]["default_enabled"])
         with patch.object(feature_flags, "_cached_rows", return_value={}):
             self.assertTrue(feature_flags.is_enabled("seedance_video"))
             with patch.object(video, "seedance_video_is_open", return_value=True):
@@ -292,6 +295,33 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 self.assertFalse(video.seedance_video_health_enabled(feature_flags))
         with patch.object(feature_flags, "_cached_rows", return_value={"seedance_video": {"enabled": True}}):
             self.assertTrue(feature_flags.is_enabled("seedance_video"))
+
+    def test_feature_flag_read_failure_preserves_safe_runtime_defaults(self):
+        from content_domains import feature_flags
+
+        original_cache = feature_flags._CACHE
+        try:
+            feature_flags._CACHE = {
+                "loaded_at": 0,
+                "items": {
+                    "image": {"enabled": False},
+                    "seedance_video": {"enabled": False},
+                    "sora_video": {"enabled": True},
+                    "omni_video": {"enabled": True},
+                },
+            }
+            with patch.object(feature_flags, "_load_rows", side_effect=OSError("db unavailable")):
+                rows = feature_flags._cached_rows()
+            self.assertFalse(rows["image"]["enabled"])
+            self.assertFalse(rows["seedance_video"]["enabled"])
+            self.assertNotIn("sora_video", rows)
+            self.assertNotIn("omni_video", rows)
+            with patch.object(feature_flags, "_cached_rows", return_value=rows):
+                self.assertFalse(feature_flags.is_enabled("seedance_video"))
+                self.assertFalse(feature_flags.is_enabled("sora_video"))
+                self.assertFalse(feature_flags.is_enabled("omni_video"))
+        finally:
+            feature_flags._CACHE = original_cache
 
     def test_single_video_routes_use_kind_specific_caps_before_deduct(self):
         from content_domains import core
