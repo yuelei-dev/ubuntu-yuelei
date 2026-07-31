@@ -54,6 +54,15 @@ XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
 
+def seedance_video_health_enabled(flags):
+    """Report effective Seedance availability for legacy and official runtimes."""
+    provider_probe = globals().get("seedance_video_is_open")
+    try:
+        provider_ready = bool(provider_probe()) if callable(provider_probe) else bool(XIAOLEVIDEO_API_KEY)
+        return bool(provider_ready and flags.is_enabled("seedance_video"))
+    except Exception:
+        return False
+
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
     # type 合法枚举(实测 422 暴露)：'url' | 'base64' | 'data_url'。

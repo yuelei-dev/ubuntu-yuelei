@@ -269,23 +269,14 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
     def test_seedance_health_prefers_official_probe_and_fails_closed(self):
         from content_domains import core
 
-        class OfficialSeedance:
-            XIAOLEVIDEO_API_KEY = "legacy-key-must-not-override-official-probe"
+        with patch.object(video, "XIAOLEVIDEO_API_KEY", "legacy-key-must-not-override-official-probe"), \
+                patch.object(video, "seedance_video_is_open", return_value=False, create=True), \
+                patch.object(core.feature_flags, "is_enabled", return_value=True):
+            self.assertFalse(video.seedance_video_health_enabled(core.feature_flags))
 
-            @staticmethod
-            def seedance_video_is_open():
-                return False
-
-        with patch.object(core.feature_flags, "is_enabled", return_value=True):
-            self.assertFalse(core._seedance_video_health_enabled(OfficialSeedance()))
-
-        class BrokenSeedance:
-            @staticmethod
-            def seedance_video_is_open():
-                raise RuntimeError("provider probe failed")
-
-        with patch.object(core.feature_flags, "is_enabled", return_value=True):
-            self.assertFalse(core._seedance_video_health_enabled(BrokenSeedance()))
+        with patch.object(video, "seedance_video_is_open", side_effect=RuntimeError("provider probe failed"), create=True), \
+                patch.object(core.feature_flags, "is_enabled", return_value=True):
+            self.assertFalse(video.seedance_video_health_enabled(core.feature_flags))
 
     def test_single_video_routes_use_kind_specific_caps_before_deduct(self):
         from content_domains import core

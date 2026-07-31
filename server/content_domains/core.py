@@ -605,22 +605,6 @@ def verify(token):
     return dict(user)
 
 def _domains(): from . import audio, points, video; return audio, points, video
-
-def _seedance_video_health_enabled(video_domain):
-    """Return the effective Seedance availability across old and new runtimes."""
-    provider_probe = getattr(video_domain, "seedance_video_is_open", None)
-    try:
-        provider_ready = (
-            bool(provider_probe())
-            if callable(provider_probe)
-            else bool(getattr(video_domain, "XIAOLEVIDEO_API_KEY", ""))
-        )
-        return bool(
-            provider_ready
-            and feature_flags.is_enabled("seedance_video")
-        )
-    except Exception:
-        return False
 def _leads_domain(): from . import leads; return leads
 def _must_change_password(user): return bool(user and user.get("must_change"))
 
@@ -1676,8 +1660,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
-                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
-                                    "seedance_video_enabled": _seedance_video_health_enabled(video_domain),
+                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
 
