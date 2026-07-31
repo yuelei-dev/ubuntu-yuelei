@@ -187,7 +187,7 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("switchBreakdownTool('reverse_prompt')", self.html)
         self.assertIn("document.getElementById('bdReversePromptText')", self.html)
         self.assertIn("function validReversePromptText(value, sourceUrl)", self.html)
-        self.assertIn("if(card) return validReversePromptText(card.textContent,sourceUrl);", self.html)
+        self.assertIn("return card ? validReversePromptText(card.textContent,sourceUrl) : '';", self.html)
         self.assertIn("bdReverseCopyBtn.onclick=copyReversePrompt", self.html)
         self.assertIn("return copyText(prompt,function()", self.html)
         self.assertIn("location.href=handoffUrl('banana.html',prompt)", self.html)

@@ -55,7 +55,7 @@ class ReversePromptCopyTests(unittest.TestCase):
             )
         )
 
-    def _run(self, *, dom_text, state_prompt, clipboard="success"):
+    def _run(self, *, dom_text, state_prompt, clipboard="success", card_present=True):
         clipboard_body = {
             "success": "writes.push(text); return Promise.resolve();",
             "failure": "return Promise.reject(new Error('denied'));",
@@ -63,7 +63,7 @@ class ReversePromptCopyTests(unittest.TestCase):
         harness = f"""
 var writes=[];
 var toasts=[];
-var card={{textContent:{json.dumps(dom_text, ensure_ascii=False)}}};
+var card={str(card_present).lower()}?{{textContent:{json.dumps(dom_text, ensure_ascii=False)}}}:null;
 var document={{
   getElementById:function(id){{return id==='bdReversePromptText'?card:null;}},
   createElement:function(){{throw new Error('fallback not expected');}}
@@ -114,6 +114,17 @@ copyReversePrompt().then(function(copied){{
         result = self._run(
             dom_text="反推失败：模型响应异常 · 已退点",
             state_prompt="旧状态里的有效提示词",
+        )
+        self.assertFalse(result["copied"])
+        self.assertEqual(result["writes"], [])
+        self.assertEqual(result["toasts"], ["没有可复制的有效提示词"])
+        self.assertEqual(result["button"], "📋 复制提示词")
+
+    def test_missing_current_card_never_falls_back_to_stale_prompt(self):
+        result = self._run(
+            dom_text="",
+            state_prompt="上一条成功任务的旧提示词",
+            card_present=False,
         )
         self.assertFalse(result["copied"])
         self.assertEqual(result["writes"], [])
