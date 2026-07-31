@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import importlib.util
+import io
 import ipaddress
 import math
 import tempfile
@@ -57,12 +58,21 @@ XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
 SEEDANCE_REFERENCE_MAX_BYTES = 30 * 1024 * 1024
+# 参考图签名 URL 有效期：覆盖「排队等待 + Seedance 取图」的任务生命周期，同时避免长期可访问。
+# 成片走 cos._SIGN_EXPIRE(默认7天)是给用户慢慢下载的；参考图是中间产物，2 小时足够。
+SEEDANCE_REFERENCE_SIGN_EXPIRE = 2 * 60 * 60
 _SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
 _SEEDANCE_IMAGE_TYPES = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+}
+_SEEDANCE_IMAGE_FORMATS = {
+    "image/jpeg": "JPEG",
+    "image/jpg": "JPEG",
+    "image/png": "PNG",
+    "image/webp": "WEBP",
 }
 
 
@@ -92,7 +102,9 @@ def seedance_reference_upload_is_open():
     """Reference-image capability is separate from text-only Seedance health."""
     try:
         from . import cos
-        return bool(cos.enabled() and importlib.util.find_spec("qcloud_cos"))
+        return bool(cos.enabled()
+                    and importlib.util.find_spec("qcloud_cos")
+                    and importlib.util.find_spec("PIL"))
     except Exception:
         return False
 
@@ -119,6 +131,27 @@ def _seedance_reference_uri(value):
     raise ValueError("Seedance 参考图必须是公网 URL 或已授权 asset:// 素材")
 
 
+def _seedance_decode_check(data, mime):
+    """真实解码校验：完整解码 + 声明 MIME 与实际格式一致。
+    魔数只认文件头，损坏 JPEG 伪装成 image/png 能混过去；这里用 Pillow verify()+load()
+    做完整解码。Pillow 缺失时 fail-closed：宁可拒绝上传也不放行未校验内容。"""
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise SeedanceReferenceUnavailable("图片完整性校验组件不可用，参考图未上传，本次未扣点") from exc
+    expected = _SEEDANCE_IMAGE_FORMATS.get(mime)
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            detected = str(img.format or "").upper()
+            img.verify()   # 结构完整性
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()     # 完整解码：截断/损坏的像素数据在这一步暴露
+    except Exception:
+        raise ValueError("Seedance 参考图片内容无效或已损坏") from None
+    if detected != expected:
+        raise ValueError("Seedance 参考图片内容与声明格式不一致")
+
+
 def _seedance_data_image(value):
     raw = str(value or "").strip()
     if not raw.startswith("data:") or "," not in raw:
@@ -134,18 +167,54 @@ def _seedance_data_image(value):
         data = base64.b64decode(encoded, validate=True)
     except Exception:
         raise ValueError("Seedance 参考图片内容解析失败") from None
-    if not _image_bytes_look_valid(data):
-        raise ValueError("Seedance 参考图片内容无效")
     if len(data) > SEEDANCE_REFERENCE_MAX_BYTES:
         raise ValueError("Seedance 单张参考图片不能超过30MB")
+    _seedance_decode_check(data, mime)
     return mime, ext, data
 
 
+def _seedance_assert_asset_owned(ref, username=None):
+    """asset://asset-<id> 必须命中当前账号在统一资产表(assets)里的未删素材行。
+    格式正则不证明归属 —— 归属只能由服务端查库核验；库不可读时 fail-closed。"""
+    owner = str(username or "").strip()
+    suffix = str(ref or "").split("asset://asset-", 1)[-1]
+    try:
+        asset_id = int(suffix)
+    except (TypeError, ValueError):
+        asset_id = None
+    if asset_id is None or not owner:
+        raise ValueError("Seedance 参考素材不存在或未授权给当前账号")
+    try:
+        from . import assets_store
+        with closing(assets_store.adb()) as c:
+            row = c.execute(
+                "SELECT 1 FROM assets WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
+                (asset_id, owner)).fetchone()
+    except Exception as exc:
+        print("[seedance] asset ownership check failed: %s" % type(exc).__name__, flush=True)
+        raise ValueError("Seedance 参考素材归属核验失败，请稍后重试") from exc
+    if not row:
+        raise ValueError("Seedance 参考素材不存在或未授权给当前账号")
+
+
+def _seedance_cos_presign(object_key, expire=SEEDANCE_REFERENCE_SIGN_EXPIRE):
+    """参考图的短期预签名 GET。cos._SIGN_EXPIRE 面向成片(默认 7 天)，参考图只活一个任务生命周期。"""
+    from . import cos
+    return cos._client().get_presigned_url(
+        Method="GET", Bucket=cos._BUCKET, Key=cos._object_key(object_key), Expired=expire)
+
+
+def _seedance_cos_delete(object_key):
+    from . import cos
+    cos._client().delete_object(Bucket=cos._BUCKET, Key=cos._object_key(object_key))
+
+
 def _stage_seedance_reference(value, username=None):
-    """Turn a local data URL into a deterministic COS URL before charging."""
+    """把本地 data: 参考图上传为 COS 私有对象，返回 (短期签名URL, 对象键)。
+    只被 stage_seedance_references 调用；http(s)/asset:// 透传不产对象。"""
     raw = str(value or "").strip()
     if not raw.startswith("data:"):
-        return _seedance_reference_uri(raw)
+        return _seedance_reference_uri(raw), None
     owner = str(username or "").strip()
     if not owner:
         raise ValueError("Seedance 参考图缺少账号归属信息")
@@ -155,10 +224,9 @@ def _stage_seedance_reference(value, username=None):
     object_key = "seedance/reference/%s/%s%s" % (owner_hash, content_hash, ext)
     try:
         from . import cos
-        if not cos.enabled():
-            raise SeedanceReferenceUnavailable("Seedance 参考图上传服务未配置，本次未扣点")
-        url = cos.put_bytes(data, object_key, mime, private=False)
-        return _seedance_reference_uri(url)
+        cos.put_bytes(data, object_key, mime, private=True)   # 用户肖像素材强制私有 ACL
+        url = _seedance_reference_uri(_seedance_cos_presign(object_key))
+        return url, object_key
     except SeedanceReferenceUnavailable:
         raise
     except Exception as exc:
@@ -166,11 +234,72 @@ def _stage_seedance_reference(value, username=None):
         raise SeedanceReferenceUnavailable("Seedance 参考图上传失败，本次未扣点") from exc
 
 
-def _prepare_seedance_references(values, username=None):
+def _validate_seedance_references(values, username=None):
+    """本地校验(无网络)：真实解码 + MIME/扩展名一致 + asset:// 归属核验。
+    COS 转存是网络动作，由 core 在幂等/上限/余额资格检查之后、扣点之前单独触发。"""
     refs = [str(item or "").strip() for item in (values or []) if str(item or "").strip()]
     if len(refs) > 9:
         raise ValueError("Seedance 最多支持 9 张参考图")
-    return [_stage_seedance_reference(item, username) for item in refs]
+    out = []
+    for item in refs:
+        if item.startswith("data:"):
+            _seedance_data_image(item)   # 完整解码校验，损坏/伪装在这一步拒绝
+            out.append(item)
+            continue
+        uri = _seedance_reference_uri(item)
+        if uri.startswith("asset://"):
+            _seedance_assert_asset_owned(uri, username)
+        out.append(uri)
+    return out
+
+
+def stage_seedance_references(body, username):
+    """扣点前的唯一网络动作：micro 渠道的 data: 参考图转存 COS 私有对象、换短期签名 URL。
+    任一失败都 best-effort 删除本批已上传对象，绝不残留，也绝不回退 data:。
+    就地改写 body["reference_images"]，返回本批新上传的对象键（供后续失败时清理）。"""
+    refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or []) if str(item or "").strip()]
+    if str((body or {}).get("channel") or "").strip().lower() != "micro" or not any(item.startswith("data:") for item in refs):
+        return []
+    if not seedance_reference_upload_is_open():
+        raise SeedanceReferenceUnavailable("Seedance 参考图上传服务未配置，本次未扣点")
+    staged_keys = []
+    staged_refs = []
+    try:
+        for item in refs:
+            url, key = _stage_seedance_reference(item, username)
+            staged_refs.append(url)
+            if key:
+                staged_keys.append(key)
+    except Exception:
+        cleanup_staged_seedance_references(staged_keys)
+        raise
+    body["reference_images"] = staged_refs
+    return staged_keys
+
+
+def stage_xiaole_video_references(kind, body, username, cost, points_domain):
+    """core 提交路径的薄接线：仅 xiaole_video 且 micro 渠道带 data: 参考图时，
+    先做余额资格预检（原子扣点仍是余额最终裁决），再转存 COS。
+    返回 (staged_keys, None)；失败返回 (None, (status, payload)) 由 core 直接 _send。"""
+    refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or []) if str(item or "").strip()]
+    if kind != "xiaole_video" or str((body or {}).get("channel") or "").strip().lower() != "micro" \
+            or not any(item.startswith("data:") for item in refs):
+        return [], None
+    if points_domain.get_points(username) < cost:
+        return None, (402, {"detail": "点数不足，请先充值（未扣点）", "need": cost})
+    try:
+        return stage_seedance_references(body, username), None
+    except SeedanceReferenceUnavailable as e:
+        return None, (e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
+
+
+def cleanup_staged_seedance_references(object_keys):
+    """best-effort 清理：扣点失败、入队失败等后续步骤失败时删除已转存的参考图对象。"""
+    for key in object_keys or []:
+        try:
+            _seedance_cos_delete(key)
+        except Exception as exc:
+            print("[seedance] reference cleanup failed for %s: %s" % (key, type(exc).__name__), flush=True)
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
@@ -241,8 +370,9 @@ def validate_xiaole_video_payload(payload, username=None):
             raise ValueError("Seedance 不支持该画面比例")
         if resolution not in video_seedance.RESOLUTIONS:
             raise ValueError("Seedance 不支持该分辨率")
-        # Network staging is deliberately last: reject all cheap parameter errors first.
-        refs = _prepare_seedance_references(refs, username)
+        # 本地校验(含真实解码与 asset:// 归属)在这里完成；COS 转存是网络动作，
+        # 由 core 在幂等/上限/余额资格检查之后、扣点之前调 stage_seedance_references。
+        refs = _validate_seedance_references(refs, username)
         cleaned.update({
             "model": video_seedance.SEEDANCE_MODEL,
             "duration": duration,
