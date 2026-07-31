@@ -278,12 +278,18 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 patch.object(core.feature_flags, "is_enabled", return_value=True):
             self.assertFalse(video.seedance_video_health_enabled(core.feature_flags))
 
-    def test_seedance_feature_flag_is_registered_and_defaults_closed(self):
+    def test_seedance_feature_flag_defaults_open_but_honors_explicit_disable(self):
         from content_domains import feature_flags
 
         self.assertIn("seedance_video", feature_flags.CATALOG_MAP)
         with patch.object(feature_flags, "_cached_rows", return_value={}):
+            self.assertTrue(feature_flags.is_enabled("seedance_video"))
+            with patch.object(video, "seedance_video_is_open", return_value=True):
+                self.assertTrue(video.seedance_video_health_enabled(feature_flags))
+        with patch.object(feature_flags, "_cached_rows", return_value={"seedance_video": {"enabled": False}}):
             self.assertFalse(feature_flags.is_enabled("seedance_video"))
+            with patch.object(video, "seedance_video_is_open", return_value=True):
+                self.assertFalse(video.seedance_video_health_enabled(feature_flags))
         with patch.object(feature_flags, "_cached_rows", return_value={"seedance_video": {"enabled": True}}):
             self.assertTrue(feature_flags.is_enabled("seedance_video"))
 
