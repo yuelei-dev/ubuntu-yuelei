@@ -145,16 +145,25 @@ class XiaoleVideoTests(unittest.TestCase):
             "model": "doubao-seedance-2-0-260128",
             "duration": 15,
         }
+        payload = self.video.validate_xiaole_video_payload({
+            "channel": "micro",
+            "prompt": "cinematic demo",
+            "duration": 15,
+            "ratio": "4:3",
+            "resolution": "1080p",
+        })
         with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
              patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
              patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-            result = self.video.gen_xiaole_video({
-                "channel": "micro", "prompt": "cinematic demo", "duration": 15,
-            })
+            result = self.video.gen_xiaole_video(payload)
         self.assertEqual(generate.call_args.kwargs["duration"], 15)
         self.assertEqual(generate.call_args.kwargs["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(generate.call_args.kwargs["ratio"], "4:3")
+        self.assertEqual(generate.call_args.kwargs["resolution"], "1080p")
         self.assertEqual(result["provider_video_id"], "seedance-1")
         self.assertEqual(result["duration"], 15)
+        self.assertEqual(result["ratio"], "4:3")
+        self.assertEqual(result["resolution"], "1080p")
 
     def test_validate_official_grok_parameters(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):

@@ -2972,7 +2972,7 @@ def gen_xiaole_video(payload):
     if not prompt:
         raise ValueError("请输入视频提示词")
     ratio = (payload.get("ratio") or ("16:9" if use_xai else "9:16")).strip()
-    if not use_xai and ratio not in XIAOLE_RATIO_SIZES:
+    if not use_xai and not use_seedance and ratio not in XIAOLE_RATIO_SIZES:
         ratio = "9:16"
     size = _xiaole_size_for_ratio(ratio) if not use_xai else None
     ref_images = None
@@ -3078,7 +3078,7 @@ def gen_xiaole_video(payload):
     return {
         "type": "video", "status": "done", "mode": channel, "model": result.get("model") or model, "text": prompt,
         "operation": payload.get("operation") or "generate",
-        "ratio": ratio, "resolution": payload.get("resolution") if use_xai and payload.get("operation") != "edit" else None,
+        "ratio": ratio, "resolution": payload.get("resolution") if use_seedance or (use_xai and payload.get("operation") != "edit") else None,
         "duration": result.get("duration") or (payload.get("duration") if use_xai or channel == "micro"
                                                 else XIAOLE_CHANNEL_DURATION.get(channel)),
         "provider_video_id": result.get("request_id"),
