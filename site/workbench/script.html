@@ -1459,15 +1459,24 @@
   function _showReverseVideoPicker(prompt,onConfirm){
     var modal=document.getElementById('reverseVideoPickModal');
     var noAvatar=document.getElementById('reverseVideoNoAvatar');
+    var seedanceStatus=document.getElementById('reverseVideoSeedanceStatus');
     var grid=document.getElementById('reverseVideoAvatarGrid');
     var duration=document.getElementById('reverseVideoDuration');
     var cost=document.getElementById('reverseVideoCost');
     var confirm=document.getElementById('reverseVideoConfirm');
     var close=document.getElementById('reverseVideoPickClose');
-    if(!modal||!noAvatar||!grid||!duration||!cost||!confirm||!close) return;
+    if(!modal||!noAvatar||!seedanceStatus||!grid||!duration||!cost||!confirm||!close) return;
+    var invocationId=++reverseVideoPickerRequest;
+    var avatarLoadRequest=0;
     var selectedAvatarId=null;
     var selectedDuration=10;
     var submitted=false;
+    var seedanceReady=false;
+    function updateConfirm(){
+      var blocked=selectedAvatarId===null&&!seedanceReady;
+      confirm.disabled=blocked;
+      confirm.style.opacity=blocked?'.55':'1';
+    }
     function updateCost(){
       var rate=selectedAvatarId===null?30:10;
       cost.textContent='预计消耗 '+(selectedDuration*rate)+' 点';
@@ -1480,6 +1489,7 @@
       });
     }
     function selectAvatar(id){
+      if(id===null&&!seedanceReady) return;
       selectedAvatarId=id;
       noAvatar.classList.toggle('on',id===null);
       noAvatar.setAttribute('aria-pressed',id===null?'true':'false');
@@ -1489,13 +1499,32 @@
         card.setAttribute('aria-pressed',on?'true':'false');
       });
       updateCost();
+      updateConfirm();
+    }
+    function setSeedanceAvailability(ready,detail){
+      seedanceReady=ready===true;
+      noAvatar.disabled=!seedanceReady;
+      seedanceStatus.textContent=detail;
+      seedanceStatus.setAttribute('data-state',seedanceReady?'ready':'blocked');
+      if(seedanceReady&&selectedAvatarId===null){
+        selectAvatar(null);
+        return;
+      }
+      if(!seedanceReady&&selectedAvatarId===null){
+        noAvatar.classList.toggle('on',false);
+        noAvatar.setAttribute('aria-pressed','false');
+      }
+      updateConfirm();
     }
     function dismiss(){ modal.style.display='none'; }
     modal.style.display='flex';
-    confirm.disabled=false;
-    confirm.style.opacity='1';
-    selectAvatar(null);
+    noAvatar.disabled=true;
+    noAvatar.classList.toggle('on',false);
+    noAvatar.setAttribute('aria-pressed','false');
+    seedanceStatus.textContent='正在检查 Seedance 官方通道…';
+    seedanceStatus.setAttribute('data-state','checking');
     updateCost();
+    updateConfirm();
     duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
       btn.onclick=function(){ selectedDuration=Number(btn.getAttribute('data-reverse-duration')); updateCost(); };
     });
@@ -1503,7 +1532,7 @@
     close.onclick=dismiss;
     modal.onclick=function(e){ if(e.target===modal) dismiss(); };
     confirm.onclick=function(){
-      if(submitted) return;
+      if(submitted||confirm.disabled) return;
       submitted=true;
       confirm.disabled=true;
       confirm.style.opacity='.6';
@@ -1511,12 +1540,12 @@
       onConfirm({avatarId:selectedAvatarId,duration:selectedDuration});
     };
     function loadAvatars(){
-      var requestId=++reverseVideoPickerRequest;
+      var avatarRequestId=++avatarLoadRequest;
       grid.innerHTML='<div style="grid-column:1/-1;color:#5c6b82;font-size:13px;text-align:center;padding:32px 0;">正在读取形象…</div>';
       fetch('/api/gen/video/avatars?limit=60',{headers:{'Authorization':'Bearer '+tok()}})
         .then(function(r){ return r.ok?r.json():Promise.reject(); })
         .then(function(d){
-          if(requestId!==reverseVideoPickerRequest) return;
+          if(invocationId!==reverseVideoPickerRequest||avatarRequestId!==avatarLoadRequest) return;
           var avatars=(d&&d.items)||[];
           if(!avatars.length){
             grid.innerHTML='<div style="grid-column:1/-1;color:#94a4bb;font-size:13px;text-align:center;padding:24px 0;">还没有形象<br><a href="video.html" style="color:#60a5fa;">去创建</a></div>';
@@ -1537,7 +1566,7 @@
           selectAvatar(selectedAvatarId);
         })
         .catch(function(){
-          if(requestId!==reverseVideoPickerRequest) return;
+          if(invocationId!==reverseVideoPickerRequest||avatarRequestId!==avatarLoadRequest) return;
           grid.innerHTML='<div style="grid-column:1/-1;color:#f4a460;font-size:13px;text-align:center;padding:16px 0 4px;">形象加载失败，不影响无形象生成</div>';
           var retry=document.createElement('button');
           retry.type='button';
@@ -1549,7 +1578,24 @@
           grid.appendChild(retry);
         });
     }
+    function loadSeedanceAvailability(){
+      fetch('/api/gen/health',{cache:'no-store'})
+        .then(function(r){ return r.ok?r.json():Promise.reject(); })
+        .then(function(d){
+          if(invocationId!==reverseVideoPickerRequest) return;
+          if(d&&d.seedance_video_enabled===true){
+            setSeedanceAvailability(true,'Seedance 官方通道可用');
+            return;
+          }
+          setSeedanceAvailability(false,'Seedance 通道暂未开启；请选择数字人形象生成，或联系管理员开启通道。');
+        })
+        .catch(function(){
+          if(invocationId!==reverseVideoPickerRequest) return;
+          setSeedanceAvailability(false,'暂时无法确认 Seedance 通道状态；请选择数字人形象，或稍后重试。');
+        });
+    }
     loadAvatars();
+    loadSeedanceAvailability();
   }
   function _setGenerateBusy(btn, busy){
     if(!btn) return;
@@ -1990,6 +2036,7 @@
   <div style="font-size:12.5px;color:#94a4bb;line-height:1.6;margin-bottom:16px;">形象可选；不选择时生成纯剧情视频</div>
   <div style="font-size:13px;font-weight:600;margin-bottom:8px;">选择形象（可选）</div>
   <button id="reverseVideoNoAvatar" class="sc-opt on" type="button" aria-pressed="true" style="width:100%;font-family:inherit;margin-bottom:10px;">不使用形象</button>
+  <div id="reverseVideoSeedanceStatus" data-state="checking" style="font-size:11.5px;color:#94a4bb;line-height:1.55;margin:-2px 0 12px;">正在检查 Seedance 官方通道…</div>
   <div id="reverseVideoAvatarGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;min-height:80px;max-height:230px;overflow-y:auto;padding-right:3px;"></div>
   <div style="font-size:13px;font-weight:600;margin:18px 0 8px;">视频时长</div>
   <div id="reverseVideoDuration" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">

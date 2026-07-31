@@ -42,7 +42,7 @@ _xiaole_dl_retries = int(os.environ.get("XIAOLEVIDEO_DL_RETRIES", "3"))     # �
 # 页面渠道 → 模型 id（前端传 channel，后端定 model，避免任意模型注入）
 XIAOLE_CHANNEL_MODELS = {
     "grok": "Grok Image Video",   # 果肉视频（Grok Video 1.0：文生/图生视频）
-    "micro": "seedance-2.0-fast", # 豆姐视频（Seedance 2.0 Fast：文生/图生视频）
+    "micro": "doubao-seedance-2-0-260128", # 火山方舟 Seedance 官方视频
     "omni": "omni-fast",          # 欧米视频（Omni Fast：文生/图生视频，~100s快；文生真人会被上游内容审核拦，图生真人不拦）
 }
 XIAOLE_IMAGE_CHANNELS = {"grok", "micro", "omni"}  # 支持参考图（图生视频）的渠道
@@ -53,6 +53,21 @@ GROK_VIDEO_PROVIDER = os.environ.get("GROK_VIDEO_PROVIDER", "xai").strip().lower
 XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
+
+def seedance_video_is_open():
+    """Return whether the dedicated official Seedance adapter is configured."""
+    try:
+        from . import video_seedance
+        return bool(video_seedance.available())
+    except Exception:
+        return False
+
+def seedance_video_health_enabled(flags):
+    """Report Seedance availability without falling back to a shared provider key."""
+    try:
+        return bool(seedance_video_is_open() and flags.is_enabled("seedance_video"))
+    except Exception:
+        return False
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
@@ -102,15 +117,36 @@ def validate_xiaole_video_payload(payload):
     cleaned["channel"] = channel
     cleaned["prompt"] = prompt
     if channel == "micro":
+        from . import video_seedance
         try:
             duration = int(cleaned.get("duration") or 10)
         except (TypeError, ValueError):
             raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
         if duration not in {5, 10, 15}:
             raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
-        if cleaned.get("reference_images") and duration != 10:
-            raise ValueError("豆姐图生视频仅支持 10 秒")
-        cleaned["duration"] = duration
+        refs = cleaned.get("reference_images") or []
+        if not isinstance(refs, list):
+            raise ValueError("reference_images 必须是数组")
+        refs = [str(item or "").strip() for item in refs if str(item or "").strip()]
+        if len(refs) > 9:
+            raise ValueError("Seedance 最多支持 9 张参考图")
+        ratio = str(cleaned.get("ratio") or "9:16").strip()
+        resolution = str(cleaned.get("resolution") or "720p").strip().lower()
+        generate_audio = cleaned.get("generate_audio", True)
+        if not isinstance(generate_audio, bool):
+            raise ValueError("Seedance 声音选项必须为布尔值")
+        if ratio not in video_seedance.RATIOS:
+            raise ValueError("Seedance 不支持该画面比例")
+        if resolution not in video_seedance.RESOLUTIONS:
+            raise ValueError("Seedance 不支持该分辨率")
+        cleaned.update({
+            "model": video_seedance.SEEDANCE_MODEL,
+            "duration": duration,
+            "ratio": ratio,
+            "resolution": resolution,
+            "generate_audio": generate_audio,
+            "reference_images": refs,
+        })
     if channel != "grok" or GROK_VIDEO_PROVIDER == "xiaole":
         return cleaned
 
@@ -2923,15 +2959,20 @@ def generate_xiaole_video(model, prompt, reference_images=None, size="720x1280",
 def gen_xiaole_video(payload):
     job_id = payload.get("_job_id")
     channel = (payload.get("channel") or "grok").strip()
+    use_seedance = channel == "micro"
     use_xai = channel == "grok" and GROK_VIDEO_PROVIDER != "xiaole"
-    model = (payload.get("model") or "grok-imagine-video") if use_xai else XIAOLE_CHANNEL_MODELS.get(channel)
+    if use_seedance:
+        from . import video_seedance
+        model = video_seedance.SEEDANCE_MODEL
+    else:
+        model = (payload.get("model") or "grok-imagine-video") if use_xai else XIAOLE_CHANNEL_MODELS.get(channel)
     if not model:
         raise ValueError("未知视频渠道：%s" % channel)
     prompt = (payload.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("请输入视频提示词")
     ratio = (payload.get("ratio") or ("16:9" if use_xai else "9:16")).strip()
-    if not use_xai and ratio not in XIAOLE_RATIO_SIZES:
+    if not use_xai and not use_seedance and ratio not in XIAOLE_RATIO_SIZES:
         ratio = "9:16"
     size = _xiaole_size_for_ratio(ratio) if not use_xai else None
     ref_images = None
@@ -2942,7 +2983,40 @@ def gen_xiaole_video(payload):
     label = {"grok": "果肉视频", "micro": "豆姐视频", "omni": "欧米视频"}.get(channel, model)
     if job_id:
         update_video_asset_phase(job_id, "queued", mode=channel, text=prompt, model=model)
-    if use_xai:
+    if use_seedance:
+        seedance_result = video_seedance.generate(
+            model=model,
+            prompt=prompt,
+            duration=payload.get("duration") or 10,
+            ratio=ratio,
+            resolution=payload.get("resolution") or "720p",
+            generate_audio=payload.get("generate_audio", True),
+            reference_images=ref_images,
+            job_id=job_id,
+            heartbeat=update_video_asset_phase,
+        )
+        source_url = seedance_result["source_video_url"]
+        if job_id:
+            update_video_asset_phase(
+                job_id,
+                "seedance_downloading",
+                source_video_url=source_url,
+                provider_video_id=seedance_result.get("request_id"),
+                model=seedance_result.get("model") or model,
+            )
+        video_file = _download_xiaole_video(source_url, "seedance")
+        cover = _extract_first_frame_cover(video_file)
+        result = {
+            "video_file": video_file,
+            "video_url": _file_url(video_file),
+            "source_video_url": source_url,
+            "model": seedance_result.get("model") or model,
+            "request_id": seedance_result.get("request_id"),
+            "duration": seedance_result.get("duration"),
+            "image_file": cover,
+            "image_url": public_url(cover, "image/jpeg") if cover else None,
+        }
+    elif use_xai:
         from . import video_openrouter, video_xai
         operation = payload.get("operation") or "generate"
         reference_video_file = reference_video_url = None
@@ -3004,7 +3078,7 @@ def gen_xiaole_video(payload):
     return {
         "type": "video", "status": "done", "mode": channel, "model": result.get("model") or model, "text": prompt,
         "operation": payload.get("operation") or "generate",
-        "ratio": ratio, "resolution": payload.get("resolution") if use_xai and payload.get("operation") != "edit" else None,
+        "ratio": ratio, "resolution": payload.get("resolution") if use_seedance or (use_xai and payload.get("operation") != "edit") else None,
         "duration": result.get("duration") or (payload.get("duration") if use_xai or channel == "micro"
                                                 else XIAOLE_CHANNEL_DURATION.get(channel)),
         "provider_video_id": result.get("request_id"),

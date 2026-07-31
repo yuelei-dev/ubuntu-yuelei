@@ -23,6 +23,7 @@ CATALOG = [
     {"key": "banana", "name": "Nano Banana 作图", "desc": "Gemini 图片生成入口", "service": "imggen"},
     {"key": "audio", "name": "配音生成", "desc": "文案配音与音色复刻", "service": "content"},
     {"key": "video", "name": "视频口播", "desc": "数字人口播视频生成", "service": "content"},
+    {"key": "seedance_video", "name": "Seedance 视频", "desc": "火山方舟 Seedance 官方视频生成", "service": "content", "default_enabled": False},
     {"key": "avatar", "name": "数字人形象", "desc": "上传照片创建可复用的数字人形象", "service": "content"},
     {"key": "cinematic", "name": "AI 剧情视频", "desc": "选 1~3 个形象 + 提示词生成剧情视频", "service": "content"},
     {"key": "tryon", "name": "换装换背景", "desc": "视频换装与背景生成", "service": "content"},
@@ -94,7 +95,7 @@ def is_enabled(feature):
     if not meta:
         return True
     row = _cached_rows().get(meta["key"])
-    return True if row is None else bool(row.get("enabled"))
+    return bool(meta.get("default_enabled", True)) if row is None else bool(row.get("enabled"))
 
 
 def require_enabled(feature):
@@ -129,7 +130,7 @@ def get_feature(feature):
     row = rows.get(key) or {}
     meta.update(
         {
-            "enabled": bool(row.get("enabled", True)),
+            "enabled": bool(row.get("enabled", meta.get("default_enabled", True))),
             "updated_by": row.get("updated_by"),
             "updated_at": row.get("updated_at"),
         }
@@ -149,7 +150,7 @@ def list_features(services=None):
         merged = dict(item)
         merged.update(
             {
-                "enabled": bool(row.get("enabled", True)),
+                "enabled": bool(row.get("enabled", item.get("default_enabled", True))),
                 "updated_by": row.get("updated_by"),
                 "updated_at": row.get("updated_at"),
                 "online": bool(svc.get("online")) if svc else None,

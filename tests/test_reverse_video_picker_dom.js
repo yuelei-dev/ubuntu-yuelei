@@ -92,8 +92,12 @@ function deferred() {
   return {promise, resolve, reject};
 }
 
+function jsonResponse(body) {
+  return {ok: true, json: () => Promise.resolve(body)};
+}
+
 function response(items) {
-  return {ok: true, json: () => Promise.resolve({items})};
+  return jsonResponse({items});
 }
 
 async function settlePromises() {
@@ -111,6 +115,7 @@ function createHarness() {
   add('reverseVideoPickModal');
   const noAvatar = add('reverseVideoNoAvatar', 'button');
   noAvatar.className = 'sc-opt on';
+  add('reverseVideoSeedanceStatus');
   const grid = add('reverseVideoAvatarGrid');
   const duration = add('reverseVideoDuration');
   [5, 10, 15].forEach((seconds) => {
@@ -130,8 +135,10 @@ function createHarness() {
       getElementById: (id) => ids[id] || null,
       createElement: (tagName) => new FakeElement(tagName),
     },
-    fetch: () => {
+    fetch: (url, options) => {
       const request = deferred();
+      request.url = url;
+      request.options = options || {};
       requests.push(request);
       return request.promise;
     },
@@ -142,8 +149,8 @@ function createHarness() {
   return {context, ids, requests};
 }
 
-test('confirm dismisses before firing its callback exactly once', () => {
-  const {context, ids} = createHarness();
+test('confirm dismisses before firing its callback exactly once', async () => {
+  const {context, ids, requests} = createHarness();
   const generationButton = {disabled: false};
   let callbackCount = 0;
   let displaySeenByCallback = '';
@@ -152,6 +159,12 @@ test('confirm dismisses before firing its callback exactly once', () => {
     displaySeenByCallback = ids.reverseVideoPickModal.style.display;
     generationButton.disabled = true;
   });
+
+  assert.equal(ids.reverseVideoConfirm.disabled, true, 'no-avatar submit waits for channel health');
+  assert.equal(requests[1].url, '/api/gen/health');
+  assert.equal(requests[1].options.cache, 'no-store');
+  requests[1].resolve(jsonResponse({seedance_video_enabled: true}));
+  await settlePromises();
 
   ids.reverseVideoConfirm.onclick();
   ids.reverseVideoConfirm.onclick();
@@ -166,6 +179,8 @@ test('confirm dismisses before firing its callback exactly once', () => {
 test('retry starts a new avatar load without resetting no-avatar or duration', async () => {
   const {context, ids, requests} = createHarness();
   context._showReverseVideoPicker('prompt', () => {});
+  requests[1].resolve(jsonResponse({seedance_video_enabled: true}));
+  await settlePromises();
   const duration15 = ids.reverseVideoDuration.children[2];
   duration15.onclick();
   ids.reverseVideoNoAvatar.onclick();
@@ -177,7 +192,8 @@ test('retry starts a new avatar load without resetting no-avatar or duration', a
   assert.ok(retry, 'load failure must render an explicit retry button');
   retry.onclick();
 
-  assert.equal(requests.length, 2, 'retry must start a fresh avatar request');
+  assert.equal(requests.length, 3, 'retry must start a fresh avatar request without repeating health');
+  assert.equal(requests[2].url, '/api/gen/video/avatars?limit=60');
   assert.equal(ids.reverseVideoNoAvatar.classList.contains('on'), true);
   assert.equal(ids.reverseVideoNoAvatar.getAttribute('aria-pressed'), 'true');
   assert.equal(duration15.classList.contains('on'), true, 'retry must preserve duration selection');
@@ -189,11 +205,66 @@ test('stale response from a prior invocation cannot overwrite the current grid',
   context._showReverseVideoPicker('old prompt', () => {});
   context._showReverseVideoPicker('current prompt', () => {});
 
-  requests[1].resolve(response([{id: 'current', name: 'current avatar'}]));
+  requests[3].resolve(jsonResponse({seedance_video_enabled: true}));
+  requests[2].resolve(response([{id: 'current', name: 'current avatar'}]));
   await settlePromises();
   requests[0].resolve(response([{id: 'stale', name: 'stale avatar'}]));
+  requests[1].resolve(jsonResponse({seedance_video_enabled: false}));
   await settlePromises();
 
   const cards = ids.reverseVideoAvatarGrid.querySelectorAll('[data-reverse-avatar]');
   assert.deepEqual(cards.map((card) => card.getAttribute('data-reverse-avatar')), ['current']);
+  assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'ready');
+});
+
+test('disabled Seedance blocks no-avatar submission before the paid endpoint', async () => {
+  const {context, ids, requests} = createHarness();
+  let callbackCount = 0;
+  context._showReverseVideoPicker('prompt', () => {
+    callbackCount += 1;
+  });
+
+  requests[1].resolve(jsonResponse({seedance_video_enabled: false}));
+  await settlePromises();
+
+  assert.equal(ids.reverseVideoNoAvatar.disabled, true);
+  assert.equal(ids.reverseVideoNoAvatar.getAttribute('aria-pressed'), 'false');
+  assert.equal(ids.reverseVideoConfirm.disabled, true);
+  assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'blocked');
+  assert.match(ids.reverseVideoSeedanceStatus.textContent, /Seedance 通道暂未开启/);
+  ids.reverseVideoConfirm.onclick();
+  assert.equal(callbackCount, 0, 'blocked channel must not invoke generation callback');
+});
+
+test('disabled Seedance still allows the explicit avatar cinematic path', async () => {
+  const {context, ids, requests} = createHarness();
+  let choice = null;
+  context._showReverseVideoPicker('prompt', (value) => {
+    choice = value;
+  });
+
+  requests[0].resolve(response([{id: 'avatar-7', name: 'avatar'}]));
+  requests[1].resolve(jsonResponse({seedance_video_enabled: false}));
+  await settlePromises();
+
+  const card = ids.reverseVideoAvatarGrid.querySelectorAll('[data-reverse-avatar]')[0];
+  card.onclick();
+  assert.equal(ids.reverseVideoConfirm.disabled, false);
+  assert.equal(ids.reverseVideoCost.textContent, '预计消耗 100 点');
+  ids.reverseVideoConfirm.onclick();
+  assert.equal(choice.avatarId, 'avatar-7');
+  assert.equal(choice.duration, 10);
+});
+
+test('health lookup failure fails closed for no-avatar Seedance generation', async () => {
+  const {context, ids, requests} = createHarness();
+  context._showReverseVideoPicker('prompt', () => {});
+
+  requests[1].reject(new Error('health unavailable'));
+  await settlePromises();
+
+  assert.equal(ids.reverseVideoNoAvatar.disabled, true);
+  assert.equal(ids.reverseVideoConfirm.disabled, true);
+  assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'blocked');
+  assert.match(ids.reverseVideoSeedanceStatus.textContent, /无法确认 Seedance 通道状态/);
 });

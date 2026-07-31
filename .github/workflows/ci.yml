@@ -60,6 +60,9 @@ jobs:
       - name: 测试工作台侧栏
         run: node tests/test_cloud_shell_sidebar.js
 
+      - name: Test reverse video picker
+        run: node --test tests/test_reverse_video_picker_dom.js
+
       - name: 安装设计系统依赖
         working-directory: design-system
         run: npm ci

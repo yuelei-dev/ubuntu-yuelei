@@ -603,7 +603,6 @@ def verify(token):
                 if len(_verify_cache) >= VERIFY_CACHE_MAX: _verify_cache.pop(next(iter(_verify_cache)), None)
             _verify_cache[token] = (now + VERIFY_CACHE_TTL, dict(user))
     return dict(user)
-
 def _domains(): from . import audio, points, video; return audio, points, video
 def _leads_domain(): from . import leads; return leads
 def _must_change_password(user): return bool(user and user.get("must_change"))
@@ -1367,6 +1366,7 @@ class H(BaseHTTPRequestHandler):
                     body = video_domain.validate_avatar_payload(body)
                 elif kind == "xiaole_video":
                     body = video_domain.validate_xiaole_video_payload(body)
+                    if body.get("channel") == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
@@ -1660,7 +1660,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
-                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
+                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
 
