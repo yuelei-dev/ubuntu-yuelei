@@ -658,10 +658,14 @@ def _do_breakdown(payload, info, url, mode=None):
         _heartbeat(job_id, "extracting_frames")
         is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
         frame_count = 8 if is_reverse else max(4, min(10, int(duration / 5)))
+        frame_pts = None
         if is_reverse:
-            frame_dir, frames = _extract_frames(
-                tmp_video.name, frame_count, duration,
-                scale_width=1024, min_frames=8, uniform=True,
+            frame_dir, frames, frame_pts = _split_extracted_frames(
+                _extract_frames(
+                    tmp_video.name, frame_count, duration,
+                    scale_width=1024, min_frames=8, uniform=True,
+                    return_pts=True,
+                )
             )
         else:
             frame_dir, frames = _extract_frames(
@@ -697,9 +701,18 @@ def _do_breakdown(payload, info, url, mode=None):
                 deadline=analysis_deadline,
                 heartbeat=analysis_heartbeat,
             )
-            _validate_gemini_reverse_entries(prompt_result, frames, script_text)
+            frames, frame_pts = _fill_reverse_window_frames(
+                tmp_video.name,
+                frame_dir,
+                frames,
+                frame_pts,
+                prompt_result["windows"],
+            )
+            _validate_gemini_reverse_entries(
+                prompt_result, frames, script_text, frame_pts=frame_pts
+            )
             frame_bundle = _reverse_frame_bundle(
-                frames, prompt_result["windows"]
+                frames, prompt_result["windows"], frame_pts=frame_pts
             )
             global_continuity = _reverse_global_facts_from_segments(
                 prompt_result["entries"],
@@ -844,14 +857,18 @@ def _do_local_reverse(payload, upload_token):
             # The reverse engine owns one auditable eight-frame bundle. For a
             # still image those entries intentionally point to the same source.
             frames = [path] * 8
+            frame_pts = [0.0] * 8
             duration = 0.0
         else:
             duration = _probe_duration(path)
             if duration > 120.05:
                 raise ValueError("视频最长支持 2 分钟")
-            frame_dir, frames = _extract_frames(
-                path, 8, duration or 30,
-                scale_width=1024, min_frames=8, uniform=True,
+            frame_dir, frames, frame_pts = _split_extracted_frames(
+                _extract_frames(
+                    path, 8, duration or 30,
+                    scale_width=1024, min_frames=8, uniform=True,
+                    return_pts=True,
+                )
             )
         _heartbeat(job_id, "analyzing")
         suffix = str(row["suffix"] or "").lower()
@@ -869,6 +886,8 @@ def _do_local_reverse(payload, upload_token):
             duration=duration,
             media_path=path,
             media_mime=media_mime,
+            frame_pts=frame_pts,
+            frame_dir=frame_dir,
         )
     finally:
         if frame_dir:
@@ -921,6 +940,7 @@ def _remove_trusted_upload(token, username, job_id, path):
 def _reverse_result_from_frames(
     payload, frames, source_url="", title="", platform="", duration=0,
     script_text="", asr_failed=False, media_path=None, media_mime="video/mp4",
+    frame_pts=None, frame_dir=None,
 ):
     """Run the audited reverse engine for a validated local upload."""
     job_id = (payload or {}).get("_job_id")
@@ -938,9 +958,18 @@ def _reverse_result_from_frames(
         deadline=analysis_deadline,
         heartbeat=analysis_heartbeat,
     )
-    _validate_gemini_reverse_entries(prompt_result, frames, script_text)
+    frames, frame_pts = _fill_reverse_window_frames(
+        media_path,
+        frame_dir,
+        frames,
+        frame_pts,
+        prompt_result["windows"],
+    )
+    _validate_gemini_reverse_entries(
+        prompt_result, frames, script_text, frame_pts=frame_pts
+    )
     frame_bundle = _reverse_frame_bundle(
-        frames, prompt_result["windows"]
+        frames, prompt_result["windows"], frame_pts=frame_pts
     )
     global_continuity = _reverse_global_facts_from_segments(
         prompt_result["entries"],
@@ -1464,12 +1493,14 @@ def _reverse_frame_time(frame_index, frame_count, duration):
     return duration * max(0, frame_index - 1) / float(frame_count - 1)
 
 
-def _group_reverse_frame_indices(frame_count, segments):
+def _group_reverse_frame_indices(frame_count, segments, frame_pts=None):
     """Return the single authoritative source-frame ownership mapping.
 
     Integer callers retain the legacy equal grouping contract. Production
     Gemini callers pass the FFmpeg-owned windows so unequal shots receive only
     the audit frames whose chronological source positions fall inside them.
+    frame_pts 提供每张帧的真实 FFmpeg PTS（秒）时按真实时间归属；无 PTS 的
+    均匀映射仅为测试遗留调用保留。
     """
     frame_count = max(0, int(frame_count or 0))
     if isinstance(segments, int):
@@ -1486,11 +1517,23 @@ def _group_reverse_frame_indices(frame_count, segments):
     if not windows:
         return []
     duration = float(windows[-1][1])
+    pts_seconds = None
+    if frame_pts is not None:
+        try:
+            candidate = [float(value) for value in list(frame_pts)]
+        except (TypeError, ValueError):
+            candidate = []
+        if len(candidate) == frame_count:
+            pts_seconds = candidate
     groups = [[] for _window in windows]
     for frame_index in range(1, frame_count + 1):
-        at_seconds = _reverse_frame_time(
-            frame_index, frame_count, duration,
-        )
+        if pts_seconds is not None:
+            at_seconds = pts_seconds[frame_index - 1]
+        else:
+            at_seconds = _reverse_frame_time(
+                frame_index, frame_count, duration,
+            )
+        assigned = False
         for window_index, (start, end, _label) in enumerate(windows):
             if (
                 float(start) <= at_seconds < float(end)
@@ -1500,14 +1543,24 @@ def _group_reverse_frame_indices(frame_count, segments):
                 )
             ):
                 groups[window_index].append(frame_index)
+                assigned = True
                 break
+        if not assigned:
+            # PTS 越界（如封装 start_time 偏移）时归入最近的端点窗口，
+            # 证据帧绝不丢弃、也绝不跨窗口重映射。
+            if at_seconds < float(windows[0][0]):
+                groups[0].append(frame_index)
+            else:
+                groups[-1].append(frame_index)
     return groups
 
 
-def _group_reverse_frames(frames, segments):
+def _group_reverse_frames(frames, segments, frame_pts=None):
     """Partition all audit frames by the single authoritative segment mapping."""
     ordered = list(frames or [])
-    groups = _group_reverse_frame_indices(len(ordered), segments)
+    groups = _group_reverse_frame_indices(
+        len(ordered), segments, frame_pts=frame_pts
+    )
     if not groups:
         raise ValueError("反推时间段为空，无法绑定原始帧证据")
     if isinstance(segments, int) and any(len(group) < 2 for group in groups):
@@ -1525,29 +1578,29 @@ def _group_reverse_frames(frames, segments):
     ]
 
 
-def _reverse_model_frame_groups(frames, segments):
+def _reverse_model_frame_groups(frames, segments, frame_pts=None):
     """Select only the first/last frame in each segment for the VLM request."""
     result = []
-    for group in _group_reverse_frames(frames, segments):
+    for group in _group_reverse_frames(frames, segments, frame_pts=frame_pts):
         result.append(
             [group[0], group[-1]] if len(group) > 1 else [group[0]]
         )
     return result
 
 
-def _reverse_reference_frames(frames, segments):
+def _reverse_reference_frames(frames, segments, frame_pts=None):
     """Return one chronological source frame per segment for downstream generation."""
     return [
         group[-1]
-        for group in _group_reverse_frames(frames, segments)
+        for group in _group_reverse_frames(frames, segments, frame_pts=frame_pts)
     ]
 
 
-def _reverse_frame_bundle(frames, segments):
+def _reverse_frame_bundle(frames, segments, frame_pts=None):
     """Keep explicit downstream indexes separate from the audit-frame set."""
     ordered = list(frames or [])
     segment_source_indices = _group_reverse_frame_indices(
-        len(ordered), segments
+        len(ordered), segments, frame_pts=frame_pts
     )
     if (
         isinstance(segments, int)
@@ -4420,11 +4473,13 @@ def _parse_gemini_reverse_result(raw, windows):
     return {"entries": entries, "windows": windows}
 
 
-def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
+def _validate_gemini_reverse_entries(prompt_result, frames, script_text, frame_pts=None):
     _bind_gemini_sound_evidence(prompt_result, script_text)
     entries = prompt_result.get("entries") or []
     windows = prompt_result.get("windows") or []
-    frame_groups = _reverse_model_frame_groups(frames, windows)
+    frame_groups = _reverse_model_frame_groups(
+        frames, windows, frame_pts=frame_pts
+    )
     accepted = []
     for index, (entry, window, frame_group) in enumerate(
         zip(entries, windows, frame_groups), 1
@@ -5125,22 +5180,50 @@ def _format_transcript(segs):
     return str(segs)
 
 
+_SHOWINFO_PTS_PATTERN = re.compile(
+    r"pts_time:(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)"
+)
+
+
+def _parse_showinfo_pts(stderr_text):
+    """从 ffmpeg showinfo 的 stderr 逐帧解析真实输出 PTS（秒）。"""
+    points = []
+    for line in str(stderr_text or "").splitlines():
+        if "showinfo" not in line:
+            continue
+        match = _SHOWINFO_PTS_PATTERN.search(line)
+        if match:
+            points.append(float(match.group(1)))
+    return points
+
+
+def _showinfo_pts_from_completed(completed):
+    stderr = getattr(completed, "stderr", b"") or b""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    return _parse_showinfo_pts(stderr)
+
+
 def _extract_frames(video_path, count=6, duration=30, scale_width=512,
-                    min_frames=None, uniform=False):
-    """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
+                    min_frames=None, uniform=False, return_pts=False):
+    """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])；
+    return_pts=True 时返回 (outdir, [paths], [pts_seconds])，PTS 取自
+    ffmpeg showinfo 输出的真实帧时间戳，与帧路径一一绑定。"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
     scale_width = max(256, min(int(scale_width or 512), 2048))
     outdir = tempfile.mkdtemp()
+    pts_seconds = []
     if not uniform:
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
                  "-i", video_path,
-                 "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
+                 "-vf", "select='gt(scene,0.15)',showinfo,scale=%d:-1" % scale_width,
                  "-vsync", "vfr", "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            pts_seconds = _showinfo_pts_from_completed(completed)
         except subprocess.CalledProcessError:
             pass  # 场景检测失败 → 退到均匀采样
     frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
@@ -5155,20 +5238,93 @@ def _extract_frames(video_path, count=6, duration=30, scale_width=512,
         outdir = tempfile.mkdtemp()
         fps = max(float(count) / max(float(duration or 1), 1.0), 0.001)
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
                  "-i", video_path,
-                 "-vf", "fps=%.6f,scale=%d:-1" % (fps, scale_width),
+                 "-vf", "fps=%.6f,showinfo,scale=%d:-1" % (fps, scale_width),
                  "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            pts_seconds = _showinfo_pts_from_completed(completed)
         except subprocess.CalledProcessError:
             pass  # 均匀采样也失败 → 返回已有帧（可能 0 张，GPT-4o 仍可纯文本分析）
         frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
                          if f.endswith(".jpg")],
                         key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
+    if len(pts_seconds) != len(frames):
+        # showinfo 解析失败时按 ffmpeg fps 滤镜的确定性输出时间戳兜底：
+        # fps=count/duration 第 i 帧输出 PTS = i*duration/count（起点为 0）。
+        pts_seconds = [
+            index * float(duration or len(frames)) / max(len(frames), 1)
+            for index in range(len(frames))
+        ]
+    if return_pts:
+        return outdir, frames, pts_seconds
     return outdir, frames
+
+
+def _split_extracted_frames(extracted):
+    """兼容返回 (outdir, frames) 的旧测试桩与 (outdir, frames, pts) 新契约。"""
+    if len(extracted) == 3:
+        return extracted[0], list(extracted[1]), list(extracted[2])
+    return extracted[0], list(extracted[1]), None
+
+
+def _fill_reverse_window_frames(video_path, frame_dir, frames, frame_pts,
+                                windows, scale_width=1024):
+    """为没有任何采样帧落入的权威窗口在该窗口内补抽一帧。
+
+    只用 ffmpeg -ss/-to 在空窗口内部取帧，并记录其真实 PTS 后按时间序插入
+    帧序列；绝不把其他窗口的既有帧重映射进空窗口伪造证据。补抽失败时保留
+    空窗口，由下游分组校验抛出“证据不足”错误。
+    """
+    ordered = list(frames or [])
+    if frame_pts is None or not ordered or not windows:
+        return ordered, frame_pts
+    pts_seconds = [float(value) for value in frame_pts]
+    if len(pts_seconds) != len(ordered):
+        return ordered, frame_pts
+    groups = _group_reverse_frame_indices(
+        len(ordered), windows, frame_pts=pts_seconds
+    )
+    if not groups or all(groups):
+        return ordered, pts_seconds
+    scale_width = max(256, min(int(scale_width or 1024), 2048))
+    directory = frame_dir or os.path.dirname(ordered[0]) or tempfile.mkdtemp()
+    for window_index, group in enumerate(groups):
+        if group:
+            continue
+        start = float(windows[window_index][0])
+        end = float(windows[window_index][1])
+        output = os.path.join(
+            directory, "frame_window_%d.jpg" % (window_index + 1)
+        )
+        try:
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
+                 "-ss", "%.3f" % start, "-to", "%.3f" % end,
+                 "-i", video_path,
+                 "-vf", "scale=%d:-1,showinfo" % scale_width,
+                 "-frames:v", "1", output],
+                check=True, timeout=30,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError):
+            continue
+        if not os.path.isfile(output):
+            continue
+        showinfo = _showinfo_pts_from_completed(completed)
+        # 输入级 -ss 会把时间戳重置为 0，真实源时间 = 窗口起点 + 帧 PTS。
+        at_seconds = start + showinfo[0] if showinfo else (start + end) / 2.0
+        if not (start <= at_seconds < end):
+            at_seconds = (start + end) / 2.0
+        position = 0
+        while position < len(pts_seconds) and pts_seconds[position] <= at_seconds:
+            position += 1
+        ordered.insert(position, output)
+        pts_seconds.insert(position, at_seconds)
+    return ordered, pts_seconds
 
 
 def _pair_reverse_frames(frame_dir, frames):
