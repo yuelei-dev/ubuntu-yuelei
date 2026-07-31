@@ -1001,6 +1001,42 @@ class BreakdownTests(unittest.TestCase):
                 require_detail=True,
             )
 
+    def test_scene_detail_contract_rejects_speculation_and_pending_verification(self):
+        scene = (
+            "主体：可能是一名女性站在窗边，身份外观位置与占比尚待核实；"
+            "动作：疑似抬起右手靠近窗框，动作起点过程结果仍待确认；"
+            "场景：似乎位于室内窗边，地点道具与前中后景有待验证；"
+            "镜头：或许采用中景平视固定机位，构图和运镜需要核实；"
+            "光影：大概是窗外自然光，方向软硬明暗与色温尚未确认。"
+        )
+        values = re.findall(
+            r"(?:主体|动作|场景|镜头|光影)：([^；]+)", scene
+        )
+        self.assertEqual(len(values), 5)
+        self.assertTrue(all(
+            self.breakdown._scene_detail_value_is_unknown(value)
+            for value in values
+        ))
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
+    def test_scene_detail_contract_accepts_plain_language_fact_after_unknown(self):
+        scene = (
+            "主体：无法确认身份，但仍可见一名女性站在窗边，穿深色上衣，位于画面右侧；"
+            "动作：女性保持站立，右手自然下垂，身体朝向窗户，没有观察到位置变化；"
+            "场景：白色窗框位于人物左侧，浅色墙面构成背景，室外细节无法确认；"
+            "镜头：画面信息不足，无法判断具体景别机位构图和运镜方式；"
+            "光影：清晰度有限，未能辨识光源方向软硬明暗以及色温。"
+        )
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+            require_detail=True,
+        )
+        self.assertEqual(result["scenes"][0]["scene"], scene)
+
     def test_scene_detail_contract_rejects_repeated_word_padding(self):
         scene = (
             "主体：人物人物人物人物人物人物人物人物人物人物；"

@@ -4209,25 +4209,31 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
-_SCENE_DETAIL_UNKNOWN_FAMILY_RE = re.compile(
+_SCENE_DETAIL_UNCERTAIN_FAMILY_RE = re.compile(
     "|".join((
         r"(?:画面|图像|影像|信息|细节|线索|清晰度)"
         r"(?:信息)?(?:不足|有限|模糊|不清(?:晰)?|欠清晰)",
         r"(?:未能|无法|不能|不可|难以)"
         r"(?:清楚地?)?(?:识别|辨识|辨认|看清|确定|判断|确认)",
         r"(?:看不清|辨不清|认不出|不确定|不明确|不清楚|未知|unknown)",
+        r"(?:可能|疑似|似乎|仿佛|或许|也许|大概|推测|猜测|不排除)",
+        r"(?:尚待|有待|仍待|待|需要|需)(?:核实|确认|验证)",
+        r"(?:尚未|未获|没有)(?:核实|确认|验证)",
     )),
     re.IGNORECASE,
 )
 _SCENE_DETAIL_CONTRAST_RE = re.compile(
     r"(?:但(?:仍然?|依然|可以|可)?|不过|然而|可是)"
 )
-_SCENE_DETAIL_CONCRETE_ASSERTION_RE = re.compile(
-    r"(?:位于|处于|占据|约占|穿着|手持|拿着|保持静止|"
-    r"发生移动|转向|从.+到|固定机位|俯拍|仰拍|"
-    r"(?:红|蓝|白|黑|绿|黄|灰|金|银)色"
-    r"(?:矩形|圆形|人物|动物|产品|物体|文字|建筑|背景)|"
-    r"(?:轮廓|边缘|形状|材质|投影|光线)(?:清晰|稳定|明显|柔和|均匀))"
+_SCENE_DETAIL_FACT_BRIDGE_RE = re.compile(
+    r"^(?:(?:仍然?|依然|可以|能够|可)?"
+    r"(?:可见|确认|观察到|看出|显示|呈现))"
+)
+_SCENE_DETAIL_SCHEMA_ONLY_RE = re.compile(
+    r"^(?:(?:具体|相关|画面|内容|信息|细节|以及|或者|是否|存在|"
+    r"主体|身份|外观|位置|占比|动作|起点|过程|结果|方向|速度|"
+    r"场景|地点|道具|前景|中景|背景|关系|镜头|景别|机位|视角|"
+    r"构图|运镜|方式|光影|光源|软硬|明暗|色温|主色调|和|与|及|等))+$"
 )
 
 
@@ -4235,34 +4241,35 @@ def _scene_detail_compact(value):
     return re.sub(r"[\W_]+", "", str(value or "").lower())
 
 
-def _scene_detail_contrast_has_concrete_fact(value):
+def _scene_detail_clauses(value):
     text = re.sub(r"\s+", "", str(value or "").lower())
-    contrast = _SCENE_DETAIL_CONTRAST_RE.search(text)
-    if not contrast:
+    text = _SCENE_DETAIL_CONTRAST_RE.sub("，", text)
+    return [
+        clause for clause in re.split(r"[，,。；;！!？?]", text)
+        if clause
+    ]
+
+
+def _scene_detail_clause_has_certain_fact(clause):
+    if _SCENE_DETAIL_UNCERTAIN_FAMILY_RE.search(clause):
         return False
-    tail = text[contrast.end():]
-    for clause in re.split(r"[，,。；;！!？?]", tail):
-        if not clause or _SCENE_DETAIL_UNKNOWN_FAMILY_RE.search(clause):
-            continue
-        if (
-            len(_scene_detail_compact(clause)) >= 6
-            and _SCENE_DETAIL_CONCRETE_ASSERTION_RE.search(clause)
-        ):
-            return True
-    return False
+    compact = _scene_detail_compact(clause)
+    compact = _SCENE_DETAIL_FACT_BRIDGE_RE.sub("", compact)
+    if len(compact) < 4:
+        return False
+    if _SCENE_DETAIL_SCHEMA_ONLY_RE.fullmatch(compact):
+        return False
+    return True
 
 
 def _scene_detail_value_is_unknown(value):
     compact = _scene_detail_compact(value)
     if not compact:
         return True
-    if _scene_detail_contrast_has_concrete_fact(value):
-        return False
-    matches = list(_SCENE_DETAIL_UNKNOWN_FAMILY_RE.finditer(compact))
-    if matches and matches[0].start() <= 2:
-        return True
-    unknown_chars = sum(len(match.group(0)) for match in matches)
-    return unknown_chars >= max(3, math.ceil(len(compact) * 0.4))
+    return not any(
+        _scene_detail_clause_has_certain_fact(clause)
+        for clause in _scene_detail_clauses(value)
+    )
 
 
 def _scene_detail_value_is_repetitive(value):
