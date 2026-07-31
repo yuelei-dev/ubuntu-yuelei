@@ -1115,26 +1115,43 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     context = _breakdown_source_context(title, duration, platform, script_text)
     usermsg = (
         context + "\n\n"
-        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"详细画面描述(100-180字)\",\"line\":\"口播台词\"}],"
+        "以下图片按请求顺序编号为1到%d。请严格输出 JSON："
+        "{\"scenes\":[{\"dur\":\"3s\",\"detail_facts\":{"
+        "\"subject\":{\"status\":\"observed\",\"identity\":\"主体身份或类型\",\"appearance\":\"外观服装颜色材质\","
+        "\"position_scale\":\"位置和画面占比\",\"evidence_frames\":[1]},"
+        "\"action\":{\"status\":\"observed\",\"start\":\"起始状态\",\"process\":\"动作过程\",\"end\":\"结束状态\","
+        "\"direction_speed\":\"方向和速度\",\"motion\":\"gesture\",\"evidence_frames\":[1,2]},"
+        "\"setting\":{\"status\":\"observed\",\"location\":\"地点\",\"foreground\":\"前景\",\"midground\":\"中景\","
+        "\"background\":\"背景\",\"evidence_frames\":[1]},"
+        "\"camera\":{\"status\":\"observed\",\"shot_size\":\"medium\",\"angle\":\"eye_level\","
+        "\"composition\":\"centered\",\"movement\":\"static\",\"evidence_frames\":[1]},"
+        "\"lighting\":{\"status\":\"observed\",\"source_direction\":\"光源和方向\",\"quality\":\"soft\","
+        "\"contrast\":\"medium\",\"color_tone\":\"neutral\",\"evidence_frames\":[1]}},"
+        "\"line\":\"口播台词\"}],"
         "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(150-240字)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
-        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 100-180 字描述一个可直接拍摄或生成的完整镜头。"
-        "scene 必须按“主体：可见事实：…；动作：可见事实：…；场景：可见事实：…；"
-        "镜头：可见事实：…；光影：可见事实：…”组织为连贯文字："
+        "4-6 个分镜，各 dur 之和≈总时长；不要输出 scene，服务端会根据 detail_facts 组装画面文字。"
         "主体写清外观、服装或产品的颜色、材质、位置和画面占比；"
         "动作按实际先后写起点、过程、结果、方向以及与道具的互动，静止画面要明确写静止；"
         "场景写清地点、关键道具以及前景、中景、背景的空间关系；"
         "镜头写清景别、机位高低、视角、构图和可见的推进、跟随、摇移或固定机位；"
         "光影写清光源方向、软硬、明暗层次、色温和主色调。"
-        "画面存在清晰字幕、招牌或产品文字时，在末尾追加“文字：…”并照实记录。"
-        "只写关键帧和口播能够确认的事实：脸部不可见时省略表情，无法确认的运镜或材质要明确无法确认，"
-        "只有画面能够直接确认的陈述才能加“可见事实：”标记；不确定内容不得添加该标记。"
-        "五个栏目中至少三个必须提供互不重复的可见事实；不得五栏都写无法确认，也不得重复词语凑长度。"
-        "不得为了详细而编造动作、道具、文字或氛围。不要只写“人物出现”“展示产品”等笼统结论。"
+        "每个栏目只能使用 status=observed 或 status=unknown。observed 时该栏所有字段必须填写具体值，"
+        "并提供至少一个1到%d之间、确实支持该栏事实的 evidence_frames；"
+        "unknown 时该栏所有文字字段必须为空串且 evidence_frames 必须为空数组。"
+        "motion 只能取 static/gesture/posture_change/translation/rotation/interaction/mixed；"
+        "shot_size 只能取 extreme_closeup/closeup/medium/full/wide/extreme_wide；"
+        "angle 只能取 eye_level/high/low/overhead/dutch；composition 只能取 "
+        "centered/rule_of_thirds/symmetrical/leading_lines/layered/mixed；movement 只能取 "
+        "static/pan/tilt/dolly_in/dolly_out/tracking/handheld/orbit/mixed；"
+        "quality 只能取 soft/hard/mixed，contrast 只能取 low/medium/high，"
+        "color_tone 只能取 warm/cool/neutral/mixed。"
+        "五个栏目中至少三个必须为 observed。不得把“未提供、无法判断、字段为空”等空信息标成 observed。"
+        "不得为了详细而编造动作、道具、文字或氛围。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
         "所有 line 输出空串\"\"，不要编造台词。"
-    )
+    ) % (len(frames), len(frames))
     sysmsg = (
         "你是黄雀传媒资深短视频编导。分析视频关键帧和口播，拆解为简洁的分镜脚本，同时输出一份视频内容综合分析。"
         "只输出 JSON，不要多余内容。"
@@ -1144,7 +1161,8 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     )
     try:
         return _validate_scene_breakdown(
-            _parse_breakdown_json(raw), require_detail=True
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
         )
     except ValueError as first_error:
         _log_breakdown_parse_failure("zhipu-primary", raw, first_error)
@@ -1152,24 +1170,37 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     compact_msg = (
         context + "\n\n"
         "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
-        "固定输出 4 个分镜，格式为："
-        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"主体：可见事实：…；动作：可见事实：…；"
-        "场景：可见事实：…；镜头：可见事实：…；光影：可见事实：…\",\"line\":\"对应口播或空串\"}],"
+        "固定输出 4 个分镜，格式为：{\"scenes\":[{\"dur\":\"4s\",\"detail_facts\":{"
+        "\"subject\":{\"status\":\"observed\",\"identity\":\"\",\"appearance\":\"\","
+        "\"position_scale\":\"\",\"evidence_frames\":[]},"
+        "\"action\":{\"status\":\"observed\",\"start\":\"\",\"process\":\"\",\"end\":\"\","
+        "\"direction_speed\":\"\",\"motion\":\"\",\"evidence_frames\":[]},"
+        "\"setting\":{\"status\":\"observed\",\"location\":\"\",\"foreground\":\"\","
+        "\"midground\":\"\",\"background\":\"\",\"evidence_frames\":[]},"
+        "\"camera\":{\"status\":\"observed\",\"shot_size\":\"\",\"angle\":\"\","
+        "\"composition\":\"\",\"movement\":\"\",\"evidence_frames\":[]},"
+        "\"lighting\":{\"status\":\"observed\",\"source_direction\":\"\",\"quality\":\"\","
+        "\"contrast\":\"\",\"color_tone\":\"\",\"evidence_frames\":[]}},\"line\":\"对应口播或空串\"}],"
         "\"analysis\":\"100-180字综合分析\"}。"
-        "每个 scene 90-160 字，五个栏目均须填写可见事实；有清晰画面文字时追加“文字：…”。"
-        "动作按起点、过程、结果写，场景写前中后景，镜头写景别、机位、构图与可见运镜，"
-        "光影写方向、软硬、明暗和色调。只有确定观察到的内容才标记“可见事实：”，"
-        "至少三个栏目必须包含互不重复的可见事实，"
-        "禁止五栏全部写无法确认或使用重复词语填充。不得为补细节编造关键帧中不存在的内容；"
+        "不要输出 scene；服务端根据结构化槽位组装。每栏只能是 observed 或 unknown；"
+        "observed 必须填写该栏全部字段并引用1到%d之间的原始帧，unknown 必须全部留空且无证据帧；"
+        "motion取static/gesture/posture_change/translation/rotation/interaction/mixed；"
+        "shot_size取extreme_closeup/closeup/medium/full/wide/extreme_wide；"
+        "angle取eye_level/high/low/overhead/dutch；composition取centered/rule_of_thirds/"
+        "symmetrical/leading_lines/layered/mixed；movement取static/pan/tilt/dolly_in/dolly_out/"
+        "tracking/handheld/orbit/mixed；quality取soft/hard/mixed；contrast取low/medium/high；"
+        "color_tone取warm/cool/neutral/mixed，不得翻译、组合或自造；"
+        "至少三个栏目为 observed。不得为补细节编造关键帧中不存在的内容；"
         "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
-    )
+    ) % len(frames)
     raw = _chat_multimodal(
         sysmsg, compact_msg, frames, temp=0.1, max_tokens=2400,
     )
     try:
         return _validate_scene_breakdown(
-            _parse_breakdown_json(raw), require_detail=True
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
         )
     except ValueError as retry_error:
         _log_breakdown_parse_failure("zhipu-compact", raw, retry_error)
@@ -1180,7 +1211,8 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     )
     try:
         return _validate_scene_breakdown(
-            _parse_breakdown_json(raw), require_detail=True
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
         )
     except ValueError as fallback_error:
         _log_breakdown_parse_failure("openai-fallback", raw, fallback_error)
@@ -4213,186 +4245,215 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
-_SCENE_DETAIL_UNCERTAIN_FAMILY_RE = re.compile(
-    "|".join((
-        r"(?:画面|图像|影像|信息|细节|线索|清晰度)"
-        r"(?:信息)?(?:不足|有限|模糊|不清(?:晰)?|欠清晰)",
-        r"(?:未能|无法|不能|不可|难以)"
-        r"(?:清楚地?)?(?:识别|辨识|辨认|看清|确定|判断|确认)",
-        r"(?:看不清|辨不清|认不出|不确定|不明确|不清楚|未知|unknown)",
-        r"(?:可能|疑似|似乎|仿佛|或许|也许|大概|推测|猜测|不排除)",
-        r"(?:看起来像|看上去|貌似|应该是|应当是|大概率)",
-        r"(?:尚待|有待|仍待|待|需要|需)(?:核实|确认|验证)",
-        r"(?:尚未|未获|没有)(?:核实|确认|验证)",
-        r"(?:情况|详情|细节)(?:暂不详|不详)",
-        r"(?:暂无|缺少|缺乏|欠缺)(?:依据|资料|信息|线索|证据)",
-        r"(?:暂时|目前|现阶段)?(?:无法|不能|难以|无从)(?:进行)?(?:描述|说明|表述)",
-        r"(?:没有|尚无|暂无|缺少|缺乏)(?:足够|充分)?的?"
-        r"(?:内容|信息|细节|依据|资料|线索|证据)(?:可供)?(?:描述|说明|判断|确认|识别)?",
-        r"(?:相关)?(?:内容|信息|细节|情况)?(?:暂时|目前|现阶段)?(?:不可知|未知)",
-    )),
-    re.IGNORECASE,
-)
-_SCENE_DETAIL_CONTRAST_RE = re.compile(
-    r"(?:但(?:仍然?|依然|可以)?|不过|然而|可是)"
-)
-_SCENE_DETAIL_OBSERVED_CLAIM_RE = re.compile(
-    r"^可见事实[：:]"
-)
-_SCENE_DETAIL_SCHEMA_ONLY_RE = re.compile(
-    r"^(?:(?:具体|相关|画面|内容|信息|细节|以及|或者|是否|存在|"
-    r"主体|身份|外观|位置|占比|动作|起点|过程|结果|方向|速度|"
-    r"场景|地点|道具|前景|中景|背景|关系|镜头|景别|机位|视角|"
-    r"构图|运镜|方式|光影|光源|软硬|明暗|色温|主色调|和|与|及|等))+$"
-)
-_SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL = {
-    "主体": re.compile(
-        r"(?:位于|处于|站在|站立|坐在|坐着|躺在|进入|离开|"
-        r"穿着|身穿|佩戴|手持|拿着|占据|约占|呈现|朝向|面向)"
-    ),
-    "动作": re.compile(
-        r"(?:移动|行走|走向|跑|抬起|举起|放下|拿起|转身|转向|"
-        r"起身|坐下|站起|靠近|离开|进入|退出|停留|保持静止|"
-        r"保持站立|保持坐姿|保持姿势|"
-        r"位置变化|形态变化|轮廓变化|旋转|挥动|伸出|弯曲|跳起|落下)"
-    ),
-    "场景": re.compile(
-        r"(?:位于|处在|构成|形成|填满|分布|排列|延伸|环绕|"
-        r"覆盖|占据|连接|包围|作为前景|作为中景|作为背景)"
-    ),
-    "镜头": re.compile(
-        r"(?:特写|近景|中景|全景|远景|俯拍|仰拍|平视|正面机位|"
-        r"侧面机位|固定机位|手持机位|居中构图|对称构图|跟随|"
-        r"推进|拉远|横移|摇镜|环绕|运镜)"
-    ),
-    "光影": re.compile(
-        r"(?:自然光|逆光|侧光|顶光|正面光|柔光|硬光|阴影|"
-        r"亮度|明暗|色温|色调|高光|曝光|照亮|投影|轮廓光|主色)"
-    ),
+_SCENE_DETAIL_FACT_SPECS = {
+    "subject": {
+        "label": "主体",
+        "text": ("identity", "appearance", "position_scale"),
+        "enums": {},
+    },
+    "action": {
+        "label": "动作",
+        "text": ("start", "process", "end", "direction_speed"),
+        "enums": {
+            "motion": {
+                "static", "gesture", "posture_change", "translation",
+                "rotation", "interaction", "mixed",
+            },
+        },
+    },
+    "setting": {
+        "label": "场景",
+        "text": ("location", "foreground", "midground", "background"),
+        "enums": {},
+    },
+    "camera": {
+        "label": "镜头",
+        "text": (),
+        "enums": {
+            "shot_size": {
+                "extreme_closeup", "closeup", "medium", "full",
+                "wide", "extreme_wide",
+            },
+            "angle": {"eye_level", "high", "low", "overhead", "dutch"},
+            "composition": {
+                "centered", "rule_of_thirds", "symmetrical",
+                "leading_lines", "layered", "mixed",
+            },
+            "movement": {
+                "static", "pan", "tilt", "dolly_in", "dolly_out",
+                "tracking", "handheld", "orbit", "mixed",
+            },
+        },
+    },
+    "lighting": {
+        "label": "光影",
+        "text": ("source_direction",),
+        "enums": {
+            "quality": {"soft", "hard", "mixed"},
+            "contrast": {"low", "medium", "high"},
+            "color_tone": {"warm", "cool", "neutral", "mixed"},
+        },
+    },
 }
-_SCENE_DETAIL_POSITIVE_FACT_RE = re.compile(
-    "|".join(
-        "(?:%s)" % pattern.pattern
-        for pattern in _SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL.values()
-    )
-)
+_SCENE_DETAIL_UNKNOWN_SENTINELS = {
+    "unknown", "none", "null", "n/a", "na", "未知", "不确定",
+    "无法确认", "未提供", "空白",
+}
+_SCENE_DETAIL_ENUM_LABELS = {
+    "static": "固定/静止",
+    "gesture": "肢体动作",
+    "posture_change": "姿态变化",
+    "translation": "位置移动",
+    "rotation": "旋转",
+    "interaction": "交互动作",
+    "mixed": "混合",
+    "extreme_closeup": "大特写",
+    "closeup": "特写",
+    "medium": "中景",
+    "full": "全身景",
+    "wide": "全景",
+    "extreme_wide": "远景",
+    "eye_level": "平视",
+    "high": "高机位",
+    "low": "低机位",
+    "overhead": "俯拍",
+    "dutch": "倾斜机位",
+    "centered": "居中构图",
+    "rule_of_thirds": "三分构图",
+    "symmetrical": "对称构图",
+    "leading_lines": "引导线构图",
+    "layered": "层次构图",
+    "pan": "横摇",
+    "tilt": "俯仰摇镜",
+    "dolly_in": "推进",
+    "dolly_out": "拉远",
+    "tracking": "跟随",
+    "handheld": "手持",
+    "orbit": "环绕",
+    "soft": "柔光",
+    "hard": "硬光",
+    "low": "低反差",
+    "high": "高反差",
+    "warm": "暖色调",
+    "cool": "冷色调",
+    "neutral": "中性色调",
+}
 
 
-def _scene_detail_compact(value):
-    return re.sub(r"[\W_]+", "", str(value or "").lower())
+def _scene_detail_fact_contract_error(detail_facts, frame_count):
+    if not isinstance(detail_facts, dict):
+        return "缺少结构化事实槽位"
+    try:
+        frame_count = int(frame_count)
+    except (TypeError, ValueError):
+        return "缺少可核验的关键帧数量"
+    if frame_count < 1:
+        return "缺少可核验的关键帧数量"
 
+    observed_count = 0
+    for field, spec in _SCENE_DETAIL_FACT_SPECS.items():
+        slot = detail_facts.get(field)
+        if not isinstance(slot, dict):
+            return "缺少%s结构化事实槽位" % spec["label"]
+        status = str(slot.get("status") or "").strip().lower()
+        if status not in {"observed", "unknown"}:
+            return "%s状态必须是observed或unknown" % spec["label"]
 
-def _scene_detail_clauses(value):
-    text = re.sub(r"\s+", "", str(value or "").lower())
-    text = _SCENE_DETAIL_CONTRAST_RE.sub("，", text)
-    return [
-        clause for clause in re.split(r"[，,。；;！!？?]", text)
-        if clause
-    ]
+        expected_values = {}
+        for key in spec["text"]:
+            expected_values[key] = str(slot.get(key) or "").strip()
+        for key in spec["enums"]:
+            expected_values[key] = str(slot.get(key) or "").strip().lower()
+        evidence = slot.get("evidence_frames")
+        if not isinstance(evidence, list):
+            return "%s缺少证据帧数组" % spec["label"]
 
-
-def _scene_detail_clause_observed_fact(clause, label=None):
-    if _SCENE_DETAIL_UNCERTAIN_FAMILY_RE.search(clause):
-        return ""
-    matched = _SCENE_DETAIL_OBSERVED_CLAIM_RE.match(clause)
-    if not matched:
-        return ""
-    compact = _scene_detail_compact(clause[matched.end():])
-    if len(compact) < 4:
-        return ""
-    if _SCENE_DETAIL_SCHEMA_ONLY_RE.fullmatch(compact):
-        return ""
-    positive_contract = (
-        _SCENE_DETAIL_POSITIVE_FACT_RE_BY_LABEL.get(label)
-        if label
-        else _SCENE_DETAIL_POSITIVE_FACT_RE
-    )
-    if positive_contract is None or not positive_contract.search(compact):
-        return ""
-    return compact
-
-
-def _scene_detail_observed_facts(value, label=None):
-    return [
-        fact
-        for fact in (
-            _scene_detail_clause_observed_fact(clause, label=label)
-            for clause in _scene_detail_clauses(value)
-        )
-        if fact
-    ]
-
-
-def _scene_detail_value_is_unknown(value, label=None):
-    compact = _scene_detail_compact(value)
-    if not compact:
-        return True
-    return not _scene_detail_observed_facts(value, label=label)
-
-
-def _strip_scene_detail_observation_markers(scene_text):
-    return re.sub(r"可见事实[：:]", "", str(scene_text or ""))
-
-
-def _scene_detail_value_is_repetitive(value):
-    compact = _scene_detail_compact(value)
-    if len(compact) < 6:
-        return False
-    if re.search(r"(.{1,8})\1{2,}", compact):
-        return True
-    shingles = [compact[index:index + 2] for index in range(len(compact) - 1)]
-    return bool(shingles) and len(set(shingles)) / len(shingles) < 0.5
-
-
-def _scene_detail_distinct_value_count(values):
-    distinct = []
-    for value in values:
-        compact = _scene_detail_compact(value)
-        if not any(
-            SequenceMatcher(None, compact, previous).ratio() >= 0.86
-            for previous in distinct
-        ):
-            distinct.append(compact)
-    return len(distinct)
-
-
-def _scene_breakdown_detail_error(scene_text):
-    normalized = re.sub(r"\s+", "", str(scene_text or ""))
-    required = ("主体", "动作", "场景", "镜头", "光影")
-    missing = []
-    values = {}
-    for label in required:
-        matched = re.search(
-            r"(?:^|[；;\n])%s[：:]([^；;\n]+)" % re.escape(label),
-            normalized,
-        )
-        if not matched or len(matched.group(1).strip()) < 6:
-            missing.append(label)
+        if status == "unknown":
+            if any(expected_values.values()) or evidence:
+                return "%s为unknown时不得携带事实或证据" % spec["label"]
             continue
-        values[label] = matched.group(1).strip()
-    if missing:
-        return "缺少" + "、".join(missing)
-    if len(_strip_scene_detail_observation_markers(normalized)) < 90:
-        return "可确认画面细节少于90字"
-    repetitive = [
-        label for label, value in values.items()
-        if _scene_detail_value_is_repetitive(value)
-    ]
-    if repetitive:
-        return "存在低信息重复填充：" + "、".join(repetitive)
-    substantive = []
-    for label, value in values.items():
-        observed_facts = _scene_detail_observed_facts(value, label=label)
-        if observed_facts:
-            substantive.append("，".join(observed_facts))
-    if len(substantive) < 3:
-        return "至少三个栏目需要可观察的实质信息"
-    if _scene_detail_distinct_value_count(substantive) < 3:
-        return "至少三个栏目的可观察信息需要互不重复"
+
+        observed_count += 1
+        for key in spec["text"]:
+            value = expected_values[key]
+            if not value or len(value) > 160:
+                return "%s的%s必须是1到160字的具体事实" % (spec["label"], key)
+            if value.lower() in _SCENE_DETAIL_UNKNOWN_SENTINELS:
+                return "%s的%s不能使用unknown占位" % (spec["label"], key)
+        for key, allowed in spec["enums"].items():
+            if expected_values[key] not in allowed:
+                return "%s的%s枚举无效" % (spec["label"], key)
+        if not evidence:
+            return "%s缺少原始帧证据" % spec["label"]
+        if any(
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 1
+            or index > frame_count
+            for index in evidence
+        ):
+            return "%s证据帧超出1到%d范围" % (spec["label"], frame_count)
+
+    if observed_count < 3:
+        return "至少三个栏目需要结构化可观察事实和证据"
     return ""
 
 
-def _validate_scene_breakdown(result, require_detail=False):
+def _scene_detail_enum_label(value, field=None):
+    scoped = {
+        ("angle", "low"): "低机位",
+        ("angle", "high"): "高机位",
+        ("contrast", "low"): "低反差",
+        ("contrast", "medium"): "中等反差",
+        ("contrast", "high"): "高反差",
+    }
+    if (field, str(value or "")) in scoped:
+        return scoped[(field, str(value or ""))]
+    return _SCENE_DETAIL_ENUM_LABELS.get(str(value or ""), str(value or ""))
+
+
+def _compose_scene_detail(detail_facts):
+    parts = []
+    for field, spec in _SCENE_DETAIL_FACT_SPECS.items():
+        slot = detail_facts[field]
+        label = spec["label"]
+        if slot["status"] == "unknown":
+            parts.append("%s：无法确认" % label)
+            continue
+        if field == "subject":
+            value = "，".join((
+                slot["identity"], slot["appearance"], slot["position_scale"],
+            ))
+        elif field == "action":
+            value = "起点%s，过程%s，结果%s，%s，动作类型%s" % (
+                slot["start"], slot["process"], slot["end"],
+                slot["direction_speed"],
+                _scene_detail_enum_label(slot["motion"], "motion"),
+            )
+        elif field == "setting":
+            value = "%s，前景%s，中景%s，背景%s" % (
+                slot["location"], slot["foreground"],
+                slot["midground"], slot["background"],
+            )
+        elif field == "camera":
+            value = "%s，%s，%s，%s" % (
+                _scene_detail_enum_label(slot["shot_size"], "shot_size"),
+                _scene_detail_enum_label(slot["angle"], "angle"),
+                _scene_detail_enum_label(slot["composition"], "composition"),
+                _scene_detail_enum_label(slot["movement"], "movement"),
+            )
+        else:
+            value = "%s，%s，%s，%s" % (
+                slot["source_direction"],
+                _scene_detail_enum_label(slot["quality"], "quality"),
+                _scene_detail_enum_label(slot["contrast"], "contrast"),
+                _scene_detail_enum_label(slot["color_tone"], "color_tone"),
+            )
+        parts.append("%s：%s" % (label, value))
+    return "；".join(parts) + "。"
+
+
+def _validate_scene_breakdown(result, require_detail=False, frame_count=None):
     if not isinstance(result, dict):
         raise ValueError("拆解结果为空，请重试")
     scenes = result.get("scenes")
@@ -4405,18 +4466,20 @@ def _validate_scene_breakdown(result, require_detail=False):
             continue
         scene_text = str(scene.get("scene") or "").strip()
         line_text = str(scene.get("line") or "").strip()
-        if not scene_text:
-            continue
         if any(marker in scene_text or marker in line_text for marker in placeholders):
             raise ValueError("拆解结果包含模板占位内容，请重试")
         if require_detail:
-            detail_error = _scene_breakdown_detail_error(scene_text)
+            detail_error = _scene_detail_fact_contract_error(
+                scene.get("detail_facts"), frame_count,
+            )
             if detail_error:
                 raise ValueError(
                     "拆解结果第%d段画面细节不足（%s），请重试"
                     % (len(valid_scenes) + 1, detail_error)
                 )
-            scene["scene"] = _strip_scene_detail_observation_markers(scene_text)
+            scene["scene"] = _compose_scene_detail(scene["detail_facts"])
+        elif not scene_text:
+            continue
         valid_scenes.append(scene)
     if not valid_scenes:
         raise ValueError("拆解结果为空，请重试")
