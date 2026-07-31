@@ -1127,6 +1127,7 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "光影写清光源方向、软硬、明暗层次、色温和主色调。"
         "画面存在清晰字幕、招牌或产品文字时，在末尾追加“文字：…”并照实记录。"
         "只写关键帧和口播能够确认的事实：脸部不可见时省略表情，无法确认的运镜或材质要明确无法确认，"
+        "五个栏目中至少三个必须提供互不重复的可观察事实；不得五栏都写无法确认，也不得重复词语凑长度。"
         "不得为了详细而编造动作、道具、文字或氛围。不要只写“人物出现”“展示产品”等笼统结论。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
@@ -1154,7 +1155,8 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "\"analysis\":\"100-180字综合分析\"}。"
         "每个 scene 90-160 字，五个栏目均须填写可见事实；有清晰画面文字时追加“文字：…”。"
         "动作按起点、过程、结果写，场景写前中后景，镜头写景别、机位、构图与可见运镜，"
-        "光影写方向、软硬、明暗和色调。不得为补细节编造关键帧中不存在的内容；"
+        "光影写方向、软硬、明暗和色调。至少三个栏目必须包含互不重复的可观察事实，"
+        "禁止五栏全部写无法确认或使用重复词语填充。不得为补细节编造关键帧中不存在的内容；"
         "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
     )
@@ -4207,10 +4209,66 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
+_SCENE_DETAIL_UNKNOWN_MARKERS = (
+    "无法确认", "不能确认", "不可确认",
+    "无法判断", "不能判断", "不可判断",
+    "看不清", "无法看清", "不可辨认", "无法辨认",
+    "不清楚", "未知", "unknown",
+)
+
+
+def _scene_detail_compact(value):
+    return re.sub(r"[\W_]+", "", str(value or "").lower())
+
+
+def _scene_detail_value_is_unknown(value):
+    compact = _scene_detail_compact(value)
+    if not compact:
+        return True
+    for marker in _SCENE_DETAIL_UNKNOWN_MARKERS:
+        marker_compact = _scene_detail_compact(marker)
+        if compact.startswith(marker_compact):
+            if not any(
+                bridge in compact
+                for bridge in ("但", "不过", "仍可见", "可以确认", "能够确认")
+            ):
+                return True
+    unknown_chars = sum(
+        len(_scene_detail_compact(marker)) * compact.count(
+            _scene_detail_compact(marker)
+        )
+        for marker in _SCENE_DETAIL_UNKNOWN_MARKERS
+    )
+    return unknown_chars >= max(3, math.ceil(len(compact) * 0.4))
+
+
+def _scene_detail_value_is_repetitive(value):
+    compact = _scene_detail_compact(value)
+    if len(compact) < 6:
+        return False
+    if re.search(r"(.{1,8})\1{2,}", compact):
+        return True
+    shingles = [compact[index:index + 2] for index in range(len(compact) - 1)]
+    return bool(shingles) and len(set(shingles)) / len(shingles) < 0.5
+
+
+def _scene_detail_distinct_value_count(values):
+    distinct = []
+    for value in values:
+        compact = _scene_detail_compact(value)
+        if not any(
+            SequenceMatcher(None, compact, previous).ratio() >= 0.86
+            for previous in distinct
+        ):
+            distinct.append(compact)
+    return len(distinct)
+
+
 def _scene_breakdown_detail_error(scene_text):
     normalized = re.sub(r"\s+", "", str(scene_text or ""))
     required = ("主体", "动作", "场景", "镜头", "光影")
     missing = []
+    values = {}
     for label in required:
         matched = re.search(
             r"(?:^|[；;\n])%s[：:]([^；;\n]+)" % re.escape(label),
@@ -4218,10 +4276,26 @@ def _scene_breakdown_detail_error(scene_text):
         )
         if not matched or len(matched.group(1).strip()) < 6:
             missing.append(label)
+            continue
+        values[label] = matched.group(1).strip()
     if missing:
         return "缺少" + "、".join(missing)
     if len(normalized) < 90:
         return "可确认画面细节少于90字"
+    repetitive = [
+        label for label, value in values.items()
+        if _scene_detail_value_is_repetitive(value)
+    ]
+    if repetitive:
+        return "存在低信息重复填充：" + "、".join(repetitive)
+    substantive = [
+        value for value in values.values()
+        if not _scene_detail_value_is_unknown(value)
+    ]
+    if len(substantive) < 3:
+        return "至少三个栏目需要可观察的实质信息"
+    if _scene_detail_distinct_value_count(substantive) < 3:
+        return "至少三个栏目的可观察信息需要互不重复"
     return ""
 
 

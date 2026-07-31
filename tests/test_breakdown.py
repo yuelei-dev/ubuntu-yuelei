@@ -900,6 +900,9 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("推进、跟随、摇移或固定机位", src)
         self.assertIn("光源方向、软硬、明暗层次", src)
         self.assertIn("画面存在清晰字幕、招牌或产品文字时", src)
+        self.assertIn("至少三个必须提供互不重复的可观察事实", src)
+        self.assertIn("不得五栏都写无法确认", src)
+        self.assertIn("不得重复词语凑长度", src)
         self.assertIn("不得为了详细而编造动作、道具、文字或氛围", src)
         self.assertIn("max_tokens=3200", src)
         self.assertIn("每个 scene 90-160 字", src)
@@ -932,6 +935,48 @@ class BreakdownTests(unittest.TestCase):
                 },
                 require_detail=True,
             )
+
+    def test_scene_detail_contract_rejects_all_unknown_padding(self):
+        scene = (
+            "主体：无法确认具体主体身份外观位置与画面占比；"
+            "动作：不可判断动作起点过程结果方向以及道具互动；"
+            "场景：看不清具体地点道具以及前景中景背景关系；"
+            "镜头：无法确认景别机位视角构图以及是否存在运镜；"
+            "光影：不能判断光源方向软硬明暗色温以及主色调。"
+        )
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
+    def test_scene_detail_contract_rejects_repeated_word_padding(self):
+        scene = (
+            "主体：人物人物人物人物人物人物人物人物人物人物；"
+            "动作：展示展示展示展示展示展示展示展示展示展示；"
+            "场景：室内室内室内室内室内室内室内室内室内室内；"
+            "镜头：中景中景中景中景中景中景中景中景中景中景；"
+            "光影：柔光柔光柔光柔光柔光柔光柔光柔光柔光柔光。"
+        )
+        with self.assertRaisesRegex(ValueError, "低信息重复填充"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
+    def test_scene_detail_contract_accepts_honest_simple_static_frame(self):
+        scene = (
+            "主体：白色矩形位于蓝色画面中央，边缘清晰，约占画面宽度三分之一；"
+            "动作：矩形保持静止，前后位置、大小和形状没有观察到变化；"
+            "场景：纯蓝色背景填满画面，没有观察到其他独立物体或文字；"
+            "镜头：正面平视固定机位，矩形居中，左右留白基本对称；"
+            "光影：画面亮度均匀，没有明显投影，蓝白色彩保持稳定。"
+        )
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+            require_detail=True,
+        )
+        self.assertEqual(result["scenes"][0]["scene"], scene)
 
     def test_reverse_prompt_requires_structured_action_detail(self):
         """反推必须按段绑定证据，明确禁止字数填充和无证据推断。"""
