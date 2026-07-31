@@ -1115,14 +1115,19 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     context = _breakdown_source_context(title, duration, platform, script_text)
     usermsg = (
         context + "\n\n"
-        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"详细画面描述(60-100字)\",\"line\":\"口播台词\"}],"
-        "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(100-160字)\"}，"
+        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"详细画面描述(100-180字)\",\"line\":\"口播台词\"}],"
+        "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(150-240字)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
-        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 60-100 字描述一个可直接拍摄或生成的完整镜头，"
-        "必须结合关键帧可见内容，至少写清以下六类细节中的五类："
-        "①主体外观、服装或产品特征；②动作起点、过程、结果及与道具的互动；③表情、视线和身体姿态；"
-        "④场景环境、关键道具及前中后景关系；⑤景别、机位、构图和推进/跟随/摇移等运镜；"
-        "⑥光线方向、明暗层次、色调和画面氛围。不要只写“人物出现”“展示产品”等笼统结论。"
+        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 100-180 字描述一个可直接拍摄或生成的完整镜头。"
+        "scene 必须按“主体：…；动作：…；场景：…；镜头：…；光影：…”组织为连贯文字："
+        "主体写清外观、服装或产品的颜色、材质、位置和画面占比；"
+        "动作按实际先后写起点、过程、结果、方向以及与道具的互动，静止画面要明确写静止；"
+        "场景写清地点、关键道具以及前景、中景、背景的空间关系；"
+        "镜头写清景别、机位高低、视角、构图和可见的推进、跟随、摇移或固定机位；"
+        "光影写清光源方向、软硬、明暗层次、色温和主色调。"
+        "画面存在清晰字幕、招牌或产品文字时，在末尾追加“文字：…”并照实记录。"
+        "只写关键帧和口播能够确认的事实：脸部不可见时省略表情，无法确认的运镜或材质要明确无法确认，"
+        "不得为了详细而编造动作、道具、文字或氛围。不要只写“人物出现”“展示产品”等笼统结论。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
         "所有 line 输出空串\"\"，不要编造台词。"
@@ -1135,7 +1140,9 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         sysmsg, usermsg, frames, temp=0.2, max_tokens=3200,
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True
+        )
     except ValueError as first_error:
         _log_breakdown_parse_failure("zhipu-primary", raw, first_error)
 
@@ -1143,9 +1150,11 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         context + "\n\n"
         "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
         "固定输出 4 个分镜，格式为："
-        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"具体画面\",\"line\":\"对应口播或空串\"}],"
-        "\"analysis\":\"80-150字综合分析\"}。"
-        "每个 scene 50-80 字，至少写清主体特征、连续动作、场景道具、构图运镜和光影氛围；"
+        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"主体：…；动作：…；场景：…；镜头：…；光影：…\",\"line\":\"对应口播或空串\"}],"
+        "\"analysis\":\"100-180字综合分析\"}。"
+        "每个 scene 90-160 字，五个栏目均须填写可见事实；有清晰画面文字时追加“文字：…”。"
+        "动作按起点、过程、结果写，场景写前中后景，镜头写景别、机位、构图与可见运镜，"
+        "光影写方向、软硬、明暗和色调。不得为补细节编造关键帧中不存在的内容；"
         "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
     )
@@ -1153,7 +1162,9 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         sysmsg, compact_msg, frames, temp=0.1, max_tokens=2400,
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True
+        )
     except ValueError as retry_error:
         _log_breakdown_parse_failure("zhipu-compact", raw, retry_error)
 
@@ -1162,7 +1173,9 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         provider="openai",
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True
+        )
     except ValueError as fallback_error:
         _log_breakdown_parse_failure("openai-fallback", raw, fallback_error)
         raise
@@ -4194,7 +4207,25 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
-def _validate_scene_breakdown(result):
+def _scene_breakdown_detail_error(scene_text):
+    normalized = re.sub(r"\s+", "", str(scene_text or ""))
+    required = ("主体", "动作", "场景", "镜头", "光影")
+    missing = []
+    for label in required:
+        matched = re.search(
+            r"(?:^|[；;\n])%s[：:]([^；;\n]+)" % re.escape(label),
+            normalized,
+        )
+        if not matched or len(matched.group(1).strip()) < 6:
+            missing.append(label)
+    if missing:
+        return "缺少" + "、".join(missing)
+    if len(normalized) < 90:
+        return "可确认画面细节少于90字"
+    return ""
+
+
+def _validate_scene_breakdown(result, require_detail=False):
     if not isinstance(result, dict):
         raise ValueError("拆解结果为空，请重试")
     scenes = result.get("scenes")
@@ -4211,6 +4242,13 @@ def _validate_scene_breakdown(result):
             continue
         if any(marker in scene_text or marker in line_text for marker in placeholders):
             raise ValueError("拆解结果包含模板占位内容，请重试")
+        if require_detail:
+            detail_error = _scene_breakdown_detail_error(scene_text)
+            if detail_error:
+                raise ValueError(
+                    "拆解结果第%d段画面细节不足（%s），请重试"
+                    % (len(valid_scenes) + 1, detail_error)
+                )
         valid_scenes.append(scene)
     if not valid_scenes:
         raise ValueError("拆解结果为空，请重试")

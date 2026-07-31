@@ -754,6 +754,14 @@ class BreakdownTests(unittest.TestCase):
 
     def _install_fake_env(self, raw_json, transcript=None):
         calls = {}
+        try:
+            parsed = json.loads(raw_json)
+            for scene in parsed.get("scenes") or []:
+                if scene.get("scene") and "主体：" not in scene["scene"]:
+                    scene["scene"] = self._detailed_scene(scene["scene"])
+            raw_json = json.dumps(parsed, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
 
         class FakeTikHub:
             @staticmethod
@@ -792,6 +800,16 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "fake-video.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
         return calls
+
+    @staticmethod
+    def _detailed_scene(focus="门店门头"):
+        return (
+            "主体：%s位于画面中央，主体轮廓、颜色与表面特征清晰可见；"
+            "动作：主体从画面中央开始展示，位置和朝向连续可见，最后停留在原构图区域；"
+            "场景：近处地面形成前景，主体处在中景，建筑与环境陈设构成背景；"
+            "镜头：平视中景固定机位，主体居中，水平线保持稳定，没有观察到明显运镜；"
+            "光影：正面柔和自然光照亮主体，背景亮度略低，整体色调自然。"
+        ) % focus
 
     def _gemini_reverse_result(self, duration=18.0, count=4):
         shots = []
@@ -846,11 +864,11 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["type"], "breakdown")
         self.assertEqual(result["source_platform"], "douyin")
         self.assertEqual(result["analysis"], "这是一条团购探店口播视频")
-        self.assertEqual(result["scenes"][0]["scene"], "门店门头")
+        self.assertIn("门店门头", result["scenes"][0]["scene"])
         self.assertFalse(result["asr_failed"])
         self.assertIn('"analysis"', calls["usermsg"])
         self.assertIn("同时输出一份视频内容综合分析", calls["sysmsg"])
-        self.assertIn("60-100 字描述一个可直接拍摄或生成的完整镜头", calls["usermsg"])
+        self.assertIn("100-180 字描述一个可直接拍摄或生成的完整镜头", calls["usermsg"])
         self.assertEqual(calls["frames"], ["frame_1.jpg", "frame_2.jpg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
@@ -871,23 +889,49 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["scenes"]), 1)
 
     def test_scenes_prompt_requires_rich_detail(self):
-        """分镜 prompt 必须要求 60-100 字及主体、动作、场景、镜头、光影细节。"""
+        """分镜 prompt 必须要求可核验的主体、动作、场景、镜头、光影细节。"""
         import inspect
         src = inspect.getsource(self.breakdown._breakdown_scenes_from_frames)
-        self.assertIn("60-100字", src)
+        self.assertIn("100-180字", src)
         self.assertIn("4-6 个分镜", src)
-        self.assertIn("六类细节中的五类", src)
-        self.assertIn("动作起点、过程、结果", src)
-        self.assertIn("表情、视线和身体姿态", src)
-        self.assertIn("前中后景关系", src)
-        self.assertIn("推进/跟随/摇移", src)
-        self.assertIn("光线方向、明暗层次", src)
+        self.assertIn("主体：…；动作：…；场景：…；镜头：…；光影：…", src)
+        self.assertIn("起点、过程、结果、方向", src)
+        self.assertIn("前景、中景、背景", src)
+        self.assertIn("推进、跟随、摇移或固定机位", src)
+        self.assertIn("光源方向、软硬、明暗层次", src)
+        self.assertIn("画面存在清晰字幕、招牌或产品文字时", src)
+        self.assertIn("不得为了详细而编造动作、道具、文字或氛围", src)
         self.assertIn("max_tokens=3200", src)
-        self.assertIn("每个 scene 50-80 字", src)
+        self.assertIn("每个 scene 90-160 字", src)
         self.assertIn("max_tokens=2400", src)
         self.assertIn('provider="openai"', src)
         self.assertIn("固定输出 4 个分镜", src)
         self.assertNotIn("10字内", src)
+
+    def test_scene_detail_contract_accepts_complete_observable_description(self):
+        scene = (
+            "主体：穿白色衬衫的女性位于画面中央，人物约占画面高度一半；"
+            "动作：她从桌面拿起透明玻璃杯，举到唇边短暂停留后放回原位；"
+            "场景：室内木桌位于前景，人物处在中景，浅色墙面与绿植构成背景；"
+            "镜头：平视中景固定机位，主体居中，桌面边缘形成水平构图线；"
+            "光影：左侧柔和自然光照亮人物和杯子，背景略暗，整体呈暖色调。"
+        )
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+            require_detail=True,
+        )
+        self.assertEqual(result["scenes"][0]["scene"], scene)
+
+    def test_scene_detail_contract_rejects_vague_nonempty_description(self):
+        with self.assertRaisesRegex(ValueError, "第1段画面细节不足"):
+            self.breakdown._validate_scene_breakdown(
+                {
+                    "scenes": [
+                        {"dur": "4s", "scene": "人物在室内展示产品", "line": ""}
+                    ]
+                },
+                require_detail=True,
+            )
 
     def test_reverse_prompt_requires_structured_action_detail(self):
         """反推必须按段绑定证据，明确禁止字数填充和无证据推断。"""
@@ -1081,7 +1125,14 @@ class BreakdownTests(unittest.TestCase):
                 calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
                 return (
                     'first' if len(calls) == 1
-                    else '{"scenes":[{"dur":"3s","scene":"产品展示","line":""}],"analysis":"ok"}'
+                    else json.dumps({
+                        "scenes": [{
+                            "dur": "3s",
+                            "scene": self._detailed_scene("产品"),
+                            "line": "",
+                        }],
+                        "analysis": "ok",
+                    }, ensure_ascii=False)
                 )
 
             seen = {"count": 0}
@@ -3788,7 +3839,14 @@ class BreakdownTests(unittest.TestCase):
             calls["sysmsg"] = sysmsg
             calls["usermsg"] = usermsg
             calls["frames"] = list(frames)
-            return '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎光临"}],"analysis":"探店视频"}'
+            return json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "scene": self._detailed_scene("门店门头"),
+                    "line": "欢迎光临",
+                }],
+                "analysis": "探店视频",
+            }, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "fake-video.mp4"})()
@@ -3915,7 +3973,14 @@ class BreakdownTests(unittest.TestCase):
 
         self.breakdown._heartbeat = lambda job_id, phase: None
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: ("d", ["f1.jpg", "f2.jpg"])
-        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7, **kwargs: '{"scenes":[{"dur":"3s","scene":"画面","line":"口播"}],"analysis":"分析"}'
+        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7, **kwargs: json.dumps({
+            "scenes": [{
+                "dur": "3s",
+                "scene": self._detailed_scene("画面主体"),
+                "line": "口播",
+            }],
+            "analysis": "分析",
+        }, ensure_ascii=False)
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "f.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
 
@@ -3967,7 +4032,14 @@ class BreakdownTests(unittest.TestCase):
         self._install_fake_env('{"scenes":[]}')
         responses = [
             "这不是 JSON，完全无法解析",
-            '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎光临"}],"analysis":"ok"}',
+            json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "scene": self._detailed_scene("门头"),
+                    "line": "欢迎光临",
+                }],
+                "analysis": "ok",
+            }, ensure_ascii=False),
         ]
         calls = {"n": 0}
 
@@ -3985,13 +4057,20 @@ class BreakdownTests(unittest.TestCase):
         )
 
         self.assertEqual(calls["n"], 2)
-        self.assertEqual(result["scenes"][0]["scene"], "门头")
+        self.assertIn("门头", result["scenes"][0]["scene"])
 
     def test_do_breakdown_retries_once_on_empty_scenes(self):
         self._install_fake_env('{"scenes":[]}')
         responses = [
             '{"scenes":[],"analysis":"没有识别出分镜"}',
-            '{"scenes":[{"dur":"3s","scene":"产品特写","line":""}],"analysis":"ok"}',
+            json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "scene": self._detailed_scene("产品特写"),
+                    "line": "",
+                }],
+                "analysis": "ok",
+            }, ensure_ascii=False),
         ]
         calls = {"n": 0}
 
@@ -4009,7 +4088,7 @@ class BreakdownTests(unittest.TestCase):
         )
 
         self.assertEqual(calls["n"], 2)
-        self.assertEqual(result["scenes"][0]["scene"], "产品特写")
+        self.assertIn("产品特写", result["scenes"][0]["scene"])
 
     def test_do_breakdown_uses_openai_after_two_empty_scene_results(self):
         self._install_fake_env('{"scenes":[]}')
@@ -4018,7 +4097,14 @@ class BreakdownTests(unittest.TestCase):
         def empty_then_fallback(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append(kwargs)
             if kwargs.get("provider") == "openai":
-                return '{"scenes":[{"dur":"3s","scene":"锦鲤池全景","line":""}],"analysis":"恢复成功"}'
+                return json.dumps({
+                    "scenes": [{
+                        "dur": "3s",
+                        "scene": self._detailed_scene("锦鲤池全景"),
+                        "line": "",
+                    }],
+                    "analysis": "恢复成功",
+                }, ensure_ascii=False)
             return '{"scenes":[{"dur":"3s","scene":"  ","line":""}],"analysis":"empty"}'
 
         self.breakdown._chat_multimodal = empty_then_fallback
@@ -4029,7 +4115,7 @@ class BreakdownTests(unittest.TestCase):
             "https://example.test/post/empty-retry-fail",
         )
 
-        self.assertEqual(result["scenes"][0]["scene"], "锦鲤池全景")
+        self.assertIn("锦鲤池全景", result["scenes"][0]["scene"])
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[-1]["provider"], "openai")
 
