@@ -4,6 +4,7 @@ import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.pa
 import hashlib
 import http.client
 import inspect
+import unicodedata
 import urllib.error
 from contextlib import closing
 from difflib import SequenceMatcher
@@ -4383,7 +4384,11 @@ def _scene_detail_fact_contract_error(detail_facts, frame_count):
             if not value or len(value) > 160:
                 return "%s的%s必须是1到160字的具体事实" % (spec["label"], key)
             compact_value = re.sub(r"\s+", "", value).lower()
-            compact_value = compact_value.rstrip("。.!！…")
+            while (
+                compact_value
+                and unicodedata.category(compact_value[-1]).startswith("P")
+            ):
+                compact_value = compact_value[:-1]
             if (
                 compact_value in _SCENE_DETAIL_UNKNOWN_EXACT
                 or any(

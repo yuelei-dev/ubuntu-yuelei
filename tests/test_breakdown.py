@@ -1076,7 +1076,15 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("空白画布位于中央", result["scenes"][0]["scene"])
 
     def test_scene_detail_contract_rejects_blank_placeholders_with_terminal_punctuation(self):
-        for placeholder in ("外观字段均为空白。", "主体字段为空白!", "相关信息为空白……"):
+        for placeholder in (
+            "外观字段均为空白。",
+            "主体字段为空白!",
+            "相关信息为空白……",
+            "主体字段为空白？",
+            "主体字段为空白?",
+            "主体字段为空白；",
+            "主体字段为空白;”",
+        ):
             with self.subTest(placeholder=placeholder):
                 facts = self._detail_facts()
                 facts["subject"]["appearance"] = placeholder
