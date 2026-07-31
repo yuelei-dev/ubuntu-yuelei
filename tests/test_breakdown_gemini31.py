@@ -287,6 +287,92 @@ class GeminiReverseTests(unittest.TestCase):
             previous_end = end
         self.assertEqual(previous_end, 10.0)
 
+    def test_unequal_authoritative_windows_own_frames_by_source_time(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        windows = [
+            (0.0, 1.0, "0-1秒"),
+            (1.0, 9.0, "1-9秒"),
+            (9.0, 10.0, "9-10秒"),
+        ]
+        self.assertEqual(
+            self.breakdown._group_reverse_frame_indices(8, windows),
+            [[1], [2, 3, 4, 5, 6, 7], [8]],
+        )
+        self.assertEqual(
+            self.breakdown._reverse_model_frame_groups(frames, windows),
+            [
+                ["frame-1.jpg"],
+                ["frame-2.jpg", "frame-7.jpg"],
+                ["frame-8.jpg"],
+            ],
+        )
+        bundle = self.breakdown._reverse_frame_bundle(frames, windows)
+        self.assertEqual(
+            bundle["segment_source_indices"],
+            [[1], [2, 3, 4, 5, 6, 7], [8]],
+        )
+        self.assertEqual(
+            bundle["segment_model_source_indices"],
+            [[1], [2, 7], [8]],
+        )
+        self.assertEqual(
+            [
+                item["source_frame_index"]
+                for item in bundle["manifest"]
+                if item["downstream_reference"]
+            ],
+            [1, 7, 8],
+        )
+        self.assertEqual(
+            [
+                item["segment_index"]
+                for item in bundle["manifest"]
+                if item["source_frame_index"] in {1, 7, 8}
+            ],
+            [1, 2, 3],
+        )
+        prompt_result = {
+            "windows": windows,
+            "entries": [
+                {
+                    "fields": {},
+                    "evidence_frames": {"action": [1, 2]},
+                }
+                for _window in windows
+            ],
+        }
+        captured_groups = []
+
+        def capture_group(
+            _entry, _accepted, frame_group, _index, **_kwargs
+        ):
+            captured_groups.append(list(frame_group))
+
+        with mock.patch.object(
+            self.breakdown,
+            "_validate_reverse_segment_evidence",
+            side_effect=capture_group,
+        ):
+            self.breakdown._validate_gemini_reverse_entries(
+                prompt_result, frames, "",
+            )
+        self.assertEqual(
+            captured_groups,
+            [
+                ["frame-1.jpg"],
+                ["frame-2.jpg", "frame-7.jpg"],
+                ["frame-8.jpg"],
+            ],
+        )
+        self.assertEqual(
+            prompt_result["entries"][0]["evidence_frames"]["action"],
+            [1],
+        )
+        self.assertEqual(
+            prompt_result["entries"][2]["evidence_frames"]["action"],
+            [1],
+        )
+
     def test_ffmpeg_transition_candidates_are_evidence_only_and_sanitized(self):
         output = (
             "[Parsed_metadata_1] frame:0 pts:824 pts_time:8.24\n"
@@ -924,7 +1010,12 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertIn("内容重复", retry_prompt)
         self.assertIn("shot 1 (0.0-1.0s)", retry_prompt)
         self.assertIn("shot 2 (1.0-2.0s)", retry_prompt)
-        self.assertIn("merge the intervals into one shot", retry_prompt)
+        self.assertIn(
+            "Keep both server-owned segment IDs and intervals unchanged",
+            retry_prompt,
+        )
+        self.assertIn("never merge, delete, split, move, or renumber", retry_prompt)
+        self.assertNotIn("merge the intervals into one shot", retry_prompt)
         self.assertIn("Never invent a difference", retry_prompt)
         self.assertNotIn(first["candidates"][0]["content"]["parts"][0]["text"], retry_prompt)
 

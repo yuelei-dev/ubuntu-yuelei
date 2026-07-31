@@ -699,7 +699,7 @@ def _do_breakdown(payload, info, url, mode=None):
             )
             _validate_gemini_reverse_entries(prompt_result, frames, script_text)
             frame_bundle = _reverse_frame_bundle(
-                frames, len(prompt_result["windows"])
+                frames, prompt_result["windows"]
             )
             global_continuity = _reverse_global_facts_from_segments(
                 prompt_result["entries"],
@@ -940,7 +940,7 @@ def _reverse_result_from_frames(
     )
     _validate_gemini_reverse_entries(prompt_result, frames, script_text)
     frame_bundle = _reverse_frame_bundle(
-        frames, len(prompt_result["windows"])
+        frames, prompt_result["windows"]
     )
     global_continuity = _reverse_global_facts_from_segments(
         prompt_result["entries"],
@@ -1454,62 +1454,120 @@ def _authoritative_reverse_timeline(path, duration):
     return result
 
 
-def _group_reverse_frames(frames, segment_count):
-    """Partition all audit frames by the single authoritative segment mapping."""
-    ordered = list(frames or [])
-    segment_count = max(1, int(segment_count or 1))
-    if len(ordered) < segment_count * 2:
-        raise ValueError(
-            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
-            % (segment_count, segment_count * 2)
+def _reverse_frame_time(frame_index, frame_count, duration):
+    """Map a chronological audit-frame index onto the source timeline."""
+    frame_index = int(frame_index or 0)
+    frame_count = int(frame_count or 0)
+    duration = max(0.0, float(duration or 0))
+    if frame_count <= 1:
+        return 0.0
+    return duration * max(0, frame_index - 1) / float(frame_count - 1)
+
+
+def _group_reverse_frame_indices(frame_count, segments):
+    """Return the single authoritative source-frame ownership mapping.
+
+    Integer callers retain the legacy equal grouping contract. Production
+    Gemini callers pass the FFmpeg-owned windows so unequal shots receive only
+    the audit frames whose chronological source positions fall inside them.
+    """
+    frame_count = max(0, int(frame_count or 0))
+    if isinstance(segments, int):
+        segment_count = max(1, segments)
+        return [
+            list(range(
+                int(round(index * frame_count / float(segment_count))) + 1,
+                int(round((index + 1) * frame_count / float(segment_count))) + 1,
+            ))
+            for index in range(segment_count)
+        ]
+
+    windows = list(segments or [])
+    if not windows:
+        return []
+    duration = float(windows[-1][1])
+    groups = [[] for _window in windows]
+    for frame_index in range(1, frame_count + 1):
+        at_seconds = _reverse_frame_time(
+            frame_index, frame_count, duration,
         )
-    groups = []
-    for index in range(segment_count):
-        start = int(round(index * len(ordered) / float(segment_count)))
-        end = int(round((index + 1) * len(ordered) / float(segment_count)))
-        group = ordered[start:end]
-        if len(group) < 2:
-            raise ValueError("反推第%d段缺少多帧证据" % (index + 1))
-        groups.append(group)
+        for window_index, (start, end, _label) in enumerate(windows):
+            if (
+                float(start) <= at_seconds < float(end)
+                or (
+                    window_index == len(windows) - 1
+                    and at_seconds <= float(end)
+                )
+            ):
+                groups[window_index].append(frame_index)
+                break
     return groups
 
 
-def _reverse_model_frame_groups(frames, segment_count):
+def _group_reverse_frames(frames, segments):
+    """Partition all audit frames by the single authoritative segment mapping."""
+    ordered = list(frames or [])
+    groups = _group_reverse_frame_indices(len(ordered), segments)
+    if not groups:
+        raise ValueError("反推时间段为空，无法绑定原始帧证据")
+    if isinstance(segments, int) and any(len(group) < 2 for group in groups):
+        raise ValueError(
+            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
+            % (max(1, segments), max(1, segments) * 2)
+        )
+    if any(not group for group in groups):
+        raise ValueError(
+            "反推关键帧不足：至少一个权威时间段没有对应原始帧证据"
+        )
+    return [
+        [ordered[source_index - 1] for source_index in source_indices]
+        for source_indices in groups
+    ]
+
+
+def _reverse_model_frame_groups(frames, segments):
     """Select only the first/last frame in each segment for the VLM request."""
     result = []
-    for group in _group_reverse_frames(frames, segment_count):
-        result.append([group[0], group[-1]])
+    for group in _group_reverse_frames(frames, segments):
+        result.append(
+            [group[0], group[-1]] if len(group) > 1 else [group[0]]
+        )
     return result
 
 
-def _reverse_reference_frames(frames, segment_count):
+def _reverse_reference_frames(frames, segments):
     """Return one chronological source frame per segment for downstream generation."""
     return [
         group[-1]
-        for group in _group_reverse_frames(frames, segment_count)
+        for group in _group_reverse_frames(frames, segments)
     ]
 
 
-def _group_reverse_frame_indices(frame_count, segment_count):
-    frame_count = max(0, int(frame_count or 0))
-    segment_count = max(1, int(segment_count or 1))
-    return [
-        list(range(
-            int(round(index * frame_count / float(segment_count))) + 1,
-            int(round((index + 1) * frame_count / float(segment_count))) + 1,
-        ))
-        for index in range(segment_count)
-    ]
-
-
-def _reverse_frame_bundle(frames, segment_count):
+def _reverse_frame_bundle(frames, segments):
     """Keep explicit downstream indexes separate from the audit-frame set."""
     ordered = list(frames or [])
     segment_source_indices = _group_reverse_frame_indices(
-        len(ordered), segment_count
+        len(ordered), segments
     )
+    if (
+        isinstance(segments, int)
+        and any(len(indices) < 2 for indices in segment_source_indices)
+    ):
+        raise ValueError(
+            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
+            % (max(1, segments), max(1, segments) * 2)
+        )
+    if not segment_source_indices or any(
+        not indices for indices in segment_source_indices
+    ):
+        raise ValueError(
+            "反推关键帧不足：权威时间段与原始帧无法完整对应"
+        )
     segment_model_source_indices = [
-        [indices[0], indices[-1]]
+        (
+            [indices[0], indices[-1]]
+            if len(indices) > 1 else [indices[0]]
+        )
         for indices in segment_source_indices
     ]
     reference_source_indices = [
@@ -4366,11 +4424,18 @@ def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
     _bind_gemini_sound_evidence(prompt_result, script_text)
     entries = prompt_result.get("entries") or []
     windows = prompt_result.get("windows") or []
-    frame_groups = _reverse_model_frame_groups(frames, len(windows))
+    frame_groups = _reverse_model_frame_groups(frames, windows)
     accepted = []
     for index, (entry, window, frame_group) in enumerate(
         zip(entries, windows, frame_groups), 1
     ):
+        if len(frame_group) == 1:
+            entry["evidence_frames"] = {
+                key: [1] if values else []
+                for key, values in (
+                    entry.get("evidence_frames") or {}
+                ).items()
+            }
         transcript = _segment_transcript(script_text, window[0], window[1])
         _validate_reverse_segment_evidence(
             entry, accepted, frame_group, index,
@@ -4418,12 +4483,14 @@ def _gemini_validation_retry_error(error, parsed):
     return (
         "%s. Rewatch the original video intervals for shot %d (%.1f-%.1fs) "
         "and shot %d (%.1f-%.1fs) independently. Do not copy either rejected "
-        "shot text. If there is no evidence-backed cut or visual difference, "
-        "merge the intervals into one shot and return a gap-free timeline. "
-        "If they are distinct shots, describe at least one directly visible "
+        "shot text. Keep both server-owned segment IDs and intervals unchanged; "
+        "never merge, delete, split, move, or renumber either shot. Describe at "
+        "least one directly visible "
         "difference in subject, action, scene, camera, or lighting, with "
         "evidence_seconds inside the corresponding interval. Never invent a "
-        "difference merely to pass validation."
+        "difference merely to pass validation. If no difference can be "
+        "verified, return only evidence-bound values and accept strict "
+        "validation failure rather than changing the authoritative timeline."
     ) % (
         message,
         previous_index, float(previous[0]), float(previous[1]),
