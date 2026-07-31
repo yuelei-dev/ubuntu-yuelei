@@ -4209,11 +4209,23 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
-_SCENE_DETAIL_UNKNOWN_MARKERS = (
-    "无法确认", "不能确认", "不可确认",
-    "无法判断", "不能判断", "不可判断",
-    "看不清", "无法看清", "不可辨认", "无法辨认",
-    "不清楚", "未知", "unknown",
+_SCENE_DETAIL_UNKNOWN_FAMILY_RE = re.compile(
+    "|".join((
+        r"(?:画面|图像|影像|信息|细节|线索|清晰度)"
+        r"(?:信息)?(?:不足|有限|模糊|不清(?:晰)?|欠清晰)",
+        r"(?:未能|无法|不能|不可|难以)"
+        r"(?:清楚地?)?(?:识别|辨识|辨认|看清|确定|判断|确认)",
+        r"(?:看不清|辨不清|认不出|不确定|不明确|不清楚|未知|unknown)",
+    )),
+    re.IGNORECASE,
+)
+_SCENE_DETAIL_CONTRAST_RE = re.compile(
+    r"(?:但(?:仍然?|依然|可以|可)?|不过|然而|可是)"
+)
+_SCENE_DETAIL_OBSERVABLE_RE = re.compile(
+    r"(?:可见|显示|呈现|位于|处于|占据|保持|静止|移动|转向|"
+    r"穿着|拿着|前景|中景|背景|固定机位|"
+    r"红色|蓝色|白色|黑色|绿色|黄色|明亮|昏暗|柔和)"
 )
 
 
@@ -4225,20 +4237,19 @@ def _scene_detail_value_is_unknown(value):
     compact = _scene_detail_compact(value)
     if not compact:
         return True
-    for marker in _SCENE_DETAIL_UNKNOWN_MARKERS:
-        marker_compact = _scene_detail_compact(marker)
-        if compact.startswith(marker_compact):
-            if not any(
-                bridge in compact
-                for bridge in ("但", "不过", "仍可见", "可以确认", "能够确认")
-            ):
-                return True
-    unknown_chars = sum(
-        len(_scene_detail_compact(marker)) * compact.count(
-            _scene_detail_compact(marker)
-        )
-        for marker in _SCENE_DETAIL_UNKNOWN_MARKERS
-    )
+    contrast = _SCENE_DETAIL_CONTRAST_RE.search(compact)
+    if contrast:
+        visible_tail = compact[contrast.end():]
+        visible_tail = _SCENE_DETAIL_UNKNOWN_FAMILY_RE.sub("", visible_tail)
+        if (
+            len(visible_tail) >= 6
+            and _SCENE_DETAIL_OBSERVABLE_RE.search(visible_tail)
+        ):
+            return False
+    matches = list(_SCENE_DETAIL_UNKNOWN_FAMILY_RE.finditer(compact))
+    if matches and matches[0].start() <= 2:
+        return True
+    unknown_chars = sum(len(match.group(0)) for match in matches)
     return unknown_chars >= max(3, math.ceil(len(compact) * 0.4))
 
 

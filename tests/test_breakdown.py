@@ -950,6 +950,34 @@ class BreakdownTests(unittest.TestCase):
                 require_detail=True,
             )
 
+    def test_scene_detail_contract_rejects_unknown_semantic_families(self):
+        scene = (
+            "主体：画面信息不足，未能辨识具体主体身份外观位置与占比；"
+            "动作：画面模糊，难以看清动作起点过程结果方向与速度；"
+            "场景：信息有限，无法确定地点道具及前景中景背景关系；"
+            "镜头：线索不足，不确定景别机位视角构图以及运镜方式；"
+            "光影：清晰度有限，未能辨识光源方向软硬明暗和色温。"
+        )
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
+    def test_scene_detail_contract_accepts_unknown_qualifier_with_visible_fact(self):
+        scene = (
+            "主体：无法确认表面材质，但仍可见红色矩形位于画面中央，约占画面宽度三分之一；"
+            "动作：矩形保持静止，前后位置、大小和外轮廓没有观察到变化；"
+            "场景：纯白色背景填满画面，没有观察到其他独立物体或文字；"
+            "镜头：正面平视固定机位，矩形居中，左右留白基本对称；"
+            "光影：画面亮度均匀，没有明显投影，红白色彩保持稳定。"
+        )
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+            require_detail=True,
+        )
+        self.assertEqual(result["scenes"][0]["scene"], scene)
+
     def test_scene_detail_contract_rejects_repeated_word_padding(self):
         scene = (
             "主体：人物人物人物人物人物人物人物人物人物人物；"
