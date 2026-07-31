@@ -48,9 +48,12 @@ class GeminiReverseTests(unittest.TestCase):
                 evidence[key] = [round(start + 0.1, 1)]
         evidence["action_end"] = [round(end - 0.1, 1)]
         return {
-            "start_seconds": start,
-            "end_seconds": end,
-            "cut_from_previous": cut,
+            "segment_id": int(round(start)) + 1,
+            "transition_from_previous": {
+                "type": "hard_cut" if cut else "none",
+                "description": "直接硬切" if cut else "not_applicable",
+                "evidence_seconds": [start] if cut else [],
+            },
             "facts": facts,
             "evidence_seconds": evidence,
             "generation_advice": {
@@ -74,9 +77,10 @@ class GeminiReverseTests(unittest.TestCase):
                 for key in self.breakdown._GEMINI_FACT_FIELDS
             ]
             shots.append({
-                "start_seconds": shot["start_seconds"],
-                "end_seconds": shot["end_seconds"],
-                "cut_from_previous": shot["cut_from_previous"],
+                "segment_id": shot["segment_id"],
+                "transition_from_previous": shot[
+                    "transition_from_previous"
+                ],
                 "facts": facts,
                 "generation_advice": shot["generation_advice"],
             })
@@ -103,6 +107,12 @@ class GeminiReverseTests(unittest.TestCase):
 
         self.assertEqual(result["model"], "gemini-3.1-pro-preview")
         self.assertEqual(result["provider"], "google")
+        self.assertEqual(result["attempts"], 1)
+        self.assertEqual(result["attempt_audit"][0]["validation"], "passed")
+        self.assertEqual(
+            result["timeline_audit"]["source"],
+            "single_full_media_segment",
+        )
         self.assertIn("/v1beta/models/gemini-3.1-pro-preview:generateContent", captured["url"])
         self.assertEqual(captured["api_key"], "mock-key")
         part = captured["body"]["contents"][0]["parts"][0]
@@ -117,6 +127,10 @@ class GeminiReverseTests(unittest.TestCase):
             config["responseJsonSchema"],
             self.breakdown._gemini_reverse_provider_schema(),
         )
+        request_text = captured["body"]["contents"][0]["parts"][1]["text"]
+        self.assertIn("Authoritative segments:", request_text)
+        self.assertIn('"segment_id":1', request_text)
+        self.assertIn('"display_range":"0-1秒"', request_text)
 
     def test_gemini31_request_uses_compatible_rest_json_schema(self):
         body = self.breakdown._gemini_request_body(
@@ -147,9 +161,11 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertIn("no indentation or line breaks", instruction)
         self.assertIn("do not repeat the same description", instruction)
         self.assertIn(
-            "start_seconds, end_seconds, cut_from_previous, facts, and generation_advice",
+            "segment_id, transition_from_previous, facts, and generation_advice",
             instruction,
         )
+        self.assertIn("Never return start_seconds or end_seconds", instruction)
+        self.assertIn("The server owns all timeline boundaries", instruction)
         self.assertIn(
             "key, value, and evidence_seconds",
             instruction,
@@ -190,7 +206,7 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertEqual(
             shot_schema["required"],
             [
-                "start_seconds", "end_seconds", "cut_from_previous", "facts",
+                "segment_id", "transition_from_previous", "facts",
                 "generation_advice",
             ],
         )
@@ -215,11 +231,161 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertEqual(
             schema["properties"]["shots"]["items"]["required"],
             [
-                "start_seconds", "end_seconds", "cut_from_previous", "facts",
+                "segment_id", "transition_from_previous", "facts",
                 "generation_advice",
             ],
         )
-        self.assertLess(len(encoded.encode("utf-8")), 1500)
+        self.assertLess(len(encoded.encode("utf-8")), 1800)
+
+    def test_authoritative_timeline_is_deterministic_and_integer_displayed(self):
+        candidates = [
+            {"at_seconds": 8.24, "score": 0.91},
+            {"at_seconds": 15.58, "score": 0.88},
+        ]
+        expected = self.breakdown._build_authoritative_reverse_timeline(
+            21.534, candidates,
+        )
+        for _index in range(100):
+            self.assertEqual(
+                self.breakdown._build_authoritative_reverse_timeline(
+                    21.534, candidates,
+                ),
+                expected,
+            )
+        self.assertEqual(
+            expected["windows"],
+            [
+                (0.0, 8.2, "0-8秒"),
+                (8.2, 15.6, "8-16秒"),
+                (15.6, 21.5, "16-22秒"),
+            ],
+        )
+        self.assertEqual(expected["display_duration_seconds"], 22)
+        self.assertEqual(expected["transitions"][0]["display_at_second"], 8)
+
+    def test_authoritative_timeline_keeps_only_strong_spaced_candidates(self):
+        timeline = self.breakdown._build_authoritative_reverse_timeline(
+            10.0,
+            [
+                {"at_seconds": 0.4, "score": 0.99},
+                {"at_seconds": 2.0, "score": 0.70},
+                {"at_seconds": 2.4, "score": 0.95},
+                {"at_seconds": 5.0, "score": 0.90},
+                {"at_seconds": 8.0, "score": 0.80},
+                {"at_seconds": 9.6, "score": 0.99},
+            ],
+        )
+        self.assertEqual(
+            [item["at_seconds"] for item in timeline["transitions"]],
+            [2.4, 5.0, 8.0],
+        )
+        self.assertEqual(len(timeline["windows"]), 4)
+        previous_end = 0.0
+        for start, end, _label in timeline["windows"]:
+            self.assertEqual(start, previous_end)
+            self.assertGreater(end, start)
+            previous_end = end
+        self.assertEqual(previous_end, 10.0)
+
+    def test_ffmpeg_transition_candidates_are_evidence_only_and_sanitized(self):
+        output = (
+            "[Parsed_metadata_1] frame:0 pts:824 pts_time:8.24\n"
+            "[Parsed_metadata_1] lavfi.scene_score=0.812345\n"
+            "[Parsed_metadata_1] frame:1 pts:1558 pts_time:15.58\n"
+            "[Parsed_metadata_1] lavfi.scene_score=0.723456\n"
+        )
+        completed = mock.Mock(returncode=0, stdout="", stderr=output)
+        with mock.patch.object(
+            self.breakdown.subprocess, "run", return_value=completed,
+        ):
+            candidates, audit = (
+                self.breakdown._detect_reverse_transition_candidates(
+                    "private-video.mp4", 21.534,
+                )
+            )
+        self.assertEqual(
+            [item["at_seconds"] for item in candidates],
+            [8.2, 15.6],
+        )
+        self.assertEqual(audit["candidate_count"], 2)
+        self.assertNotIn("private-video.mp4", json.dumps(audit))
+
+    def test_detector_failure_falls_back_to_one_server_owned_segment(self):
+        with mock.patch.object(
+            self.breakdown.subprocess,
+            "run",
+            side_effect=FileNotFoundError("ffmpeg"),
+        ):
+            candidates, audit = (
+                self.breakdown._detect_reverse_transition_candidates(
+                    "private-video.mp4", 21.534,
+                )
+            )
+        timeline = self.breakdown._build_authoritative_reverse_timeline(
+            21.534, candidates,
+        )
+        self.assertEqual(candidates, [])
+        self.assertEqual(audit["status"], "unavailable")
+        self.assertEqual(
+            timeline["windows"], [(0.0, 21.5, "0-22秒")]
+        )
+
+    def test_model_cannot_return_or_change_server_timestamps(self):
+        shot = self._shot(0.0, 1.0)
+        shot["start_seconds"] = 0.0
+        with self.assertRaisesRegex(ValueError, "does not match schema"):
+            self.breakdown._parse_gemini_reverse_result(
+                json.dumps({"shots": [shot]}), 1.0,
+            )
+
+    def test_segment_id_mismatch_reports_exact_server_range(self):
+        shot = self._shot(0.0, 1.0)
+        shot["segment_id"] = 2
+        with self.assertRaises(ValueError) as raised:
+            self.breakdown._parse_gemini_reverse_result(
+                json.dumps({"shots": [shot]}),
+                [(0.0, 1.0, "0-1秒")],
+            )
+        message = str(raised.exception)
+        self.assertIn("expected segment_id 1, received 2", message)
+        self.assertIn("valid server range is 0-1秒", message)
+
+    def test_transition_is_bound_to_server_boundary_and_rendered_in_prompt(self):
+        raw = json.dumps({
+            "shots": [
+                self._shot(0.0, 1.0),
+                self._shot(1.0, 2.0, True),
+            ],
+        }, ensure_ascii=False)
+        parsed = self.breakdown._parse_gemini_reverse_result(
+            raw,
+            [(0.0, 1.0, "0-1秒"), (1.0, 2.0, "1-2秒")],
+        )
+        transition = parsed["entries"][1]["transition_from_previous"]
+        self.assertEqual(transition["boundary_id"], 1)
+        self.assertEqual(transition["at_seconds"], 1.0)
+        self.assertEqual(transition["time_source"], "server_ffmpeg")
+        self.assertEqual(transition["type_source"], "gemini")
+        prompt = self.breakdown._assemble_reverse_prompt(
+            parsed["entries"], parsed["windows"],
+            enforce_length_limits=False,
+        )
+        self.assertIn("1秒转场: 直接硬切", prompt)
+        self.assertIn("0-1秒", prompt)
+        self.assertIn("1-2秒", prompt)
+
+    def test_structured_gemini_score_never_reports_legacy_hundred_zero(self):
+        parsed = self.breakdown._parse_gemini_reverse_result(
+            json.dumps({"shots": [self._shot(0.0, 1.0)]}),
+            [(0.0, 1.0, "0-1秒")],
+        )
+        score = self.breakdown._score_reverse_generation_coverage(
+            parsed["entries"], {}, parsed["windows"],
+        )
+        self.assertFalse(score["legacy_unstructured"])
+        self.assertGreaterEqual(score["components"]["generation_readiness"], 80)
+        self.assertEqual(score["components"]["factual_consistency"], 100)
+        self.assertEqual(score["total"], min(score["components"].values()))
 
     def test_compact_fact_rows_expand_deterministically_and_reject_duplicates(self):
         response = self._provider_response()
@@ -296,7 +462,7 @@ class GeminiReverseTests(unittest.TestCase):
         self.assertIn("direction_speed", message)
         self.assertIn("camera_movement", message)
         retry = self.breakdown._gemini_reverse_instruction(
-            "sample", 1.0, "local", "", message,
+            "sample", 1.0, "local", "", retry_error=message,
         )
         self.assertIn("only when visible evidence supports them", retry)
         self.assertIn("otherwise keep unknown and allow strict failure", retry)
@@ -747,7 +913,11 @@ class GeminiReverseTests(unittest.TestCase):
             media_path = Path(temp_dir) / "sample.mp4"
             media_path.write_bytes(b"not-a-real-video")
             result = self.breakdown._gemini_reverse_prompt_from_media(
-                str(media_path), "video/mp4", "sample", 2.0, "local", ""
+                str(media_path), "video/mp4", "sample", 2.0, "local", "",
+                timeline=self.breakdown._build_authoritative_reverse_timeline(
+                    2.0,
+                    [{"at_seconds": 1.0, "score": 0.9}],
+                ),
             )
         self.assertEqual(result["attempts"], 2)
         retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]

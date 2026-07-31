@@ -888,9 +888,14 @@ class BreakdownTests(unittest.TestCase):
                     evidence[key] = [round(start + 0.1, 1)]
             evidence["action_end"] = [round(end - 0.1, 1)]
             shots.append({
-                "start_seconds": start,
-                "end_seconds": end,
-                "cut_from_previous": index > 0,
+                "segment_id": index + 1,
+                "transition_from_previous": {
+                    "type": "hard_cut" if index > 0 else "none",
+                    "description": (
+                        "直接硬切" if index > 0 else "not_applicable"
+                    ),
+                    "evidence_seconds": [start] if index > 0 else [],
+                },
                 "facts": facts,
                 "evidence_seconds": evidence,
                 "generation_advice": {
