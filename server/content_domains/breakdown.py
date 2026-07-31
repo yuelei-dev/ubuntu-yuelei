@@ -4295,10 +4295,10 @@ _SCENE_DETAIL_FACT_SPECS = {
         },
     },
 }
-_SCENE_DETAIL_UNKNOWN_SENTINELS = {
-    "unknown", "none", "null", "n/a", "na", "未知", "不确定",
-    "无法确认", "未提供", "空白",
-}
+_SCENE_DETAIL_UNKNOWN_EXACT = {"unknown", "none", "null", "n/a", "na"}
+_SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS = (
+    "未知", "不确定", "无法确认", "未提供", "空白",
+)
 _SCENE_DETAIL_ENUM_LABELS = {
     "static": "固定/静止",
     "gesture": "肢体动作",
@@ -4378,7 +4378,14 @@ def _scene_detail_fact_contract_error(detail_facts, frame_count):
             value = expected_values[key]
             if not value or len(value) > 160:
                 return "%s的%s必须是1到160字的具体事实" % (spec["label"], key)
-            if value.lower() in _SCENE_DETAIL_UNKNOWN_SENTINELS:
+            compact_value = re.sub(r"\s+", "", value).lower()
+            if (
+                compact_value in _SCENE_DETAIL_UNKNOWN_EXACT
+                or any(
+                    marker in compact_value
+                    for marker in _SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS
+                )
+            ):
                 return "%s的%s不能使用unknown占位" % (spec["label"], key)
         for key, allowed in spec["enums"].items():
             if expected_values[key] not in allowed:

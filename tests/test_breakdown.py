@@ -1033,6 +1033,33 @@ class BreakdownTests(unittest.TestCase):
                 require_detail=True, frame_count=2,
             )
 
+    def test_scene_detail_contract_rejects_extended_unknown_text_in_observed_slots(self):
+        facts = self._detail_facts()
+        facts["subject"].update({
+            "identity": "未提供相关信息",
+            "appearance": "外观字段均为空白",
+            "position_scale": "无法确认位置和占比",
+        })
+        facts["action"].update({
+            "start": "未提供动作起点",
+            "process": "动作过程字段为空白",
+            "end": "无法确认动作结果",
+            "direction_speed": "未提供方向和速度",
+        })
+        facts["setting"].update({
+            "location": "未提供地点",
+            "foreground": "前景字段为空白",
+            "midground": "无法确认中景",
+            "background": "未提供背景",
+        })
+        facts["lighting"]["source_direction"] = "无法确认光源方向"
+
+        with self.assertRaisesRegex(ValueError, "不能使用unknown占位"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
     def test_scene_detail_contract_rejects_observed_without_evidence(self):
         facts = self._detail_facts()
         facts["action"]["evidence_frames"] = []
