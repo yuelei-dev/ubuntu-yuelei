@@ -91,6 +91,7 @@
   <div id="scModeTabs" style="display:flex; gap:6px; margin-bottom:18px;">
     <button class="sc-mode-tab on" data-mode="write" type="button">✍️ AI写脚本</button>
     <button class="sc-mode-tab" data-mode="breakdown" type="button">🔍 拆解视频</button>
+    <button class="sc-mode-tab" data-mode="reverse_prompt" type="button">✨ 提示词反推</button>
   </div>
 
   <div class="gScript">
@@ -153,11 +154,6 @@
       <div id="panelBreakdown" style="display:none;">
         <div style="display:flex; align-items:flex-start; justify-content:space-between;">
           <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><span style="font-size:26px;">🔍</span>爆款拆解</h1><p id="bdIntroText" style="margin:7px 0 0; font-size:13px; color:#94a4bb;">粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频</p></div>
-        </div>
-
-        <div id="bdToolTabs" style="display:flex; gap:10px; margin-top:18px; flex-wrap:wrap;">
-          <button id="bdToolScenes" class="sc-btn" data-bd-tool="scenes" type="button" style="padding:10px 14px; border-radius:12px; font-weight:700; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35);">🎞 分解拆解</button>
-          <button id="bdToolReverse" class="sc-btn" data-bd-tool="reverse_prompt" type="button" style="padding:10px 14px; border-radius:12px; font-weight:700;">✨ 提示词反推</button>
         </div>
 
         <div id="bdSourceGrid" class="bd-source-grid">
@@ -634,10 +630,11 @@
   }
   function syncModeUi(){
     var reverseMode=isBreakdownReverseTool();
+    var activeMode=currentMode==='breakdown'?(reverseMode?'reverse_prompt':'breakdown'):'write';
     var breakdownScenes=breakdownSceneList();
     var hasBreakdownScenes=breakdownScenes.length>0;
     var hasReversePrompt=!!reversePromptText();
-    document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.classList.toggle('on', tab.getAttribute('data-mode')===currentMode); });
+    document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.classList.toggle('on', tab.getAttribute('data-mode')===activeMode); });
     document.querySelectorAll('[data-bd-tool]').forEach(function(tab){
       var on=tab.getAttribute('data-bd-tool')===currentBreakdownTool;
       tab.classList.toggle('on', on);
@@ -685,7 +682,15 @@
     }
   }
   function switchMode(mode){
-    currentMode=mode==='breakdown'?'breakdown':'write';
+    if(mode==='reverse_prompt'){
+      currentMode='breakdown';
+      currentBreakdownTool='reverse_prompt';
+    }else if(mode==='breakdown'){
+      currentMode='breakdown';
+      currentBreakdownTool='scenes';
+    }else{
+      currentMode='write';
+    }
     syncModeUi();
     if(currentMode==='breakdown'){
       if(isBreakdownReverseTool()){

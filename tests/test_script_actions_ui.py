@@ -79,13 +79,27 @@ class ScriptActionsUiTests(unittest.TestCase):
 
     def test_breakdown_mode_ui_and_api_exist(self):
         self.assertIn('data-mode="breakdown"', self.html)
+        self.assertIn('data-mode="reverse_prompt"', self.html)
         self.assertIn('id="panelBreakdown"', self.html)
-        self.assertIn('id="bdToolScenes"', self.html)
-        self.assertIn('id="bdToolReverse"', self.html)
-        self.assertIn("data-bd-tool=\"reverse_prompt\"", self.html)
+        self.assertNotIn('id="bdToolTabs"', self.html)
+        self.assertNotIn('id="bdToolScenes"', self.html)
+        self.assertNotIn('id="bdToolReverse"', self.html)
         self.assertIn('id="bdGen"', self.html)
         self.assertIn("fetch('/api/gen/breakdown'", self.html)
         self.assertIn("var reqBody=isBatch?{urls:lines,mode:'scenes'}:{url:lines[0],mode:submitMode};", self.html)
+
+    def test_reverse_prompt_is_a_top_level_mode_next_to_script_and_breakdown(self):
+        write = self.html.index('data-mode="write"')
+        breakdown = self.html.index('data-mode="breakdown"')
+        reverse = self.html.index('data-mode="reverse_prompt"')
+        self.assertLess(write, breakdown)
+        self.assertLess(breakdown, reverse)
+        self.assertIn(
+            "var activeMode=currentMode==='breakdown'?(reverseMode?'reverse_prompt':'breakdown'):'write';",
+            self.html,
+        )
+        self.assertIn("if(mode==='reverse_prompt'){", self.html)
+        self.assertIn("currentBreakdownTool='reverse_prompt';", self.html)
 
     def test_breakdown_progress_and_history_restore_exist(self):
         self.assertIn('id="bdProgress"', self.html)
