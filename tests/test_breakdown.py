@@ -1060,6 +1060,21 @@ class BreakdownTests(unittest.TestCase):
                 require_detail=True, frame_count=2,
             )
 
+    def test_scene_detail_contract_accepts_blank_canvas_as_visible_subject(self):
+        facts = self._detail_facts("白色空白画布")
+        facts["subject"].update({
+            "appearance": "白色矩形画布没有文字或图案",
+            "position_scale": "空白画布位于中央，约占画面宽度一半",
+        })
+
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+
+        self.assertIn("白色空白画布", result["scenes"][0]["scene"])
+        self.assertIn("空白画布位于中央", result["scenes"][0]["scene"])
+
     def test_scene_detail_contract_rejects_observed_without_evidence(self):
         facts = self._detail_facts()
         facts["action"]["evidence_frames"] = []

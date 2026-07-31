@@ -4297,7 +4297,11 @@ _SCENE_DETAIL_FACT_SPECS = {
 }
 _SCENE_DETAIL_UNKNOWN_EXACT = {"unknown", "none", "null", "n/a", "na"}
 _SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS = (
-    "未知", "不确定", "无法确认", "未提供", "空白",
+    "未知", "不确定", "无法确认", "未提供",
+)
+_SCENE_DETAIL_BLANK_PLACEHOLDER_RE = re.compile(
+    r"(?:字段|栏目|内容|信息|细节|资料|描述|数值|值|项)"
+    r"(?:均|都|全部)?(?:为|是|呈|等于)?空白$"
 )
 _SCENE_DETAIL_ENUM_LABELS = {
     "static": "固定/静止",
@@ -4385,6 +4389,8 @@ def _scene_detail_fact_contract_error(detail_facts, frame_count):
                     marker in compact_value
                     for marker in _SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS
                 )
+                or compact_value == "空白"
+                or _SCENE_DETAIL_BLANK_PLACEHOLDER_RE.search(compact_value)
             ):
                 return "%s的%s不能使用unknown占位" % (spec["label"], key)
         for key, allowed in spec["enums"].items():
