@@ -805,11 +805,11 @@ class BreakdownTests(unittest.TestCase):
     @staticmethod
     def _detailed_scene(focus="门店门头"):
         return (
-            "主体：%s位于画面中央，主体轮廓、颜色与表面特征清晰可见；"
-            "动作：主体从画面中央开始展示，位置和朝向连续可见，最后停留在原构图区域；"
-            "场景：近处地面形成前景，主体处在中景，建筑与环境陈设构成背景；"
-            "镜头：平视中景固定机位，主体居中，水平线保持稳定，没有观察到明显运镜；"
-            "光影：正面柔和自然光照亮主体，背景亮度略低，整体色调自然。"
+            "主体：可见事实：%s位于画面中央，主体轮廓、颜色与表面特征清晰可见；"
+            "动作：可见事实：主体从画面中央开始展示，位置和朝向连续可见，最后停留在原构图区域；"
+            "场景：可见事实：近处地面形成前景，主体处在中景，建筑与环境陈设构成背景；"
+            "镜头：可见事实：平视中景固定机位，主体居中，水平线保持稳定，没有观察到明显运镜；"
+            "光影：可见事实：正面柔和自然光照亮主体，背景亮度略低，整体色调自然。"
         ) % focus
 
     def _gemini_reverse_result(self, duration=18.0, count=4):
@@ -866,6 +866,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["source_platform"], "douyin")
         self.assertEqual(result["analysis"], "这是一条团购探店口播视频")
         self.assertIn("门店门头", result["scenes"][0]["scene"])
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
         self.assertFalse(result["asr_failed"])
         self.assertIn('"analysis"', calls["usermsg"])
         self.assertIn("同时输出一份视频内容综合分析", calls["sysmsg"])
@@ -895,13 +896,13 @@ class BreakdownTests(unittest.TestCase):
         src = inspect.getsource(self.breakdown._breakdown_scenes_from_frames)
         self.assertIn("100-180字", src)
         self.assertIn("4-6 个分镜", src)
-        self.assertIn("主体：…；动作：…；场景：…；镜头：…；光影：…", src)
+        self.assertIn("主体：可见事实：…；动作：可见事实：…；场景：可见事实：…", src)
         self.assertIn("起点、过程、结果、方向", src)
         self.assertIn("前景、中景、背景", src)
         self.assertIn("推进、跟随、摇移或固定机位", src)
         self.assertIn("光源方向、软硬、明暗层次", src)
         self.assertIn("画面存在清晰字幕、招牌或产品文字时", src)
-        self.assertIn("至少三个必须提供互不重复的可观察事实", src)
+        self.assertIn("至少三个必须提供互不重复的可见事实", src)
         self.assertIn("不得五栏都写无法确认", src)
         self.assertIn("不得重复词语凑长度", src)
         self.assertIn("不得为了详细而编造动作、道具、文字或氛围", src)
@@ -914,17 +915,18 @@ class BreakdownTests(unittest.TestCase):
 
     def test_scene_detail_contract_accepts_complete_observable_description(self):
         scene = (
-            "主体：穿白色衬衫的女性位于画面中央，人物约占画面高度一半；"
-            "动作：她从桌面拿起透明玻璃杯，举到唇边短暂停留后放回原位；"
-            "场景：室内木桌位于前景，人物处在中景，浅色墙面与绿植构成背景；"
-            "镜头：平视中景固定机位，主体居中，桌面边缘形成水平构图线；"
-            "光影：左侧柔和自然光照亮人物和杯子，背景略暗，整体呈暖色调。"
+            "主体：可见事实：穿白色衬衫的女性位于画面中央，人物约占画面高度一半；"
+            "动作：可见事实：她从桌面拿起透明玻璃杯，举到唇边短暂停留后放回原位；"
+            "场景：可见事实：室内木桌位于前景，人物处在中景，浅色墙面与绿植构成背景；"
+            "镜头：可见事实：平视中景固定机位，主体居中，桌面边缘形成水平构图线；"
+            "光影：可见事实：左侧柔和自然光照亮人物和杯子，背景略暗，整体呈暖色调。"
         )
         result = self.breakdown._validate_scene_breakdown(
             {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
             require_detail=True,
         )
-        self.assertEqual(result["scenes"][0]["scene"], scene)
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
+        self.assertIn("穿白色衬衫的女性位于画面中央", result["scenes"][0]["scene"])
 
     def test_scene_detail_contract_rejects_vague_nonempty_description(self):
         with self.assertRaisesRegex(ValueError, "第1段画面细节不足"):
@@ -967,17 +969,18 @@ class BreakdownTests(unittest.TestCase):
 
     def test_scene_detail_contract_accepts_unknown_qualifier_with_visible_fact(self):
         scene = (
-            "主体：无法确认表面材质，但仍可见红色矩形位于画面中央，约占画面宽度三分之一；"
-            "动作：矩形保持静止，前后位置、大小和外轮廓没有观察到变化；"
-            "场景：纯白色背景填满画面，没有观察到其他独立物体或文字；"
-            "镜头：正面平视固定机位，矩形居中，左右留白基本对称；"
-            "光影：画面亮度均匀，没有明显投影，红白色彩保持稳定。"
+            "主体：无法确认表面材质，但可见事实：红色矩形位于画面中央，约占画面宽度三分之一；"
+            "动作：可见事实：矩形保持静止，前后位置、大小和外轮廓没有观察到变化；"
+            "场景：可见事实：纯白色背景填满画面，没有观察到其他独立物体或文字；"
+            "镜头：可见事实：正面平视固定机位，矩形居中，左右留白基本对称；"
+            "光影：可见事实：画面亮度均匀，没有明显投影，红白色彩保持稳定。"
         )
         result = self.breakdown._validate_scene_breakdown(
             {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
             require_detail=True,
         )
-        self.assertEqual(result["scenes"][0]["scene"], scene)
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
+        self.assertIn("红色矩形位于画面中央", result["scenes"][0]["scene"])
 
     def test_scene_detail_contract_rejects_unknown_clauses_after_visible_bridge(self):
         scene = (
@@ -1003,11 +1006,33 @@ class BreakdownTests(unittest.TestCase):
 
     def test_scene_detail_contract_rejects_speculation_and_pending_verification(self):
         scene = (
-            "主体：可能是一名女性站在窗边，身份外观位置与占比尚待核实；"
-            "动作：疑似抬起右手靠近窗框，动作起点过程结果仍待确认；"
-            "场景：似乎位于室内窗边，地点道具与前中后景有待验证；"
-            "镜头：或许采用中景平视固定机位，构图和运镜需要核实；"
-            "光影：大概是窗外自然光，方向软硬明暗与色温尚未确认。"
+            "主体：可见事实：看起来像一名女性站在窗边，身份外观位置与占比尚待核实；"
+            "动作：可见事实：看上去正在抬起右手靠近窗框，动作过程结果仍待确认；"
+            "场景：可见事实：貌似位于室内窗边，地点道具与前中后景有待验证；"
+            "镜头：可见事实：应该是中景平视固定机位，构图和运镜需要核实；"
+            "光影：可见事实：大概率是窗外自然光，方向软硬明暗与色温尚未确认。"
+        )
+        values = re.findall(
+            r"(?:主体|动作|场景|镜头|光影)：([^；]+)", scene
+        )
+        self.assertEqual(len(values), 5)
+        self.assertTrue(all(
+            self.breakdown._scene_detail_value_is_unknown(value)
+            for value in values
+        ))
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
+
+    def test_scene_detail_contract_rejects_empty_information_phrases(self):
+        scene = (
+            "主体：可见事实：主体情况暂不详，身份外观位置与画面占比暂无依据；"
+            "动作：可见事实：动作情况暂不详，起点过程结果方向与速度缺少资料；"
+            "场景：可见事实：场景情况暂不详，地点道具与前中后景暂无信息；"
+            "镜头：可见事实：镜头情况暂不详，景别机位构图与运镜缺乏依据；"
+            "光影：可见事实：光影情况暂不详，方向软硬明暗与色温缺少证据。"
         )
         values = re.findall(
             r"(?:主体|动作|场景|镜头|光影)：([^；]+)", scene
@@ -1025,9 +1050,9 @@ class BreakdownTests(unittest.TestCase):
 
     def test_scene_detail_contract_accepts_plain_language_fact_after_unknown(self):
         scene = (
-            "主体：无法确认身份，但仍可见一名女性站在窗边，穿深色上衣，位于画面右侧；"
-            "动作：女性保持站立，右手自然下垂，身体朝向窗户，没有观察到位置变化；"
-            "场景：白色窗框位于人物左侧，浅色墙面构成背景，室外细节无法确认；"
+            "主体：无法确认身份，但可见事实：一名女性站在窗边，穿深色上衣，位于画面右侧；"
+            "动作：可见事实：女性保持站立，右手自然下垂，身体朝向窗户，没有观察到位置变化；"
+            "场景：可见事实：白色窗框位于人物左侧，浅色墙面构成背景，室外细节无法确认；"
             "镜头：画面信息不足，无法判断具体景别机位构图和运镜方式；"
             "光影：清晰度有限，未能辨识光源方向软硬明暗以及色温。"
         )
@@ -1035,15 +1060,16 @@ class BreakdownTests(unittest.TestCase):
             {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
             require_detail=True,
         )
-        self.assertEqual(result["scenes"][0]["scene"], scene)
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
+        self.assertIn("一名女性站在窗边", result["scenes"][0]["scene"])
 
     def test_scene_detail_contract_rejects_repeated_word_padding(self):
         scene = (
-            "主体：人物人物人物人物人物人物人物人物人物人物；"
-            "动作：展示展示展示展示展示展示展示展示展示展示；"
-            "场景：室内室内室内室内室内室内室内室内室内室内；"
-            "镜头：中景中景中景中景中景中景中景中景中景中景；"
-            "光影：柔光柔光柔光柔光柔光柔光柔光柔光柔光柔光。"
+            "主体：可见事实：人物人物人物人物人物人物人物人物人物人物；"
+            "动作：可见事实：展示展示展示展示展示展示展示展示展示展示；"
+            "场景：可见事实：室内室内室内室内室内室内室内室内室内室内；"
+            "镜头：可见事实：中景中景中景中景中景中景中景中景中景中景；"
+            "光影：可见事实：柔光柔光柔光柔光柔光柔光柔光柔光柔光柔光。"
         )
         with self.assertRaisesRegex(ValueError, "低信息重复填充"):
             self.breakdown._validate_scene_breakdown(
@@ -1053,17 +1079,18 @@ class BreakdownTests(unittest.TestCase):
 
     def test_scene_detail_contract_accepts_honest_simple_static_frame(self):
         scene = (
-            "主体：白色矩形位于蓝色画面中央，边缘清晰，约占画面宽度三分之一；"
-            "动作：矩形保持静止，前后位置、大小和形状没有观察到变化；"
-            "场景：纯蓝色背景填满画面，没有观察到其他独立物体或文字；"
-            "镜头：正面平视固定机位，矩形居中，左右留白基本对称；"
-            "光影：画面亮度均匀，没有明显投影，蓝白色彩保持稳定。"
+            "主体：可见事实：白色矩形位于蓝色画面中央，边缘清晰，约占画面宽度三分之一；"
+            "动作：可见事实：矩形保持静止，前后位置、大小和形状没有观察到变化；"
+            "场景：可见事实：纯蓝色背景填满画面，没有观察到其他独立物体或文字；"
+            "镜头：可见事实：正面平视固定机位，矩形居中，左右留白基本对称；"
+            "光影：可见事实：画面亮度均匀，没有明显投影，蓝白色彩保持稳定。"
         )
         result = self.breakdown._validate_scene_breakdown(
             {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
             require_detail=True,
         )
-        self.assertEqual(result["scenes"][0]["scene"], scene)
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
+        self.assertIn("白色矩形位于蓝色画面中央", result["scenes"][0]["scene"])
 
     def test_reverse_prompt_requires_structured_action_detail(self):
         """反推必须按段绑定证据，明确禁止字数填充和无证据推断。"""

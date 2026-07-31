@@ -1119,7 +1119,8 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(150-240字)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
         "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 100-180 字描述一个可直接拍摄或生成的完整镜头。"
-        "scene 必须按“主体：…；动作：…；场景：…；镜头：…；光影：…”组织为连贯文字："
+        "scene 必须按“主体：可见事实：…；动作：可见事实：…；场景：可见事实：…；"
+        "镜头：可见事实：…；光影：可见事实：…”组织为连贯文字："
         "主体写清外观、服装或产品的颜色、材质、位置和画面占比；"
         "动作按实际先后写起点、过程、结果、方向以及与道具的互动，静止画面要明确写静止；"
         "场景写清地点、关键道具以及前景、中景、背景的空间关系；"
@@ -1127,7 +1128,8 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         "光影写清光源方向、软硬、明暗层次、色温和主色调。"
         "画面存在清晰字幕、招牌或产品文字时，在末尾追加“文字：…”并照实记录。"
         "只写关键帧和口播能够确认的事实：脸部不可见时省略表情，无法确认的运镜或材质要明确无法确认，"
-        "五个栏目中至少三个必须提供互不重复的可观察事实；不得五栏都写无法确认，也不得重复词语凑长度。"
+        "只有画面能够直接确认的陈述才能加“可见事实：”标记；不确定内容不得添加该标记。"
+        "五个栏目中至少三个必须提供互不重复的可见事实；不得五栏都写无法确认，也不得重复词语凑长度。"
         "不得为了详细而编造动作、道具、文字或氛围。不要只写“人物出现”“展示产品”等笼统结论。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
@@ -1151,11 +1153,13 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         context + "\n\n"
         "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
         "固定输出 4 个分镜，格式为："
-        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"主体：…；动作：…；场景：…；镜头：…；光影：…\",\"line\":\"对应口播或空串\"}],"
+        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"主体：可见事实：…；动作：可见事实：…；"
+        "场景：可见事实：…；镜头：可见事实：…；光影：可见事实：…\",\"line\":\"对应口播或空串\"}],"
         "\"analysis\":\"100-180字综合分析\"}。"
         "每个 scene 90-160 字，五个栏目均须填写可见事实；有清晰画面文字时追加“文字：…”。"
         "动作按起点、过程、结果写，场景写前中后景，镜头写景别、机位、构图与可见运镜，"
-        "光影写方向、软硬、明暗和色调。至少三个栏目必须包含互不重复的可观察事实，"
+        "光影写方向、软硬、明暗和色调。只有确定观察到的内容才标记“可见事实：”，"
+        "至少三个栏目必须包含互不重复的可见事实，"
         "禁止五栏全部写无法确认或使用重复词语填充。不得为补细节编造关键帧中不存在的内容；"
         "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
@@ -4217,17 +4221,19 @@ _SCENE_DETAIL_UNCERTAIN_FAMILY_RE = re.compile(
         r"(?:清楚地?)?(?:识别|辨识|辨认|看清|确定|判断|确认)",
         r"(?:看不清|辨不清|认不出|不确定|不明确|不清楚|未知|unknown)",
         r"(?:可能|疑似|似乎|仿佛|或许|也许|大概|推测|猜测|不排除)",
+        r"(?:看起来像|看上去|貌似|应该是|应当是|大概率)",
         r"(?:尚待|有待|仍待|待|需要|需)(?:核实|确认|验证)",
         r"(?:尚未|未获|没有)(?:核实|确认|验证)",
+        r"(?:情况|详情|细节)(?:暂不详|不详)",
+        r"(?:暂无|缺少|缺乏|欠缺)(?:依据|资料|信息|线索|证据)",
     )),
     re.IGNORECASE,
 )
 _SCENE_DETAIL_CONTRAST_RE = re.compile(
-    r"(?:但(?:仍然?|依然|可以|可)?|不过|然而|可是)"
+    r"(?:但(?:仍然?|依然|可以)?|不过|然而|可是)"
 )
-_SCENE_DETAIL_FACT_BRIDGE_RE = re.compile(
-    r"^(?:(?:仍然?|依然|可以|能够|可)?"
-    r"(?:可见|确认|观察到|看出|显示|呈现))"
+_SCENE_DETAIL_OBSERVED_CLAIM_RE = re.compile(
+    r"^可见事实[：:]"
 )
 _SCENE_DETAIL_SCHEMA_ONLY_RE = re.compile(
     r"^(?:(?:具体|相关|画面|内容|信息|细节|以及|或者|是否|存在|"
@@ -4250,26 +4256,40 @@ def _scene_detail_clauses(value):
     ]
 
 
-def _scene_detail_clause_has_certain_fact(clause):
+def _scene_detail_clause_observed_fact(clause):
     if _SCENE_DETAIL_UNCERTAIN_FAMILY_RE.search(clause):
-        return False
-    compact = _scene_detail_compact(clause)
-    compact = _SCENE_DETAIL_FACT_BRIDGE_RE.sub("", compact)
+        return ""
+    matched = _SCENE_DETAIL_OBSERVED_CLAIM_RE.match(clause)
+    if not matched:
+        return ""
+    compact = _scene_detail_compact(clause[matched.end():])
     if len(compact) < 4:
-        return False
+        return ""
     if _SCENE_DETAIL_SCHEMA_ONLY_RE.fullmatch(compact):
-        return False
-    return True
+        return ""
+    return compact
+
+
+def _scene_detail_observed_facts(value):
+    return [
+        fact
+        for fact in (
+            _scene_detail_clause_observed_fact(clause)
+            for clause in _scene_detail_clauses(value)
+        )
+        if fact
+    ]
 
 
 def _scene_detail_value_is_unknown(value):
     compact = _scene_detail_compact(value)
     if not compact:
         return True
-    return not any(
-        _scene_detail_clause_has_certain_fact(clause)
-        for clause in _scene_detail_clauses(value)
-    )
+    return not _scene_detail_observed_facts(value)
+
+
+def _strip_scene_detail_observation_markers(scene_text):
+    return re.sub(r"可见事实[：:]", "", str(scene_text or ""))
 
 
 def _scene_detail_value_is_repetitive(value):
@@ -4310,7 +4330,7 @@ def _scene_breakdown_detail_error(scene_text):
         values[label] = matched.group(1).strip()
     if missing:
         return "缺少" + "、".join(missing)
-    if len(normalized) < 90:
+    if len(_strip_scene_detail_observation_markers(normalized)) < 90:
         return "可确认画面细节少于90字"
     repetitive = [
         label for label, value in values.items()
@@ -4319,8 +4339,9 @@ def _scene_breakdown_detail_error(scene_text):
     if repetitive:
         return "存在低信息重复填充：" + "、".join(repetitive)
     substantive = [
-        value for value in values.values()
-        if not _scene_detail_value_is_unknown(value)
+        "，".join(_scene_detail_observed_facts(value))
+        for value in values.values()
+        if _scene_detail_observed_facts(value)
     ]
     if len(substantive) < 3:
         return "至少三个栏目需要可观察的实质信息"
@@ -4353,6 +4374,7 @@ def _validate_scene_breakdown(result, require_detail=False):
                     "拆解结果第%d段画面细节不足（%s），请重试"
                     % (len(valid_scenes) + 1, detail_error)
                 )
+            scene["scene"] = _strip_scene_detail_observation_markers(scene_text)
         valid_scenes.append(scene)
     if not valid_scenes:
         raise ValueError("拆解结果为空，请重试")
