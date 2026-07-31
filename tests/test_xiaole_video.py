@@ -1,3 +1,4 @@
+import base64
 import sys
 import unittest
 from pathlib import Path
@@ -137,6 +138,101 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(body["duration"], 15)
         self.assertEqual(body["ratio"], "9:16")
         self.assertEqual(body["resolution"], "720p")
+
+    @staticmethod
+    def _seedance_png_data(tag=b""):
+        raw = b"\x89PNG\r\n\x1a\n" + b"seedance-reference" + tag
+        return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+
+    def test_validate_micro_stages_data_images_before_worker(self):
+        from content_domains import cos
+
+        uploaded = "https://cdn.example/seedance/reference.png"
+        refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(4)]
+        with patch.object(cos, "enabled", return_value=True), \
+             patch.object(cos, "put_bytes", return_value=uploaded) as put:
+            first = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "demo", "duration": 5,
+                "reference_images": refs,
+            }, "fang")
+            second = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "demo", "duration": 5,
+                "reference_images": refs,
+            }, "fang")
+
+        self.assertEqual([uploaded] * 4, first["reference_images"])
+        self.assertNotIn("data:", str(first))
+        first_keys = [call.args[1] for call in put.call_args_list[:4]]
+        second_keys = [call.args[1] for call in put.call_args_list[4:]]
+        self.assertEqual(first_keys, second_keys)
+        self.assertEqual(4, len(set(first_keys)))
+        self.assertRegex(put.call_args_list[0].args[1], r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{64}\.png$")
+        self.assertEqual(first["reference_images"], second["reference_images"])
+
+    def test_validate_micro_upload_unavailable_is_explicit(self):
+        from content_domains import cos
+
+        with patch.object(cos, "enabled", return_value=False):
+            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "未配置.*未扣点"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "micro", "prompt": "demo", "duration": 5,
+                    "reference_images": [self._seedance_png_data()],
+                }, "fang")
+
+    def test_validate_micro_upload_failure_never_falls_back_to_data_url(self):
+        from content_domains import cos
+
+        with patch.object(cos, "enabled", return_value=True), \
+             patch.object(cos, "put_bytes", side_effect=ModuleNotFoundError("qcloud_cos")):
+            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "上传失败.*未扣点"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "micro", "prompt": "demo", "duration": 5,
+                    "reference_images": [self._seedance_png_data()],
+                }, "fang")
+
+    def test_validate_micro_accepts_public_and_authorized_asset_references(self):
+        refs = ["https://cdn.example/ref.jpg", "asset://asset-reference-2"]
+        body = self.video.validate_xiaole_video_payload({
+            "channel": "micro", "prompt": "demo", "duration": 5,
+            "reference_images": refs,
+        }, "fang")
+        self.assertEqual(refs, body["reference_images"])
+
+    def test_validate_micro_rejects_local_or_malformed_references(self):
+        for ref in ("/api/gen/file/ref.jpg", "file:///tmp/ref.jpg", "http://127.0.0.1/ref.jpg",
+                    "http://localhost/ref.jpg", "asset://reference/2"):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(ValueError, "公网|asset://"):
+                    self.video.validate_xiaole_video_payload({
+                        "channel": "micro", "prompt": "demo", "duration": 5,
+                        "reference_images": [ref],
+                    }, "fang")
+
+    def test_seedance_worker_defense_rejects_unstaged_data_url(self):
+        with patch("content_domains.video_seedance.generate") as generate:
+            with self.assertRaisesRegex(ValueError, "公网 URL"):
+                self.video.gen_xiaole_video({
+                    "channel": "micro", "prompt": "demo", "duration": 5,
+                    "reference_images": [self._seedance_png_data()],
+                })
+        generate.assert_not_called()
+
+    def test_seedance_reference_health_requires_cos_and_sdk(self):
+        from content_domains import cos
+
+        with patch.object(cos, "enabled", return_value=True), \
+             patch.object(self.video.importlib.util, "find_spec", return_value=object()):
+            self.assertTrue(self.video.seedance_reference_upload_is_open())
+        with patch.object(cos, "enabled", return_value=False):
+            self.assertFalse(self.video.seedance_reference_upload_is_open())
+        with patch.object(cos, "enabled", return_value=True), \
+             patch.object(self.video.importlib.util, "find_spec", return_value=None):
+            self.assertFalse(self.video.seedance_reference_upload_is_open())
+
+    def test_content_service_dependency_manifest_pins_cos_sdk(self):
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "deploy/requirements-content.txt").read_text(encoding="utf-8")
+        self.assertIn("cos-python-sdk-v5==1.9.44", requirements)
 
     def test_gen_micro_uses_official_seedance_without_shared_provider(self):
         fake = {

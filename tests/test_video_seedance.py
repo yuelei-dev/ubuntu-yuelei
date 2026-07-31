@@ -27,7 +27,7 @@ class OfficialSeedanceAdapterTests(unittest.TestCase):
             "9:16",
             "720p",
             True,
-            ["https://cdn.example/1.jpg", "asset://reference/2"],
+            ["https://cdn.example/1.jpg", "asset://asset-reference-2"],
         )
         self.assertEqual(payload["model"], "doubao-seedance-2-0-260128")
         self.assertEqual(payload["duration"], 10)
@@ -36,6 +36,14 @@ class OfficialSeedanceAdapterTests(unittest.TestCase):
         self.assertTrue(payload["generate_audio"])
         self.assertEqual(payload["content"][0], {"type": "text", "text": "cinematic demo"})
         self.assertEqual(len(payload["content"]), 3)
+
+    def test_payload_rejects_data_local_and_malformed_asset_references(self):
+        for ref in ("data:image/png;base64,AAAA", "/api/gen/file/ref.png", "asset://reference/2"):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(ValueError, "公网 URL"):
+                    self.seedance._build_payload(
+                        self.seedance.SEEDANCE_MODEL, "demo", 5, "9:16", "720p", True, [ref]
+                    )
 
     def test_generate_creates_once_then_polls_known_task(self):
         calls = []

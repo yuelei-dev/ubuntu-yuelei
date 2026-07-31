@@ -362,6 +362,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             "validate_xiaole": video.validate_xiaole_video_payload,
             "xiaole_key": video.XIAOLEVIDEO_API_KEY,
             "seedance_probe": video.seedance_video_is_open,
+            "seedance_ref_probe": video.seedance_reference_upload_is_open,
         }
         fake = FakePoints()
         server = None
@@ -377,9 +378,10 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             core.HANDLERS = {"video": lambda body: body, "tryon": lambda body: body, "xiaole_video": lambda body: body}
             video.validate_video_payload = lambda body, username: body
             video.validate_tryon_payload = lambda body: body
-            video.validate_xiaole_video_payload = lambda body: body
+            video.validate_xiaole_video_payload = lambda body, username=None: body
             video.XIAOLEVIDEO_API_KEY = "configured"
             video.seedance_video_is_open = lambda: True
+            video.seedance_reference_upload_is_open = lambda: True
             try:
                 with closing(sqlite3.connect(core.JOB_DB)) as db:
                     db.execute("""CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,username TEXT,cost INTEGER,
@@ -427,6 +429,26 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
 
                 video.seedance_video_is_open = lambda: True
                 core.feature_flags.is_enabled = lambda kind: kind == "seedance_video"
+                def reject_reference_upload(body, username=None):
+                    raise video.SeedanceReferenceUnavailable("Seedance 参考图上传失败，本次未扣点")
+                video.validate_xiaole_video_payload = reject_reference_upload
+                req = urllib.request.Request(
+                    base + "/api/gen/xiaole_video",
+                    data=json.dumps({"channel": "micro", "prompt": "demo", "duration": 5,
+                                     "reference_images": ["data:image/png;base64,AAAA"]}).encode("utf-8"),
+                    method="POST",
+                    headers={"Authorization": "Bearer test", "Content-Type": "application/json"},
+                )
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(503, rejected.exception.code)
+                response = json.loads(rejected.exception.read().decode("utf-8"))
+                self.assertEqual("seedance_reference_upload_unavailable", response["code"])
+                self.assertEqual([], fake.deductions)
+                with closing(core.jdb()) as db:
+                    self.assertEqual(0, db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+
+                video.validate_xiaole_video_payload = lambda body, username=None: body
                 cases = [
                     {
                         "seed": [
@@ -475,6 +497,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 self.assertEqual(3, health["max_user_active_xiaole_video"])
                 self.assertEqual(1, health["max_user_active_tryon"])
                 self.assertIs(health["seedance_video_enabled"], True)
+                self.assertIs(health["seedance_reference_images_enabled"], True)
 
                 core.feature_flags.is_enabled = lambda kind: False
                 with urllib.request.urlopen(base + "/api/gen/health", timeout=5) as response:
@@ -499,6 +522,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 video.validate_xiaole_video_payload = originals["validate_xiaole"]
                 video.XIAOLEVIDEO_API_KEY = originals["xiaole_key"]
                 video.seedance_video_is_open = originals["seedance_probe"]
+                video.seedance_reference_upload_is_open = originals["seedance_ref_probe"]
 
 
 if __name__ == "__main__":

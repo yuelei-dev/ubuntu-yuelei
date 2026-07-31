@@ -1365,15 +1365,15 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "avatar":
                     body = video_domain.validate_avatar_payload(body)
                 elif kind == "xiaole_video":
-                    body = video_domain.validate_xiaole_video_payload(body)
-                    if body.get("channel") == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
+                    if isinstance(body, dict) and str(body.get("channel") or "grok").strip().lower() == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
+                    body = video_domain.validate_xiaole_video_payload(body, user["username"])
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
                 elif kind == "script_to_video": from . import script_to_video as script_to_video_domain; body = script_to_video_domain.prepare_script_to_video_payload(body, user["username"])
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"} else ""
-            except ValueError as e:
-                return self._send(400, {"detail": str(e)[:220]})
+            except video_domain.SeedanceReferenceUnavailable as e: return self._send(e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
+            except ValueError as e: return self._send(400, {"detail": str(e)[:220]})
             # 正在停机（部署中）→ 不收新活。⚠️ 必须在【扣点之前】。
             # 否则用户被扣了点、任务入了队，进程下一秒就退了 —— 又是一条「服务重启中断」。
             if is_shutting_down():
@@ -1660,7 +1660,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
-                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags),
+                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags), "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
 

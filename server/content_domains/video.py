@@ -1,4 +1,7 @@
 # -*- coding: utf-8 -*-
+import hashlib
+import importlib.util
+import ipaddress
 import math
 import tempfile
 
@@ -53,6 +56,21 @@ GROK_VIDEO_PROVIDER = os.environ.get("GROK_VIDEO_PROVIDER", "xai").strip().lower
 XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
+SEEDANCE_REFERENCE_MAX_BYTES = 30 * 1024 * 1024
+_SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
+_SEEDANCE_IMAGE_TYPES = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+
+
+class SeedanceReferenceUnavailable(RuntimeError):
+    """A reference image could not be staged before points are deducted."""
+
+    code = "seedance_reference_upload_unavailable"
+    status = 503
 
 def seedance_video_is_open():
     """Return whether the dedicated official Seedance adapter is configured."""
@@ -68,6 +86,91 @@ def seedance_video_health_enabled(flags):
         return bool(seedance_video_is_open() and flags.is_enabled("seedance_video"))
     except Exception:
         return False
+
+
+def seedance_reference_upload_is_open():
+    """Reference-image capability is separate from text-only Seedance health."""
+    try:
+        from . import cos
+        return bool(cos.enabled() and importlib.util.find_spec("qcloud_cos"))
+    except Exception:
+        return False
+
+
+def _seedance_reference_uri(value):
+    """Validate a provider-readable reference without fetching user URLs here."""
+    raw = str(value or "").strip()
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme in {"http", "https"}:
+        if not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("Seedance 参考图 URL 不合法")
+        host = parsed.hostname.rstrip(".").lower()
+        if host == "localhost":
+            raise ValueError("Seedance 参考图必须使用公网地址")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("Seedance 参考图必须使用公网地址")
+        return raw
+    if parsed.scheme == "asset" and _SEEDANCE_ASSET_RE.fullmatch(raw):
+        return raw
+    raise ValueError("Seedance 参考图必须是公网 URL 或已授权 asset:// 素材")
+
+
+def _seedance_data_image(value):
+    raw = str(value or "").strip()
+    if not raw.startswith("data:") or "," not in raw:
+        raise ValueError("Seedance 参考图片格式不支持（jpg/png/webp）")
+    meta, encoded = raw.split(",", 1)
+    if ";base64" not in meta.lower():
+        raise ValueError("Seedance 参考图片必须使用 base64 编码")
+    mime = meta.split(";", 1)[0].replace("data:", "", 1).lower()
+    ext = _SEEDANCE_IMAGE_TYPES.get(mime)
+    if not ext:
+        raise ValueError("Seedance 参考图片格式不支持（jpg/png/webp）")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except Exception:
+        raise ValueError("Seedance 参考图片内容解析失败") from None
+    if not _image_bytes_look_valid(data):
+        raise ValueError("Seedance 参考图片内容无效")
+    if len(data) > SEEDANCE_REFERENCE_MAX_BYTES:
+        raise ValueError("Seedance 单张参考图片不能超过30MB")
+    return mime, ext, data
+
+
+def _stage_seedance_reference(value, username=None):
+    """Turn a local data URL into a deterministic COS URL before charging."""
+    raw = str(value or "").strip()
+    if not raw.startswith("data:"):
+        return _seedance_reference_uri(raw)
+    owner = str(username or "").strip()
+    if not owner:
+        raise ValueError("Seedance 参考图缺少账号归属信息")
+    mime, ext, data = _seedance_data_image(raw)
+    owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+    content_hash = hashlib.sha256(data).hexdigest()
+    object_key = "seedance/reference/%s/%s%s" % (owner_hash, content_hash, ext)
+    try:
+        from . import cos
+        if not cos.enabled():
+            raise SeedanceReferenceUnavailable("Seedance 参考图上传服务未配置，本次未扣点")
+        url = cos.put_bytes(data, object_key, mime, private=False)
+        return _seedance_reference_uri(url)
+    except SeedanceReferenceUnavailable:
+        raise
+    except Exception as exc:
+        print("[seedance] reference staging failed: %s" % type(exc).__name__, flush=True)
+        raise SeedanceReferenceUnavailable("Seedance 参考图上传失败，本次未扣点") from exc
+
+
+def _prepare_seedance_references(values, username=None):
+    refs = [str(item or "").strip() for item in (values or []) if str(item or "").strip()]
+    if len(refs) > 9:
+        raise ValueError("Seedance 最多支持 9 张参考图")
+    return [_stage_seedance_reference(item, username) for item in refs]
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
@@ -103,7 +206,7 @@ def _xiaole_ref_to_url(data_url):
         print("[video] 参考图转存COS失败，回退原始数据: %s" % e, flush=True)
         return s
 
-def validate_xiaole_video_payload(payload):
+def validate_xiaole_video_payload(payload, username=None):
     """校验果肉/豆姐/欧米的公共入口；果肉官方线另按 xAI 参数收紧。"""
     if not isinstance(payload, dict):
         raise ValueError("请求体不是合法 JSON")
@@ -127,8 +230,7 @@ def validate_xiaole_video_payload(payload):
         refs = cleaned.get("reference_images") or []
         if not isinstance(refs, list):
             raise ValueError("reference_images 必须是数组")
-        refs = [str(item or "").strip() for item in refs if str(item or "").strip()]
-        if len(refs) > 9:
+        if len([item for item in refs if str(item or "").strip()]) > 9:
             raise ValueError("Seedance 最多支持 9 张参考图")
         ratio = str(cleaned.get("ratio") or "9:16").strip()
         resolution = str(cleaned.get("resolution") or "720p").strip().lower()
@@ -139,6 +241,8 @@ def validate_xiaole_video_payload(payload):
             raise ValueError("Seedance 不支持该画面比例")
         if resolution not in video_seedance.RESOLUTIONS:
             raise ValueError("Seedance 不支持该分辨率")
+        # Network staging is deliberately last: reject all cheap parameter errors first.
+        refs = _prepare_seedance_references(refs, username)
         cleaned.update({
             "model": video_seedance.SEEDANCE_MODEL,
             "duration": duration,
@@ -2976,7 +3080,9 @@ def gen_xiaole_video(payload):
         ratio = "9:16"
     size = _xiaole_size_for_ratio(ratio) if not use_xai else None
     ref_images = None
-    if channel in XIAOLE_IMAGE_CHANNELS:
+    if use_seedance:
+        ref_images = [_seedance_reference_uri(item) for item in (payload.get("reference_images") or [])]
+    elif channel in XIAOLE_IMAGE_CHANNELS:
         raw_refs = payload.get("reference_images") or None
         if raw_refs:
             ref_images = [_xiaole_ref_to_url(r) for r in raw_refs]
