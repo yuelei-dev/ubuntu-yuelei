@@ -603,7 +603,6 @@ def verify(token):
                 if len(_verify_cache) >= VERIFY_CACHE_MAX: _verify_cache.pop(next(iter(_verify_cache)), None)
             _verify_cache[token] = (now + VERIFY_CACHE_TTL, dict(user))
     return dict(user)
-
 def _domains(): from . import audio, points, video; return audio, points, video
 def _leads_domain(): from . import leads; return leads
 def _must_change_password(user): return bool(user and user.get("must_change"))
@@ -1367,6 +1366,7 @@ class H(BaseHTTPRequestHandler):
                     body = video_domain.validate_avatar_payload(body)
                 elif kind == "xiaole_video":
                     body = video_domain.validate_xiaole_video_payload(body)
+                    if body.get("channel") == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)

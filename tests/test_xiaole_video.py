@@ -128,21 +128,32 @@ class XiaoleVideoTests(unittest.TestCase):
                 "channel": "micro", "prompt": "cinematic demo", "duration": 7,
             })
 
-    def test_validate_micro_image_video_requires_ten_seconds(self):
-        with self.assertRaisesRegex(ValueError, "图生视频仅支持 10 秒"):
-            self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "cinematic demo", "duration": 15,
-                "reference_images": ["https://example.com/ref.jpg"],
-            })
+    def test_validate_micro_uses_official_seedance_contract(self):
+        body = self.video.validate_xiaole_video_payload({
+            "channel": "micro", "prompt": "cinematic demo", "duration": 15,
+            "reference_images": ["https://example.com/ref.jpg"],
+        })
+        self.assertEqual(body["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(body["duration"], 15)
+        self.assertEqual(body["ratio"], "9:16")
+        self.assertEqual(body["resolution"], "720p")
 
-    def test_gen_micro_passes_selected_duration_to_supplier(self):
-        fake = {"video_file": "video/micro.mp4", "video_url": "/video/micro.mp4",
-                "source_video_url": "https://example.com/micro.mp4", "model": "seedance-2.0-fast"}
-        with patch.object(self.video, "generate_xiaole_video", return_value=fake) as generate:
+    def test_gen_micro_uses_official_seedance_without_shared_provider(self):
+        fake = {
+            "request_id": "seedance-1",
+            "source_video_url": "https://example.com/micro.mp4",
+            "model": "doubao-seedance-2-0-260128",
+            "duration": 15,
+        }
+        with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
             result = self.video.gen_xiaole_video({
                 "channel": "micro", "prompt": "cinematic demo", "duration": 15,
             })
         self.assertEqual(generate.call_args.kwargs["duration"], 15)
+        self.assertEqual(generate.call_args.kwargs["model"], "doubao-seedance-2-0-260128")
+        self.assertEqual(result["provider_video_id"], "seedance-1")
         self.assertEqual(result["duration"], 15)
 
     def test_validate_official_grok_parameters(self):

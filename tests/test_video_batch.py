@@ -357,6 +357,40 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 thread.start()
                 base = "http://127.0.0.1:%d" % server.server_address[1]
 
+                for label, probe, flag_enabled in (
+                    ("adapter_missing", lambda: False, True),
+                    ("probe_error", lambda: (_ for _ in ()).throw(RuntimeError("probe failed")), True),
+                    ("feature_disabled", lambda: True, False),
+                ):
+                    with self.subTest(seedance_preflight=label):
+                        video.seedance_video_is_open = probe
+                        core.feature_flags.is_enabled = lambda kind, enabled=flag_enabled: (
+                            enabled if kind == "seedance_video" else True
+                        )
+                        req = urllib.request.Request(
+                            base + "/api/gen/xiaole_video",
+                            data=json.dumps({
+                                "channel": "micro",
+                                "prompt": "cinematic demo",
+                                "duration": 5,
+                            }).encode("utf-8"),
+                            method="POST",
+                            headers={
+                                "Authorization": "Bearer test",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        with self.assertRaises(urllib.error.HTTPError) as rejected:
+                            urllib.request.urlopen(req, timeout=5)
+                        self.assertEqual(503, rejected.exception.code)
+                        response = json.loads(rejected.exception.read().decode("utf-8"))
+                        self.assertEqual("seedance_unavailable", response["code"])
+                        self.assertEqual([], fake.deductions)
+                        with closing(core.jdb()) as db:
+                            self.assertEqual(0, db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+
+                video.seedance_video_is_open = lambda: True
+                core.feature_flags.is_enabled = lambda kind: kind == "seedance_video"
                 cases = [
                     {
                         "seed": [

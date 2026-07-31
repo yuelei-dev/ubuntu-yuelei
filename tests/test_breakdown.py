@@ -3515,7 +3515,7 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("endpoint:'/api/gen/xiaole_video'", ui)
         self.assertIn("cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt", ui)
         self.assertIn("endpoint:'/api/gen/cinematic'", ui)
-        self.assertIn('"micro": "seedance-2.0-fast"', video)
+        self.assertIn('"micro": "doubao-seedance-2-0-260128"', video)
         self.assertIn('input_d["mode"] = "image_to_video"', video)
         self.assertIn('input_d["duration_seconds"] = 10', video)
         self.assertIn('"prompt": prompt or MOTION_PROMPT', video)
