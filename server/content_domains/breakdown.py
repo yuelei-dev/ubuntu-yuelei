@@ -54,6 +54,20 @@ _REVERSE_STATIC_SSIM_THRESHOLD = 0.995
 # A value below this only means the two sampled frames are visually
 # discontinuous enough that the model must represent them as separate shots.
 _REVERSE_HARD_CUT_SSIM_THRESHOLD = 0.35
+_REVERSE_SCENE_SCORE_THRESHOLD = 0.30
+_REVERSE_MIN_SEGMENT_SECONDS = 1.0
+_REVERSE_MAX_SEGMENTS = 4
+_REVERSE_TRANSITION_TYPES = {
+    "none",
+    "hard_cut",
+    "fade",
+    "dissolve",
+    "wipe",
+    "occlusion",
+    "whip_pan",
+    "push_pull",
+    "unknown",
+}
 _REVERSE_STATIC_ACTION_MARKERS = (
     "动作无变化",
     "姿态无变化",
@@ -644,10 +658,14 @@ def _do_breakdown(payload, info, url, mode=None):
         _heartbeat(job_id, "extracting_frames")
         is_reverse = mode == _BREAKDOWN_MODE_REVERSE_PROMPT
         frame_count = 8 if is_reverse else max(4, min(10, int(duration / 5)))
+        frame_pts = None
         if is_reverse:
-            frame_dir, frames = _extract_frames(
-                tmp_video.name, frame_count, duration,
-                scale_width=1024, min_frames=8, uniform=True,
+            frame_dir, frames, frame_pts = _split_extracted_frames(
+                _extract_frames(
+                    tmp_video.name, frame_count, duration,
+                    scale_width=1024, min_frames=8, uniform=True,
+                    return_pts=True,
+                )
             )
         else:
             frame_dir, frames = _extract_frames(
@@ -683,9 +701,18 @@ def _do_breakdown(payload, info, url, mode=None):
                 deadline=analysis_deadline,
                 heartbeat=analysis_heartbeat,
             )
-            _validate_gemini_reverse_entries(prompt_result, frames, script_text)
+            frames, frame_pts = _fill_reverse_window_frames(
+                tmp_video.name,
+                frame_dir,
+                frames,
+                frame_pts,
+                prompt_result["windows"],
+            )
+            _validate_gemini_reverse_entries(
+                prompt_result, frames, script_text, frame_pts=frame_pts
+            )
             frame_bundle = _reverse_frame_bundle(
-                frames, len(prompt_result["windows"])
+                frames, prompt_result["windows"], frame_pts=frame_pts
             )
             global_continuity = _reverse_global_facts_from_segments(
                 prompt_result["entries"],
@@ -734,6 +761,8 @@ def _do_breakdown(payload, info, url, mode=None):
                 "global_continuity": global_continuity,
                 "segment_evidence": segment_evidence,
                 "analysis_call_budget": call_budget,
+                "timeline_audit": prompt_result.get("timeline_audit") or {},
+                "attempt_audit": prompt_result.get("attempt_audit") or [],
                 "quality_dimensions": _gemini_quality_dimensions(prompt_result),
                 "model_provider": prompt_result.get("provider"),
                 "model_id": prompt_result.get("model"),
@@ -764,6 +793,7 @@ def _do_breakdown(payload, info, url, mode=None):
                 "global_continuity": global_continuity,
                 "segment_evidence": segment_evidence,
                 "analysis_call_budget": call_budget,
+                "timeline_audit": prompt_result.get("timeline_audit") or {},
                 "quality_contract": _reverse_quality_contract(),
                 "quality_score": quality_score,
                 # assets_store already persists sections and frame_thumbnails;
@@ -827,14 +857,18 @@ def _do_local_reverse(payload, upload_token):
             # The reverse engine owns one auditable eight-frame bundle. For a
             # still image those entries intentionally point to the same source.
             frames = [path] * 8
+            frame_pts = [0.0] * 8
             duration = 0.0
         else:
             duration = _probe_duration(path)
             if duration > 120.05:
                 raise ValueError("视频最长支持 2 分钟")
-            frame_dir, frames = _extract_frames(
-                path, 8, duration or 30,
-                scale_width=1024, min_frames=8, uniform=True,
+            frame_dir, frames, frame_pts = _split_extracted_frames(
+                _extract_frames(
+                    path, 8, duration or 30,
+                    scale_width=1024, min_frames=8, uniform=True,
+                    return_pts=True,
+                )
             )
         _heartbeat(job_id, "analyzing")
         suffix = str(row["suffix"] or "").lower()
@@ -852,6 +886,8 @@ def _do_local_reverse(payload, upload_token):
             duration=duration,
             media_path=path,
             media_mime=media_mime,
+            frame_pts=frame_pts,
+            frame_dir=frame_dir,
         )
     finally:
         if frame_dir:
@@ -904,6 +940,7 @@ def _remove_trusted_upload(token, username, job_id, path):
 def _reverse_result_from_frames(
     payload, frames, source_url="", title="", platform="", duration=0,
     script_text="", asr_failed=False, media_path=None, media_mime="video/mp4",
+    frame_pts=None, frame_dir=None,
 ):
     """Run the audited reverse engine for a validated local upload."""
     job_id = (payload or {}).get("_job_id")
@@ -921,9 +958,18 @@ def _reverse_result_from_frames(
         deadline=analysis_deadline,
         heartbeat=analysis_heartbeat,
     )
-    _validate_gemini_reverse_entries(prompt_result, frames, script_text)
+    frames, frame_pts = _fill_reverse_window_frames(
+        media_path,
+        frame_dir,
+        frames,
+        frame_pts,
+        prompt_result["windows"],
+    )
+    _validate_gemini_reverse_entries(
+        prompt_result, frames, script_text, frame_pts=frame_pts
+    )
     frame_bundle = _reverse_frame_bundle(
-        frames, len(prompt_result["windows"])
+        frames, prompt_result["windows"], frame_pts=frame_pts
     )
     global_continuity = _reverse_global_facts_from_segments(
         prompt_result["entries"],
@@ -972,6 +1018,8 @@ def _reverse_result_from_frames(
         "global_continuity": global_continuity,
         "segment_evidence": segment_evidence,
         "analysis_call_budget": call_budget,
+        "timeline_audit": prompt_result.get("timeline_audit") or {},
+        "attempt_audit": prompt_result.get("attempt_audit") or [],
         "quality_dimensions": _gemini_quality_dimensions(prompt_result),
         "model_provider": prompt_result.get("provider"),
         "model_id": prompt_result.get("model"),
@@ -999,6 +1047,7 @@ def _reverse_result_from_frames(
         "global_continuity": global_continuity,
         "segment_evidence": segment_evidence,
         "analysis_call_budget": call_budget,
+        "timeline_audit": prompt_result.get("timeline_audit") or {},
         "quality_contract": _reverse_quality_contract(),
         "quality_score": quality_score,
         "sections": {"reverse_audit": audit_sections},
@@ -1284,62 +1333,294 @@ def _fixed_reverse_ranges(duration, max_segments=4):
     ]
 
 
-def _group_reverse_frames(frames, segment_count):
-    """Partition all audit frames by the single authoritative segment mapping."""
-    ordered = list(frames or [])
-    segment_count = max(1, int(segment_count or 1))
-    if len(ordered) < segment_count * 2:
-        raise ValueError(
-            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
-            % (segment_count, segment_count * 2)
+def _round_tenth(value):
+    return math.floor(max(0.0, float(value or 0)) * 10.0 + 0.5) / 10.0
+
+
+def _round_whole_second(value):
+    return int(math.floor(max(0.0, float(value or 0)) + 0.5))
+
+
+def _reverse_display_range(start, end):
+    return "%d-%d秒" % (
+        _round_whole_second(start),
+        _round_whole_second(end),
+    )
+
+
+def _detect_reverse_transition_candidates(path, duration):
+    """Return evidence-only FFmpeg scene candidates; never infer a cut in Python."""
+    duration = _round_tenth(duration)
+    command = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-v", "info", "-i", path,
+        "-vf",
+        "select='gt(scene,%.2f)',metadata=print"
+        % _REVERSE_SCENE_SCORE_THRESHOLD,
+        "-an", "-f", "null", "-",
+    ]
+    try:
+        process = subprocess.run(
+            command,
+            check=False,
+            timeout=max(20, min(60, int(math.ceil(duration * 2.0)))),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
-    groups = []
-    for index in range(segment_count):
-        start = int(round(index * len(ordered) / float(segment_count)))
-        end = int(round((index + 1) * len(ordered) / float(segment_count)))
-        group = ordered[start:end]
-        if len(group) < 2:
-            raise ValueError("反推第%d段缺少多帧证据" % (index + 1))
-        groups.append(group)
-    return groups
+    except Exception as error:
+        return [], {
+            "detector": "ffmpeg_scene_score",
+            "threshold": _REVERSE_SCENE_SCORE_THRESHOLD,
+            "status": "unavailable",
+            "error_type": type(error).__name__,
+        }
+    output = "%s\n%s" % (process.stdout or "", process.stderr or "")
+    pattern = re.compile(
+        r"frame:\s*\d+\s+pts:[^\r\n]*?pts_time:([0-9]+(?:\.[0-9]+)?)"
+        r"[\s\S]{0,240}?lavfi\.scene_score=([0-9]+(?:\.[0-9]+)?)"
+    )
+    candidates = []
+    for match in pattern.finditer(output):
+        at_seconds = _round_tenth(match.group(1))
+        score = round(float(match.group(2)), 6)
+        if 0.0 < at_seconds < duration:
+            candidates.append({
+                "at_seconds": at_seconds,
+                "score": score,
+                "detector": "ffmpeg_scene_score",
+            })
+    return candidates, {
+        "detector": "ffmpeg_scene_score",
+        "threshold": _REVERSE_SCENE_SCORE_THRESHOLD,
+        "status": "ok" if process.returncode == 0 else "partial",
+        "candidate_count": len(candidates),
+        "ffmpeg_returncode": int(process.returncode),
+    }
 
 
-def _reverse_model_frame_groups(frames, segment_count):
-    """Select only the first/last frame in each segment for the VLM request."""
-    result = []
-    for group in _group_reverse_frames(frames, segment_count):
-        result.append([group[0], group[-1]])
+def _build_authoritative_reverse_timeline(duration, candidates=None):
+    """Choose at most three evidence-backed cuts and build one gap-free timeline."""
+    duration = max(0.1, _round_tenth(duration))
+    normalized = []
+    for raw in candidates or []:
+        try:
+            at_seconds = _round_tenth(raw.get("at_seconds"))
+            score = float(raw.get("score") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if (
+            at_seconds < _REVERSE_MIN_SEGMENT_SECONDS
+            or duration - at_seconds < _REVERSE_MIN_SEGMENT_SECONDS
+        ):
+            continue
+        normalized.append({
+            "at_seconds": at_seconds,
+            "score": round(score, 6),
+            "detector": str(raw.get("detector") or "ffmpeg_scene_score"),
+        })
+    strongest = sorted(
+        normalized,
+        key=lambda item: (-item["score"], item["at_seconds"]),
+    )
+    selected = []
+    for candidate in strongest:
+        at_seconds = candidate["at_seconds"]
+        if any(
+            abs(at_seconds - previous["at_seconds"])
+            < _REVERSE_MIN_SEGMENT_SECONDS
+            for previous in selected
+        ):
+            continue
+        selected.append(candidate)
+        if len(selected) >= _REVERSE_MAX_SEGMENTS - 1:
+            break
+    selected.sort(key=lambda item: item["at_seconds"])
+    boundaries = [0.0] + [
+        item["at_seconds"] for item in selected
+    ] + [duration]
+    windows = [
+        (
+            boundaries[index],
+            boundaries[index + 1],
+            _reverse_display_range(
+                boundaries[index], boundaries[index + 1],
+            ),
+        )
+        for index in range(len(boundaries) - 1)
+    ]
+    transitions = [
+        {
+            "boundary_id": index,
+            "at_seconds": candidate["at_seconds"],
+            "display_at_second": _round_whole_second(
+                candidate["at_seconds"]
+            ),
+            "score": candidate["score"],
+            "detector": candidate["detector"],
+        }
+        for index, candidate in enumerate(selected, 1)
+    ]
+    return {
+        "windows": windows,
+        "transitions": transitions,
+        "duration_seconds": duration,
+        "display_duration_seconds": _round_whole_second(duration),
+        "max_segments": _REVERSE_MAX_SEGMENTS,
+        "min_segment_seconds": _REVERSE_MIN_SEGMENT_SECONDS,
+        "source": (
+            "ffmpeg_scene_candidates"
+            if selected else "single_full_media_segment"
+        ),
+    }
+
+
+def _authoritative_reverse_timeline(path, duration):
+    candidates, detector_audit = _detect_reverse_transition_candidates(
+        path, duration,
+    )
+    result = _build_authoritative_reverse_timeline(duration, candidates)
+    result["detector_audit"] = detector_audit
     return result
 
 
-def _reverse_reference_frames(frames, segment_count):
+def _reverse_frame_time(frame_index, frame_count, duration):
+    """Map a chronological audit-frame index onto the source timeline."""
+    frame_index = int(frame_index or 0)
+    frame_count = int(frame_count or 0)
+    duration = max(0.0, float(duration or 0))
+    if frame_count <= 1:
+        return 0.0
+    return duration * max(0, frame_index - 1) / float(frame_count - 1)
+
+
+def _group_reverse_frame_indices(frame_count, segments, frame_pts=None):
+    """Return the single authoritative source-frame ownership mapping.
+
+    Integer callers retain the legacy equal grouping contract. Production
+    Gemini callers pass the FFmpeg-owned windows so unequal shots receive only
+    the audit frames whose chronological source positions fall inside them.
+    frame_pts 提供每张帧的真实 FFmpeg PTS（秒）时按真实时间归属；无 PTS 的
+    均匀映射仅为测试遗留调用保留。
+    """
+    frame_count = max(0, int(frame_count or 0))
+    if isinstance(segments, int):
+        segment_count = max(1, segments)
+        return [
+            list(range(
+                int(round(index * frame_count / float(segment_count))) + 1,
+                int(round((index + 1) * frame_count / float(segment_count))) + 1,
+            ))
+            for index in range(segment_count)
+        ]
+
+    windows = list(segments or [])
+    if not windows:
+        return []
+    duration = float(windows[-1][1])
+    pts_seconds = None
+    if frame_pts is not None:
+        try:
+            candidate = [float(value) for value in list(frame_pts)]
+        except (TypeError, ValueError):
+            candidate = []
+        if len(candidate) == frame_count:
+            pts_seconds = candidate
+    groups = [[] for _window in windows]
+    for frame_index in range(1, frame_count + 1):
+        if pts_seconds is not None:
+            at_seconds = pts_seconds[frame_index - 1]
+        else:
+            at_seconds = _reverse_frame_time(
+                frame_index, frame_count, duration,
+            )
+        assigned = False
+        for window_index, (start, end, _label) in enumerate(windows):
+            if (
+                float(start) <= at_seconds < float(end)
+                or (
+                    window_index == len(windows) - 1
+                    and at_seconds <= float(end)
+                )
+            ):
+                groups[window_index].append(frame_index)
+                assigned = True
+                break
+        if not assigned:
+            # PTS 越界（如封装 start_time 偏移）时归入最近的端点窗口，
+            # 证据帧绝不丢弃、也绝不跨窗口重映射。
+            if at_seconds < float(windows[0][0]):
+                groups[0].append(frame_index)
+            else:
+                groups[-1].append(frame_index)
+    return groups
+
+
+def _group_reverse_frames(frames, segments, frame_pts=None):
+    """Partition all audit frames by the single authoritative segment mapping."""
+    ordered = list(frames or [])
+    groups = _group_reverse_frame_indices(
+        len(ordered), segments, frame_pts=frame_pts
+    )
+    if not groups:
+        raise ValueError("反推时间段为空，无法绑定原始帧证据")
+    if isinstance(segments, int) and any(len(group) < 2 for group in groups):
+        raise ValueError(
+            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
+            % (max(1, segments), max(1, segments) * 2)
+        )
+    if any(not group for group in groups):
+        raise ValueError(
+            "反推关键帧不足：至少一个权威时间段没有对应原始帧证据"
+        )
+    return [
+        [ordered[source_index - 1] for source_index in source_indices]
+        for source_indices in groups
+    ]
+
+
+def _reverse_model_frame_groups(frames, segments, frame_pts=None):
+    """Select only the first/last frame in each segment for the VLM request."""
+    result = []
+    for group in _group_reverse_frames(frames, segments, frame_pts=frame_pts):
+        result.append(
+            [group[0], group[-1]] if len(group) > 1 else [group[0]]
+        )
+    return result
+
+
+def _reverse_reference_frames(frames, segments, frame_pts=None):
     """Return one chronological source frame per segment for downstream generation."""
     return [
         group[-1]
-        for group in _group_reverse_frames(frames, segment_count)
+        for group in _group_reverse_frames(frames, segments, frame_pts=frame_pts)
     ]
 
 
-def _group_reverse_frame_indices(frame_count, segment_count):
-    frame_count = max(0, int(frame_count or 0))
-    segment_count = max(1, int(segment_count or 1))
-    return [
-        list(range(
-            int(round(index * frame_count / float(segment_count))) + 1,
-            int(round((index + 1) * frame_count / float(segment_count))) + 1,
-        ))
-        for index in range(segment_count)
-    ]
-
-
-def _reverse_frame_bundle(frames, segment_count):
+def _reverse_frame_bundle(frames, segments, frame_pts=None):
     """Keep explicit downstream indexes separate from the audit-frame set."""
     ordered = list(frames or [])
     segment_source_indices = _group_reverse_frame_indices(
-        len(ordered), segment_count
+        len(ordered), segments, frame_pts=frame_pts
     )
+    if (
+        isinstance(segments, int)
+        and any(len(indices) < 2 for indices in segment_source_indices)
+    ):
+        raise ValueError(
+            "反推关键帧不足：%d个时间段至少需要%d张原始帧"
+            % (max(1, segments), max(1, segments) * 2)
+        )
+    if not segment_source_indices or any(
+        not indices for indices in segment_source_indices
+    ):
+        raise ValueError(
+            "反推关键帧不足：权威时间段与原始帧无法完整对应"
+        )
     segment_model_source_indices = [
-        [indices[0], indices[-1]]
+        (
+            [indices[0], indices[-1]]
+            if len(indices) > 1 else [indices[0]]
+        )
         for indices in segment_source_indices
     ]
     reference_source_indices = [
@@ -1450,6 +1731,10 @@ def _reverse_segment_evidence_manifest(
             "evidence_seconds": entry.get("evidence_seconds") or {},
             "generation_advice": entry.get("generation_advice") or {},
             "cut_from_previous": bool(entry.get("cut_from_previous")),
+            "transition_from_previous": json.loads(json.dumps(
+                entry.get("transition_from_previous") or {},
+                ensure_ascii=False,
+            )),
             "generation_readiness": entry.get("readiness") or {},
             "continuity_source_frames": entry.get(
                 "continuity_evidence_frames", []
@@ -3126,6 +3411,30 @@ def _reverse_segment_messages(
 def _score_reverse_generation_coverage(entries, global_continuity, windows):
     """Keep source evidence, generation readiness and consistency independent."""
     entries = list(entries or [])
+    if entries and all(entry.get("structured_generation") for entry in entries):
+        segment_scores = []
+        for index, entry in enumerate(entries, 1):
+            summary = _gemini_validation_summary(entry)
+            entry["validation_summary"] = summary
+            segment_scores.append({
+                "segment_index": index,
+                **summary,
+            })
+        components = {
+            key: min(score[key] for score in segment_scores)
+            for key in (
+                "source_evidence_coverage",
+                "generation_readiness",
+                "factual_consistency",
+            )
+        }
+        return {
+            "total": min(components.values()),
+            "components": components,
+            "segment_scores": segment_scores,
+            "legacy_unstructured": False,
+            "generated_video_similarity_claim": False,
+        }
     if entries and all(entry.get("generation") for entry in entries):
         segment_scores = []
         for index, entry in enumerate(entries, 1):
@@ -3258,17 +3567,35 @@ def _gemini_reverse_schema():
             },
         },
     }
+    transition = {
+        "type": "object", "additionalProperties": False,
+        "required": ["type", "description", "evidence_seconds"],
+        "properties": {
+            "type": {
+                "type": "string",
+                "enum": sorted(_REVERSE_TRANSITION_TYPES),
+            },
+            "description": {"type": "string"},
+            "evidence_seconds": {
+                "type": "array",
+                "items": {"type": "number", "minimum": 0},
+                "maxItems": 3,
+            },
+        },
+    }
     return {
         "type": "object", "additionalProperties": False, "required": ["shots"],
         "properties": {"shots": {
             "type": "array", "minItems": 1, "maxItems": 4,
             "items": {
                 "type": "object", "additionalProperties": False,
-                "required": ["start_seconds", "end_seconds", "cut_from_previous", "facts", "generation_advice"],
+                "required": [
+                    "segment_id", "transition_from_previous", "facts",
+                    "generation_advice",
+                ],
                 "properties": {
-                    "start_seconds": {"type": "number", "minimum": 0},
-                    "end_seconds": {"type": "number", "minimum": 0},
-                    "cut_from_previous": {"type": "boolean"},
+                    "segment_id": {"type": "integer", "minimum": 1},
+                    "transition_from_previous": transition,
                     "facts": {
                         "type": "array",
                         "minItems": len(_GEMINI_FACT_FIELDS),
@@ -3480,13 +3807,15 @@ def _gemini_delete_file(file_info, api_key, deadline=None, heartbeat=None):
 
 
 def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartbeat=None,
-                       inline_payload_bytes=None, title="", platform="", transcript=""):
+                       inline_payload_bytes=None, title="", platform="", transcript="",
+                       windows=None):
     size = os.path.getsize(path)
     if size <= 0 or size > _GEMINI_MAX_MEDIA_BYTES:
         raise ValueError("Gemini reverse media size is outside the allowed range")
     if inline_payload_bytes is None:
         inline_payload_bytes = _gemini_inline_payload_bytes(
             path, mime_type, title, duration, platform, transcript,
+            windows=windows,
         )
     projected = int(inline_payload_bytes)
     if (size <= _GEMINI_INLINE_MAX_BYTES
@@ -3501,7 +3830,22 @@ def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartb
     return {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}, uploaded
 
 
-def _gemini_reverse_instruction(title, duration, platform, transcript, retry_error=""):
+def _gemini_reverse_instruction(
+    title, duration, platform, transcript, windows=None, retry_error="",
+):
+    windows = list(
+        windows
+        or _build_authoritative_reverse_timeline(duration)["windows"]
+    )
+    authoritative_segments = [
+        {
+            "segment_id": index,
+            "start_seconds": start,
+            "end_seconds": end,
+            "display_range": label,
+        }
+        for index, (start, end, label) in enumerate(windows, 1)
+    ]
     retry = ""
     if retry_error:
         retry = (
@@ -3514,16 +3858,22 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         'Return only one complete minified JSON object with exactly the root key "shots"; '
         'no markdown or wrapper; no indentation or line breaks. Keep every value concise and evidence-bound; '
         'do not repeat the same description in multiple fact values. '
-        'Each shots item must have exactly start_seconds, end_seconds, cut_from_previous, facts, '
-        'and generation_advice. facts must be an array with exactly one row for every key, in this order: %s. '
+        'Each shots item must have exactly segment_id, transition_from_previous, facts, '
+        'and generation_advice. Never return start_seconds or end_seconds. '
+        'facts must be an array with exactly one row for every key, in this order: %s. '
         'Each fact row must have exactly key, value, and evidence_seconds. evidence_seconds must be an array '
         'of 1-3 timestamps inside the current shot for an observed value, or [] for unknown/not_applicable. '
+        'transition_from_previous must have exactly type, description, and evidence_seconds. '
+        'For segment 1 use type none, description not_applicable, and []. For later segments classify only '
+        'the server-provided boundary as hard_cut, fade, dissolve, wipe, occlusion, whip_pan, push_pull, '
+        'or unknown; do not create or move a boundary. Use [] for unknown. '
         'generation_advice must have exactly '
         'aspect_ratio, fps, camera_control, and negative_prompt. '
     ) % ", ".join(_GEMINI_FACT_FIELDS)
     return (
-        "Analyze the complete original video. Detect hard cuts first. Return 1-4 gap-free shots "
-        "covering 0.0 through %.1f seconds with 0.1-second precision. Facts and generation advice "
+        "Analyze the complete original video using exactly the authoritative server segments below. "
+        "Return exactly one shots item for each segment_id, in ascending order. The server owns all "
+        "timeline boundaries; never add, remove, merge, split, or move a segment. Facts and generation advice "
         "must remain separate. Every visible fact must cite evidence_seconds inside its shot. "
         "Return facts as exactly one row per required key; each row contains key, value, and "
         "evidence_seconds. Never repeat or omit a fact key. "
@@ -3549,10 +3899,14 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
         "temporal differences; every non-sentinel value must contain shot-specific visible evidence, "
         "and never invent differences merely to avoid duplication. "
         "Write fact values and generation advice in Chinese, except the two exact sentinel values. %s"
-        "Title: %s. Platform: %s. Verified ASR: %s. %s"
+        "Authoritative segments: %s. Title: %s. Platform: %s. Verified ASR: %s. %s"
     ) % (
-        max(0.1, float(duration or 0.1)),
         output_contract,
+        json.dumps(
+            authoritative_segments,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
         str(title or "")[:200],
         str(platform or "")[:40],
         str(transcript or "(none)")[:3000],
@@ -3560,7 +3914,10 @@ def _gemini_reverse_instruction(title, duration, platform, transcript, retry_err
     )
 
 
-def _gemini_request_body(media_part, title, duration, platform, transcript, validation_error=""):
+def _gemini_request_body(
+    media_part, title, duration, platform, transcript, windows=None,
+    validation_error="",
+):
     return {
         "systemInstruction": {
             "parts": [{"text": "You are an evidence-bound video prompt reverse director."}],
@@ -3570,7 +3927,8 @@ def _gemini_request_body(media_part, title, duration, platform, transcript, vali
             "parts": [
                 media_part,
                 {"text": _gemini_reverse_instruction(
-                    title, duration, platform, transcript, validation_error,
+                    title, duration, platform, transcript, windows,
+                    validation_error,
                 )},
             ],
         }],
@@ -3590,12 +3948,16 @@ def _gemini_request_body(media_part, title, duration, platform, transcript, vali
     }
 
 
-def _gemini_inline_payload_bytes(path, mime_type, title, duration, platform, transcript):
+def _gemini_inline_payload_bytes(
+    path, mime_type, title, duration, platform, transcript, windows=None,
+):
     size = os.path.getsize(path)
     encoded_size = 4 * ((size + 2) // 3)
     placeholder = {"inline_data": {"mime_type": mime_type, "data": ""}}
     body = _gemini_request_body(
-        placeholder, title, duration, platform, transcript, "x" * 300,
+        placeholder, title, duration, platform, transcript,
+        windows=windows,
+        validation_error="x" * 300,
     )
     return len(json.dumps(body, ensure_ascii=False).encode("utf-8")) + encoded_size
 
@@ -3664,13 +4026,40 @@ def _gemini_evidence_to_local(times, start, end):
 def _render_gemini_entry_text(entry):
     fields = entry.get("fields") or {}
     advice = entry.get("generation_advice") or {}
-    parts = [
+    parts = []
+    transition = entry.get("transition_from_previous") or {}
+    if transition.get("boundary_id") is not None:
+        type_labels = {
+            "hard_cut": "直接硬切",
+            "fade": "淡入淡出",
+            "dissolve": "叠化",
+            "wipe": "划像",
+            "occlusion": "遮挡转场",
+            "whip_pan": "甩镜转场",
+            "push_pull": "推拉转场",
+            "unknown": "转场类型无法确认",
+        }
+        transition_text = "%d秒转场: %s" % (
+            int(transition.get("display_at_second") or 0),
+            type_labels.get(
+                str(transition.get("type") or ""),
+                str(transition.get("type") or ""),
+            ),
+        )
+        description = str(transition.get("description") or "").strip()
+        if description not in {"", _GEMINI_NOT_APPLICABLE}:
+            transition_text += "; " + description
+        duration = float(transition.get("duration_seconds") or 0.0)
+        if duration > 0:
+            transition_text += "; duration %.1fs" % duration
+        parts.append(transition_text)
+    parts.extend([
         "subject: " + str(fields.get("subject") or ""),
         "action: " + str(fields.get("action") or ""),
         "scene: " + str(fields.get("scene") or ""),
         "camera: " + str(fields.get("camera") or ""),
         "lighting/style: " + str(fields.get("lighting") or ""),
-    ]
+    ])
     if fields.get("sound"):
         parts.append("verified sound/ASR: " + str(fields["sound"]))
     if fields.get("subtitles"):
@@ -3712,7 +4101,7 @@ def _omit_unsupported_gemini_sound(entry, reason):
     notice = {"field": "sound", "reason": reason}
     if notice not in omitted:
         omitted.append(notice)
-    summary = dict(entry.get("validation_summary") or {})
+    summary = _gemini_validation_summary(entry)
     summary["omitted_unsupported_fields"] = list(omitted)
     entry["validation_summary"] = summary
     entry["text"] = _render_gemini_entry_text(entry)
@@ -3752,7 +4141,42 @@ def _gemini_expand_fact_rows(rows):
     return facts, evidence
 
 
-def _parse_gemini_reverse_result(raw, duration):
+def _gemini_validation_summary(entry):
+    readiness = entry.get("readiness") or {}
+    applicable = int(readiness.get("applicable") or 0)
+    ready = int(readiness.get("ready") or 0)
+    percent = round(100.0 * ready / applicable, 1) if applicable else 0.0
+    return {
+        "source_evidence_coverage": 100 if applicable else 0,
+        "generation_readiness": percent,
+        "factual_consistency": 100,
+    }
+
+
+def _validate_authoritative_reverse_windows(windows):
+    values = list(windows or [])
+    if not 1 <= len(values) <= _REVERSE_MAX_SEGMENTS:
+        raise ValueError("Server reverse timeline must contain 1-4 segments")
+    validated = []
+    previous_end = 0.0
+    for index, window in enumerate(values, 1):
+        if not isinstance(window, (list, tuple)) or len(window) != 3:
+            raise ValueError(
+                "Server reverse segment %d has an invalid window" % index
+            )
+        start, end, label = float(window[0]), float(window[1]), str(window[2])
+        if abs(start - previous_end) > 0.01 or end <= start:
+            raise ValueError(
+                "Server reverse segment %d is not gap-free "
+                "(previous_end=%.1f, start=%.1f, end=%.1f)"
+                % (index, previous_end, start, end)
+            )
+        validated.append((start, end, label))
+        previous_end = end
+    return validated
+
+
+def _parse_gemini_reverse_result(raw, windows):
     try:
         result = json.loads(str(raw or ""))
     except Exception as error:
@@ -3760,25 +4184,140 @@ def _parse_gemini_reverse_result(raw, duration):
     if not isinstance(result, dict) or set(result) != {"shots"}:
         raise ValueError("Gemini reverse output root does not match schema")
     shots = result.get("shots")
-    if not isinstance(shots, list) or not 1 <= len(shots) <= 4:
-        raise ValueError("Gemini reverse output must contain 1-4 shots")
-    expected_duration = max(0.1, round(float(duration or 0.1), 1))
-    entries, windows = [], []
-    previous_end = 0.0
-    for index, shot in enumerate(shots, 1):
+    # Numeric duration remains a direct-helper compatibility input only.
+    # Production callers always pass the FFmpeg-owned authoritative windows.
+    if isinstance(windows, (int, float)) and isinstance(shots, list) and shots:
+        helper_duration = max(0.1, _round_tenth(windows))
+        helper_boundaries = [
+            _round_tenth(index * helper_duration / len(shots))
+            for index in range(len(shots) + 1)
+        ]
+        helper_boundaries[-1] = helper_duration
+        windows = [
+            (
+                helper_boundaries[index],
+                helper_boundaries[index + 1],
+                _reverse_display_range(
+                    helper_boundaries[index],
+                    helper_boundaries[index + 1],
+                ),
+            )
+            for index in range(len(shots))
+        ]
+    windows = _validate_authoritative_reverse_windows(windows)
+    if not isinstance(shots, list) or len(shots) != len(windows):
+        raise ValueError(
+            "Gemini reverse output segment count mismatch: expected %d "
+            "segments with ids %s, received %d"
+            % (
+                len(windows),
+                ",".join(str(index) for index in range(1, len(windows) + 1)),
+                len(shots) if isinstance(shots, list) else 0,
+            )
+        )
+    entries = []
+    for index, (shot, window) in enumerate(zip(shots, windows), 1):
         compact_required = {
-            "start_seconds", "end_seconds", "cut_from_previous", "facts",
+            "segment_id", "transition_from_previous", "facts",
             "generation_advice",
         }
         legacy_required = compact_required | {"evidence_seconds"}
         if (not isinstance(shot, dict)
                 or (set(shot) != compact_required and set(shot) != legacy_required)):
             raise ValueError("Gemini shot %d does not match schema" % index)
-        start, end = round(float(shot["start_seconds"]), 1), round(float(shot["end_seconds"]), 1)
-        if abs(start - previous_end) > 0.11 or end <= start:
-            raise ValueError("Gemini shot timeline is not gap-free")
-        if index == 1 and bool(shot["cut_from_previous"]):
-            raise ValueError("The first Gemini shot cannot cut from a previous shot")
+        try:
+            segment_id = int(shot["segment_id"])
+        except (TypeError, ValueError):
+            raise ValueError(
+                "Gemini segment %d has an invalid segment_id; expected %d"
+                % (index, index)
+            )
+        if segment_id != index:
+            raise ValueError(
+                "Gemini segment order mismatch at position %d: expected "
+                "segment_id %d, received %d; valid server range is %s"
+                % (index, index, segment_id, window[2])
+            )
+        start, end, timeline = window
+        transition = shot["transition_from_previous"]
+        if (
+            not isinstance(transition, dict)
+            or set(transition)
+            != {"type", "description", "evidence_seconds"}
+        ):
+            raise ValueError(
+                "Gemini segment %d transition_from_previous does not "
+                "match schema" % index
+            )
+        transition_type = str(transition["type"] or "").strip().lower()
+        transition_description = _gemini_fact_text(
+            transition["description"]
+        )
+        transition_evidence = transition["evidence_seconds"]
+        if transition_type not in _REVERSE_TRANSITION_TYPES:
+            raise ValueError(
+                "Gemini segment %d transition type is invalid" % index
+            )
+        if not isinstance(transition_evidence, list) or len(transition_evidence) > 3:
+            raise ValueError(
+                "Gemini segment %d transition evidence must contain at "
+                "most 3 timestamps" % index
+            )
+        if index == 1:
+            if (
+                transition_type != "none"
+                or transition_description != _GEMINI_NOT_APPLICABLE
+                or transition_evidence
+            ):
+                raise ValueError(
+                    "Gemini segment 1 transition must be none with "
+                    "not_applicable and no evidence"
+                )
+        elif transition_type == "none":
+            raise ValueError(
+                "Gemini segment %d must classify server boundary %d at "
+                "%d seconds" % (
+                    index,
+                    index - 1,
+                    _round_whole_second(start),
+                )
+            )
+        elif transition_type == "unknown":
+            if transition_evidence:
+                raise ValueError(
+                    "Gemini segment %d unknown transition must not cite "
+                    "evidence" % index
+                )
+        else:
+            if not transition_description:
+                raise ValueError(
+                    "Gemini segment %d transition description is empty"
+                    % index
+                )
+            if not transition_evidence:
+                raise ValueError(
+                    "Gemini segment %d transition lacks evidence near "
+                    "server boundary %d at %d seconds"
+                    % (
+                        index,
+                        index - 1,
+                        _round_whole_second(start),
+                    )
+                )
+            for point in transition_evidence:
+                point = float(point)
+                if point < start - 1.01 or point > start + 1.01:
+                    raise ValueError(
+                        "Gemini segment %d transition evidence %.1f is "
+                        "outside boundary %d evidence window %.1f-%.1f"
+                        % (
+                            index,
+                            point,
+                            index - 1,
+                            max(0.0, start - 1.0),
+                            start + 1.0,
+                        )
+                    )
         if set(shot) == compact_required:
             facts, evidence = _gemini_expand_fact_rows(shot["facts"])
         else:
@@ -3892,7 +4431,25 @@ def _parse_gemini_reverse_result(raw, duration):
             "camera": _gemini_evidence_to_local(evidence["shot_scale"] + evidence["camera_angle"] + evidence["composition"], start, end) or [1],
             "lighting": _gemini_evidence_to_local(evidence["lighting_color"], start, end) or [1],
         }
-        timeline = "%.1f-%.1fs" % (start, end)
+        transition_duration = 0.0
+        if len(transition_evidence) >= 2:
+            transition_duration = _round_tenth(
+                max(float(value) for value in transition_evidence)
+                - min(float(value) for value in transition_evidence)
+            )
+        transition_result = {
+            "boundary_id": index - 1 if index > 1 else None,
+            "at_seconds": start if index > 1 else None,
+            "display_at_second": (
+                _round_whole_second(start) if index > 1 else None
+            ),
+            "type": transition_type,
+            "description": transition_description,
+            "duration_seconds": transition_duration,
+            "evidence_seconds": list(transition_evidence),
+            "time_source": "server_ffmpeg",
+            "type_source": "gemini",
+        }
         entry = {
             "text": "",
             "fields": {"subject": subject, "scene": scene, "action": action, "camera": camera,
@@ -3900,29 +4457,40 @@ def _parse_gemini_reverse_result(raw, duration):
                        "continuity": ""},
             "evidence_frames": local_evidence, "continuity_evidence_frames": [],
             "evidence_seconds": evidence, "generation_advice": advice,
-            "cut_from_previous": bool(shot["cut_from_previous"]),
+            "segment_id": segment_id,
+            "transition_from_previous": transition_result,
+            "cut_from_previous": (
+                index > 1 and transition_type not in {"none", "unknown"}
+            ),
             "readiness": {"applicable": applicable, "ready": ready},
+            "structured_generation": True,
         }
         if lightweight_corrections:
             entry["lightweight_corrections"] = lightweight_corrections
+        entry["validation_summary"] = _gemini_validation_summary(entry)
         entry["text"] = _render_gemini_entry_text(entry)
         entries.append(entry)
-        windows.append((start, end, timeline))
-        previous_end = end
-    if abs(previous_end - expected_duration) > 0.11:
-        raise ValueError("Gemini shot timeline does not cover the full media duration")
     return {"entries": entries, "windows": windows}
 
 
-def _validate_gemini_reverse_entries(prompt_result, frames, script_text):
+def _validate_gemini_reverse_entries(prompt_result, frames, script_text, frame_pts=None):
     _bind_gemini_sound_evidence(prompt_result, script_text)
     entries = prompt_result.get("entries") or []
     windows = prompt_result.get("windows") or []
-    frame_groups = _reverse_model_frame_groups(frames, len(windows))
+    frame_groups = _reverse_model_frame_groups(
+        frames, windows, frame_pts=frame_pts
+    )
     accepted = []
     for index, (entry, window, frame_group) in enumerate(
         zip(entries, windows, frame_groups), 1
     ):
+        if len(frame_group) == 1:
+            entry["evidence_frames"] = {
+                key: [1] if values else []
+                for key, values in (
+                    entry.get("evidence_frames") or {}
+                ).items()
+            }
         transcript = _segment_transcript(script_text, window[0], window[1])
         _validate_reverse_segment_evidence(
             entry, accepted, frame_group, index,
@@ -3970,12 +4538,14 @@ def _gemini_validation_retry_error(error, parsed):
     return (
         "%s. Rewatch the original video intervals for shot %d (%.1f-%.1fs) "
         "and shot %d (%.1f-%.1fs) independently. Do not copy either rejected "
-        "shot text. If there is no evidence-backed cut or visual difference, "
-        "merge the intervals into one shot and return a gap-free timeline. "
-        "If they are distinct shots, describe at least one directly visible "
+        "shot text. Keep both server-owned segment IDs and intervals unchanged; "
+        "never merge, delete, split, move, or renumber either shot. Describe at "
+        "least one directly visible "
         "difference in subject, action, scene, camera, or lighting, with "
         "evidence_seconds inside the corresponding interval. Never invent a "
-        "difference merely to pass validation."
+        "difference merely to pass validation. If no difference can be "
+        "verified, return only evidence-bound values and accept strict "
+        "validation failure rather than changing the authoritative timeline."
     ) % (
         message,
         previous_index, float(previous[0]), float(previous[1]),
@@ -3984,16 +4554,21 @@ def _gemini_validation_retry_error(error, parsed):
 
 
 def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform, transcript,
-                                      deadline=None, heartbeat=None):
+                                      deadline=None, heartbeat=None, timeline=None):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
+    timeline = timeline or _authoritative_reverse_timeline(path, duration)
+    windows = _validate_authoritative_reverse_windows(
+        timeline.get("windows") or [],
+    )
     uploaded = None
     try:
         media_part, uploaded = _gemini_media_part(
             path, mime_type, duration, api_key,
             deadline=deadline, heartbeat=heartbeat,
             title=title, platform=platform, transcript=transcript,
+            windows=windows,
         )
         if uploaded:
             uploaded = _gemini_wait_for_file_active(
@@ -4001,16 +4576,21 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
             )
             media_part = {"file_data": {"mime_type": mime_type, "file_uri": uploaded["uri"]}}
         validation_error = ""
+        attempt_audit = []
         for attempt in range(2):
             body = _gemini_request_body(
-                media_part, title, duration, platform, transcript, validation_error,
+                media_part, title, duration, platform, transcript, windows,
+                validation_error,
             )
+            started_at = time.monotonic()
             response = _gemini_json_request(
                 _GEMINI_API_BASE + "/v1beta/models/" + _GEMINI_REVERSE_MODEL + ":generateContent",
                 body, api_key, deadline=deadline, heartbeat=heartbeat)
             parsed = None
+            raw_text = ""
             try:
-                parsed = _parse_gemini_reverse_result(_gemini_candidate_text(response), duration)
+                raw_text = _gemini_candidate_text(response)
+                parsed = _parse_gemini_reverse_result(raw_text, windows)
                 _bind_gemini_sound_evidence(parsed, transcript)
                 # Run deterministic duplicate/length checks while the original
                 # media is still available for the one allowed validation
@@ -4020,11 +4600,42 @@ def _gemini_reverse_prompt_from_media(path, mime_type, title, duration, platform
                     parsed["windows"],
                     enforce_length_limits=False,
                 )
-                parsed.update({"provider": "google", "model": _GEMINI_REVERSE_MODEL, "attempts": attempt + 1})
+                attempt_audit.append({
+                    "attempt": attempt + 1,
+                    "http_status": 200,
+                    "response_chars": len(raw_text),
+                    "elapsed_ms": int(
+                        round((time.monotonic() - started_at) * 1000)
+                    ),
+                    "validation": "passed",
+                })
+                parsed.update({
+                    "provider": "google",
+                    "model": _GEMINI_REVERSE_MODEL,
+                    "attempts": attempt + 1,
+                    "attempt_audit": attempt_audit,
+                    "timeline_audit": json.loads(json.dumps(
+                        timeline, ensure_ascii=False,
+                    )),
+                })
                 return parsed
             except ValueError as error:
                 validation_error = _gemini_validation_retry_error(
                     error, parsed,
+                )
+                attempt_audit.append({
+                    "attempt": attempt + 1,
+                    "http_status": 200,
+                    "response_chars": len(raw_text),
+                    "elapsed_ms": int(
+                        round((time.monotonic() - started_at) * 1000)
+                    ),
+                    "validation": "failed",
+                    "error": str(error)[:500],
+                })
+                print(
+                    "[breakdown] gemini validation attempt=%d failed=%s"
+                    % (attempt + 1, str(error)[:500])
                 )
                 if attempt:
                     raise
@@ -4569,22 +5180,50 @@ def _format_transcript(segs):
     return str(segs)
 
 
+_SHOWINFO_PTS_PATTERN = re.compile(
+    r"pts_time:(-?[0-9]+(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)"
+)
+
+
+def _parse_showinfo_pts(stderr_text):
+    """从 ffmpeg showinfo 的 stderr 逐帧解析真实输出 PTS（秒）。"""
+    points = []
+    for line in str(stderr_text or "").splitlines():
+        if "showinfo" not in line:
+            continue
+        match = _SHOWINFO_PTS_PATTERN.search(line)
+        if match:
+            points.append(float(match.group(1)))
+    return points
+
+
+def _showinfo_pts_from_completed(completed):
+    stderr = getattr(completed, "stderr", b"") or b""
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    return _parse_showinfo_pts(stderr)
+
+
 def _extract_frames(video_path, count=6, duration=30, scale_width=512,
-                    min_frames=None, uniform=False):
-    """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])"""
+                    min_frames=None, uniform=False, return_pts=False):
+    """ffmpeg 抽帧：场景检测 + 均匀采样兜底。返回 (outdir, [paths])；
+    return_pts=True 时返回 (outdir, [paths], [pts_seconds])，PTS 取自
+    ffmpeg showinfo 输出的真实帧时间戳，与帧路径一一绑定。"""
     count = max(2, min(count, 12))  # 限制 2-12 帧，防止异常参数
     scale_width = max(256, min(int(scale_width or 512), 2048))
     outdir = tempfile.mkdtemp()
+    pts_seconds = []
     if not uniform:
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
                  "-i", video_path,
-                 "-vf", "select='gt(scene,0.15)',scale=%d:-1" % scale_width,
+                 "-vf", "select='gt(scene,0.15)',showinfo,scale=%d:-1" % scale_width,
                  "-vsync", "vfr", "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            pts_seconds = _showinfo_pts_from_completed(completed)
         except subprocess.CalledProcessError:
             pass  # 场景检测失败 → 退到均匀采样
     frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
@@ -4599,20 +5238,93 @@ def _extract_frames(video_path, count=6, duration=30, scale_width=512,
         outdir = tempfile.mkdtemp()
         fps = max(float(count) / max(float(duration or 1), 1.0), 0.001)
         try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
                  "-i", video_path,
-                 "-vf", "fps=%.6f,scale=%d:-1" % (fps, scale_width),
+                 "-vf", "fps=%.6f,showinfo,scale=%d:-1" % (fps, scale_width),
                  "-vframes", str(count),
                  "%s/frame_%%d.jpg" % outdir],
                 check=True, timeout=60,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            pts_seconds = _showinfo_pts_from_completed(completed)
         except subprocess.CalledProcessError:
             pass  # 均匀采样也失败 → 返回已有帧（可能 0 张，GPT-4o 仍可纯文本分析）
         frames = sorted([os.path.join(outdir, f) for f in os.listdir(outdir)
                          if f.endswith(".jpg")],
                         key=lambda p: int(os.path.splitext(os.path.basename(p))[0].split("_")[-1]))
+    if len(pts_seconds) != len(frames):
+        # showinfo 解析失败时按 ffmpeg fps 滤镜的确定性输出时间戳兜底：
+        # fps=count/duration 第 i 帧输出 PTS = i*duration/count（起点为 0）。
+        pts_seconds = [
+            index * float(duration or len(frames)) / max(len(frames), 1)
+            for index in range(len(frames))
+        ]
+    if return_pts:
+        return outdir, frames, pts_seconds
     return outdir, frames
+
+
+def _split_extracted_frames(extracted):
+    """兼容返回 (outdir, frames) 的旧测试桩与 (outdir, frames, pts) 新契约。"""
+    if len(extracted) == 3:
+        return extracted[0], list(extracted[1]), list(extracted[2])
+    return extracted[0], list(extracted[1]), None
+
+
+def _fill_reverse_window_frames(video_path, frame_dir, frames, frame_pts,
+                                windows, scale_width=1024):
+    """为没有任何采样帧落入的权威窗口在该窗口内补抽一帧。
+
+    只用 ffmpeg -ss/-to 在空窗口内部取帧，并记录其真实 PTS 后按时间序插入
+    帧序列；绝不把其他窗口的既有帧重映射进空窗口伪造证据。补抽失败时保留
+    空窗口，由下游分组校验抛出“证据不足”错误。
+    """
+    ordered = list(frames or [])
+    if frame_pts is None or not ordered or not windows:
+        return ordered, frame_pts
+    pts_seconds = [float(value) for value in frame_pts]
+    if len(pts_seconds) != len(ordered):
+        return ordered, frame_pts
+    groups = _group_reverse_frame_indices(
+        len(ordered), windows, frame_pts=pts_seconds
+    )
+    if not groups or all(groups):
+        return ordered, pts_seconds
+    scale_width = max(256, min(int(scale_width or 1024), 2048))
+    directory = frame_dir or os.path.dirname(ordered[0]) or tempfile.mkdtemp()
+    for window_index, group in enumerate(groups):
+        if group:
+            continue
+        start = float(windows[window_index][0])
+        end = float(windows[window_index][1])
+        output = os.path.join(
+            directory, "frame_window_%d.jpg" % (window_index + 1)
+        )
+        try:
+            completed = subprocess.run(
+                ["ffmpeg", "-y", "-hide_banner", "-loglevel", "info",
+                 "-ss", "%.3f" % start, "-to", "%.3f" % end,
+                 "-i", video_path,
+                 "-vf", "scale=%d:-1,showinfo" % scale_width,
+                 "-frames:v", "1", output],
+                check=True, timeout=30,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                OSError):
+            continue
+        if not os.path.isfile(output):
+            continue
+        showinfo = _showinfo_pts_from_completed(completed)
+        # 输入级 -ss 会把时间戳重置为 0，真实源时间 = 窗口起点 + 帧 PTS。
+        at_seconds = start + showinfo[0] if showinfo else (start + end) / 2.0
+        if not (start <= at_seconds < end):
+            at_seconds = (start + end) / 2.0
+        position = 0
+        while position < len(pts_seconds) and pts_seconds[position] <= at_seconds:
+            position += 1
+        ordered.insert(position, output)
+        pts_seconds.insert(position, at_seconds)
+    return ordered, pts_seconds
 
 
 def _pair_reverse_frames(frame_dir, frames):

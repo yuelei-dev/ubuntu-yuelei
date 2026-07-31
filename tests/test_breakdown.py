@@ -4,8 +4,10 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import ssl
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -785,7 +787,7 @@ class BreakdownTests(unittest.TestCase):
                 return transcript if transcript is not None else [{"start": 0, "end": 3, "text": "先看门头"}]
 
         self.breakdown._heartbeat = lambda job_id, phase: calls.setdefault("phases", []).append(phase)
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False, return_pts=False: (
             "fake-frame-dir",
             ["frame_1.jpg", "frame_2.jpg"],
         )
@@ -888,9 +890,14 @@ class BreakdownTests(unittest.TestCase):
                     evidence[key] = [round(start + 0.1, 1)]
             evidence["action_end"] = [round(end - 0.1, 1)]
             shots.append({
-                "start_seconds": start,
-                "end_seconds": end,
-                "cut_from_previous": index > 0,
+                "segment_id": index + 1,
+                "transition_from_previous": {
+                    "type": "hard_cut" if index > 0 else "none",
+                    "description": (
+                        "直接硬切" if index > 0 else "not_applicable"
+                    ),
+                    "evidence_seconds": [start] if index > 0 else [],
+                },
                 "facts": facts,
                 "evidence_seconds": evidence,
                 "generation_advice": {
@@ -1321,7 +1328,7 @@ class BreakdownTests(unittest.TestCase):
             ),
             transcript=None,
         )
-        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False: (
+        self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512, min_frames=None, uniform=False, return_pts=False: (
             "fake-frame-dir",
             [thumb.name] * 8,
         )
@@ -3991,7 +3998,7 @@ class BreakdownTests(unittest.TestCase):
 
         def fake_extract(
             path, count, duration, scale_width=512, min_frames=None,
-            uniform=False,
+            uniform=False, return_pts=False,
         ):
             calls["extract_args"] = (count, scale_width, min_frames, uniform)
             return "frames-dir", ["f%d.jpg" % i for i in range(1, 9)]
@@ -4236,6 +4243,121 @@ class BreakdownTests(unittest.TestCase):
             self.assertIn("fps=", calls[1][calls[1].index("-vf") + 1])
         finally:
             if frame_dir:
+                shutil.rmtree(frame_dir, ignore_errors=True)
+
+    def _synth_three_shot_video(self, tmpdir):
+        """本地 ffmpeg 合成 黑1s/白8s/红1s 三段硬切测试视频（共 10 秒）。"""
+        path = os.path.join(tmpdir, "three_shots.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=320x240:d=1:r=8",
+             "-f", "lavfi", "-i", "color=white:s=320x240:d=8:r=8",
+             "-f", "lavfi", "-i", "color=red:s=320x240:d=1:r=8",
+             "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]",
+             "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", path],
+            check=True, timeout=60,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return path
+
+    @staticmethod
+    def _jpeg_mean_rgb(path):
+        raw = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error",
+             "-i", path, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+            check=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout
+        total = len(raw) // 3 * 3
+        return (
+            sum(raw[0:total:3]) / float(total // 3),
+            sum(raw[1:total:3]) / float(total // 3),
+            sum(raw[2:total:3]) / float(total // 3),
+        )
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "需要本地 ffmpeg")
+    def test_extract_frames_binds_real_ffmpeg_pts(self):
+        """抽帧必须记录每张帧的真实 FFmpeg PTS，而非均匀假设的时间。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = self._synth_three_shot_video(tmpdir)
+            frame_dir, frames, pts = self.breakdown._extract_frames(
+                video, 8, 10.0, scale_width=1024, min_frames=8,
+                uniform=True, return_pts=True,
+            )
+            try:
+                self.assertEqual(len(frames), 8)
+                self.assertEqual(len(pts), 8)
+                # fps=8/10 滤镜的真实输出 PTS：0, 1.25, 2.5, ..., 8.75
+                for index, actual in enumerate(pts):
+                    self.assertAlmostEqual(actual, index * 1.25, delta=0.3)
+            finally:
+                shutil.rmtree(frame_dir, ignore_errors=True)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "需要本地 ffmpeg")
+    def test_unequal_windows_group_frames_by_real_pts(self):
+        """非等长权威窗口下，每帧按真实 PTS 落窗（真实合成素材 + 真实场景检测）。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = self._synth_three_shot_video(tmpdir)
+            timeline = self.breakdown._authoritative_reverse_timeline(video, 10.0)
+            windows = timeline["windows"]
+            self.assertEqual(
+                [(round(start, 1), round(end, 1)) for start, end, _label in windows],
+                [(0.0, 1.0), (1.0, 9.0), (9.0, 10.0)],
+            )
+            frame_dir, frames, pts = self.breakdown._extract_frames(
+                video, 8, 10.0, scale_width=1024, min_frames=8,
+                uniform=True, return_pts=True,
+            )
+            try:
+                groups = self.breakdown._group_reverse_frame_indices(
+                    len(frames), windows, frame_pts=pts,
+                )
+                # 第 8 帧真实 PTS 为 8.75s，属于 1-9 秒窗口；旧的均匀假设
+                # 会把它错映射到 10s → 9-10 秒窗口。
+                self.assertEqual(groups, [[1], [2, 3, 4, 5, 6, 7, 8], []])
+            finally:
+                shutil.rmtree(frame_dir, ignore_errors=True)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "需要本地 ffmpeg")
+    def test_empty_authoritative_window_resamples_inside_window(self):
+        """空权威窗口触发窗口内补抽，绝不重映射既有帧伪造证据。"""
+        windows = [
+            (0.0, 1.0, "0-1秒"),
+            (1.0, 9.0, "1-9秒"),
+            (9.0, 10.0, "9-10秒"),
+        ]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            video = self._synth_three_shot_video(tmpdir)
+            frame_dir, frames, pts = self.breakdown._extract_frames(
+                video, 8, 10.0, scale_width=1024, min_frames=8,
+                uniform=True, return_pts=True,
+            )
+            try:
+                filled, filled_pts = self.breakdown._fill_reverse_window_frames(
+                    video, frame_dir, frames, pts, windows,
+                )
+                # 既有 8 帧与其 PTS 原样保留，只新增窗口内补抽帧
+                self.assertEqual(len(filled), 9)
+                self.assertEqual(filled[:8], frames)
+                self.assertEqual(filled_pts[:8], list(pts))
+                new_pts = filled_pts[8]
+                self.assertGreaterEqual(new_pts, 9.0)
+                self.assertLess(new_pts, 10.0)
+                groups = self.breakdown._group_reverse_frame_indices(
+                    len(filled), windows, frame_pts=filled_pts,
+                )
+                self.assertEqual(groups, [[1], [2, 3, 4, 5, 6, 7, 8], [9]])
+                # 补抽帧真实来自 9-10 秒窗口（红色画面），不是伪造证据
+                red, green, blue = self._jpeg_mean_rgb(filled[8])
+                self.assertGreater(red, green + 40)
+                self.assertGreater(red, blue + 40)
+                # bundle 端到端消费一致
+                bundle = self.breakdown._reverse_frame_bundle(
+                    filled, windows, frame_pts=filled_pts,
+                )
+                self.assertEqual(
+                    bundle["segment_source_indices"],
+                    [[1], [2, 3, 4, 5, 6, 7, 8], [9]],
+                )
+            finally:
                 shutil.rmtree(frame_dir, ignore_errors=True)
 
     def test_gen_breakdown_single_url_still_works(self):
