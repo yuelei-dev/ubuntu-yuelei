@@ -683,7 +683,14 @@ DRAIN_TIMEOUT = _env_positive_int("CONTENT_DRAIN_TIMEOUT", 1200)
 def is_shutting_down(): return _shutting_down.is_set()
 
 # CAS 抢终态 / 退点幂等：实现在 content_domains/jobs_store.py，三个共写 jobs 表的服务共用一份。
-def _set_terminal(job_id, status, result=None, error=None, from_states=("running",)): return jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
+def _set_terminal(job_id, status, result=None, error=None, from_states=("running",)):
+    claimed = jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
+    if claimed:
+        try:
+            _domains()[2].cleanup_job_staged_seedance_references(job_id)  # Seedance 参考图暂存对象随终态清理(best-effort)
+        except Exception:
+            pass
+    return claimed
 
 def _refund_once(job_id, username, cost):
     # safe_refund_points 吞掉异常并返回当前点数，不让退点接口故障影响主流程 → 视为永远成功。
@@ -1408,9 +1415,25 @@ class H(BaseHTTPRequestHandler):
                     return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
                         "code": "active_job_cap", "active_jobs": active_jobs, "max_active_jobs": MAX_USER_ACTIVE_JOBS,
                         "retry_after_ms": 4000, "need": cost})
-                # Seedance 参考图转存必须在幂等/上限/余额资格检查之后、扣点之前；后续失败一律清理已传对象。
-                staged_ref_keys, staging_error = video_domain.stage_xiaole_video_references(kind, body, user["username"], cost, points_domain)
-                if staging_error: _idempotency_abort(user["username"], p, idem_key); return self._send(*staging_error)
+                # 余额资格预检（快速本地口径）：不足直接拒，不产生任何 COS 对象；原子扣点仍是最终裁决。
+                precheck_error = video_domain.xiaole_reference_precheck(kind, body, user["username"], cost, points_domain)
+                if precheck_error: _idempotency_abort(user["username"], p, idem_key); return self._send(*precheck_error)
+            # COS 网络上传放在全局提交锁外：最多 9 张图的上传耗时不能阻塞所有用户的提交。
+            # 幂等行已占位(processing)，同 Key 并发请求此时拿 409；转存失败不扣点、不建任务。
+            staged_ref_keys, staging_error = video_domain.stage_xiaole_video_references(kind, body, user["username"], idem_key)
+            if staging_error: _idempotency_abort(user["username"], p, idem_key); return self._send(*staging_error)
+            with _submission_lock:
+                # 上传期间槽位可能被别人抢走：扣点前重查上限；失败同样清理已传对象。
+                limit_hit = _user_video_submit_limit(kind, body, user["username"], cost)
+                if limit_hit:
+                    video_domain.cleanup_staged_seedance_references(staged_ref_keys); _idempotency_abort(user["username"], p, idem_key)
+                    return self._send(429, limit_hit)
+                active_jobs = _user_active_job_count(user["username"])
+                if active_jobs >= MAX_USER_ACTIVE_JOBS:
+                    video_domain.cleanup_staged_seedance_references(staged_ref_keys); _idempotency_abort(user["username"], p, idem_key)
+                    return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
+                        "code": "active_job_cap", "active_jobs": active_jobs, "max_active_jobs": MAX_USER_ACTIVE_JOBS,
+                        "retry_after_ms": 4000, "need": cost})
                 try:
                     points_left = points_domain.deduct_points(user["username"], cost, "job:" + kind)  # 原子预扣
                 except points_domain.AuthPointsError as e:

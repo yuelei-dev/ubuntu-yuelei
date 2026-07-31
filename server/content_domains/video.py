@@ -174,27 +174,32 @@ def _seedance_data_image(value):
 
 
 def _seedance_assert_asset_owned(ref, username=None):
-    """asset://asset-<id> 必须命中当前账号在统一资产表(assets)里的未删素材行。
-    格式正则不证明归属 —— 归属只能由服务端查库核验；库不可读时 fail-closed。"""
+    """asset://asset-<provider_id> 必须命中当前账号在统一资产表里【显式登记】的
+    Seedance 上游素材映射（assets.meta JSON 的 seedance_asset_id 字段）。
+    本地资产行号不等同于上游 asset：没有 provider 映射的普通资产（哪怕编号相同）
+    一律拒绝；库不可读 fail-closed。schema 不变，映射存在现有 meta JSON 字段里。"""
     owner = str(username or "").strip()
     suffix = str(ref or "").split("asset://asset-", 1)[-1]
-    try:
-        asset_id = int(suffix)
-    except (TypeError, ValueError):
-        asset_id = None
-    if asset_id is None or not owner:
+    if not owner or not suffix:
         raise ValueError("Seedance 参考素材不存在或未授权给当前账号")
     try:
         from . import assets_store
         with closing(assets_store.adb()) as c:
-            row = c.execute(
-                "SELECT 1 FROM assets WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
-                (asset_id, owner)).fetchone()
+            rows = c.execute(
+                """SELECT meta FROM assets
+                   WHERE username=? AND COALESCE(deleted,0)=0 AND meta LIKE '%seedance_asset_id%'""",
+                (owner,)).fetchall()
     except Exception as exc:
         print("[seedance] asset ownership check failed: %s" % type(exc).__name__, flush=True)
         raise ValueError("Seedance 参考素材归属核验失败，请稍后重试") from exc
-    if not row:
-        raise ValueError("Seedance 参考素材不存在或未授权给当前账号")
+    for row in rows:
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except Exception:
+            continue
+        if str((meta or {}).get("seedance_asset_id") or "") == suffix:
+            return
+    raise ValueError("Seedance 参考素材不存在或未授权给当前账号")
 
 
 def _seedance_cos_presign(object_key, expire=SEEDANCE_REFERENCE_SIGN_EXPIRE):
@@ -209,7 +214,14 @@ def _seedance_cos_delete(object_key):
     cos._client().delete_object(Bucket=cos._BUCKET, Key=cos._object_key(object_key))
 
 
-def _stage_seedance_reference(value, username=None):
+def _seedance_staging_token(token):
+    """每次提交唯一的对象键成分：优先幂等键（同 Key 重试覆盖同一对象），否则随机 uuid。
+    跨提交不再共享对象键 —— 从源头消除「失败方清理删掉在途方对象」的竞态。"""
+    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(token or ""))[:24]
+    return clean or uuid.uuid4().hex[:24]
+
+
+def _stage_seedance_reference(value, username=None, token=None):
     """把本地 data: 参考图上传为 COS 私有对象，返回 (短期签名URL, 对象键)。
     只被 stage_seedance_references 调用；http(s)/asset:// 透传不产对象。"""
     raw = str(value or "").strip()
@@ -221,7 +233,7 @@ def _stage_seedance_reference(value, username=None):
     mime, ext, data = _seedance_data_image(raw)
     owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
     content_hash = hashlib.sha256(data).hexdigest()
-    object_key = "seedance/reference/%s/%s%s" % (owner_hash, content_hash, ext)
+    object_key = "seedance/reference/%s/%s-%s%s" % (owner_hash, _seedance_staging_token(token), content_hash[:16], ext)
     try:
         from . import cos
         cos.put_bytes(data, object_key, mime, private=True)   # 用户肖像素材强制私有 ACL
@@ -253,20 +265,22 @@ def _validate_seedance_references(values, username=None):
     return out
 
 
-def stage_seedance_references(body, username):
+def stage_seedance_references(body, username, token=None):
     """扣点前的唯一网络动作：micro 渠道的 data: 参考图转存 COS 私有对象、换短期签名 URL。
     任一失败都 best-effort 删除本批已上传对象，绝不残留，也绝不回退 data:。
-    就地改写 body["reference_images"]，返回本批新上传的对象键（供后续失败时清理）。"""
+    就地改写 body["reference_images"]，并把对象键记入 body["_seedance_staged_keys"]
+    （随 jobs.payload 落库，供终态清理），返回本批新上传的对象键。"""
     refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or []) if str(item or "").strip()]
     if str((body or {}).get("channel") or "").strip().lower() != "micro" or not any(item.startswith("data:") for item in refs):
         return []
     if not seedance_reference_upload_is_open():
         raise SeedanceReferenceUnavailable("Seedance 参考图上传服务未配置，本次未扣点")
+    token = _seedance_staging_token(token)
     staged_keys = []
     staged_refs = []
     try:
         for item in refs:
-            url, key = _stage_seedance_reference(item, username)
+            url, key = _stage_seedance_reference(item, username, token)
             staged_refs.append(url)
             if key:
                 staged_keys.append(key)
@@ -274,21 +288,35 @@ def stage_seedance_references(body, username):
         cleanup_staged_seedance_references(staged_keys)
         raise
     body["reference_images"] = staged_refs
+    body["_seedance_staged_keys"] = staged_keys
     return staged_keys
 
 
-def stage_xiaole_video_references(kind, body, username, cost, points_domain):
-    """core 提交路径的薄接线：仅 xiaole_video 且 micro 渠道带 data: 参考图时，
-    先做余额资格预检（原子扣点仍是余额最终裁决），再转存 COS。
-    返回 (staged_keys, None)；失败返回 (None, (status, payload)) 由 core 直接 _send。"""
+def xiaole_reference_needs_staging(kind, body):
+    """该提交是否需要在扣点前做 COS 参考图转存（决定预检/锁外上传是否启用）。"""
     refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or []) if str(item or "").strip()]
-    if kind != "xiaole_video" or str((body or {}).get("channel") or "").strip().lower() != "micro" \
-            or not any(item.startswith("data:") for item in refs):
-        return [], None
+    return (kind == "xiaole_video"
+            and str((body or {}).get("channel") or "").strip().lower() == "micro"
+            and any(item.startswith("data:") for item in refs))
+
+
+def xiaole_reference_precheck(kind, body, username, cost, points_domain):
+    """锁内快速资格检查：仅当需要转存时查余额（原子扣点仍是余额最终裁决）。
+    返回 None 放行，或 (status, payload) 由 core 直接 _send。"""
+    if not xiaole_reference_needs_staging(kind, body):
+        return None
     if points_domain.get_points(username) < cost:
-        return None, (402, {"detail": "点数不足，请先充值（未扣点）", "need": cost})
+        return (402, {"detail": "点数不足，请先充值（未扣点）", "need": cost})
+    return None
+
+
+def stage_xiaole_video_references(kind, body, username, token=None):
+    """锁外网络转存（core 提交路径的薄接线）：COS 上传耗时长，绝不能放在全局提交锁内。
+    返回 (staged_keys, None)；失败返回 (None, (status, payload)) 由 core 直接 _send。"""
+    if not xiaole_reference_needs_staging(kind, body):
+        return [], None
     try:
-        return stage_seedance_references(body, username), None
+        return stage_seedance_references(body, username, token), None
     except SeedanceReferenceUnavailable as e:
         return None, (e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
 
@@ -300,6 +328,19 @@ def cleanup_staged_seedance_references(object_keys):
             _seedance_cos_delete(key)
         except Exception as exc:
             print("[seedance] reference cleanup failed for %s: %s" % (key, type(exc).__name__), flush=True)
+
+
+def cleanup_job_staged_seedance_references(job_id):
+    """终态清理：job 进 done/error 后删除本次暂存的参考图对象。
+    由 core._set_terminal 在 CAS 抢到终态后调用；best-effort，永不阻断主流程。"""
+    try:
+        with closing(jdb()) as c:
+            row = c.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
+        keys = (json.loads(row["payload"] or "{}") if row else {}).get("_seedance_staged_keys") or []
+    except Exception as exc:
+        print("[seedance] terminal cleanup lookup failed for job %s: %s" % (job_id, type(exc).__name__), flush=True)
+        return
+    cleanup_staged_seedance_references(keys)
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。

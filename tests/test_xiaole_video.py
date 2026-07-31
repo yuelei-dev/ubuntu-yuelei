@@ -179,18 +179,26 @@ class XiaoleVideoTests(unittest.TestCase):
                 "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
             second = self.video.validate_xiaole_video_payload({
                 "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
-            first_keys = self.video.stage_seedance_references(first, "fang")
-            second_keys = self.video.stage_seedance_references(second, "fang")
+            first_keys = self.video.stage_seedance_references(first, "fang", "idem-token-a")
+            second_keys = self.video.stage_seedance_references(second, "fang", "idem-token-b")
+            repeat = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
+            repeat_keys = self.video.stage_seedance_references(repeat, "fang", "idem-token-a")
 
-        self.assertEqual(8, put.call_count)
+        self.assertEqual(12, put.call_count)
         for call in put.call_args_list:
             self.assertIs(call.kwargs.get("private"), True)   # 强制私有 ACL
         first_keys_uploaded = [call.args[1] for call in put.call_args_list[:4]]
-        second_keys_uploaded = [call.args[1] for call in put.call_args_list[4:]]
-        self.assertEqual(first_keys_uploaded, second_keys_uploaded)   # 确定性对象键
+        second_keys_uploaded = [call.args[1] for call in put.call_args_list[4:8]]
+        repeat_keys_uploaded = [call.args[1] for call in put.call_args_list[8:]]
+        # 跨提交不共享对象键（消除失败清理竞态）；同幂等键重试覆盖同一对象
+        self.assertNotEqual(first_keys_uploaded, second_keys_uploaded)
+        self.assertEqual(first_keys_uploaded, repeat_keys_uploaded)
         self.assertEqual(4, len(set(first_keys_uploaded)))
-        self.assertRegex(first_keys_uploaded[0], r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{64}\.png$")
+        self.assertRegex(first_keys_uploaded[0],
+                         r"^seedance/reference/[0-9a-f]{16}/idem-token-a-[0-9a-f]{16}\.png$")
         self.assertEqual(first_keys, first_keys_uploaded)
+        self.assertEqual(first_keys, first["_seedance_staged_keys"])   # 随 payload 落库供终态清理
         self.assertEqual(first["reference_images"], second["reference_images"])
         for url in first["reference_images"]:
             self.assertTrue(url.startswith("https://"))
@@ -255,19 +263,32 @@ class XiaoleVideoTests(unittest.TestCase):
              patch.object(assets_store, "_initialized", False):
             assets_store.init_assets()
             from contextlib import closing as _closing
+            import json as _json
             with _closing(assets_store.adb()) as c:
-                c.execute("INSERT INTO assets(id,kind,stage,username,created_at) VALUES(120,'collect','material','fang',1)")
-                c.execute("INSERT INTO assets(id,kind,stage,username,created_at) VALUES(130,'collect','material','other',1)")
+                # 显式登记了 Seedance provider 映射的素材（meta.seedance_asset_id）
+                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(120,'collect','material','fang',?,1)",
+                          (_json.dumps({"seedance_asset_id": "prov-abc123"}),))
+                # 普通 copy 资产：没有 provider 映射，哪怕编号相同也不得授权
+                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(130,'copy','work','fang',?,1)",
+                          (_json.dumps({"text": "普通文案资产"}),))
+                # 别人的 provider 映射
+                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(140,'collect','material','other',?,1)",
+                          (_json.dumps({"seedance_asset_id": "prov-other-9"}),))
+                # 已删除的映射
+                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at,deleted) VALUES(150,'collect','material','fang',?,1,1)",
+                          (_json.dumps({"seedance_asset_id": "prov-deleted"}),))
                 c.commit()
-            refs = ["https://cdn.example/ref.jpg", "asset://asset-120"]
+            refs = ["https://cdn.example/ref.jpg", "asset://asset-prov-abc123"]
             body = self.video.validate_xiaole_video_payload({
                 "channel": "micro", "prompt": "demo", "duration": 5,
                 "reference_images": refs,
             }, "fang")
             self.assertEqual(refs, body["reference_images"])
-            for ref, owner in (("asset://asset-130", "fang"),     # 别人的素材
-                               ("asset://asset-990", "fang"),     # 不存在
-                               ("asset://asset-120", "other")):   # 归属不符
+            for ref, owner in (("asset://asset-130", "fang"),          # 普通 copy 资产同编号误授权探针
+                               ("asset://asset-prov-other-9", "fang"), # 别人的 provider 素材
+                               ("asset://asset-prov-deleted", "fang"), # 已删除的映射
+                               ("asset://asset-999", "fang"),          # 不存在的编号
+                               ("asset://asset-prov-abc123", "other")):# 归属不符
                 with self.subTest(ref=ref, owner=owner):
                     with self.assertRaisesRegex(ValueError, "不存在或未授权"):
                         self.video.validate_xiaole_video_payload({
@@ -344,6 +365,12 @@ class XiaoleVideoTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         requirements = (root / "deploy/requirements-content.txt").read_text(encoding="utf-8")
         self.assertIn("cos-python-sdk-v5==1.9.44", requirements)
+        self.assertIn("Pillow==", requirements)   # 真实解码校验的运行依赖必须闭环
+
+    def test_ci_installs_content_python_dependencies(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("pip install -r deploy/requirements-content.txt", workflow)
 
     def test_gen_micro_uses_official_seedance_without_shared_provider(self):
         fake = {

@@ -606,7 +606,8 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
             put_calls = []
             delete_calls = []
             def fake_put(data, key, content_type=None, private=False):
-                put_calls.append({"key": key, "private": private, "content_type": content_type})
+                put_calls.append({"key": key, "private": private, "content_type": content_type,
+                                  "lock_held": core._submission_lock.locked()})
                 return signed_url
             def fake_delete(key):
                 delete_calls.append(key)
@@ -668,11 +669,20 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertEqual(200, status)
                 self.assertEqual(1, len(put_calls))
                 self.assertIs(put_calls[0]["private"], True)
+                self.assertIs(put_calls[0]["lock_held"], False)   # COS 网络上传不得持有全局提交锁
                 self.assertEqual(1, len(fake.deductions))
                 with closing(core.jdb()) as db:
                     row = db.execute("SELECT payload FROM jobs").fetchone()
                 self.assertIn(signed_url, row["payload"])
                 self.assertNotIn("data:image", row["payload"])
+                self.assertIn(put_calls[0]["key"], row["payload"])   # _seedance_staged_keys 随 payload 落库
+
+                # 终态清理：job 进 done 后删除本次暂存对象；重复 CAS 不重复清理
+                self.assertEqual([], delete_calls)
+                self.assertTrue(core._set_terminal(resp["job_id"], "done", result={"url": "x"}, from_states=("pending", "running")))
+                self.assertEqual([put_calls[0]["key"]], delete_calls)
+                self.assertFalse(core._set_terminal(resp["job_id"], "done", result={"url": "y"}, from_states=("pending", "running")))
+                self.assertEqual(1, len(delete_calls))
 
                 # 余额不足：资格预检 402，COS 上传调用数为 0，不扣点不建任务
                 reset()
@@ -741,6 +751,30 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertEqual(1, len(put_calls))
                 self.assertEqual([put_calls[0]["key"]], delete_calls)
                 self.assertEqual(1, len(fake.refunds))
+
+                # 并行提交：两个上传必须并发发生（证明上传不在全局提交锁内），且互不阻塞、各自成功
+                reset()
+                barrier = threading.Barrier(2)
+                def blocking_put(data, key, content_type=None, private=False):
+                    put_calls.append({"key": key, "lock_held": core._submission_lock.locked()})
+                    barrier.wait(timeout=20)   # 上传若持锁，另一方到不了这里 → BrokenBarrierError → 503
+                    return signed_url
+                cos.put_bytes = blocking_put
+                results = {}
+                def worker(tag):
+                    try:
+                        results[tag] = post({"channel": "micro", "prompt": "demo", "duration": 5,
+                                             "reference_images": [_real_png_data_url(tag)]})[0]
+                    except Exception as exc:
+                        results[tag] = repr(exc)
+                threads = [threading.Thread(target=worker, args=(tag,)) for tag in (1, 2)]
+                for t in threads: t.start()
+                for t in threads: t.join(timeout=30)
+                cos.put_bytes = fake_put
+                self.assertEqual({1: 200, 2: 200}, results)
+                self.assertEqual(2, len(put_calls))
+                self.assertEqual(2, len({call["key"] for call in put_calls}))   # 跨提交对象键不共享
+                self.assertEqual(2, len(fake.deductions))
             finally:
                 if server:
                     server.shutdown()

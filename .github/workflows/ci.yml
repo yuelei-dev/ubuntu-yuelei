@@ -38,6 +38,9 @@ jobs:
       - name: 检查敏感文件与静态资源
         run: python scripts/ci_validate.py
 
+      - name: 安装 content 服务 Python 依赖（Pillow/qcloud_cos，供单测真实解码与 mock）
+        run: python -m pip install -r deploy/requirements-content.txt
+
       - name: Verify workbench shell cache stamps
         run: python scripts/stamp_assets.py --check
 
