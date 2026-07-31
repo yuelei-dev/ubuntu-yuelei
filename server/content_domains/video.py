@@ -54,12 +54,18 @@ XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
 
-def seedance_video_health_enabled(flags):
-    """Report effective Seedance availability for legacy and official runtimes."""
-    provider_probe = globals().get("seedance_video_is_open")
+def seedance_video_is_open():
+    """Return whether the dedicated official Seedance adapter is configured."""
     try:
-        provider_ready = bool(provider_probe()) if callable(provider_probe) else bool(XIAOLEVIDEO_API_KEY)
-        return bool(provider_ready and flags.is_enabled("seedance_video"))
+        from . import video_seedance
+        return bool(video_seedance.available())
+    except Exception:
+        return False
+
+def seedance_video_health_enabled(flags):
+    """Report Seedance availability without falling back to a shared provider key."""
+    try:
+        return bool(seedance_video_is_open() and flags.is_enabled("seedance_video"))
     except Exception:
         return False
 

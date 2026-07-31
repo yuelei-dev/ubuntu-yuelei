@@ -266,17 +266,26 @@ class VideoBatchIntegrationGuardTests(unittest.TestCase):
 
 
 class VideoSingleRouteSubLimitTests(unittest.TestCase):
-    def test_seedance_health_prefers_official_probe_and_fails_closed(self):
+    def test_seedance_health_rejects_shared_key_when_dedicated_probe_is_closed(self):
         from content_domains import core
 
         with patch.object(video, "XIAOLEVIDEO_API_KEY", "legacy-key-must-not-override-official-probe"), \
-                patch.object(video, "seedance_video_is_open", return_value=False, create=True), \
+                patch.object(video, "seedance_video_is_open", return_value=False), \
                 patch.object(core.feature_flags, "is_enabled", return_value=True):
             self.assertFalse(video.seedance_video_health_enabled(core.feature_flags))
 
-        with patch.object(video, "seedance_video_is_open", side_effect=RuntimeError("provider probe failed"), create=True), \
+        with patch.object(video, "seedance_video_is_open", side_effect=RuntimeError("provider probe failed")), \
                 patch.object(core.feature_flags, "is_enabled", return_value=True):
             self.assertFalse(video.seedance_video_health_enabled(core.feature_flags))
+
+    def test_seedance_feature_flag_is_registered_and_defaults_closed(self):
+        from content_domains import feature_flags
+
+        self.assertIn("seedance_video", feature_flags.CATALOG_MAP)
+        with patch.object(feature_flags, "_cached_rows", return_value={}):
+            self.assertFalse(feature_flags.is_enabled("seedance_video"))
+        with patch.object(feature_flags, "_cached_rows", return_value={"seedance_video": {"enabled": True}}):
+            self.assertTrue(feature_flags.is_enabled("seedance_video"))
 
     def test_single_video_routes_use_kind_specific_caps_before_deduct(self):
         from content_domains import core
@@ -316,6 +325,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             "validate_tryon": video.validate_tryon_payload,
             "validate_xiaole": video.validate_xiaole_video_payload,
             "xiaole_key": video.XIAOLEVIDEO_API_KEY,
+            "seedance_probe": video.seedance_video_is_open,
         }
         fake = FakePoints()
         server = None
@@ -333,6 +343,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
             video.validate_tryon_payload = lambda body: body
             video.validate_xiaole_video_payload = lambda body: body
             video.XIAOLEVIDEO_API_KEY = "configured"
+            video.seedance_video_is_open = lambda: True
             try:
                 with closing(sqlite3.connect(core.JOB_DB)) as db:
                     db.execute("""CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,username TEXT,cost INTEGER,
@@ -417,6 +428,7 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
                 video.validate_tryon_payload = originals["validate_tryon"]
                 video.validate_xiaole_video_payload = originals["validate_xiaole"]
                 video.XIAOLEVIDEO_API_KEY = originals["xiaole_key"]
+                video.seedance_video_is_open = originals["seedance_probe"]
 
 
 if __name__ == "__main__":
