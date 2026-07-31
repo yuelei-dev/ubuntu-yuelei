@@ -147,10 +147,12 @@ class LocalReverseProcessorUnitTests(unittest.TestCase):
                 self.processor.OUT_DIR = original_out
 
             self.assertEqual(result, expected)
+            self.assertEqual(result["source_type"], "video")
+            self.assertEqual(result["source_platform"], "local_video")
             shared_reverse.assert_called_once()
             args, kwargs = shared_reverse.call_args
             self.assertEqual(args[1], frames)
-            self.assertEqual(kwargs["platform"], "local")
+            self.assertEqual(kwargs["platform"], "local_video")
             self.assertEqual(kwargs["media_path"], str(video))
             self.assertEqual(kwargs["media_mime"], "video/webm")
             self.assertEqual(

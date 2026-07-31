@@ -242,18 +242,21 @@ def gen_local_reverse(payload):
                 ".mov": "video/quicktime",
                 ".webm": "video/webm",
             }.get(path.suffix.lower(), "video/mp4")
-            return _reverse_result_from_frames(
+            result = _reverse_result_from_frames(
                 payload,
                 frames,
                 source_url="",
                 title=title,
-                platform="local",
+                platform="local_video",
                 duration=duration,
                 script_text=script_text,
                 asr_failed=asr_failed,
                 media_path=str(path),
                 media_mime=media_mime,
             )
+            result["source_type"] = "video"
+            result["source_platform"] = "local_video"
+            return result
         thumbs = _thumbnails(frames)
         sections, prompt = _structured_prompt(
             media_type, title, duration, script_text, model_frames)
