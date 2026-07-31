@@ -4222,10 +4222,12 @@ _SCENE_DETAIL_UNKNOWN_FAMILY_RE = re.compile(
 _SCENE_DETAIL_CONTRAST_RE = re.compile(
     r"(?:但(?:仍然?|依然|可以|可)?|不过|然而|可是)"
 )
-_SCENE_DETAIL_OBSERVABLE_RE = re.compile(
-    r"(?:可见|显示|呈现|位于|处于|占据|保持|静止|移动|转向|"
-    r"穿着|拿着|前景|中景|背景|固定机位|"
-    r"红色|蓝色|白色|黑色|绿色|黄色|明亮|昏暗|柔和)"
+_SCENE_DETAIL_CONCRETE_ASSERTION_RE = re.compile(
+    r"(?:位于|处于|占据|约占|穿着|手持|拿着|保持静止|"
+    r"发生移动|转向|从.+到|固定机位|俯拍|仰拍|"
+    r"(?:红|蓝|白|黑|绿|黄|灰|金|银)色"
+    r"(?:矩形|圆形|人物|动物|产品|物体|文字|建筑|背景)|"
+    r"(?:轮廓|边缘|形状|材质|投影|光线)(?:清晰|稳定|明显|柔和|均匀))"
 )
 
 
@@ -4233,19 +4235,29 @@ def _scene_detail_compact(value):
     return re.sub(r"[\W_]+", "", str(value or "").lower())
 
 
+def _scene_detail_contrast_has_concrete_fact(value):
+    text = re.sub(r"\s+", "", str(value or "").lower())
+    contrast = _SCENE_DETAIL_CONTRAST_RE.search(text)
+    if not contrast:
+        return False
+    tail = text[contrast.end():]
+    for clause in re.split(r"[，,。；;！!？?]", tail):
+        if not clause or _SCENE_DETAIL_UNKNOWN_FAMILY_RE.search(clause):
+            continue
+        if (
+            len(_scene_detail_compact(clause)) >= 6
+            and _SCENE_DETAIL_CONCRETE_ASSERTION_RE.search(clause)
+        ):
+            return True
+    return False
+
+
 def _scene_detail_value_is_unknown(value):
     compact = _scene_detail_compact(value)
     if not compact:
         return True
-    contrast = _SCENE_DETAIL_CONTRAST_RE.search(compact)
-    if contrast:
-        visible_tail = compact[contrast.end():]
-        visible_tail = _SCENE_DETAIL_UNKNOWN_FAMILY_RE.sub("", visible_tail)
-        if (
-            len(visible_tail) >= 6
-            and _SCENE_DETAIL_OBSERVABLE_RE.search(visible_tail)
-        ):
-            return False
+    if _scene_detail_contrast_has_concrete_fact(value):
+        return False
     matches = list(_SCENE_DETAIL_UNKNOWN_FAMILY_RE.finditer(compact))
     if matches and matches[0].start() <= 2:
         return True

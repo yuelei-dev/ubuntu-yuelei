@@ -3,6 +3,7 @@ import errno
 import io
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -977,6 +978,28 @@ class BreakdownTests(unittest.TestCase):
             require_detail=True,
         )
         self.assertEqual(result["scenes"][0]["scene"], scene)
+
+    def test_scene_detail_contract_rejects_unknown_clauses_after_visible_bridge(self):
+        scene = (
+            "主体：画面信息不足，但仍可见画面模糊，未能辨识具体主体身份外观位置和占比；"
+            "动作：画面模糊，但仍可见动作线索不足，难以看清起点过程结果方向与速度；"
+            "场景：信息有限，但仍可见背景信息不足，无法确定地点道具及前中后景关系；"
+            "镜头：线索不足，但仍可见镜头画面模糊，不确定景别机位视角构图和运镜；"
+            "光影：清晰度有限，但仍可见光影信息不足，未能辨识方向软硬明暗和色温。"
+        )
+        values = re.findall(
+            r"(?:主体|动作|场景|镜头|光影)：([^；]+)", scene
+        )
+        self.assertEqual(len(values), 5)
+        self.assertTrue(all(
+            self.breakdown._scene_detail_value_is_unknown(value)
+            for value in values
+        ))
+        with self.assertRaisesRegex(ValueError, "可观察的实质信息"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True,
+            )
 
     def test_scene_detail_contract_rejects_repeated_word_padding(self):
         scene = (
