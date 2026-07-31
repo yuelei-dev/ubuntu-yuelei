@@ -4,6 +4,7 @@ import os, json, time, base64, tempfile, subprocess, shutil, math, re, urllib.pa
 import hashlib
 import http.client
 import inspect
+import unicodedata
 import urllib.error
 from contextlib import closing
 from difflib import SequenceMatcher
@@ -1115,18 +1116,43 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
     context = _breakdown_source_context(title, duration, platform, script_text)
     usermsg = (
         context + "\n\n"
-        "请严格输出 JSON：{\"scenes\":[{\"dur\":\"3s\",\"scene\":\"详细画面描述(60-100字)\",\"line\":\"口播台词\"}],"
-        "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(100-160字)\"}，"
+        "以下图片按请求顺序编号为1到%d。请严格输出 JSON："
+        "{\"scenes\":[{\"dur\":\"3s\",\"detail_facts\":{"
+        "\"subject\":{\"status\":\"observed\",\"identity\":\"主体身份或类型\",\"appearance\":\"外观服装颜色材质\","
+        "\"position_scale\":\"位置和画面占比\",\"evidence_frames\":[1]},"
+        "\"action\":{\"status\":\"observed\",\"start\":\"起始状态\",\"process\":\"动作过程\",\"end\":\"结束状态\","
+        "\"direction_speed\":\"方向和速度\",\"motion\":\"gesture\",\"evidence_frames\":[1,2]},"
+        "\"setting\":{\"status\":\"observed\",\"location\":\"地点\",\"foreground\":\"前景\",\"midground\":\"中景\","
+        "\"background\":\"背景\",\"evidence_frames\":[1]},"
+        "\"camera\":{\"status\":\"observed\",\"shot_size\":\"medium\",\"angle\":\"eye_level\","
+        "\"composition\":\"centered\",\"movement\":\"static\",\"evidence_frames\":[1]},"
+        "\"lighting\":{\"status\":\"observed\",\"source_direction\":\"光源和方向\",\"quality\":\"soft\","
+        "\"contrast\":\"medium\",\"color_tone\":\"neutral\",\"evidence_frames\":[1]}},"
+        "\"line\":\"口播台词\"}],"
+        "\"analysis\":\"视频主题、叙事结构、情绪与转化目的综合分析(150-240字)\"}，"
         "只输出 JSON 本身，不要解释、不要 markdown 代码块。"
-        "4-6 个分镜，各 dur 之和≈总时长；每个 scene 用 60-100 字描述一个可直接拍摄或生成的完整镜头，"
-        "必须结合关键帧可见内容，至少写清以下六类细节中的五类："
-        "①主体外观、服装或产品特征；②动作起点、过程、结果及与道具的互动；③表情、视线和身体姿态；"
-        "④场景环境、关键道具及前中后景关系；⑤景别、机位、构图和推进/跟随/摇移等运镜；"
-        "⑥光线方向、明暗层次、色调和画面氛围。不要只写“人物出现”“展示产品”等笼统结论。"
+        "4-6 个分镜，各 dur 之和≈总时长；不要输出 scene，服务端会根据 detail_facts 组装画面文字。"
+        "主体写清外观、服装或产品的颜色、材质、位置和画面占比；"
+        "动作按实际先后写起点、过程、结果、方向以及与道具的互动，静止画面要明确写静止；"
+        "场景写清地点、关键道具以及前景、中景、背景的空间关系；"
+        "镜头写清景别、机位高低、视角、构图和可见的推进、跟随、摇移或固定机位；"
+        "光影写清光源方向、软硬、明暗层次、色温和主色调。"
+        "每个栏目只能使用 status=observed 或 status=unknown。observed 时该栏所有字段必须填写具体值，"
+        "并提供至少一个1到%d之间、确实支持该栏事实的 evidence_frames；"
+        "unknown 时该栏所有文字字段必须为空串且 evidence_frames 必须为空数组。"
+        "motion 只能取 static/gesture/posture_change/translation/rotation/interaction/mixed；"
+        "shot_size 只能取 extreme_closeup/closeup/medium/full/wide/extreme_wide；"
+        "angle 只能取 eye_level/high/low/overhead/dutch；composition 只能取 "
+        "centered/rule_of_thirds/symmetrical/leading_lines/layered/mixed；movement 只能取 "
+        "static/pan/tilt/dolly_in/dolly_out/tracking/handheld/orbit/mixed；"
+        "quality 只能取 soft/hard/mixed，contrast 只能取 low/medium/high，"
+        "color_tone 只能取 warm/cool/neutral/mixed。"
+        "五个栏目中至少三个必须为 observed。不得把“未提供、无法判断、字段为空”等空信息标成 observed。"
+        "不得为了详细而编造动作、道具、文字或氛围。"
         "line 是原视频对应的口播内容。"
         "若原视频没有人物口播（纯音乐/歌舞/背景乐），或上方口播文案实为歌词、听写乱码、与画面无关的内容，"
         "所有 line 输出空串\"\"，不要编造台词。"
-    )
+    ) % (len(frames), len(frames))
     sysmsg = (
         "你是黄雀传媒资深短视频编导。分析视频关键帧和口播，拆解为简洁的分镜脚本，同时输出一份视频内容综合分析。"
         "只输出 JSON，不要多余内容。"
@@ -1135,25 +1161,48 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         sysmsg, usermsg, frames, temp=0.2, max_tokens=3200,
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
+        )
     except ValueError as first_error:
         _log_breakdown_parse_failure("zhipu-primary", raw, first_error)
 
     compact_msg = (
         context + "\n\n"
         "上一次输出未形成完整 JSON。请重新分析并只返回一个完整、可解析的 JSON 对象，禁止代码围栏、解释和重复内容。"
-        "固定输出 4 个分镜，格式为："
-        "{\"scenes\":[{\"dur\":\"4s\",\"scene\":\"具体画面\",\"line\":\"对应口播或空串\"}],"
-        "\"analysis\":\"80-150字综合分析\"}。"
-        "每个 scene 50-80 字，至少写清主体特征、连续动作、场景道具、构图运镜和光影氛围；"
+        "固定输出 4 个分镜，格式为：{\"scenes\":[{\"dur\":\"4s\",\"detail_facts\":{"
+        "\"subject\":{\"status\":\"observed\",\"identity\":\"\",\"appearance\":\"\","
+        "\"position_scale\":\"\",\"evidence_frames\":[]},"
+        "\"action\":{\"status\":\"observed\",\"start\":\"\",\"process\":\"\",\"end\":\"\","
+        "\"direction_speed\":\"\",\"motion\":\"\",\"evidence_frames\":[]},"
+        "\"setting\":{\"status\":\"observed\",\"location\":\"\",\"foreground\":\"\","
+        "\"midground\":\"\",\"background\":\"\",\"evidence_frames\":[]},"
+        "\"camera\":{\"status\":\"observed\",\"shot_size\":\"\",\"angle\":\"\","
+        "\"composition\":\"\",\"movement\":\"\",\"evidence_frames\":[]},"
+        "\"lighting\":{\"status\":\"observed\",\"source_direction\":\"\",\"quality\":\"\","
+        "\"contrast\":\"\",\"color_tone\":\"\",\"evidence_frames\":[]}},\"line\":\"对应口播或空串\"}],"
+        "\"analysis\":\"100-180字综合分析\"}。"
+        "不要输出 scene；服务端根据结构化槽位组装。每栏只能是 observed 或 unknown；"
+        "observed 必须填写该栏全部字段并引用1到%d之间的原始帧，unknown 必须全部留空且无证据帧；"
+        "motion取static/gesture/posture_change/translation/rotation/interaction/mixed；"
+        "shot_size取extreme_closeup/closeup/medium/full/wide/extreme_wide；"
+        "angle取eye_level/high/low/overhead/dutch；composition取centered/rule_of_thirds/"
+        "symmetrical/leading_lines/layered/mixed；movement取static/pan/tilt/dolly_in/dolly_out/"
+        "tracking/handheld/orbit/mixed；quality取soft/hard/mixed；contrast取low/medium/high；"
+        "color_tone取warm/cool/neutral/mixed，不得翻译、组合或自造；"
+        "至少三个栏目为 observed。不得为补细节编造关键帧中不存在的内容；"
         "不得照抄“具体画面”“对应口播”“画面描述”"
         "“口播台词”等格式示例。无人物口播时所有 line 必须为空串。务必闭合全部引号、数组和大括号。"
-    )
+    ) % len(frames)
     raw = _chat_multimodal(
         sysmsg, compact_msg, frames, temp=0.1, max_tokens=2400,
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
+        )
     except ValueError as retry_error:
         _log_breakdown_parse_failure("zhipu-compact", raw, retry_error)
 
@@ -1162,7 +1211,10 @@ def _breakdown_scenes_from_frames(title, duration, platform, script_text, frames
         provider="openai",
     )
     try:
-        return _validate_scene_breakdown(_parse_breakdown_json(raw))
+        return _validate_scene_breakdown(
+            _parse_breakdown_json(raw), require_detail=True,
+            frame_count=len(frames),
+        )
     except ValueError as fallback_error:
         _log_breakdown_parse_failure("openai-fallback", raw, fallback_error)
         raise
@@ -4194,7 +4246,237 @@ def _parse_breakdown_json(raw):
     raise ValueError("拆解结果解析失败，请重试")
 
 
-def _validate_scene_breakdown(result):
+_SCENE_DETAIL_FACT_SPECS = {
+    "subject": {
+        "label": "主体",
+        "text": ("identity", "appearance", "position_scale"),
+        "enums": {},
+    },
+    "action": {
+        "label": "动作",
+        "text": ("start", "process", "end", "direction_speed"),
+        "enums": {
+            "motion": {
+                "static", "gesture", "posture_change", "translation",
+                "rotation", "interaction", "mixed",
+            },
+        },
+    },
+    "setting": {
+        "label": "场景",
+        "text": ("location", "foreground", "midground", "background"),
+        "enums": {},
+    },
+    "camera": {
+        "label": "镜头",
+        "text": (),
+        "enums": {
+            "shot_size": {
+                "extreme_closeup", "closeup", "medium", "full",
+                "wide", "extreme_wide",
+            },
+            "angle": {"eye_level", "high", "low", "overhead", "dutch"},
+            "composition": {
+                "centered", "rule_of_thirds", "symmetrical",
+                "leading_lines", "layered", "mixed",
+            },
+            "movement": {
+                "static", "pan", "tilt", "dolly_in", "dolly_out",
+                "tracking", "handheld", "orbit", "mixed",
+            },
+        },
+    },
+    "lighting": {
+        "label": "光影",
+        "text": ("source_direction",),
+        "enums": {
+            "quality": {"soft", "hard", "mixed"},
+            "contrast": {"low", "medium", "high"},
+            "color_tone": {"warm", "cool", "neutral", "mixed"},
+        },
+    },
+}
+_SCENE_DETAIL_UNKNOWN_EXACT = {"unknown", "none", "null", "n/a", "na"}
+_SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS = (
+    "未知", "不确定", "无法确认", "未提供",
+)
+_SCENE_DETAIL_BLANK_PLACEHOLDER_RE = re.compile(
+    r"(?:字段|栏目|内容|信息|细节|资料|描述|数值|值|项)"
+    r"(?:均|都|全部)?(?:为|是|呈|等于)?空白$"
+)
+_SCENE_DETAIL_ENUM_LABELS = {
+    "static": "固定/静止",
+    "gesture": "肢体动作",
+    "posture_change": "姿态变化",
+    "translation": "位置移动",
+    "rotation": "旋转",
+    "interaction": "交互动作",
+    "mixed": "混合",
+    "extreme_closeup": "大特写",
+    "closeup": "特写",
+    "medium": "中景",
+    "full": "全身景",
+    "wide": "全景",
+    "extreme_wide": "远景",
+    "eye_level": "平视",
+    "high": "高机位",
+    "low": "低机位",
+    "overhead": "俯拍",
+    "dutch": "倾斜机位",
+    "centered": "居中构图",
+    "rule_of_thirds": "三分构图",
+    "symmetrical": "对称构图",
+    "leading_lines": "引导线构图",
+    "layered": "层次构图",
+    "pan": "横摇",
+    "tilt": "俯仰摇镜",
+    "dolly_in": "推进",
+    "dolly_out": "拉远",
+    "tracking": "跟随",
+    "handheld": "手持",
+    "orbit": "环绕",
+    "soft": "柔光",
+    "hard": "硬光",
+    "low": "低反差",
+    "high": "高反差",
+    "warm": "暖色调",
+    "cool": "冷色调",
+    "neutral": "中性色调",
+}
+
+
+def _scene_detail_fact_contract_error(detail_facts, frame_count):
+    if not isinstance(detail_facts, dict):
+        return "缺少结构化事实槽位"
+    try:
+        frame_count = int(frame_count)
+    except (TypeError, ValueError):
+        return "缺少可核验的关键帧数量"
+    if frame_count < 1:
+        return "缺少可核验的关键帧数量"
+
+    observed_count = 0
+    for field, spec in _SCENE_DETAIL_FACT_SPECS.items():
+        slot = detail_facts.get(field)
+        if not isinstance(slot, dict):
+            return "缺少%s结构化事实槽位" % spec["label"]
+        status = str(slot.get("status") or "").strip().lower()
+        if status not in {"observed", "unknown"}:
+            return "%s状态必须是observed或unknown" % spec["label"]
+
+        expected_values = {}
+        for key in spec["text"]:
+            expected_values[key] = str(slot.get(key) or "").strip()
+        for key in spec["enums"]:
+            expected_values[key] = str(slot.get(key) or "").strip().lower()
+        evidence = slot.get("evidence_frames")
+        if not isinstance(evidence, list):
+            return "%s缺少证据帧数组" % spec["label"]
+
+        if status == "unknown":
+            if any(expected_values.values()) or evidence:
+                return "%s为unknown时不得携带事实或证据" % spec["label"]
+            continue
+
+        observed_count += 1
+        for key in spec["text"]:
+            value = expected_values[key]
+            if not value or len(value) > 160:
+                return "%s的%s必须是1到160字的具体事实" % (spec["label"], key)
+            compact_value = re.sub(r"\s+", "", value).lower()
+            while (
+                compact_value
+                and unicodedata.category(compact_value[-1]).startswith("P")
+            ):
+                compact_value = compact_value[:-1]
+            if not compact_value:
+                return "%s的%s必须是1到160字的具体事实" % (
+                    spec["label"], key,
+                )
+            if (
+                compact_value in _SCENE_DETAIL_UNKNOWN_EXACT
+                or any(
+                    marker in compact_value
+                    for marker in _SCENE_DETAIL_UNKNOWN_CN_FRAGMENTS
+                )
+                or compact_value == "空白"
+                or _SCENE_DETAIL_BLANK_PLACEHOLDER_RE.search(compact_value)
+            ):
+                return "%s的%s不能使用unknown占位" % (spec["label"], key)
+        for key, allowed in spec["enums"].items():
+            if expected_values[key] not in allowed:
+                return "%s的%s枚举无效" % (spec["label"], key)
+        if not evidence:
+            return "%s缺少原始帧证据" % spec["label"]
+        if any(
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 1
+            or index > frame_count
+            for index in evidence
+        ):
+            return "%s证据帧超出1到%d范围" % (spec["label"], frame_count)
+
+    if observed_count < 3:
+        return "至少三个栏目需要结构化可观察事实和证据"
+    return ""
+
+
+def _scene_detail_enum_label(value, field=None):
+    scoped = {
+        ("angle", "low"): "低机位",
+        ("angle", "high"): "高机位",
+        ("contrast", "low"): "低反差",
+        ("contrast", "medium"): "中等反差",
+        ("contrast", "high"): "高反差",
+    }
+    if (field, str(value or "")) in scoped:
+        return scoped[(field, str(value or ""))]
+    return _SCENE_DETAIL_ENUM_LABELS.get(str(value or ""), str(value or ""))
+
+
+def _compose_scene_detail(detail_facts):
+    parts = []
+    for field, spec in _SCENE_DETAIL_FACT_SPECS.items():
+        slot = detail_facts[field]
+        label = spec["label"]
+        if slot["status"] == "unknown":
+            parts.append("%s：无法确认" % label)
+            continue
+        if field == "subject":
+            value = "，".join((
+                slot["identity"], slot["appearance"], slot["position_scale"],
+            ))
+        elif field == "action":
+            value = "起点%s，过程%s，结果%s，%s，动作类型%s" % (
+                slot["start"], slot["process"], slot["end"],
+                slot["direction_speed"],
+                _scene_detail_enum_label(slot["motion"], "motion"),
+            )
+        elif field == "setting":
+            value = "%s，前景%s，中景%s，背景%s" % (
+                slot["location"], slot["foreground"],
+                slot["midground"], slot["background"],
+            )
+        elif field == "camera":
+            value = "%s，%s，%s，%s" % (
+                _scene_detail_enum_label(slot["shot_size"], "shot_size"),
+                _scene_detail_enum_label(slot["angle"], "angle"),
+                _scene_detail_enum_label(slot["composition"], "composition"),
+                _scene_detail_enum_label(slot["movement"], "movement"),
+            )
+        else:
+            value = "%s，%s，%s，%s" % (
+                slot["source_direction"],
+                _scene_detail_enum_label(slot["quality"], "quality"),
+                _scene_detail_enum_label(slot["contrast"], "contrast"),
+                _scene_detail_enum_label(slot["color_tone"], "color_tone"),
+            )
+        parts.append("%s：%s" % (label, value))
+    return "；".join(parts) + "。"
+
+
+def _validate_scene_breakdown(result, require_detail=False, frame_count=None):
     if not isinstance(result, dict):
         raise ValueError("拆解结果为空，请重试")
     scenes = result.get("scenes")
@@ -4207,10 +4489,20 @@ def _validate_scene_breakdown(result):
             continue
         scene_text = str(scene.get("scene") or "").strip()
         line_text = str(scene.get("line") or "").strip()
-        if not scene_text:
-            continue
         if any(marker in scene_text or marker in line_text for marker in placeholders):
             raise ValueError("拆解结果包含模板占位内容，请重试")
+        if require_detail:
+            detail_error = _scene_detail_fact_contract_error(
+                scene.get("detail_facts"), frame_count,
+            )
+            if detail_error:
+                raise ValueError(
+                    "拆解结果第%d段画面细节不足（%s），请重试"
+                    % (len(valid_scenes) + 1, detail_error)
+                )
+            scene["scene"] = _compose_scene_detail(scene["detail_facts"])
+        elif not scene_text:
+            continue
         valid_scenes.append(scene)
     if not valid_scenes:
         raise ValueError("拆解结果为空，请重试")

@@ -3,6 +3,7 @@ import errno
 import io
 import json
 import os
+import re
 import socket
 import ssl
 import sys
@@ -754,6 +755,14 @@ class BreakdownTests(unittest.TestCase):
 
     def _install_fake_env(self, raw_json, transcript=None):
         calls = {}
+        try:
+            parsed = json.loads(raw_json)
+            for scene in parsed.get("scenes") or []:
+                if scene.get("scene") and not scene.get("detail_facts"):
+                    scene["detail_facts"] = self._detail_facts(scene["scene"])
+            raw_json = json.dumps(parsed, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
 
         class FakeTikHub:
             @staticmethod
@@ -792,6 +801,69 @@ class BreakdownTests(unittest.TestCase):
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "fake-video.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
         return calls
+
+    @staticmethod
+    def _detailed_scene(focus="门店门头"):
+        return (
+            "主体：可见事实：%s位于画面中央，主体轮廓、颜色与表面特征清晰可见；"
+            "动作：可见事实：主体从画面中央开始展示，位置和朝向连续可见，最后停留在原构图区域；"
+            "场景：可见事实：近处地面形成前景，主体处在中景，建筑与环境陈设构成背景；"
+            "镜头：可见事实：平视中景固定机位，主体居中，水平线保持稳定，没有观察到明显运镜；"
+            "光影：可见事实：正面柔和自然光照亮主体，背景亮度略低，整体色调自然。"
+        ) % focus
+
+    @staticmethod
+    def _detail_facts(focus="门店门头", evidence_frame=1):
+        return {
+            "subject": {
+                "status": "observed",
+                "identity": focus,
+                "appearance": "轮廓颜色和表面特征清晰",
+                "position_scale": "位于画面中央并占据中部区域",
+                "evidence_frames": [evidence_frame],
+            },
+            "action": {
+                "status": "observed",
+                "start": "主体位于画面中央",
+                "process": "主体姿态和朝向连续可见",
+                "end": "主体停留在原构图区域",
+                "direction_speed": "位置稳定且速度为零",
+                "motion": "static",
+                "evidence_frames": [evidence_frame],
+            },
+            "setting": {
+                "status": "observed",
+                "location": "建筑外部环境",
+                "foreground": "近处地面",
+                "midground": "主体和门店",
+                "background": "建筑与环境陈设",
+                "evidence_frames": [evidence_frame],
+            },
+            "camera": {
+                "status": "observed",
+                "shot_size": "medium",
+                "angle": "eye_level",
+                "composition": "centered",
+                "movement": "static",
+                "evidence_frames": [evidence_frame],
+            },
+            "lighting": {
+                "status": "observed",
+                "source_direction": "正面自然光",
+                "quality": "soft",
+                "contrast": "medium",
+                "color_tone": "neutral",
+                "evidence_frames": [evidence_frame],
+            },
+        }
+
+    @classmethod
+    def _structured_scene(cls, focus="门店门头", evidence_frame=1, line=""):
+        return {
+            "dur": "4s",
+            "detail_facts": cls._detail_facts(focus, evidence_frame),
+            "line": line,
+        }
 
     def _gemini_reverse_result(self, duration=18.0, count=4):
         shots = []
@@ -834,7 +906,14 @@ class BreakdownTests(unittest.TestCase):
 
     def test_do_breakdown_returns_analysis_and_requests_it_in_prompt(self):
         calls = self._install_fake_env(
-            '{"scenes":[{"dur":"3s","scene":"门店门头","line":"今天带你看一家店"}],"analysis":"这是一条团购探店口播视频"}'
+            json.dumps({
+                "scenes": [
+                    self._structured_scene(
+                        "门店门头", line="今天带你看一家店",
+                    )
+                ],
+                "analysis": "这是一条团购探店口播视频",
+            }, ensure_ascii=False)
         )
 
         result = self.breakdown._do_breakdown(
@@ -846,17 +925,25 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(result["type"], "breakdown")
         self.assertEqual(result["source_platform"], "douyin")
         self.assertEqual(result["analysis"], "这是一条团购探店口播视频")
-        self.assertEqual(result["scenes"][0]["scene"], "门店门头")
+        self.assertIn("门店门头", result["scenes"][0]["scene"])
+        self.assertNotIn("可见事实", result["scenes"][0]["scene"])
         self.assertFalse(result["asr_failed"])
         self.assertIn('"analysis"', calls["usermsg"])
         self.assertIn("同时输出一份视频内容综合分析", calls["sysmsg"])
-        self.assertIn("60-100 字描述一个可直接拍摄或生成的完整镜头", calls["usermsg"])
+        self.assertIn("服务端会根据 detail_facts 组装画面文字", calls["usermsg"])
+        self.assertIn("确实支持该栏事实的 evidence_frames", calls["usermsg"])
         self.assertEqual(calls["frames"], ["frame_1.jpg", "frame_2.jpg"])
         self.assertEqual(calls["phases"], ["downloading", "extracting_frames", "transcribing", "analyzing"])
 
     def test_do_breakdown_defaults_analysis_to_empty_string(self):
         self._install_fake_env(
-            '{"scenes":[{"dur":"4s","scene":"产品特写","line":"重点看这个细节"}]}'
+            json.dumps({
+                "scenes": [
+                    self._structured_scene(
+                        "产品特写", line="重点看这个细节",
+                    )
+                ],
+            }, ensure_ascii=False)
         )
 
         result = self.breakdown._do_breakdown(
@@ -871,23 +958,279 @@ class BreakdownTests(unittest.TestCase):
         self.assertEqual(len(result["scenes"]), 1)
 
     def test_scenes_prompt_requires_rich_detail(self):
-        """分镜 prompt 必须要求 60-100 字及主体、动作、场景、镜头、光影细节。"""
+        """分镜 prompt 必须要求可核验的主体、动作、场景、镜头、光影细节。"""
         import inspect
         src = inspect.getsource(self.breakdown._breakdown_scenes_from_frames)
-        self.assertIn("60-100字", src)
         self.assertIn("4-6 个分镜", src)
-        self.assertIn("六类细节中的五类", src)
-        self.assertIn("动作起点、过程、结果", src)
-        self.assertIn("表情、视线和身体姿态", src)
-        self.assertIn("前中后景关系", src)
-        self.assertIn("推进/跟随/摇移", src)
-        self.assertIn("光线方向、明暗层次", src)
+        self.assertIn("detail_facts", src)
+        self.assertIn("evidence_frames", src)
+        self.assertIn("status=observed 或 status=unknown", src)
+        self.assertIn("起点、过程、结果、方向", src)
+        self.assertIn("前景、中景、背景", src)
+        self.assertIn("推进、跟随、摇移或固定机位", src)
+        self.assertIn("光源方向、软硬、明暗层次", src)
+        self.assertIn("至少三个必须为 observed", src)
+        self.assertIn("服务端会根据 detail_facts 组装画面文字", src)
+        self.assertIn("不得为了详细而编造动作、道具、文字或氛围", src)
         self.assertIn("max_tokens=3200", src)
-        self.assertIn("每个 scene 50-80 字", src)
         self.assertIn("max_tokens=2400", src)
         self.assertIn('provider="openai"', src)
         self.assertIn("固定输出 4 个分镜", src)
         self.assertNotIn("10字内", src)
+
+    def test_scene_detail_contract_accepts_complete_structured_facts(self):
+        facts = self._detail_facts("穿白色衬衫的女性")
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+        self.assertIn("穿白色衬衫的女性", result["scenes"][0]["scene"])
+        self.assertIn("主体：", result["scenes"][0]["scene"])
+        self.assertIn("动作：", result["scenes"][0]["scene"])
+
+    def test_scene_detail_contract_rejects_vague_legacy_text(self):
+        with self.assertRaisesRegex(ValueError, "缺少结构化事实槽位"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": "人物在室内展示产品", "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_keyword_borrowing_without_slots(self):
+        scene = (
+            "主体：未提供人物位于何处的信息；动作：未提供移动方向；"
+            "场景：相关字段均为空白；镜头：未提供中景信息；光影：未提供自然光信息。"
+        )
+        with self.assertRaisesRegex(ValueError, "缺少结构化事实槽位"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "scene": scene, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_missing_field_slot(self):
+        facts = self._detail_facts()
+        del facts["lighting"]
+        with self.assertRaisesRegex(ValueError, "缺少光影结构化事实槽位"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_invalid_status(self):
+        facts = self._detail_facts()
+        facts["subject"]["status"] = "maybe"
+        with self.assertRaisesRegex(ValueError, "状态必须是observed或unknown"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_incomplete_observed_slot(self):
+        facts = self._detail_facts()
+        facts["subject"]["appearance"] = ""
+        with self.assertRaisesRegex(ValueError, "appearance必须"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_extended_unknown_text_in_observed_slots(self):
+        facts = self._detail_facts()
+        facts["subject"].update({
+            "identity": "未提供相关信息",
+            "appearance": "外观字段均为空白",
+            "position_scale": "无法确认位置和占比",
+        })
+        facts["action"].update({
+            "start": "未提供动作起点",
+            "process": "动作过程字段为空白",
+            "end": "无法确认动作结果",
+            "direction_speed": "未提供方向和速度",
+        })
+        facts["setting"].update({
+            "location": "未提供地点",
+            "foreground": "前景字段为空白",
+            "midground": "无法确认中景",
+            "background": "未提供背景",
+        })
+        facts["lighting"]["source_direction"] = "无法确认光源方向"
+
+        with self.assertRaisesRegex(ValueError, "不能使用unknown占位"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_accepts_blank_canvas_as_visible_subject(self):
+        facts = self._detail_facts("白色空白画布")
+        facts["subject"].update({
+            "appearance": "白色矩形画布没有文字或图案",
+            "position_scale": "空白画布位于中央，约占画面宽度一半",
+        })
+
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+
+        self.assertIn("白色空白画布", result["scenes"][0]["scene"])
+        self.assertIn("空白画布位于中央", result["scenes"][0]["scene"])
+
+    def test_scene_detail_contract_rejects_blank_placeholders_with_terminal_punctuation(self):
+        for placeholder in (
+            "外观字段均为空白。",
+            "主体字段为空白!",
+            "相关信息为空白……",
+            "主体字段为空白？",
+            "主体字段为空白?",
+            "主体字段为空白；",
+            "主体字段为空白;”",
+        ):
+            with self.subTest(placeholder=placeholder):
+                facts = self._detail_facts()
+                facts["subject"]["appearance"] = placeholder
+                with self.assertRaisesRegex(ValueError, "不能使用unknown占位"):
+                    self.breakdown._validate_scene_breakdown(
+                        {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                        require_detail=True, frame_count=2,
+                    )
+
+    def test_scene_detail_contract_rejects_punctuation_only_observed_text(self):
+        for placeholder in ("...", "。。。", "?!", "？！"):
+            with self.subTest(placeholder=placeholder):
+                facts = self._detail_facts()
+                facts["subject"]["identity"] = placeholder
+                with self.assertRaisesRegex(ValueError, "必须是1到160字的具体事实"):
+                    self.breakdown._validate_scene_breakdown(
+                        {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                        require_detail=True, frame_count=2,
+                    )
+
+    def test_scene_detail_contract_rejects_all_text_slots_as_punctuation(self):
+        facts = self._detail_facts()
+        text_fields = {
+            "subject": ("identity", "appearance", "position_scale"),
+            "action": ("start", "process", "end", "direction_speed"),
+            "setting": ("location", "foreground", "midground", "background"),
+            "lighting": ("source_direction",),
+        }
+        for field, keys in text_fields.items():
+            for key in keys:
+                facts[field][key] = "..."
+
+        with self.assertRaisesRegex(ValueError, "必须是1到160字的具体事实"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_observed_without_evidence(self):
+        facts = self._detail_facts()
+        facts["action"]["evidence_frames"] = []
+        with self.assertRaisesRegex(ValueError, "动作缺少原始帧证据"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_evidence_out_of_range(self):
+        facts = self._detail_facts()
+        facts["setting"]["evidence_frames"] = [3]
+        with self.assertRaisesRegex(ValueError, "证据帧超出1到2范围"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_rejects_invalid_enum(self):
+        facts = self._detail_facts()
+        facts["camera"]["angle"] = "low_angle_guess"
+        with self.assertRaisesRegex(ValueError, "angle枚举无效"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_requires_three_observed_slots(self):
+        facts = self._detail_facts()
+        for field in ("setting", "camera", "lighting"):
+            facts[field] = {
+                key: ([] if key == "evidence_frames" else (
+                    "unknown" if key == "status" else ""
+                ))
+                for key in facts[field]
+            }
+        with self.assertRaisesRegex(ValueError, "至少三个栏目"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
+    def test_scene_detail_contract_accepts_natural_cat_wording(self):
+        facts = self._detail_facts("橘猫")
+        facts["subject"].update({
+            "appearance": "橘色短毛，四肢收在身体下方",
+            "position_scale": "趴在沙发中央，约占画面宽度三分之一",
+        })
+        facts["action"].update({
+            "start": "橘猫趴在沙发上",
+            "process": "橘猫眨眼并甩动尾巴",
+            "end": "橘猫继续保持趴卧",
+            "direction_speed": "尾巴向右缓慢摆动",
+            "motion": "gesture",
+        })
+        facts["camera"].update({
+            "shot_size": "wide",
+            "angle": "low",
+            "composition": "rule_of_thirds",
+        })
+        facts["lighting"].update({
+            "source_direction": "阳光从左侧窗户射入",
+            "quality": "hard",
+            "contrast": "high",
+            "color_tone": "warm",
+        })
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+        text = result["scenes"][0]["scene"]
+        self.assertIn("橘猫眨眼并甩动尾巴", text)
+        self.assertIn("阳光从左侧窗户射入", text)
+
+    def test_scene_detail_contract_accepts_unknown_slots_with_three_observed(self):
+        facts = self._detail_facts("红色矩形")
+        for field in ("camera", "lighting"):
+            facts[field] = {
+                key: ([] if key == "evidence_frames" else (
+                    "unknown" if key == "status" else ""
+                ))
+                for key in facts[field]
+            }
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+        self.assertIn("镜头：无法确认", result["scenes"][0]["scene"])
+        self.assertIn("光影：无法确认", result["scenes"][0]["scene"])
+
+    def test_scene_detail_contract_accepts_honest_simple_static_frame(self):
+        facts = self._detail_facts("白色矩形")
+        facts["subject"].update({
+            "appearance": "白色矩形边缘清晰",
+            "position_scale": "位于蓝色画面中央，约占宽度三分之一",
+        })
+        facts["action"].update({
+            "start": "矩形位于画面中央",
+            "process": "位置大小和形状保持不变",
+            "end": "矩形仍停留在原位置",
+            "direction_speed": "没有移动且速度为零",
+            "motion": "static",
+        })
+        result = self.breakdown._validate_scene_breakdown(
+            {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+            require_detail=True, frame_count=2,
+        )
+        self.assertIn("白色矩形边缘清晰", result["scenes"][0]["scene"])
 
     def test_reverse_prompt_requires_structured_action_detail(self):
         """反推必须按段绑定证据，明确禁止字数填充和无证据推断。"""
@@ -1081,7 +1424,14 @@ class BreakdownTests(unittest.TestCase):
                 calls.append((sysmsg, usermsg, list(frames), temp, kwargs))
                 return (
                     'first' if len(calls) == 1
-                    else '{"scenes":[{"dur":"3s","scene":"产品展示","line":""}],"analysis":"ok"}'
+                    else json.dumps({
+                        "scenes": [{
+                            "dur": "3s",
+                            "detail_facts": self._detail_facts("产品"),
+                            "line": "",
+                        }],
+                        "analysis": "ok",
+                    }, ensure_ascii=False)
                 )
 
             seen = {"count": 0}
@@ -3788,7 +4138,14 @@ class BreakdownTests(unittest.TestCase):
             calls["sysmsg"] = sysmsg
             calls["usermsg"] = usermsg
             calls["frames"] = list(frames)
-            return '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎光临"}],"analysis":"探店视频"}'
+            return json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "detail_facts": self._detail_facts("门店门头"),
+                    "line": "欢迎光临",
+                }],
+                "analysis": "探店视频",
+            }, ensure_ascii=False)
 
         self.breakdown._chat_multimodal = fake_chat_multimodal
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "fake-video.mp4"})()
@@ -3915,7 +4272,14 @@ class BreakdownTests(unittest.TestCase):
 
         self.breakdown._heartbeat = lambda job_id, phase: None
         self.breakdown._extract_frames = lambda video_path, count, duration, scale_width=512: ("d", ["f1.jpg", "f2.jpg"])
-        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7, **kwargs: '{"scenes":[{"dur":"3s","scene":"画面","line":"口播"}],"analysis":"分析"}'
+        self.breakdown._chat_multimodal = lambda sysmsg, usermsg, frames, temp=0.7, **kwargs: json.dumps({
+            "scenes": [{
+                "dur": "3s",
+                "detail_facts": self._detail_facts("画面主体"),
+                "line": "口播",
+            }],
+            "analysis": "分析",
+        }, ensure_ascii=False)
         self.breakdown.tempfile.NamedTemporaryFile = lambda suffix="", delete=False: type("Tmp", (), {"name": "f.mp4"})()
         sys.modules["tikhub"] = FakeTikHub
 
@@ -3967,7 +4331,14 @@ class BreakdownTests(unittest.TestCase):
         self._install_fake_env('{"scenes":[]}')
         responses = [
             "这不是 JSON，完全无法解析",
-            '{"scenes":[{"dur":"3s","scene":"门头","line":"欢迎光临"}],"analysis":"ok"}',
+            json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "detail_facts": self._detail_facts("门头"),
+                    "line": "欢迎光临",
+                }],
+                "analysis": "ok",
+            }, ensure_ascii=False),
         ]
         calls = {"n": 0}
 
@@ -3985,13 +4356,20 @@ class BreakdownTests(unittest.TestCase):
         )
 
         self.assertEqual(calls["n"], 2)
-        self.assertEqual(result["scenes"][0]["scene"], "门头")
+        self.assertIn("门头", result["scenes"][0]["scene"])
 
     def test_do_breakdown_retries_once_on_empty_scenes(self):
         self._install_fake_env('{"scenes":[]}')
         responses = [
             '{"scenes":[],"analysis":"没有识别出分镜"}',
-            '{"scenes":[{"dur":"3s","scene":"产品特写","line":""}],"analysis":"ok"}',
+            json.dumps({
+                "scenes": [{
+                    "dur": "3s",
+                    "detail_facts": self._detail_facts("产品特写"),
+                    "line": "",
+                }],
+                "analysis": "ok",
+            }, ensure_ascii=False),
         ]
         calls = {"n": 0}
 
@@ -4009,7 +4387,7 @@ class BreakdownTests(unittest.TestCase):
         )
 
         self.assertEqual(calls["n"], 2)
-        self.assertEqual(result["scenes"][0]["scene"], "产品特写")
+        self.assertIn("产品特写", result["scenes"][0]["scene"])
 
     def test_do_breakdown_uses_openai_after_two_empty_scene_results(self):
         self._install_fake_env('{"scenes":[]}')
@@ -4018,7 +4396,14 @@ class BreakdownTests(unittest.TestCase):
         def empty_then_fallback(sysmsg, usermsg, frames, temp=0.7, **kwargs):
             calls.append(kwargs)
             if kwargs.get("provider") == "openai":
-                return '{"scenes":[{"dur":"3s","scene":"锦鲤池全景","line":""}],"analysis":"恢复成功"}'
+                return json.dumps({
+                    "scenes": [{
+                        "dur": "3s",
+                        "detail_facts": self._detail_facts("锦鲤池全景"),
+                        "line": "",
+                    }],
+                    "analysis": "恢复成功",
+                }, ensure_ascii=False)
             return '{"scenes":[{"dur":"3s","scene":"  ","line":""}],"analysis":"empty"}'
 
         self.breakdown._chat_multimodal = empty_then_fallback
@@ -4029,7 +4414,7 @@ class BreakdownTests(unittest.TestCase):
             "https://example.test/post/empty-retry-fail",
         )
 
-        self.assertEqual(result["scenes"][0]["scene"], "锦鲤池全景")
+        self.assertIn("锦鲤池全景", result["scenes"][0]["scene"])
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[-1]["provider"], "openai")
 
