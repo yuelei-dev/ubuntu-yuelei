@@ -4389,6 +4389,10 @@ def _scene_detail_fact_contract_error(detail_facts, frame_count):
                 and unicodedata.category(compact_value[-1]).startswith("P")
             ):
                 compact_value = compact_value[:-1]
+            if not compact_value:
+                return "%s的%s必须是1到160字的具体事实" % (
+                    spec["label"], key,
+                )
             if (
                 compact_value in _SCENE_DETAIL_UNKNOWN_EXACT
                 or any(

@@ -1094,6 +1094,35 @@ class BreakdownTests(unittest.TestCase):
                         require_detail=True, frame_count=2,
                     )
 
+    def test_scene_detail_contract_rejects_punctuation_only_observed_text(self):
+        for placeholder in ("...", "。。。", "?!", "？！"):
+            with self.subTest(placeholder=placeholder):
+                facts = self._detail_facts()
+                facts["subject"]["identity"] = placeholder
+                with self.assertRaisesRegex(ValueError, "必须是1到160字的具体事实"):
+                    self.breakdown._validate_scene_breakdown(
+                        {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                        require_detail=True, frame_count=2,
+                    )
+
+    def test_scene_detail_contract_rejects_all_text_slots_as_punctuation(self):
+        facts = self._detail_facts()
+        text_fields = {
+            "subject": ("identity", "appearance", "position_scale"),
+            "action": ("start", "process", "end", "direction_speed"),
+            "setting": ("location", "foreground", "midground", "background"),
+            "lighting": ("source_direction",),
+        }
+        for field, keys in text_fields.items():
+            for key in keys:
+                facts[field][key] = "..."
+
+        with self.assertRaisesRegex(ValueError, "必须是1到160字的具体事实"):
+            self.breakdown._validate_scene_breakdown(
+                {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                require_detail=True, frame_count=2,
+            )
+
     def test_scene_detail_contract_rejects_observed_without_evidence(self):
         facts = self._detail_facts()
         facts["action"]["evidence_frames"] = []
