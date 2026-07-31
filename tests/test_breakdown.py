@@ -1075,6 +1075,17 @@ class BreakdownTests(unittest.TestCase):
         self.assertIn("白色空白画布", result["scenes"][0]["scene"])
         self.assertIn("空白画布位于中央", result["scenes"][0]["scene"])
 
+    def test_scene_detail_contract_rejects_blank_placeholders_with_terminal_punctuation(self):
+        for placeholder in ("外观字段均为空白。", "主体字段为空白!", "相关信息为空白……"):
+            with self.subTest(placeholder=placeholder):
+                facts = self._detail_facts()
+                facts["subject"]["appearance"] = placeholder
+                with self.assertRaisesRegex(ValueError, "不能使用unknown占位"):
+                    self.breakdown._validate_scene_breakdown(
+                        {"scenes": [{"dur": "4s", "detail_facts": facts, "line": ""}]},
+                        require_detail=True, frame_count=2,
+                    )
+
     def test_scene_detail_contract_rejects_observed_without_evidence(self):
         facts = self._detail_facts()
         facts["action"]["evidence_frames"] = []

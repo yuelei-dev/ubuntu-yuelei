@@ -4383,6 +4383,7 @@ def _scene_detail_fact_contract_error(detail_facts, frame_count):
             if not value or len(value) > 160:
                 return "%s的%s必须是1到160字的具体事实" % (spec["label"], key)
             compact_value = re.sub(r"\s+", "", value).lower()
+            compact_value = compact_value.rstrip("。.!！…")
             if (
                 compact_value in _SCENE_DETAIL_UNKNOWN_EXACT
                 or any(
