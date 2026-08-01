@@ -54,7 +54,11 @@ class ContentDomainTests(unittest.TestCase):
         #   真实点数计算 talking_actual_cost 在 video.py），门禁上调到 1675。
         # 一键成片对齐(#P0)：队列路由（口播池）+ 运行闸计数同属 core 队列/限流基础设施；
         #   批量拆解退点结算逻辑在 points.settle_breakdown_batch，core 只留 2 行接线，门禁上调到 1680。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1680)
+        # Seedance 参考图预审(#169)：转存触发 + 后续失败清理属扣点/入队生命周期胶水，
+        #   资格预检/转存/清理逻辑全在 video.stage_xiaole_video_references 等，core 只留 5 行薄接线，门禁上调到 1690。
+        # Seedance 参考图复审(#169)：COS 网络上传移出全局提交锁（拆两段锁 + 扣点前重查上限）、
+        #   _set_terminal 挂终态清理钩子，均属提交/任务生命周期胶水，门禁上调到 1715。
+        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1715)
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，

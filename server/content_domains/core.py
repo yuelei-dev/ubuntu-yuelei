@@ -683,7 +683,13 @@ DRAIN_TIMEOUT = _env_positive_int("CONTENT_DRAIN_TIMEOUT", 1200)
 def is_shutting_down(): return _shutting_down.is_set()
 
 # CAS 抢终态 / 退点幂等：实现在 content_domains/jobs_store.py，三个共写 jobs 表的服务共用一份。
-def _set_terminal(job_id, status, result=None, error=None, from_states=("running",)): return jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
+def _set_terminal(job_id, status, result=None, error=None, from_states=("running",), cleanup_delay=0):
+    claimed = jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
+    if claimed:
+        try:
+            _domains()[2].cleanup_job_staged_seedance_references(job_id, delay_seconds=cleanup_delay)
+        except Exception: pass
+    return claimed
 
 def _refund_once(job_id, username, cost):
     # safe_refund_points 吞掉异常并返回当前点数，不让退点接口故障影响主流程 → 视为永远成功。
@@ -1015,7 +1021,7 @@ def run_job(job_id):
     except Exception as e:
         # 生成失败：CAS 抢 error 终态；抢到才记失败资产。退点走幂等(reaper 若已退则跳过)
         # from_states 含 pending：抢 running 那句自己抛异常时任务还停在 pending，只认 running 会不退点
-        claimed = _set_terminal(job_id, "error", error=str(e), from_states=("pending", "running"))
+        delay = getattr(_domains()[2], "seedance_reference_cleanup_delay", lambda *_: 0)(kind, payload, e); claimed = _set_terminal(job_id, "error", error=str(e), from_states=("pending", "running"), cleanup_delay=delay)
         if claimed:
             _mark_video_asset_failed(job_id, kind, e)
         _refund_once(job_id, username, cost)  # 幂等：最多退一次
@@ -1054,6 +1060,8 @@ def reaper():
                     _mark_video_asset_failed(r["id"], r["kind"], "生成超时自动结束，已退点")
         except Exception:
             pass
+        try: _domains()[2].retry_pending_seedance_cleanups()
+        except Exception: pass
         time.sleep(60)
 
 def reclaim_orphaned_running():
@@ -1079,6 +1087,10 @@ def reclaim_orphaned_running():
             n += 1
     if n:
         print("[startup] 回收重启遗留孤儿任务 %d 个(→失败退点)" % n, flush=True)
+    try:
+        _domains()[2].retry_pending_seedance_cleanups()   # 启动扫描：收敛上次进程没删干净的 Seedance 参考图暂存对象
+    except Exception:
+        pass
     return n
 
 # ============ HTTP ============
@@ -1365,15 +1377,15 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "avatar":
                     body = video_domain.validate_avatar_payload(body)
                 elif kind == "xiaole_video":
-                    body = video_domain.validate_xiaole_video_payload(body)
-                    if body.get("channel") == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
+                    if isinstance(body, dict) and str(body.get("channel") or "grok").strip().lower() == "micro" and not video_domain.seedance_video_health_enabled(feature_flags): return self._send(503, {"detail": "Seedance 通道暂未开启（未扣点）", "code": "seedance_unavailable", "retry_after_ms": 60000})
+                    body = video_domain.validate_xiaole_video_payload(body, user["username"])
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
                 elif kind == "script_to_video": from . import script_to_video as script_to_video_domain; body = script_to_video_domain.prepare_script_to_video_payload(body, user["username"])
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"video", "tryon", "xiaole_video", "cinematic", "script_to_video"} else ""
-            except ValueError as e:
-                return self._send(400, {"detail": str(e)[:220]})
+            except video_domain.SeedanceReferenceUnavailable as e: return self._send(e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
+            except ValueError as e: return self._send(400, {"detail": str(e)[:220]})
             # 正在停机（部署中）→ 不收新活。⚠️ 必须在【扣点之前】。
             # 否则用户被扣了点、任务入了队，进程下一秒就退了 —— 又是一条「服务重启中断」。
             if is_shutting_down():
@@ -1408,24 +1420,47 @@ class H(BaseHTTPRequestHandler):
                     return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
                         "code": "active_job_cap", "active_jobs": active_jobs, "max_active_jobs": MAX_USER_ACTIVE_JOBS,
                         "retry_after_ms": 4000, "need": cost})
-                try:
-                    points_left = points_domain.deduct_points(user["username"], cost, "job:" + kind)  # 原子预扣
-                except points_domain.AuthPointsError as e:
-                    _idempotency_abort(user["username"], p, idem_key)
-                    return self._send(402 if e.status == 402 else 502, {"detail": e.detail, "need": cost})
-                now = int(time.time())
-                with closing(jdb()) as c:
-                    cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
-                                    (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
-                    c.commit(); jid = cur.lastrowid
-                if kind in {"video", "tryon", "xiaole_video", "cinematic"}:
-                    video_domain.record_video_pending_asset(jid, user["username"], body)
-                if not enqueue_job(jid, kind, body.get("mode")):
-                    _reject_pending_job(jid, user["username"], cost, "任务队列已满，请稍后再试")
-                    if kind in {"video", "tryon", "xiaole_video", "cinematic"}:
-                        video_domain.update_video_asset_phase(jid, "failed", status="failed", error="任务队列已满，请稍后再试")
-                    _idempotency_abort(user["username"], p, idem_key)
-                    return self._send(429, {"detail": "任务队列已满，请稍后再试", "code": "queue_full", "retry_after_ms": 4000, "need": cost})
+                # 鉴权结果余额仅作内存预检；原子扣点仍是最终裁决，锁内不再调用 Auth HTTP。
+                precheck_error = video_domain.xiaole_reference_precheck(kind, body, cost, user.get("points"))
+                if precheck_error: _idempotency_abort(user["username"], p, idem_key); return self._send(*precheck_error)
+            # COS 网络上传放在全局提交锁外：最多 9 张图的上传耗时不能阻塞所有用户的提交。
+            # 幂等行已占位(processing)，同 Key 并发请求此时拿 409；转存失败不扣点、不建任务。
+            staged_ref_keys, staging_error = video_domain.stage_xiaole_video_references(kind, body, user["username"], idem_key)
+            if staging_error: _idempotency_abort(user["username"], p, idem_key); return self._send(*staging_error)
+            post_stage_error = insert_error = jid = None
+            with _submission_lock:
+                if is_shutting_down():
+                    post_stage_error = (503, {"detail": "服务正在更新，请稍等几秒后重试（未扣点）", "code": "shutting_down", "retry_after_ms": 5000})
+                # 上传期间槽位可能被别人抢走：扣点前重查上限。
+                if post_stage_error is None:
+                    limit_hit = _user_video_submit_limit(kind, body, user["username"], cost)
+                    if limit_hit: post_stage_error = (429, limit_hit)
+                if post_stage_error is None:
+                    active_jobs = _user_active_job_count(user["username"])
+                    if active_jobs >= MAX_USER_ACTIVE_JOBS:
+                        post_stage_error = (429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs, "code": "active_job_cap", "active_jobs": active_jobs,
+                                                  "max_active_jobs": MAX_USER_ACTIVE_JOBS, "retry_after_ms": 4000, "need": cost})
+                if post_stage_error is None:
+                    try: points_left = points_domain.deduct_points(user["username"], cost, "job:" + kind)
+                    except points_domain.AuthPointsError as e: post_stage_error = (402 if e.status == 402 else 502, {"detail": e.detail, "need": cost})
+                if post_stage_error is None:
+                    now = int(time.time())
+                    try:
+                        with closing(jdb()) as c:
+                            cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
+                                            (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
+                            jid = cur.lastrowid; video_domain.link_staged_seedance_references(c, staged_ref_keys, jid); c.commit()
+                    except Exception as exc: insert_error = exc
+                if post_stage_error is None and insert_error is None:
+                    if kind in {"video", "tryon", "xiaole_video", "cinematic"}: video_domain.record_video_pending_asset(jid, user["username"], body)
+                    if not enqueue_job(jid, kind, body.get("mode")):
+                        _reject_pending_job(jid, user["username"], cost, "任务队列已满，请稍后再试")
+                        if kind in {"video", "tryon", "xiaole_video", "cinematic"}: video_domain.update_video_asset_phase(jid, "failed", status="failed", error="任务队列已满，请稍后再试")
+                        post_stage_error = (429, {"detail": "任务队列已满，请稍后再试", "code": "queue_full", "retry_after_ms": 4000, "need": cost})
+            if insert_error is not None:
+                video_domain.cleanup_staged_seedance_references(staged_ref_keys); _idempotency_abort(user["username"], p, idem_key); raise insert_error
+            if post_stage_error is not None:
+                video_domain.cleanup_staged_seedance_references(staged_ref_keys, jid); _idempotency_abort(user["username"], p, idem_key); return self._send(*post_stage_error)
             response = {"job_id": jid, "cost": cost, "points_left": points_left}
             if kind == "script_to_video" and body.get("cost_breakdown"): response["cost_breakdown"] = body["cost_breakdown"]
             _idempotency_complete(user["username"], p, idem_key, response)
@@ -1660,7 +1695,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
-                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags),
+                                    "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags), "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
 
