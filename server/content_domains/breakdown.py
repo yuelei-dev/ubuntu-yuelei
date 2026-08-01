@@ -547,9 +547,9 @@ def handle_local_upload(handler, user):
                         "detail": "任务队列已满，请稍后再试", "code": "queue_full",
                         "retry_after_ms": 4000,
                     })
-        return handler._send(
-            200, {"job_id": job_id, "cost": cost, "points_left": points_left}
-        )
+        success_response = {
+            "job_id": job_id, "cost": cost, "points_left": points_left,
+        }
     except points_domain.AuthPointsError as exc:
         _remove_upload(temp_path)
         return handler._send(
@@ -562,6 +562,10 @@ def handle_local_upload(handler, user):
     except Exception as exc:
         _remove_upload(temp_path)
         return handler._send(500, {"detail": "上传任务创建失败，请重试"})
+    # The paid job and its upload binding are already durable and queued.
+    # Keep response I/O outside the pre-commit cleanup scope: a disconnected
+    # client must not delete the source file that the worker still owns.
+    return handler._send(200, success_response)
 
 
 def _remove_upload(path):

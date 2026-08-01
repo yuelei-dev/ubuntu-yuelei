@@ -194,6 +194,44 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                  (uploads[0]["token"] + uploads[0]["suffix"])).is_file()
             )
 
+    def test_local_upload_broken_response_keeps_queued_source_and_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            handler._send.side_effect = BrokenPipeError("client disconnected")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct, mock.patch.object(
+                self.points, "safe_refund_points", return_value=100
+            ) as refund:
+                with self.assertRaises(BrokenPipeError):
+                    self.breakdown.handle_local_upload(
+                        handler, {"username": "alice"}
+                    )
+
+            deduct.assert_called_once_with("alice", 20, "job:breakdown")
+            refund.assert_not_called()
+            with closing(connect()) as connection:
+                jobs = connection.execute(
+                    "SELECT id,status,refunded FROM jobs"
+                ).fetchall()
+                uploads = connection.execute(
+                    "SELECT token,job_id,suffix FROM breakdown_uploads"
+                ).fetchall()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(
+                (jobs[0]["status"], jobs[0]["refunded"]), ("pending", 0)
+            )
+            self.assertEqual(len(uploads), 1)
+            self.assertEqual(uploads[0]["job_id"], jobs[0]["id"])
+            self.assertTrue(
+                (root / "_breakdown_uploads" /
+                 (uploads[0]["token"] + uploads[0]["suffix"])).is_file()
+            )
+
     def test_local_upload_insufficient_points_rejects_before_body_or_database(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
