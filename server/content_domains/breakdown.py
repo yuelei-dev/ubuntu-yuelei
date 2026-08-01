@@ -429,7 +429,6 @@ def handle_local_upload(handler, user):
     """Validate a local upload, charge once, persist its token, and enqueue it."""
     from . import core
     _, points_domain, _ = core._domains()
-    paid_job_insert_error = getattr(core.jobs_store, "PaidJobInsertError", ())
     try:
         core.feature_flags.require_enabled("breakdown")
     except core.feature_flags.FeatureDisabled as exc:
@@ -456,6 +455,14 @@ def handle_local_upload(handler, user):
     maximum = 20 * 1024 * 1024 if media_type == "image" else 200 * 1024 * 1024
     if content_length <= 0 or content_length > maximum:
         return handler._send(413, {"detail": "图片最大 20MB，视频最大 200MB"})
+    cost = points_domain.cost_of("breakdown", {
+        "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
+    })
+    points = int(points_domain.get_points(user["username"]) or 0)
+    if points < cost:
+        return handler._send(402, {
+            "detail": "点数不足", "need": cost, "points": points,
+        })
     active_jobs = core._user_active_job_count(user["username"])
     if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
         return handler._send(429, {
@@ -490,41 +497,56 @@ def handle_local_upload(handler, user):
         }[content_type]
         if not valid_signature:
             raise ValueError("文件内容与声明格式不一致")
+        if media_type == "video":
+            duration = _probe_duration(temp_path)
+            if duration <= 0:
+                raise ValueError("无法读取视频时长")
+            if duration > 120.05:
+                raise ValueError("视频最长支持 2 分钟")
         body = {
             "upload_token": upload_token,
             "media_type": media_type,
             "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
         }
-        cost = points_domain.cost_of("breakdown", body)
         with core._submission_lock:
-            with closing(core.jdb()) as connection:
-                _ensure_upload_table(connection)
-                connection.commit()
-
-            def record_upload(connection, job_id):
-                _ensure_upload_table(connection)
-                connection.execute(
-                    "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (upload_token, user["username"], suffix, job_id, int(time.time())),
-                )
-
-            job_id, points_left = core.jobs_store.create_paid_job(
-                core.jdb, points_domain.deduct_points, points_domain.refund_points,
-                "breakdown", user["username"], cost, body, core.SERVICE_OWNER,
-                before_commit=record_upload,
+            points_left = points_domain.deduct_points(
+                user["username"], cost, "job:breakdown"
             )
+            try:
+                now = int(time.time())
+                with closing(core.jdb()) as connection:
+                    _ensure_upload_table(connection)
+                    cursor = connection.execute(
+                        "INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner)"
+                        " VALUES(?,?,?,?,?,?,?)",
+                        ("breakdown", user["username"], cost,
+                         json.dumps(body, ensure_ascii=False), now, now,
+                         core.SERVICE_OWNER),
+                    )
+                    job_id = int(cursor.lastrowid)
+                    connection.execute(
+                        "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
+                        " VALUES(?,?,?,?,?)",
+                        (upload_token, user["username"], suffix, job_id, now),
+                    )
+                    connection.commit()
+            except Exception:
+                points_domain.safe_refund_points(
+                    user["username"], cost, "local breakdown create rollback"
+                )
+                raise
             if not core.enqueue_job(job_id, "breakdown", _BREAKDOWN_MODE_REVERSE_PROMPT):
-                core._reject_pending_job(
+                rejected = core._reject_pending_job(
                     job_id, user["username"], cost, "任务队列已满，请稍后再试"
                 )
-                _remove_trusted_upload(
-                    upload_token, user["username"], job_id, temp_path
-                )
-                return handler._send(429, {
-                    "detail": "任务队列已满，请稍后再试", "code": "queue_full",
-                    "retry_after_ms": 4000,
-                })
+                if rejected:
+                    _remove_trusted_upload(
+                        upload_token, user["username"], job_id, temp_path
+                    )
+                    return handler._send(429, {
+                        "detail": "任务队列已满，请稍后再试", "code": "queue_full",
+                        "retry_after_ms": 4000,
+                    })
         return handler._send(
             200, {"job_id": job_id, "cost": cost, "points_left": points_left}
         )
@@ -532,17 +554,14 @@ def handle_local_upload(handler, user):
         _remove_upload(temp_path)
         return handler._send(
             exc.status if exc.status in (402, 403) else 502,
-            points_domain.public_error_body(exc, 20),
+            {"detail": exc.detail, "need": cost},
         )
-    except paid_job_insert_error as exc:
-        _remove_upload(temp_path)
-        return handler._send(500, {
-            "detail": "任务创建失败，点数已退回",
-            "submission_ref": exc.submission_ref,
-        })
-    except Exception as exc:
+    except ValueError as exc:
         _remove_upload(temp_path)
         return handler._send(400, {"detail": str(exc)[:180]})
+    except Exception as exc:
+        _remove_upload(temp_path)
+        return handler._send(500, {"detail": "上传任务创建失败，请重试"})
 
 
 def _remove_upload(path):
@@ -887,6 +906,7 @@ def _do_local_reverse(payload, upload_token):
             ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
             ".png": "image/png", ".webp": "image/webp",
             ".mp4": "video/mp4", ".mov": "video/quicktime",
+            ".webm": "video/webm",
         }.get(suffix, "video/mp4" if media_type == "video" else "image/jpeg")
         return _reverse_result_from_frames(
             payload,

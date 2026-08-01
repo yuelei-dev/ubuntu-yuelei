@@ -361,6 +361,7 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
     def setUpClass(cls):
         cls.ui = (ROOT / "site/workbench/script.html").read_text(encoding="utf-8")
         cls.processor = (ROOT / "server/content_domains/local_reverse_processor.py").read_text(encoding="utf-8")
+        cls.breakdown = (ROOT / "server/content_domains/breakdown.py").read_text(encoding="utf-8")
         cls.core = (ROOT / "server/content_domains/core.py").read_text(encoding="utf-8")
         cls.nginx = (ROOT / "deploy/nginx-huangquechuanmei.conf").read_text(encoding="utf-8")
         cls.assets = (ROOT / "server/content_domains/assets_store.py").read_text(encoding="utf-8")
@@ -392,8 +393,11 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertNotIn("正在转写视频口播", self.ui)
 
     def test_standard_paid_job_and_refund_flow_is_reused(self):
-        self.assertIn("jobs_store.create_paid_job", (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8"))
-        self.assertIn("reject_pending_job", (ROOT / "server/content_domains/local_reverse_upload.py").read_text(encoding="utf-8"))
+        self.assertIn("points_domain.deduct_points", self.breakdown)
+        self.assertIn("INSERT INTO jobs(kind,username,cost,payload", self.breakdown)
+        self.assertIn("core._reject_pending_job", self.breakdown)
+        self.assertNotIn("jobs_store.create_paid_job", self.breakdown)
+        self.assertNotIn("points_domain.public_error_body", self.breakdown)
         self.assertIn('if p == "/api/gen/breakdown/local-upload"', self.core)
         self.assertIn('"source_type": r.get("source_type")', self.assets)
         self.assertIn('"sections": r.get("sections")', self.assets)
