@@ -61,6 +61,10 @@ SEEDANCE_REFERENCE_MAX_BYTES = 30 * 1024 * 1024
 # 参考图签名 URL 有效期：覆盖「排队等待 + Seedance 取图」的任务生命周期，同时避免长期可访问。
 # 成片走 cos._SIGN_EXPIRE(默认7天)是给用户慢慢下载的；参考图是中间产物，2 小时足够。
 SEEDANCE_REFERENCE_SIGN_EXPIRE = 2 * 60 * 60
+# 提交后 payload 里只存对象键（cos-key:// 内部形式），worker 真正向 Seedance 提交时才签名，
+# 签名 TTL 只需覆盖「提交 → Seedance 取图」的分钟级窗口，与排队时长彻底解耦。
+SEEDANCE_COS_KEY_SCHEME = "cos-key://"
+SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5   # 待清理重试上限：超过后保留记录并告警，人工介入
 _SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
 _SEEDANCE_IMAGE_TYPES = {
     "image/jpeg": ".jpg",
@@ -215,14 +219,18 @@ def _seedance_cos_delete(object_key):
 
 
 def _seedance_staging_token(token):
-    """每次提交唯一的对象键成分：优先幂等键（同 Key 重试覆盖同一对象），否则随机 uuid。
-    跨提交不再共享对象键 —— 从源头消除「失败方清理删掉在途方对象」的竞态。"""
-    clean = re.sub(r"[^A-Za-z0-9_-]", "", str(token or ""))[:24]
-    return clean or uuid.uuid4().hex[:24]
+    """每次提交唯一的对象键成分：对原始幂等键做 sha256 取前 24 hex
+    （不删字符不截断原文 —— ab.cd:ef 与 abcdef 这类仅标点不同的合法键不会碰撞），
+    无幂等键时用随机 uuid。跨提交不共享对象键，从源头消除失败清理误删在途请求。"""
+    raw = str(token or "")
+    if raw:
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+    return uuid.uuid4().hex[:24]
 
 
 def _stage_seedance_reference(value, username=None, token=None):
-    """把本地 data: 参考图上传为 COS 私有对象，返回 (短期签名URL, 对象键)。
+    """把本地 data: 参考图上传为 COS 私有对象，返回 (cos-key://内部引用, 对象键)。
+    提交时不签名 —— 签名推迟到 worker 真正向 Seedance 提交的那一刻（见 _seedance_ref_to_signed_url）。
     只被 stage_seedance_references 调用；http(s)/asset:// 透传不产对象。"""
     raw = str(value or "").strip()
     if not raw.startswith("data:"):
@@ -237,13 +245,26 @@ def _stage_seedance_reference(value, username=None, token=None):
     try:
         from . import cos
         cos.put_bytes(data, object_key, mime, private=True)   # 用户肖像素材强制私有 ACL
-        url = _seedance_reference_uri(_seedance_cos_presign(object_key))
-        return url, object_key
+        return SEEDANCE_COS_KEY_SCHEME + object_key, object_key
     except SeedanceReferenceUnavailable:
         raise
     except Exception as exc:
         print("[seedance] reference staging failed: %s" % type(exc).__name__, flush=True)
         raise SeedanceReferenceUnavailable("Seedance 参考图上传失败，本次未扣点") from exc
+
+
+def _seedance_ref_to_signed_url(ref, username=None):
+    """worker 向 Seedance 提交前，才把 payload 里的 cos-key:// 对象键换成新鲜预签名 URL。
+    http(s)/asset:// 走原契约不变；cos-key:// 必须是本账号前缀下的参考图键，否则拒绝。"""
+    raw = str(ref or "").strip()
+    if not raw.startswith(SEEDANCE_COS_KEY_SCHEME):
+        return _seedance_reference_uri(raw)
+    owner = str(username or "").strip()
+    owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16] if owner else ""
+    key = raw[len(SEEDANCE_COS_KEY_SCHEME):]
+    if not owner_hash or not key.startswith("seedance/reference/%s/" % owner_hash):
+        raise ValueError("Seedance 参考图对象键不合法")
+    return _seedance_reference_uri(_seedance_cos_presign(key))
 
 
 def _validate_seedance_references(values, username=None):
@@ -266,10 +287,11 @@ def _validate_seedance_references(values, username=None):
 
 
 def stage_seedance_references(body, username, token=None):
-    """扣点前的唯一网络动作：micro 渠道的 data: 参考图转存 COS 私有对象、换短期签名 URL。
-    任一失败都 best-effort 删除本批已上传对象，绝不残留，也绝不回退 data:。
-    就地改写 body["reference_images"]，并把对象键记入 body["_seedance_staged_keys"]
-    （随 jobs.payload 落库，供终态清理），返回本批新上传的对象键。"""
+    """扣点前的唯一网络动作：micro 渠道的 data: 参考图转存 COS 私有对象。
+    任一失败都 best-effort 删除本批已上传对象（失败键持久化待重试），绝不残留，也绝不回退 data:。
+    就地改写 body["reference_images"] 为 cos-key:// 内部引用（不签名，签名推迟到 worker 提交时），
+    并把对象键记入 body["_seedance_staged_keys"]（随 jobs.payload 落库，供终态清理），
+    返回本批新上传的对象键。"""
     refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or []) if str(item or "").strip()]
     if str((body or {}).get("channel") or "").strip().lower() != "micro" or not any(item.startswith("data:") for item in refs):
         return []
@@ -321,26 +343,111 @@ def stage_xiaole_video_references(kind, body, username, token=None):
         return None, (e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
 
 
-def cleanup_staged_seedance_references(object_keys):
-    """best-effort 清理：扣点失败、入队失败等后续步骤失败时删除已转存的参考图对象。"""
+_cleanup_table_ready = False
+
+
+def _cleanup_db():
+    """待清理队列表（content_jobs.db 内新建小表，不动既有表结构）。"""
+    global _cleanup_table_ready
+    c = jdb()
+    if not _cleanup_table_ready:
+        c.execute("""CREATE TABLE IF NOT EXISTS seedance_pending_cleanup(
+            key TEXT PRIMARY KEY, job_id INTEGER, created_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0)""")
+        c.commit()
+        _cleanup_table_ready = True
+    return c
+
+
+def _enqueue_pending_cleanup(keys, job_id=None):
+    """删除失败的键持久化待重试，避免短暂 COS 故障导致敏感参考图长期残留。"""
+    keys = [str(k) for k in (keys or []) if k]
+    if not keys:
+        return
+    try:
+        with closing(_cleanup_db()) as c:
+            now = int(time.time())
+            for k in keys:
+                c.execute("INSERT OR IGNORE INTO seedance_pending_cleanup(key,job_id,created_at,attempts) VALUES(?,?,?,0)",
+                          (k, job_id, now))
+            c.commit()
+    except Exception as exc:
+        print("[seedance] ALARM pending cleanup persist failed: %s" % type(exc).__name__, flush=True)
+
+
+def cleanup_staged_seedance_references(object_keys, job_id=None):
+    """best-effort 清理：扣点/入队失败或任务终态时删除已转存的参考图对象；
+    删除失败的键落 seedance_pending_cleanup，由启动扫描和后续清理动作重试收敛。"""
+    failed = []
     for key in object_keys or []:
         try:
             _seedance_cos_delete(key)
         except Exception as exc:
             print("[seedance] reference cleanup failed for %s: %s" % (key, type(exc).__name__), flush=True)
+            failed.append(key)
+    if failed:
+        _enqueue_pending_cleanup(failed, job_id)
+
+
+def retry_pending_seedance_cleanups(limit=50):
+    """重试待清理队列：成功即移除记录；连续失败达上限保留记录并告警（人工介入）。"""
+    try:
+        with closing(_cleanup_db()) as c:
+            rows = c.execute("SELECT key,attempts FROM seedance_pending_cleanup ORDER BY created_at LIMIT ?",
+                             (int(limit),)).fetchall()
+    except Exception:
+        return
+    for row in rows:
+        key, attempts = row["key"], int(row["attempts"] or 0)
+        try:
+            _seedance_cos_delete(key)
+        except Exception:
+            attempts += 1
+            try:
+                with closing(_cleanup_db()) as c:
+                    c.execute("UPDATE seedance_pending_cleanup SET attempts=? WHERE key=?", (attempts, key))
+                    c.commit()
+            except Exception:
+                pass
+            if attempts >= SEEDANCE_CLEANUP_MAX_ATTEMPTS:
+                print("[seedance] ALARM cleanup key %s failed %d times, manual intervention required" % (key, attempts), flush=True)
+            continue
+        try:
+            with closing(_cleanup_db()) as c:
+                c.execute("DELETE FROM seedance_pending_cleanup WHERE key=?", (key,))
+                c.commit()
+        except Exception:
+            pass
 
 
 def cleanup_job_staged_seedance_references(job_id):
     """终态清理：job 进 done/error 后删除本次暂存的参考图对象。
-    由 core._set_terminal 在 CAS 抢到终态后调用；best-effort，永不阻断主流程。"""
+    由 core._set_terminal 在 CAS 抢到终态后调用；best-effort，永不阻断主流程。
+    防越权：任务必须是 xiaole_video，且每个键必须带该任务属主账号的
+    seedance/reference/<sha256(username)[:16]>/ 前缀 —— payload 被注入/篡改时
+    不能把任意对象键送进删除函数，两条校验不过只告警不删除。"""
     try:
         with closing(jdb()) as c:
-            row = c.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
-        keys = (json.loads(row["payload"] or "{}") if row else {}).get("_seedance_staged_keys") or []
+            row = c.execute("SELECT kind,username,payload FROM jobs WHERE id=?", (job_id,)).fetchone()
     except Exception as exc:
         print("[seedance] terminal cleanup lookup failed for job %s: %s" % (job_id, type(exc).__name__), flush=True)
         return
-    cleanup_staged_seedance_references(keys)
+    if not row or row["kind"] != "xiaole_video":
+        return
+    try:
+        keys = (json.loads(row["payload"] or "{}")).get("_seedance_staged_keys") or []
+    except Exception:
+        return
+    owner_hash = hashlib.sha256(str(row["username"] or "").encode("utf-8")).hexdigest()[:16]
+    prefix = "seedance/reference/%s/" % owner_hash
+    safe = []
+    for key in keys:
+        key = str(key or "")
+        if key.startswith(prefix):
+            safe.append(key)
+        else:
+            print("[seedance] ALARM refuse to delete foreign object key for job %s: %s" % (job_id, key[:80]), flush=True)
+    cleanup_staged_seedance_references(safe, job_id)
+    retry_pending_seedance_cleanups()   # 顺手收敛历史遗留
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
@@ -380,7 +487,10 @@ def validate_xiaole_video_payload(payload, username=None):
     """校验果肉/豆姐/欧米的公共入口；果肉官方线另按 xAI 参数收紧。"""
     if not isinstance(payload, dict):
         raise ValueError("请求体不是合法 JSON")
-    cleaned = dict(payload)
+    # 剥离客户端的一切 "_" 开头内部字段（_seedance_staged_keys/_username/_job_id 等
+    # 只能由服务端在转存/派工时写入）——否则注入的暂存键会随 payload 落库，
+    # 终态清理时变成越权删除任意 COS 对象的入口。
+    cleaned = {k: v for k, v in payload.items() if not str(k).startswith("_")}
     channel = str(cleaned.get("channel") or "grok").strip().lower()
     if channel not in XIAOLE_CHANNEL_MODELS:
         raise ValueError("未知视频渠道：%s" % channel)
@@ -3252,7 +3362,7 @@ def gen_xiaole_video(payload):
     size = _xiaole_size_for_ratio(ratio) if not use_xai else None
     ref_images = None
     if use_seedance:
-        ref_images = [_seedance_reference_uri(item) for item in (payload.get("reference_images") or [])]
+        ref_images = [_seedance_ref_to_signed_url(item, payload.get("_username")) for item in (payload.get("reference_images") or [])]
     elif channel in XIAOLE_IMAGE_CHANNELS:
         raw_refs = payload.get("reference_images") or None
         if raw_refs:

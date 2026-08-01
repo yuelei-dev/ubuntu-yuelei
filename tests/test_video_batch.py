@@ -587,11 +587,13 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
             "presign": video._seedance_cos_presign,
             "cos_delete": video._seedance_cos_delete,
             "cos_enabled": cos.enabled, "cos_put": cos.put_bytes,
+            "cleanup_ready": video._cleanup_table_ready,
         }
         server = None
         with tempfile.TemporaryDirectory() as td:
             core.JOB_DB = str(pathlib.Path(td) / "jobs.db")
             core.AUDIO_DB = str(pathlib.Path(td) / "assets.db")
+            video._cleanup_table_ready = False
             core.verify = lambda token: {"username": "fang", "must_change": False}
             core.feature_flags.require_enabled = lambda kind: None
             core.feature_flags.is_enabled = lambda kind: True
@@ -663,7 +665,7 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 micro_body = {"channel": "micro", "prompt": "demo", "duration": 5,
                               "reference_images": [_real_png_data_url(1)]}
 
-                # 资格全过：上传在扣点前完成，私有 ACL + 签名 URL，扣点与建任务各 1
+                # 资格全过：上传在扣点前完成，私有 ACL，payload 只存 cos-key:// 键不存签名 URL
                 reset()
                 status, resp = post(micro_body)
                 self.assertEqual(200, status)
@@ -673,9 +675,9 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertEqual(1, len(fake.deductions))
                 with closing(core.jdb()) as db:
                     row = db.execute("SELECT payload FROM jobs").fetchone()
-                self.assertIn(signed_url, row["payload"])
+                self.assertIn("cos-key://" + put_calls[0]["key"], row["payload"])
                 self.assertNotIn("data:image", row["payload"])
-                self.assertIn(put_calls[0]["key"], row["payload"])   # _seedance_staged_keys 随 payload 落库
+                self.assertNotIn("q-sign-algorithm", row["payload"])   # 提交时不签名，签名推迟到 worker
 
                 # 终态清理：job 进 done 后删除本次暂存对象；重复 CAS 不重复清理
                 self.assertEqual([], delete_calls)
@@ -683,6 +685,24 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertEqual([put_calls[0]["key"]], delete_calls)
                 self.assertFalse(core._set_terminal(resp["job_id"], "done", result={"url": "y"}, from_states=("pending", "running")))
                 self.assertEqual(1, len(delete_calls))
+
+                # P0 入口：客户端注入的 _seedance_staged_keys 不得随 payload 入库
+                reset()
+                status, resp = post(dict(micro_body, _seedance_staged_keys=["seedance/reference/0000000000000000/evil.png"]))
+                self.assertEqual(200, status)
+                with closing(core.jdb()) as db:
+                    row = db.execute("SELECT payload FROM jobs").fetchone()
+                self.assertNotIn("evil.png", row["payload"])
+                self.assertIn(put_calls[0]["key"], row["payload"])   # 只剩服务端自己生成的键
+
+                # P0 出口：恶意构造的 payload 行（他人前缀/任意键）→ 终态清理删除调用数为 0
+                reset()
+                with closing(core.jdb()) as db:
+                    db.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at,deleted,refunded) VALUES(1,'xiaole_video','fang',20,'done',?,1,1,0,0)",
+                               (json.dumps({"_seedance_staged_keys": ["seedance/reference/0000000000000000/evil.png", "anything/at/all.png"]}),))
+                    db.commit()
+                video.cleanup_job_staged_seedance_references(1)
+                self.assertEqual([], delete_calls)
 
                 # 余额不足：资格预检 402，COS 上传调用数为 0，不扣点不建任务
                 reset()
@@ -795,6 +815,7 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 video._seedance_cos_delete = originals["cos_delete"]
                 cos.enabled = originals["cos_enabled"]
                 cos.put_bytes = originals["cos_put"]
+                video._cleanup_table_ready = originals["cleanup_ready"]
 
 
 if __name__ == "__main__":

@@ -1086,6 +1086,10 @@ def reclaim_orphaned_running():
             n += 1
     if n:
         print("[startup] 回收重启遗留孤儿任务 %d 个(→失败退点)" % n, flush=True)
+    try:
+        _domains()[2].retry_pending_seedance_cleanups()   # 启动扫描：收敛上次进程没删干净的 Seedance 参考图暂存对象
+    except Exception:
+        pass
     return n
 
 # ============ HTTP ============

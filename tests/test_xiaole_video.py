@@ -171,10 +171,10 @@ class XiaoleVideoTests(unittest.TestCase):
         put.assert_not_called()   # 校验阶段不做任何网络上传
         self.assertEqual(refs, body["reference_images"])
 
-    def test_stage_seedance_references_uploads_private_and_returns_signed_urls(self):
+    def test_stage_seedance_references_uploads_private_and_returns_cos_keys(self):
         refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(4)]
         patches = self._stage_mocks()
-        with patches[0], patches[1], patches[2] as put, patches[3]:
+        with patches[0], patches[1], patches[2] as put, patches[3] as presign:
             first = self.video.validate_xiaole_video_payload({
                 "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
             second = self.video.validate_xiaole_video_payload({
@@ -188,6 +188,7 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(12, put.call_count)
         for call in put.call_args_list:
             self.assertIs(call.kwargs.get("private"), True)   # 强制私有 ACL
+        presign.assert_not_called()   # 提交时不签名，签名推迟到 worker 提交时
         first_keys_uploaded = [call.args[1] for call in put.call_args_list[:4]]
         second_keys_uploaded = [call.args[1] for call in put.call_args_list[4:8]]
         repeat_keys_uploaded = [call.args[1] for call in put.call_args_list[8:]]
@@ -196,14 +197,71 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(first_keys_uploaded, repeat_keys_uploaded)
         self.assertEqual(4, len(set(first_keys_uploaded)))
         self.assertRegex(first_keys_uploaded[0],
-                         r"^seedance/reference/[0-9a-f]{16}/idem-token-a-[0-9a-f]{16}\.png$")
+                         r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{24}-[0-9a-f]{16}\.png$")
         self.assertEqual(first_keys, first_keys_uploaded)
         self.assertEqual(first_keys, first["_seedance_staged_keys"])   # 随 payload 落库供终态清理
-        self.assertEqual(first["reference_images"], second["reference_images"])
-        for url in first["reference_images"]:
-            self.assertTrue(url.startswith("https://"))
-            self.assertIn("q-sign-algorithm", url)   # 短期签名 URL，不是裸公开直链
+        # payload 只存 cos-key:// 内部引用，不存签名 URL；跨提交引用不同（键不同）
+        self.assertEqual(["cos-key://" + k for k in first_keys], first["reference_images"])
+        self.assertNotEqual(first["reference_images"], second["reference_images"])
         self.assertNotIn("data:", str(first["reference_images"]))
+        self.assertNotIn("q-sign-algorithm", str(first["reference_images"]))
+
+    def test_staging_token_hashes_idem_key_without_collision(self):
+        # 仅标点不同的两个合法 Idempotency-Key 不得映射为同一 token
+        self.assertNotEqual(self.video._seedance_staging_token("ab.cd:ef"),
+                            self.video._seedance_staging_token("abcdef"))
+        self.assertEqual(self.video._seedance_staging_token("ab.cd:ef"),
+                         self.video._seedance_staging_token("ab.cd:ef"))
+        self.assertRegex(self.video._seedance_staging_token("ab.cd:ef"), r"^[0-9a-f]{24}$")
+        self.assertRegex(self.video._seedance_staging_token(""), r"^[0-9a-f]{24}$")
+
+    def test_validate_micro_strips_client_internal_fields(self):
+        body = self.video.validate_xiaole_video_payload({
+            "channel": "micro", "prompt": "demo", "duration": 5,
+            "_seedance_staged_keys": ["seedance/reference/0000000000000000/evil.png"],
+            "_username": "admin", "_job_id": 1,
+        }, "fang")
+        self.assertNotIn("_seedance_staged_keys", body)   # 注入的暂存键不得进入任务 payload
+        self.assertNotIn("_username", body)
+        self.assertNotIn("_job_id", body)
+
+    def test_validate_micro_rejects_client_cos_key_reference(self):
+        with self.assertRaisesRegex(ValueError, "公网|asset://"):
+            self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "demo", "duration": 5,
+                "reference_images": ["cos-key://seedance/reference/0000000000000000/evil.png"],
+            }, "fang")
+
+    def test_worker_signs_cos_key_references_at_submit_time(self):
+        import hashlib as _hashlib
+
+        owner = _hashlib.sha256(b"fang").hexdigest()[:16]
+        key = "seedance/reference/%s/%s.png" % (owner, "t" * 24 + "-" + "c" * 16)
+        signed = "https://bucket-1250000000.cos.ap-guangzhou.myqcloud.com/x?q-sign-algorithm=sha1"
+        fake = {"request_id": "seedance-1", "source_video_url": "https://example.com/micro.mp4",
+                "model": "doubao-seedance-2-0-260128"}
+        with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
+             patch.object(self.video, "_seedance_cos_presign", return_value=signed) as presign, \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
+            self.video.gen_xiaole_video({
+                "channel": "micro", "prompt": "demo", "duration": 5,
+                "reference_images": ["cos-key://" + key], "_username": "fang",
+            })
+        presign.assert_called_once_with(key)   # worker 提交时才生成新鲜签名 URL
+        self.assertEqual([signed], generate.call_args.kwargs["reference_images"])
+
+    def test_worker_rejects_cos_key_of_other_owner(self):
+        with patch("content_domains.video_seedance.generate") as generate, \
+             patch.object(self.video, "_seedance_cos_presign") as presign:
+            with self.assertRaisesRegex(ValueError, "对象键不合法"):
+                self.video.gen_xiaole_video({
+                    "channel": "micro", "prompt": "demo", "duration": 5,
+                    "reference_images": ["cos-key://seedance/reference/0000000000000000/x.png"],
+                    "_username": "fang",
+                })
+        generate.assert_not_called()
+        presign.assert_not_called()
 
     def test_stage_seedance_references_partial_failure_cleans_uploaded_batch(self):
         refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(3)]
@@ -249,10 +307,70 @@ class XiaoleVideoTests(unittest.TestCase):
         put.assert_not_called()
 
     def test_cleanup_staged_seedance_references_is_best_effort(self):
-        with patch.object(self.video, "_seedance_cos_delete",
+        import tempfile
+        from content_domains import core
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False), \
+             patch.object(self.video, "_seedance_cos_delete",
                           side_effect=[None, RuntimeError("already gone")]) as delete:
             self.video.cleanup_staged_seedance_references(["k1", "k2"])
         self.assertEqual(2, delete.call_count)   # 单个失败不阻断其余清理
+
+    def test_cleanup_failure_persists_and_retry_converges(self):
+        import sqlite3
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        def pending_rows():
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                return db.execute("SELECT key,job_id,attempts FROM seedance_pending_cleanup").fetchall()
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False):
+            # 删除失败 → 持久化待清理
+            with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("cos down")):
+                self.video.cleanup_staged_seedance_references(["k1"], job_id=7)
+            self.assertEqual([("k1", 7, 0)], [tuple(r) for r in pending_rows()])
+            # 重试仍失败 → attempts+1，记录保留
+            with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("still down")):
+                self.video.retry_pending_seedance_cleanups()
+            self.assertEqual([("k1", 7, 1)], [tuple(r) for r in pending_rows()])
+            # 故障恢复 → 重试成功 → 记录移除
+            with patch.object(self.video, "_seedance_cos_delete") as delete:
+                self.video.retry_pending_seedance_cleanups()
+            delete.assert_called_once_with("k1")
+            self.assertEqual([], pending_rows())
+
+    def test_terminal_cleanup_refuses_foreign_or_wrong_kind_keys(self):
+        import hashlib as _hashlib
+        import json as _json
+        import sqlite3
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        own = "seedance/reference/%s/t.png" % _hashlib.sha256(b"fang").hexdigest()[:16]
+        foreign = "seedance/reference/%s/t.png" % _hashlib.sha256(b"other").hexdigest()[:16]
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False):
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                db.execute("CREATE TABLE jobs(id INTEGER PRIMARY KEY, kind TEXT, username TEXT, payload TEXT)")
+                db.execute("INSERT INTO jobs VALUES(1,'xiaole_video','fang',?)",
+                           (_json.dumps({"_seedance_staged_keys": [own, foreign, " arbitrary/key.png"]}),))
+                db.execute("INSERT INTO jobs VALUES(2,'video','fang',?)",
+                           (_json.dumps({"_seedance_staged_keys": [own]}),))
+                db.commit()
+            with patch.object(self.video, "_seedance_cos_delete") as delete:
+                self.video.cleanup_job_staged_seedance_references(1)
+                self.assertEqual([own], [c.args[0] for c in delete.call_args_list])  # 只删本账号前缀的键
+                delete.reset_mock()
+                self.video.cleanup_job_staged_seedance_references(2)   # 非 xiaole_video 一律不删
+                delete.assert_not_called()
 
     def test_validate_micro_accepts_public_and_authorized_asset_references(self):
         import tempfile
