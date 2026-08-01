@@ -382,6 +382,13 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertNotIn("Number(d.points||0)", self.ui)
         self.assertLess(self.ui.index("function _localBusy"), self.ui.index("if(bdGen)"))
         self.assertIn("headers:{'Content-Type':mime", self.ui)
+        self.assertIn("_pendingSubmission('breakdown-local-'", self.ui)
+        self.assertIn("'Idempotency-Key':localPending.key", self.ui)
+        self.assertIn("function _localFileSha256(file)", self.ui)
+        self.assertIn("'X-Content-SHA256':contentSha256", self.ui)
+        self.assertIn("}).then(_readApiResponse).then(function(x)", self.ui)
+        self.assertIn("x.d&&x.d.code==='idempotency_conflict'", self.ui)
+        self.assertIn("_confirmSubmission(localPending)", self.ui)
 
     def test_structured_sections_and_actions_are_present(self):
         for label in ("主体", "场景", "构图", "动作", "光影", "风格", "参数"):

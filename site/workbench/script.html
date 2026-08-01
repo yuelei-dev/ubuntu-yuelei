@@ -1129,6 +1129,22 @@
       video.src=url;
     });
   }
+  var _localDigestCache=typeof WeakMap==='function'?new WeakMap():null;
+  function _localFileSha256(file){
+    if(_localDigestCache&&_localDigestCache.has(file)) return _localDigestCache.get(file);
+    if(!window.crypto||!window.crypto.subtle||!file||typeof file.arrayBuffer!=='function'){
+      return Promise.reject(new Error('当前浏览器无法安全校验上传文件，请升级浏览器后重试'));
+    }
+    var pending=file.arrayBuffer().then(function(buffer){
+      return window.crypto.subtle.digest('SHA-256',buffer);
+    }).then(function(digest){
+      return Array.prototype.map.call(new Uint8Array(digest),function(value){
+        return value.toString(16).padStart(2,'0');
+      }).join('');
+    });
+    if(_localDigestCache) _localDigestCache.set(file,pending);
+    return pending;
+  }
   function _pollLocalReverse(jobId,btn){
     var count=0,errors=0,lastPhase='';
     var iv=setInterval(function(){
@@ -1159,18 +1175,39 @@
     var durationCheck=isImage?Promise.resolve():_videoDuration(file).then(function(d){if(d>120.05)throw new Error('视频最长支持 2 分钟');});
     var ext=(file.name.split('.').pop()||'').toLowerCase();
     var mime=file.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm'})[ext]||'';
+    var localPending=null;
     _localBusy(btn,true);
-    durationCheck.then(_localPointsCheck).then(function(){
+    durationCheck.then(_localPointsCheck).then(function(){return _localFileSha256(file);}).then(function(contentSha256){
+      localPending=_pendingSubmission('breakdown-local-'+mediaType,{
+        media_type:mediaType,name:file.name,size:file.size,type:mime,
+        last_modified:Number(file.lastModified||0),sha256:contentSha256
+      });
       if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
       if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
       return fetch('/api/gen/breakdown/local-upload?media_type='+mediaType,{
         method:'POST',credentials:'same-origin',
-        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name)},body:file
+        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name),'X-Content-SHA256':contentSha256,'Idempotency-Key':localPending.key},body:file
       });
-    }).then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});}).then(function(x){
-      if(x.s===401){_localBusy(btn,false);if(window.HQ)HQ.login();return;}
-      if(x.s===402){_localBusy(btn,false);_localFail('点数不足（需要 20 点）');return;}
-      if(!x.d.job_id){_localBusy(btn,false);_localFail((x.d&&x.d.detail)||'提交失败');return;}
+    }).then(_readApiResponse).then(function(x){
+      if(x.s===401){_confirmSubmission(localPending);_localBusy(btn,false);if(window.HQ)HQ.login();return;}
+      if(x.s===402){_confirmSubmission(localPending);_localBusy(btn,false);_localFail('点数不足（需要 20 点）');return;}
+      if(x.s===409){
+        _localBusy(btn,false);
+        if(x.d&&x.d.code==='idempotency_conflict'){
+          _confirmSubmission(localPending);
+          _localFail((x.d&&x.d.detail)||'所选文件与待恢复请求不一致，请重新点击提交');
+        }else{
+          _localFail((x.d&&x.d.detail)||'相同文件正在受理，请稍后再次点击，系统会恢复原任务');
+        }
+        return;
+      }
+      if(!x.d.job_id){
+        if(x.s<500&&x.s!==200) _confirmSubmission(localPending);
+        _localBusy(btn,false);
+        _localFail((x.d&&x.d.detail)||(x.s===200?'响应中断，请再次点击以恢复原任务':'提交失败'));
+        return;
+      }
+      _confirmSubmission(localPending);
       if(bdLocalStatus)bdLocalStatus.textContent='上传完成，正在反推…';
       _pollLocalReverse(x.d.job_id,btn);
     }).catch(function(error){

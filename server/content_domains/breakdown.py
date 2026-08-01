@@ -455,16 +455,88 @@ def handle_local_upload(handler, user):
     maximum = 20 * 1024 * 1024 if media_type == "image" else 200 * 1024 * 1024
     if content_length <= 0 or content_length > maximum:
         return handler._send(413, {"detail": "图片最大 20MB，视频最大 200MB"})
-    cost = points_domain.cost_of("breakdown", {
-        "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
-    })
-    points = int(points_domain.get_points(user["username"]) or 0)
+
+    endpoint = core.urllib.parse.urlparse(handler.path).path
+    try:
+        idem_key = core._idempotency_key(handler.headers.get("Idempotency-Key"))
+    except ValueError as exc:
+        return handler._send(400, {"detail": str(exc)[:180]})
+    if not idem_key:
+        return handler._send(400, {
+            "detail": "本地上传缺少 Idempotency-Key，请刷新页面后重试",
+            "code": "idempotency_key_required",
+        })
+    content_sha256 = str(
+        handler.headers.get("X-Content-SHA256") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", content_sha256):
+        return handler._send(400, {
+            "detail": "本地上传缺少有效的文件 SHA-256，请重新选择文件",
+            "code": "content_sha256_required",
+        })
+    request_identity = {
+        "media_type": media_type,
+        "content_type": content_type,
+        "content_length": content_length,
+        "file_name": str(handler.headers.get("X-File-Name") or "")[:360],
+        "content_sha256": content_sha256,
+    }
+    try:
+        with core._submission_lock:
+            idem_state, idem_response = core._idempotency_begin(
+                user["username"], endpoint, idem_key, request_identity
+            )
+    except Exception:
+        return handler._send(503, {
+            "detail": "上传请求恢复服务暂不可用，请稍后重试（未扣点）",
+            "code": "idempotency_unavailable",
+            "retry_after_ms": 3000,
+        })
+    if idem_state == "replay":
+        return handler._send(200, idem_response)
+    if idem_state == "conflict":
+        return handler._send(409, {
+            "detail": "同一个 Idempotency-Key 不能用于不同文件",
+            "code": "idempotency_conflict",
+        })
+    if idem_state == "processing":
+        return handler._send(409, {
+            "detail": "相同文件正在受理，请稍后使用原请求重试",
+            "code": "idempotency_in_progress",
+            "retry_after_ms": 1000,
+        })
+
+    def abort_idempotency():
+        try:
+            core._idempotency_abort(user["username"], endpoint, idem_key)
+        except Exception:
+            pass
+
+    try:
+        cost = points_domain.cost_of("breakdown", {
+            "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
+        })
+        points = int(points_domain.get_points(user["username"]) or 0)
+        active_jobs = core._user_active_job_count(user["username"])
+    except points_domain.AuthPointsError as exc:
+        abort_idempotency()
+        return handler._send(
+            exc.status if exc.status in (402, 403) else 502,
+            {"detail": exc.detail, "need": 20},
+        )
+    except Exception:
+        abort_idempotency()
+        return handler._send(502, {
+            "detail": "暂时无法确认点数或任务状态，请稍后重试（未扣点）",
+            "code": "local_upload_precheck_unavailable",
+        })
     if points < cost:
+        abort_idempotency()
         return handler._send(402, {
             "detail": "点数不足", "need": cost, "points": points,
         })
-    active_jobs = core._user_active_job_count(user["username"])
     if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
+        abort_idempotency()
         return handler._send(429, {
             "detail": "当前生成任务较多，请完成后再提交", "code": "active_job_cap",
             "active_jobs": active_jobs, "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
@@ -474,9 +546,14 @@ def handle_local_upload(handler, user):
     temp_path = ""
     upload_token = __import__("uuid").uuid4().hex
     suffix = allowed[media_type][content_type]
+    response_code = 200
+    job_id = None
+    job_durable = False
+    job_queued = False
     try:
         root = _upload_root()
         temp_path = str(root / (upload_token + suffix))
+        received_hash = hashlib.sha256()
         with open(temp_path, "xb") as uploaded:
             remaining = content_length
             while remaining:
@@ -484,7 +561,10 @@ def handle_local_upload(handler, user):
                 if not chunk:
                     raise ValueError("上传文件读取不完整")
                 uploaded.write(chunk)
+                received_hash.update(chunk)
                 remaining -= len(chunk)
+        if received_hash.hexdigest() != content_sha256:
+            raise ValueError("上传文件校验失败，请重新选择原文件后重试")
         with open(temp_path, "rb") as uploaded:
             signature = uploaded.read(16)
         valid_signature = {
@@ -509,6 +589,26 @@ def handle_local_upload(handler, user):
             "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
         }
         with core._submission_lock:
+            if core.is_shutting_down():
+                abort_idempotency()
+                _remove_upload(temp_path)
+                return handler._send(503, {
+                    "detail": "服务正在更新，请稍后重试（未扣点）",
+                    "code": "shutting_down", "retry_after_ms": 5000,
+                })
+            # The body can take minutes to upload.  Re-check the cap under the
+            # same lock immediately before charging so parallel uploads cannot
+            # all pass the early hint and overfill the queue.
+            active_jobs = core._user_active_job_count(user["username"])
+            if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
+                abort_idempotency()
+                _remove_upload(temp_path)
+                return handler._send(429, {
+                    "detail": "当前生成任务较多，请完成后再提交",
+                    "code": "active_job_cap", "active_jobs": active_jobs,
+                    "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
+                    "retry_after_ms": 4000,
+                })
             points_left = points_domain.deduct_points(
                 user["username"], cost, "job:breakdown"
             )
@@ -530,6 +630,7 @@ def handle_local_upload(handler, user):
                         (upload_token, user["username"], suffix, job_id, now),
                     )
                     connection.commit()
+                    job_durable = True
             except Exception:
                 points_domain.safe_refund_points(
                     user["username"], cost, "local breakdown create rollback"
@@ -543,29 +644,73 @@ def handle_local_upload(handler, user):
                     _remove_trusted_upload(
                         upload_token, user["username"], job_id, temp_path
                     )
-                    return handler._send(429, {
+                    response_code = 429
+                    success_response = {
+                        "job_id": job_id, "cost": cost,
+                        "points_left": points_left, "status": "error",
                         "detail": "任务队列已满，请稍后再试", "code": "queue_full",
                         "retry_after_ms": 4000,
-                    })
-        success_response = {
-            "job_id": job_id, "cost": cost, "points_left": points_left,
-        }
+                    }
+                else:
+                    # Never claim success when enqueue failed and the terminal
+                    # CAS was lost.  Preserve the binding for reconciliation and
+                    # make the same key recover this exact job instead of
+                    # creating and charging a second one.
+                    response_code = 202
+                    success_response = {
+                        "job_id": job_id, "cost": cost,
+                        "points_left": points_left,
+                        "status": "pending_reconciliation",
+                        "detail": "任务状态正在确认，请按任务编号继续查询",
+                    }
+            else:
+                job_queued = True
+                success_response = {
+                    "job_id": job_id, "cost": cost, "points_left": points_left,
+                }
+            core._idempotency_complete(
+                user["username"], endpoint, idem_key, success_response
+            )
     except points_domain.AuthPointsError as exc:
+        abort_idempotency()
         _remove_upload(temp_path)
         return handler._send(
             exc.status if exc.status in (402, 403) else 502,
             {"detail": exc.detail, "need": cost},
         )
     except ValueError as exc:
+        abort_idempotency()
         _remove_upload(temp_path)
         return handler._send(400, {"detail": str(exc)[:180]})
     except Exception as exc:
+        if job_durable:
+            if not job_queued:
+                try:
+                    rejected = core._reject_pending_job(
+                        job_id, user["username"], cost,
+                        "上传任务状态持久化失败"
+                    )
+                    if rejected:
+                        _remove_trusted_upload(
+                            upload_token, user["username"], job_id, temp_path
+                        )
+                except Exception:
+                    pass
+            # A durable paid job must retain its worker source.  Return its id
+            # even if the recovery snapshot itself failed, so the client can
+            # poll instead of blindly creating another charge.
+            return handler._send(202, {
+                "job_id": job_id, "cost": cost,
+                "detail": "任务已创建，响应恢复状态待确认，请按任务编号继续查询",
+                "status": "pending_reconciliation",
+            })
+        abort_idempotency()
         _remove_upload(temp_path)
         return handler._send(500, {"detail": "上传任务创建失败，请重试"})
     # The paid job and its upload binding are already durable and queued.
     # Keep response I/O outside the pre-commit cleanup scope: a disconnected
     # client must not delete the source file that the worker still owns.
-    return handler._send(200, success_response)
+    return handler._send(response_code, success_response)
 
 
 def _remove_upload(path):
