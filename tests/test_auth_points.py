@@ -102,6 +102,49 @@ class AuthPointsTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=3)
 
+    def test_http_transaction_key_replays_and_conflicts_safely(self):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), self.auth.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = "http://127.0.0.1:%d" % server.server_address[1]
+
+        def post(amount):
+            request = urllib.request.Request(
+                base + "/api/auth/points/deduct",
+                data=json.dumps({
+                    "username": "fang", "amount": amount,
+                    "transaction_key": "breakdown-upload-charge:http0001",
+                }).encode(),
+                headers={
+                    "Content-Type": "application/json",
+                    "X-HQ-Internal-Token": "test-internal-token",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=3) as response:
+                    return response.status, json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                return error.code, json.loads(error.read())
+
+        try:
+            first = post(4)
+            replay = post(4)
+            conflict = post(5)
+            self.assertEqual(first[0], 200)
+            self.assertFalse(first[1]["replayed"])
+            self.assertEqual(replay[0], 200)
+            self.assertTrue(replay[1]["replayed"])
+            self.assertEqual(first[1]["points"], replay[1]["points"])
+            self.assertEqual(conflict[0], 409)
+            self.assertEqual(
+                conflict[1]["code"], "points_transaction_conflict")
+            self.assertEqual(self.auth.get_points_row("fang")["points"], 6)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def test_login_sets_http_only_cookie_without_plaintext_token_body(self):
         self.auth.create_user("cookie_user", "secret123", 5)
         server = ThreadingHTTPServer(("127.0.0.1", 0), self.auth.H)

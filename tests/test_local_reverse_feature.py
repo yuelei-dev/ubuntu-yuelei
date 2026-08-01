@@ -401,8 +401,10 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
 
     def test_standard_paid_job_and_refund_flow_is_reused(self):
         self.assertIn("points_domain.deduct_points", self.breakdown)
-        self.assertIn("INSERT INTO jobs(kind,username,cost,payload", self.breakdown)
-        self.assertIn("core._reject_pending_job", self.breakdown)
+        self.assertIn("INSERT INTO jobs(kind,username,cost,status,payload", self.breakdown)
+        self.assertIn("jobs_store.refund_once", self.breakdown)
+        self.assertIn("transaction_key=charge_transaction_key", self.breakdown)
+        self.assertIn("transaction_key=refund_transaction_key", self.breakdown)
         self.assertNotIn("jobs_store.create_paid_job", self.breakdown)
         self.assertNotIn("points_domain.public_error_body", self.breakdown)
         self.assertIn('if p == "/api/gen/breakdown/local-upload"', self.core)

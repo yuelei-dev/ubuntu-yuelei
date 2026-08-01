@@ -426,8 +426,8 @@ def handle_local_upload_request(handler):
 
 
 def handle_local_upload(handler, user):
-    """Validate a local upload, charge once, persist its token, and enqueue it."""
-    from . import core
+    """Validate, reserve, charge, and enqueue one recoverable local upload."""
+    from . import core, jobs_store
     _, points_domain, _ = core._domains()
     try:
         core.feature_flags.require_enabled("breakdown")
@@ -481,6 +481,217 @@ def handle_local_upload(handler, user):
         "file_name": str(handler.headers.get("X-File-Name") or "")[:360],
         "content_sha256": content_sha256,
     }
+    cost = points_domain.cost_of("breakdown", {
+        "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
+    })
+    transaction_digest = hashlib.sha256(
+        (user["username"] + "\0" + endpoint + "\0" + idem_key).encode("utf-8")
+    ).hexdigest()
+    charge_transaction_key = "breakdown-upload-charge:" + transaction_digest
+    refund_transaction_key = "breakdown-upload-refund:" + transaction_digest
+
+    def abort_idempotency():
+        try:
+            core._idempotency_abort(user["username"], endpoint, idem_key)
+        except Exception:
+            pass
+
+    def send_snapshot(snapshot):
+        public = dict(snapshot or {})
+        status = int(public.pop("_http_status", 200) or 200)
+        state = public.pop("_local_upload_state", "")
+        if state == "charge_pending":
+            public.pop("job_id", None)
+        return handler._send(status, public)
+
+    def complete_snapshot(snapshot):
+        core._idempotency_complete(
+            user["username"], endpoint, idem_key, snapshot)
+
+    def upload_binding(job_id):
+        with closing(core.jdb()) as connection:
+            _ensure_upload_table(connection)
+            row = connection.execute(
+                "SELECT token,suffix FROM breakdown_uploads "
+                "WHERE job_id=? AND username=?",
+                (job_id, user["username"]),
+            ).fetchone()
+        if not row:
+            return "", ""
+        token, suffix = row["token"], row["suffix"]
+        return token, str(_upload_root() / (token + suffix))
+
+    def reconcile_refund(job_id):
+        def refund_with_stable_key(username, amount):
+            try:
+                points_domain.refund_points(
+                    username, amount, "job#%d" % job_id,
+                    transaction_key=refund_transaction_key,
+                )
+                return True
+            except Exception:
+                return False
+
+        refunded = jobs_store.refund_once(
+            core.jdb, job_id, user["username"], cost,
+            refund_with_stable_key,
+        )
+        if refunded:
+            return True
+        with closing(core.jdb()) as connection:
+            row = connection.execute(
+                "SELECT refunded FROM jobs WHERE id=? AND username=?",
+                (job_id, user["username"]),
+            ).fetchone()
+        return bool(row and int(row["refunded"] or 0) == 1)
+
+    def reject_pending_and_refund(job_id, reason):
+        with closing(core.jdb()) as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status='error',error=?,updated_at=? "
+                "WHERE id=? AND username=? AND status='pending'",
+                (str(reason or "")[:300], int(time.time()), job_id,
+                 user["username"]),
+            )
+            connection.commit()
+            claimed = cursor.rowcount == 1
+        if not claimed:
+            return False, False
+        try:
+            return True, reconcile_refund(job_id)
+        except Exception:
+            return True, False
+
+    def activate_reserved_job(job_id):
+        """Replay-safe charge followed by atomic pending/idempotency activation."""
+        points_left = points_domain.deduct_points(
+            user["username"], cost, "job:breakdown",
+            transaction_key=charge_transaction_key,
+        )
+        success = {
+            "job_id": job_id, "cost": cost, "points_left": points_left,
+        }
+        activated = False
+        with closing(core.jdb()) as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET status='pending',updated_at=? "
+                "WHERE id=? AND username=? AND status='reserved'",
+                (int(time.time()), job_id, user["username"]),
+            )
+            activated = cursor.rowcount == 1
+            if activated:
+                updated = connection.execute(
+                    "UPDATE submission_idempotency SET response_json=?,updated_at=? "
+                    "WHERE username=? AND endpoint=? AND idem_key=?",
+                    (json.dumps(success, ensure_ascii=False), int(time.time()),
+                     user["username"], endpoint, idem_key),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("local upload idempotency binding missing")
+            connection.commit()
+        if not activated:
+            with closing(core.jdb()) as connection:
+                row = connection.execute(
+                    "SELECT status FROM jobs WHERE id=? AND username=?",
+                    (job_id, user["username"]),
+                ).fetchone()
+            if not row:
+                raise RuntimeError("local upload reservation missing")
+            # Another recovery already activated this exact job.  Its stable
+            # charge key has replayed, so return the same job without enqueueing
+            # or charging again.
+            return 200, success
+        if core.enqueue_job(job_id, "breakdown", _BREAKDOWN_MODE_REVERSE_PROMPT):
+            return 200, success
+
+        claimed, refunded = reject_pending_and_refund(
+            job_id, "任务队列已满，请稍后再试")
+        token, trusted_path = upload_binding(job_id)
+        if claimed and token:
+            _remove_trusted_upload(
+                token, user["username"], job_id, trusted_path)
+        if claimed and refunded:
+            response = {
+                "job_id": job_id, "cost": cost, "points_left": points_left,
+                "status": "error", "detail": "任务队列已满，请稍后再试",
+                "code": "queue_full", "retry_after_ms": 4000,
+                "_http_status": 429,
+            }
+        elif claimed:
+            response = {
+                "job_id": job_id, "cost": cost,
+                "status": "refund_pending",
+                "detail": "任务创建失败，退款正在确认，请使用原请求重试",
+                "code": "local_upload_refund_pending", "retry_after_ms": 3000,
+                "_http_status": 202,
+                "_local_upload_state": "refund_pending",
+            }
+        else:
+            response = {
+                "job_id": job_id, "cost": cost,
+                "status": "pending_reconciliation",
+                "detail": "任务状态正在确认，请按任务编号继续查询",
+                "_http_status": 202,
+            }
+        try:
+            complete_snapshot(response)
+        except Exception:
+            # The atomic success snapshot still contains this exact job id.
+            # Its database status is authoritative if this richer snapshot
+            # cannot be written.
+            pass
+        return int(response["_http_status"]), response
+
+    def resume_snapshot(snapshot):
+        state = str((snapshot or {}).get("_local_upload_state") or "")
+        job_id = int((snapshot or {}).get("job_id") or 0)
+        if state == "charge_pending" and job_id:
+            try:
+                with core._submission_lock:
+                    code, response = activate_reserved_job(job_id)
+                return send_snapshot(dict(response, _http_status=code))
+            except points_domain.AuthPointsError as exc:
+                if exc.status == 402:
+                    token, trusted_path = upload_binding(job_id)
+                    with closing(core.jdb()) as connection:
+                        connection.execute(
+                            "DELETE FROM jobs WHERE id=? AND username=? AND status='reserved'",
+                            (job_id, user["username"]),
+                        )
+                        connection.commit()
+                    if token:
+                        _remove_trusted_upload(
+                            token, user["username"], job_id, trusted_path)
+                    abort_idempotency()
+                    return handler._send(402, {
+                        "detail": exc.detail, "need": cost,
+                    })
+                return handler._send(503, {
+                    "detail": "扣点结果正在确认，请使用原请求重试",
+                    "code": "local_upload_charge_pending",
+                    "retry_after_ms": 3000,
+                })
+            except Exception:
+                return handler._send(503, {
+                    "detail": "任务受理状态正在恢复，请使用原请求重试",
+                    "code": "local_upload_charge_pending",
+                    "retry_after_ms": 3000,
+                })
+        if state == "refund_pending" and job_id:
+            try:
+                if reconcile_refund(job_id):
+                    terminal = {
+                        "job_id": job_id, "cost": cost, "status": "error",
+                        "detail": "任务创建失败，点数已退回",
+                        "code": "queue_full", "_http_status": 429,
+                    }
+                    complete_snapshot(terminal)
+                    return send_snapshot(terminal)
+            except Exception:
+                pass
+            return send_snapshot(snapshot)
+        return send_snapshot(snapshot)
+
     try:
         with core._submission_lock:
             idem_state, idem_response = core._idempotency_begin(
@@ -493,7 +704,7 @@ def handle_local_upload(handler, user):
             "retry_after_ms": 3000,
         })
     if idem_state == "replay":
-        return handler._send(200, idem_response)
+        return resume_snapshot(idem_response)
     if idem_state == "conflict":
         return handler._send(409, {
             "detail": "同一个 Idempotency-Key 不能用于不同文件",
@@ -506,16 +717,7 @@ def handle_local_upload(handler, user):
             "retry_after_ms": 1000,
         })
 
-    def abort_idempotency():
-        try:
-            core._idempotency_abort(user["username"], endpoint, idem_key)
-        except Exception:
-            pass
-
     try:
-        cost = points_domain.cost_of("breakdown", {
-            "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
-        })
         points = int(points_domain.get_points(user["username"]) or 0)
         active_jobs = core._user_active_job_count(user["username"])
     except points_domain.AuthPointsError as exc:
@@ -546,10 +748,8 @@ def handle_local_upload(handler, user):
     temp_path = ""
     upload_token = __import__("uuid").uuid4().hex
     suffix = allowed[media_type][content_type]
-    response_code = 200
     job_id = None
-    job_durable = False
-    job_queued = False
+    job_reserved = False
     try:
         root = _upload_root()
         temp_path = str(root / (upload_token + suffix))
@@ -609,100 +809,72 @@ def handle_local_upload(handler, user):
                     "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
                     "retry_after_ms": 4000,
                 })
-            points_left = points_domain.deduct_points(
-                user["username"], cost, "job:breakdown"
-            )
-            try:
-                now = int(time.time())
-                with closing(core.jdb()) as connection:
-                    _ensure_upload_table(connection)
-                    cursor = connection.execute(
-                        "INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner)"
-                        " VALUES(?,?,?,?,?,?,?)",
-                        ("breakdown", user["username"], cost,
-                         json.dumps(body, ensure_ascii=False), now, now,
-                         core.SERVICE_OWNER),
-                    )
-                    job_id = int(cursor.lastrowid)
-                    connection.execute(
-                        "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
-                        " VALUES(?,?,?,?,?)",
-                        (upload_token, user["username"], suffix, job_id, now),
-                    )
-                    connection.commit()
-                    job_durable = True
-            except Exception:
-                points_domain.safe_refund_points(
-                    user["username"], cost, "local breakdown create rollback"
+            now = int(time.time())
+            with closing(core.jdb()) as connection:
+                _ensure_upload_table(connection)
+                cursor = connection.execute(
+                    "INSERT INTO jobs(kind,username,cost,status,payload,created_at,updated_at,owner)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    ("breakdown", user["username"], cost, "reserved",
+                     json.dumps(body, ensure_ascii=False), now, now,
+                     core.SERVICE_OWNER),
                 )
-                raise
-            if not core.enqueue_job(job_id, "breakdown", _BREAKDOWN_MODE_REVERSE_PROMPT):
-                rejected = core._reject_pending_job(
-                    job_id, user["username"], cost, "任务队列已满，请稍后再试"
+                job_id = int(cursor.lastrowid)
+                connection.execute(
+                    "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (upload_token, user["username"], suffix, job_id, now),
                 )
-                if rejected:
-                    _remove_trusted_upload(
-                        upload_token, user["username"], job_id, temp_path
-                    )
-                    response_code = 429
-                    success_response = {
-                        "job_id": job_id, "cost": cost,
-                        "points_left": points_left, "status": "error",
-                        "detail": "任务队列已满，请稍后再试", "code": "queue_full",
-                        "retry_after_ms": 4000,
-                    }
-                else:
-                    # Never claim success when enqueue failed and the terminal
-                    # CAS was lost.  Preserve the binding for reconciliation and
-                    # make the same key recover this exact job instead of
-                    # creating and charging a second one.
-                    response_code = 202
-                    success_response = {
-                        "job_id": job_id, "cost": cost,
-                        "points_left": points_left,
-                        "status": "pending_reconciliation",
-                        "detail": "任务状态正在确认，请按任务编号继续查询",
-                    }
-            else:
-                job_queued = True
-                success_response = {
-                    "job_id": job_id, "cost": cost, "points_left": points_left,
+                provisional = {
+                    "job_id": job_id, "cost": cost,
+                    "status": "charge_pending",
+                    "detail": "任务扣点状态正在确认，请使用原请求恢复",
+                    "code": "local_upload_charge_pending",
+                    "retry_after_ms": 3000,
+                    "_http_status": 503,
+                    "_local_upload_state": "charge_pending",
                 }
-            core._idempotency_complete(
-                user["username"], endpoint, idem_key, success_response
-            )
+                updated = connection.execute(
+                    "UPDATE submission_idempotency SET response_json=?,updated_at=? "
+                    "WHERE username=? AND endpoint=? AND idem_key=?",
+                    (json.dumps(provisional, ensure_ascii=False), now,
+                     user["username"], endpoint, idem_key),
+                )
+                if updated.rowcount != 1:
+                    raise RuntimeError("local upload idempotency reservation missing")
+                connection.commit()
+                job_reserved = True
+            response_code, success_response = activate_reserved_job(job_id)
     except points_domain.AuthPointsError as exc:
-        abort_idempotency()
-        _remove_upload(temp_path)
+        if exc.status in (402, 403) and job_reserved:
+            with closing(core.jdb()) as connection:
+                connection.execute(
+                    "DELETE FROM jobs WHERE id=? AND username=? AND status='reserved'",
+                    (job_id, user["username"]),
+                )
+                connection.commit()
+            _remove_trusted_upload(
+                upload_token, user["username"], job_id, temp_path)
+            abort_idempotency()
+        elif not job_reserved:
+            abort_idempotency()
+            _remove_upload(temp_path)
         return handler._send(
-            exc.status if exc.status in (402, 403) else 502,
-            {"detail": exc.detail, "need": cost},
+            exc.status if exc.status in (402, 403) else 503,
+            {"detail": exc.detail, "need": cost,
+             **({"code": "local_upload_charge_pending", "retry_after_ms": 3000}
+                if job_reserved and exc.status not in (402, 403) else {})},
         )
     except ValueError as exc:
         abort_idempotency()
         _remove_upload(temp_path)
         return handler._send(400, {"detail": str(exc)[:180]})
     except Exception as exc:
-        if job_durable:
-            if not job_queued:
-                try:
-                    rejected = core._reject_pending_job(
-                        job_id, user["username"], cost,
-                        "上传任务状态持久化失败"
-                    )
-                    if rejected:
-                        _remove_trusted_upload(
-                            upload_token, user["username"], job_id, temp_path
-                        )
-                except Exception:
-                    pass
-            # A durable paid job must retain its worker source.  Return its id
-            # even if the recovery snapshot itself failed, so the client can
-            # poll instead of blindly creating another charge.
-            return handler._send(202, {
-                "job_id": job_id, "cost": cost,
-                "detail": "任务已创建，响应恢复状态待确认，请按任务编号继续查询",
-                "status": "pending_reconciliation",
+        if job_reserved:
+            return handler._send(503, {
+                "detail": "任务受理状态正在恢复，请使用原请求重试",
+                "code": "local_upload_charge_pending",
+                "retry_after_ms": 3000,
             })
         abort_idempotency()
         _remove_upload(temp_path)
@@ -710,7 +882,7 @@ def handle_local_upload(handler, user):
     # The paid job and its upload binding are already durable and queued.
     # Keep response I/O outside the pre-commit cleanup scope: a disconnected
     # client must not delete the source file that the worker still owns.
-    return handler._send(response_code, success_response)
+    return send_snapshot(dict(success_response, _http_status=response_code))
 
 
 def _remove_upload(path):

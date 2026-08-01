@@ -188,7 +188,9 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
             self.assertEqual(handler._send.call_args.args[0], 200)
             response = handler._send.call_args.args[1]
             self.assertEqual(response["points_left"], 80)
-            deduct.assert_called_once_with("alice", 20, "job:breakdown")
+            deduct.assert_called_once()
+            self.assertTrue(deduct.call_args.kwargs["transaction_key"].startswith(
+                "breakdown-upload-charge:"))
             with closing(connect()) as connection:
                 jobs = connection.execute(
                     "SELECT id,status,payload FROM jobs"
@@ -269,7 +271,9 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                         server.shutdown()
                         server.server_close()
 
-            deduct.assert_called_once_with("alice", 20, "job:breakdown")
+            deduct.assert_called_once()
+            self.assertTrue(deduct.call_args.kwargs["transaction_key"].startswith(
+                "breakdown-upload-charge:"))
             with closing(connect()) as connection:
                 self.assertEqual(
                     connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1
@@ -296,7 +300,9 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                 retry = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
                 self.breakdown.handle_local_upload(retry, {"username": "alice"})
 
-            deduct.assert_called_once_with("alice", 20, "job:breakdown")
+            deduct.assert_called_once()
+            self.assertTrue(deduct.call_args.kwargs["transaction_key"].startswith(
+                "breakdown-upload-charge:"))
             refund.assert_not_called()
             self.assertEqual(retry._send.call_args.args[0], 200)
             self.assertEqual(retry._send.call_args.args[1]["job_id"], 1)
@@ -318,6 +324,82 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                 (root / "_breakdown_uploads" /
                  (uploads[0]["token"] + uploads[0]["suffix"])).is_file()
             )
+
+    def test_local_upload_atomic_snapshot_survives_complete_helper_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            first = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            replay = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct, mock.patch.object(
+                self.core, "_idempotency_complete",
+                side_effect=RuntimeError("snapshot helper unavailable"),
+            ):
+                self.breakdown.handle_local_upload(first, {"username": "alice"})
+                self.breakdown.handle_local_upload(replay, {"username": "alice"})
+
+            self.assertEqual(first._send.call_args.args[0], 200)
+            self.assertEqual(replay._send.call_args.args[0], 200)
+            self.assertEqual(
+                first._send.call_args.args[1]["job_id"],
+                replay._send.call_args.args[1]["job_id"],
+            )
+            self.assertEqual(replay.rfile.tell(), 0)
+            deduct.assert_called_once()
+            with closing(connect()) as connection:
+                row = connection.execute(
+                    "SELECT response_json FROM submission_idempotency"
+                ).fetchone()
+                self.assertIsNotNone(row["response_json"])
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1
+                )
+
+    def test_local_upload_charge_response_loss_recovers_reserved_job_same_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            first = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            replay = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            lost = self.points.AuthPointsError(502, "response lost")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", side_effect=[lost, 80]
+            ) as deduct:
+                self.breakdown.handle_local_upload(first, {"username": "alice"})
+                self.assertEqual(first._send.call_args.args[0], 503)
+                with closing(connect()) as connection:
+                    reserved = connection.execute(
+                        "SELECT status FROM jobs"
+                    ).fetchone()
+                    snapshot = json.loads(connection.execute(
+                        "SELECT response_json FROM submission_idempotency"
+                    ).fetchone()["response_json"])
+                self.assertEqual(reserved["status"], "reserved")
+                self.assertEqual(snapshot["_local_upload_state"], "charge_pending")
+
+                self.breakdown.handle_local_upload(replay, {"username": "alice"})
+
+            self.assertEqual(replay._send.call_args.args[0], 200)
+            self.assertEqual(replay.rfile.tell(), 0)
+            self.assertEqual(deduct.call_count, 2)
+            self.assertEqual(
+                deduct.call_args_list[0].kwargs["transaction_key"],
+                deduct.call_args_list[1].kwargs["transaction_key"],
+            )
+            with closing(connect()) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1
+                )
+                self.assertEqual(
+                    connection.execute("SELECT status FROM jobs").fetchone()["status"],
+                    "pending",
+                )
 
     def test_local_upload_requires_stable_idempotency_key_before_body(self):
         handler = self._raw_upload_handler(
@@ -483,28 +565,47 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                     ).fetchone()[0], 0
                 )
 
-    def test_local_upload_enqueue_cas_loss_never_reports_false_success(self):
+    def test_local_upload_refund_failure_is_recoverable_and_not_false_success(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             database = root / "jobs.db"
             self._create_jobs_database(database)
             connect = self._jdb(database)
             handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            replay = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
             with self._local_upload_context(
                 root, connect, enqueue=False
             ), mock.patch.object(
                 self.points, "deduct_points", return_value=80
             ) as deduct, mock.patch.object(
-                self.core, "_reject_pending_job", return_value=False
-            ):
+                self.points, "refund_points",
+                side_effect=[RuntimeError("response lost"), 100],
+            ) as refund:
                 self.breakdown.handle_local_upload(
                     handler, {"username": "alice"}
                 )
-            self.assertEqual(handler._send.call_args.args[0], 202)
-            response = handler._send.call_args.args[1]
-            self.assertEqual(response["status"], "pending_reconciliation")
-            self.assertEqual(response["job_id"], 1)
+                self.assertEqual(handler._send.call_args.args[0], 202)
+                response = handler._send.call_args.args[1]
+                self.assertEqual(response["status"], "refund_pending")
+                self.assertEqual(response["job_id"], 1)
+                self.breakdown.handle_local_upload(
+                    replay, {"username": "alice"}
+                )
+            self.assertEqual(replay._send.call_args.args[0], 429)
+            self.assertEqual(replay.rfile.tell(), 0)
             deduct.assert_called_once()
+            self.assertEqual(refund.call_count, 2)
+            self.assertEqual(
+                refund.call_args_list[0].kwargs["transaction_key"],
+                refund.call_args_list[1].kwargs["transaction_key"],
+            )
+            self.assertTrue(refund.call_args.kwargs["transaction_key"].startswith(
+                "breakdown-upload-refund:"))
+            with closing(connect()) as connection:
+                job = connection.execute(
+                    "SELECT status,refunded FROM jobs"
+                ).fetchone()
+            self.assertEqual((job["status"], job["refunded"]), ("error", 1))
 
     def test_local_upload_insufficient_points_rejects_before_body_or_database(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -577,7 +678,7 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
             ), mock.patch.object(
                 self.points, "deduct_points", return_value=80
             ) as deduct, mock.patch.object(
-                self.points, "safe_refund_points", return_value=100
+                self.points, "refund_points", return_value=100
             ) as refund:
                 self.breakdown.handle_local_upload(
                     handler, {"username": "alice"}
