@@ -217,7 +217,7 @@ test('stale response from a prior invocation cannot overwrite the current grid',
   assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'ready');
 });
 
-test('disabled Seedance blocks no-avatar submission before the paid endpoint', async () => {
+test('no available open channel blocks no-avatar submission before the paid endpoint', async () => {
   const {context, ids, requests} = createHarness();
   let callbackCount = 0;
   context._showReverseVideoPicker('prompt', () => {
@@ -231,7 +231,7 @@ test('disabled Seedance blocks no-avatar submission before the paid endpoint', a
   assert.equal(ids.reverseVideoNoAvatar.getAttribute('aria-pressed'), 'false');
   assert.equal(ids.reverseVideoConfirm.disabled, true);
   assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'blocked');
-  assert.match(ids.reverseVideoSeedanceStatus.textContent, /Seedance 通道暂未开启/);
+  assert.match(ids.reverseVideoSeedanceStatus.textContent, /开放式视频通道暂未开启/);
   ids.reverseVideoConfirm.onclick();
   assert.equal(callbackCount, 0, 'blocked channel must not invoke generation callback');
 });
@@ -256,7 +256,7 @@ test('disabled Seedance still allows the explicit avatar cinematic path', async 
   assert.equal(choice.duration, 10);
 });
 
-test('health lookup failure fails closed for no-avatar Seedance generation', async () => {
+test('health lookup failure fails closed for no-avatar generation', async () => {
   const {context, ids, requests} = createHarness();
   context._showReverseVideoPicker('prompt', () => {});
 
@@ -266,5 +266,28 @@ test('health lookup failure fails closed for no-avatar Seedance generation', asy
   assert.equal(ids.reverseVideoNoAvatar.disabled, true);
   assert.equal(ids.reverseVideoConfirm.disabled, true);
   assert.equal(ids.reverseVideoSeedanceStatus.getAttribute('data-state'), 'blocked');
-  assert.match(ids.reverseVideoSeedanceStatus.textContent, /无法确认 Seedance 通道状态/);
+  assert.match(ids.reverseVideoSeedanceStatus.textContent, /无法确认开放式视频通道状态/);
+});
+
+test('Grok fallback keeps no-avatar generation selectable when Seedance is unavailable', async () => {
+  const {context, ids, requests} = createHarness();
+  let choice = null;
+  context._showReverseVideoPicker('prompt', (value) => {
+    choice = value;
+  });
+
+  requests[1].resolve(jsonResponse({
+    seedance_video_enabled: false,
+    reverse_remake_video_channel: 'grok',
+  }));
+  await settlePromises();
+
+  assert.equal(ids.reverseVideoNoAvatar.disabled, false);
+  assert.equal(ids.reverseVideoNoAvatar.getAttribute('aria-pressed'), 'true');
+  assert.equal(ids.reverseVideoConfirm.disabled, false);
+  assert.match(ids.reverseVideoSeedanceStatus.textContent, /果肉视频/);
+  ids.reverseVideoConfirm.onclick();
+  assert.equal(choice.avatarId, null);
+  assert.equal(choice.channel, 'grok');
+  assert.equal(choice.duration, 10);
 });

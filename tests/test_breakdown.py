@@ -3868,7 +3868,8 @@ class BreakdownTests(unittest.TestCase):
             "reverse_audit||{}).reference_thumbnail_indices",
             ui,
         )
-        self.assertIn("channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", ui)
+        self.assertIn("channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration", ui)
+        self.assertIn("reverse_remake_video_channel", ui)
         self.assertIn("endpoint:'/api/gen/xiaole_video'", ui)
         self.assertIn("cine_mode:'open', avatar_ids:[choice.avatarId], prompt:avatarPrompt", ui)
         self.assertIn("endpoint:'/api/gen/cinematic'", ui)

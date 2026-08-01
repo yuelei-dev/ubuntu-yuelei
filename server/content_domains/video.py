@@ -104,6 +104,26 @@ def seedance_video_health_enabled(flags):
         return False
 
 
+def grok_video_is_open():
+    """Return whether the configured Grok video path can accept new work."""
+    try:
+        if GROK_VIDEO_PROVIDER == "xiaole":
+            return bool(XIAOLEVIDEO_API_KEY)
+        from . import video_xai
+        return bool(video_xai.available())
+    except Exception:
+        return False
+
+
+def reverse_remake_video_channel(flags):
+    """Pick an available no-avatar engine without changing avatar generation."""
+    if seedance_video_health_enabled(flags):
+        return "micro"
+    if grok_video_is_open():
+        return "grok"
+    return ""
+
+
 def seedance_reference_upload_is_open():
     """Reference-image capability is separate from text-only Seedance health."""
     try:

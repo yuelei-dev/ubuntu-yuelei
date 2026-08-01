@@ -1476,9 +1476,9 @@
     var selectedAvatarId=null;
     var selectedDuration=10;
     var submitted=false;
-    var seedanceReady=false;
+    var noAvatarChannel='';
     function updateConfirm(){
-      var blocked=selectedAvatarId===null&&!seedanceReady;
+      var blocked=selectedAvatarId===null&&!noAvatarChannel;
       confirm.disabled=blocked;
       confirm.style.opacity=blocked?'.55':'1';
     }
@@ -1494,7 +1494,7 @@
       });
     }
     function selectAvatar(id){
-      if(id===null&&!seedanceReady) return;
+      if(id===null&&!noAvatarChannel) return;
       selectedAvatarId=id;
       noAvatar.classList.toggle('on',id===null);
       noAvatar.setAttribute('aria-pressed',id===null?'true':'false');
@@ -1506,16 +1506,16 @@
       updateCost();
       updateConfirm();
     }
-    function setSeedanceAvailability(ready,detail){
-      seedanceReady=ready===true;
-      noAvatar.disabled=!seedanceReady;
+    function setNoAvatarAvailability(channel,detail){
+      noAvatarChannel=channel==='micro'||channel==='grok'?channel:'';
+      noAvatar.disabled=!noAvatarChannel;
       seedanceStatus.textContent=detail;
-      seedanceStatus.setAttribute('data-state',seedanceReady?'ready':'blocked');
-      if(seedanceReady&&selectedAvatarId===null){
+      seedanceStatus.setAttribute('data-state',noAvatarChannel?'ready':'blocked');
+      if(noAvatarChannel&&selectedAvatarId===null){
         selectAvatar(null);
         return;
       }
-      if(!seedanceReady&&selectedAvatarId===null){
+      if(!noAvatarChannel&&selectedAvatarId===null){
         noAvatar.classList.toggle('on',false);
         noAvatar.setAttribute('aria-pressed','false');
       }
@@ -1542,7 +1542,7 @@
       confirm.disabled=true;
       confirm.style.opacity='.6';
       dismiss();
-      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration});
+      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration,channel:selectedAvatarId===null?noAvatarChannel:''});
     };
     function loadAvatars(){
       var avatarRequestId=++avatarLoadRequest;
@@ -1588,15 +1588,20 @@
         .then(function(r){ return r.ok?r.json():Promise.reject(); })
         .then(function(d){
           if(invocationId!==reverseVideoPickerRequest) return;
-          if(d&&d.seedance_video_enabled===true){
-            setSeedanceAvailability(true,'Seedance 官方通道可用');
+          var channel=(d&&d.reverse_remake_video_channel)||(d&&d.seedance_video_enabled===true?'micro':'');
+          if(channel==='micro'){
+            setNoAvatarAvailability('micro','Seedance 官方通道可用');
             return;
           }
-          setSeedanceAvailability(false,'Seedance 通道暂未开启；请选择数字人形象生成，或联系管理员开启通道。');
+          if(channel==='grok'){
+            setNoAvatarAvailability('grok','开放式生成通道可用（果肉视频）');
+            return;
+          }
+          setNoAvatarAvailability('','开放式视频通道暂未开启；请选择数字人形象生成，或联系管理员开启通道。');
         })
         .catch(function(){
           if(invocationId!==reverseVideoPickerRequest) return;
-          setSeedanceAvailability(false,'暂时无法确认 Seedance 通道状态；请选择数字人形象，或稍后重试。');
+          setNoAvatarAvailability('','暂时无法确认开放式视频通道状态；请选择数字人形象，或稍后重试。');
         });
     }
     loadAvatars();
@@ -1869,8 +1874,8 @@
           },bdRemakeBtn,{endpoint:'/api/gen/cinematic',sceneCount:1});
           return;
         }
-        var seedancePrompt='严格按照所附参考关键帧的时间顺序生成，保持动作节点、镜头转换、构图和场景布局。'+prompt;
-        _doGenerate({channel:'micro',prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration},
+        var remakePrompt='严格按照所附参考关键帧的时间顺序生成，保持动作节点、镜头转换、构图和场景布局。'+prompt;
+        _doGenerate({channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration,ratio:'9:16',resolution:'720p'},
                     bdRemakeBtn,{endpoint:'/api/gen/xiaole_video',sceneCount:1});
       });
       return;
