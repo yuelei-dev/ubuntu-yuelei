@@ -414,6 +414,17 @@ def validate_breakdown_payload(payload):
     return body
 
 
+def handle_local_upload_request(handler):
+    """Authenticate the raw upload route before entering the trusted token flow."""
+    from . import core
+    user = core.verify(handler._token())
+    if not user:
+        return handler._send(401, {"detail": "\u672a\u767b\u5f55"})
+    if core._must_change_password(user):
+        return handler._send(403, {"detail": "\u8bf7\u5148\u4fee\u6539\u521d\u59cb\u5bc6\u7801"})
+    return handle_local_upload(handler, user)
+
+
 def handle_local_upload(handler, user):
     """Validate a local upload, charge once, persist its token, and enqueue it."""
     from . import core

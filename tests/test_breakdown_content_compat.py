@@ -35,6 +35,7 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
     def test_target_runtime_public_abi_is_present(self):
         for name in (
             "validate_breakdown_payload",
+            "handle_local_upload_request",
             "handle_local_upload",
             "gen_breakdown",
             "_do_local_reverse",
@@ -42,6 +43,67 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
             self.assertTrue(callable(getattr(self.breakdown, name, None)), name)
         for name in ("heygen_proxy", "post_image_json", "post_json_idempotent"):
             self.assertTrue(callable(getattr(self.egress, name, None)), name)
+
+    def _local_upload_handler(self):
+        handler = mock.Mock()
+        handler.path = "/api/gen/breakdown/local-upload?media_type=video"
+        handler.headers = {}
+        handler._token.return_value = "session-token"
+        return handler
+
+    def test_core_local_upload_routes_to_upload_token_handler(self):
+        handler = self._local_upload_handler()
+        user = {"username": "route-user", "must_change": False}
+        with mock.patch.object(
+            self.core, "_domains", return_value=(mock.Mock(), mock.Mock(), mock.Mock())
+        ), mock.patch.object(
+            self.breakdown, "handle_local_upload_request", return_value="accepted"
+        ) as upload:
+            result = self.core.H.do_POST(handler)
+
+        self.assertEqual(result, "accepted")
+        upload.assert_called_once_with(handler)
+        handler._send.assert_not_called()
+
+    def test_core_local_upload_rejects_unauthenticated_before_upload(self):
+        handler = self._local_upload_handler()
+        with mock.patch.object(
+            self.core, "verify", return_value=None
+        ), mock.patch.object(
+            self.breakdown, "handle_local_upload"
+        ) as upload:
+            self.breakdown.handle_local_upload_request(handler)
+
+        upload.assert_not_called()
+        handler._send.assert_called_once()
+        self.assertEqual(handler._send.call_args.args[0], 401)
+
+    def test_core_local_upload_requires_initial_password_change(self):
+        handler = self._local_upload_handler()
+        user = {"username": "route-user", "must_change": True}
+        with mock.patch.object(
+            self.core, "verify", return_value=user
+        ), mock.patch.object(
+            self.core, "_must_change_password", return_value=True
+        ), mock.patch.object(
+            self.breakdown, "handle_local_upload"
+        ) as upload:
+            self.breakdown.handle_local_upload_request(handler)
+
+        upload.assert_not_called()
+        handler._send.assert_called_once()
+        self.assertEqual(handler._send.call_args.args[0], 403)
+
+    def test_core_local_upload_has_no_optional_module_dependency(self):
+        source = (self.root / "server/content_domains/core.py").read_text(
+            encoding="utf-8"
+        )
+        route = source.split(
+            'if p == "/api/gen/breakdown/local-upload":', 1
+        )[1].split('if p == "/api/gen/asset/favorite":', 1)[0]
+        self.assertIn(".breakdown", route)
+        self.assertIn("handle_local_upload_request", route)
+        self.assertNotIn("local_reverse_upload", route)
 
     def test_public_link_validation_resolves_before_worker(self):
         payload = self.breakdown.validate_breakdown_payload({
