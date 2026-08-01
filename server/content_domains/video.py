@@ -64,7 +64,7 @@ SEEDANCE_REFERENCE_SIGN_EXPIRE = 2 * 60 * 60
 # 提交后 payload 里只存对象键（cos-key:// 内部形式），worker 真正向 Seedance 提交时才签名，
 # 签名 TTL 只需覆盖「提交 → Seedance 取图」的分钟级窗口，与排队时长彻底解耦。
 SEEDANCE_COS_KEY_SCHEME = "cos-key://"
-SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5   # 待清理重试上限：超过后保留记录并告警，人工介入
+SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5   # 告警阈值；达到后仍按封顶退避持续重试
 SEEDANCE_STAGING_ORPHAN_GRACE = 10 * 60
 SEEDANCE_UNKNOWN_CLEANUP_DELAY = SEEDANCE_REFERENCE_SIGN_EXPIRE + 60
 _SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
@@ -305,12 +305,14 @@ def stage_seedance_references(body, username, token=None):
         return []
     if not seedance_reference_upload_is_open():
         raise SeedanceReferenceUnavailable("Seedance 参考图上传服务未配置，本次未扣点")
-    token = _seedance_staging_token(token)
     staged_keys = []
     staged_refs = []
     try:
         for item in refs:
-            url, key = _stage_seedance_reference(item, username, token)
+            # 每个列表位置使用独立对象键；重复选择同一图片也不能碰撞。
+            url, key = _stage_seedance_reference(
+                item, username, _seedance_staging_token(token)
+            )
             staged_refs.append(url)
             if key:
                 staged_keys.append(key)
@@ -490,12 +492,10 @@ def retry_pending_seedance_cleanups(limit=50):
         with closing(_cleanup_db()) as c:
             rows = c.execute(
                 """SELECT key,attempts,state FROM seedance_pending_cleanup
-                   WHERE attempts < ? AND (
-                     (state='cleanup_pending' AND next_attempt_at<=?) OR
+                   WHERE (state='cleanup_pending' AND next_attempt_at<=?) OR
                      (state='staged' AND job_id IS NULL AND created_at<=?)
-                   ) ORDER BY created_at,key LIMIT ?""",
-                (SEEDANCE_CLEANUP_MAX_ATTEMPTS, now,
-                 now - SEEDANCE_STAGING_ORPHAN_GRACE, int(limit)),
+                   ORDER BY next_attempt_at,created_at,key LIMIT ?""",
+                (now, now - SEEDANCE_STAGING_ORPHAN_GRACE, int(limit)),
             ).fetchall()
     except Exception:
         return 0

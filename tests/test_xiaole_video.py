@@ -218,6 +218,33 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertRegex(first, r"^[0-9a-f]{32}$")
         self.assertRegex(retry, r"^[0-9a-f]{32}$")
 
+    def test_duplicate_images_in_one_batch_get_distinct_object_keys(self):
+        import sqlite3
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core, cos
+
+        image = self._seedance_png_data(b"same")
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False), \
+             patch.object(self.video, "seedance_reference_upload_is_open", return_value=True), \
+             patch.object(cos, "put_bytes") as put:
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "demo", "duration": 5,
+                "reference_images": [image, image],
+            }, "fang")
+            keys = self.video.stage_seedance_references(
+                body, "fang", "same-idempotency-key"
+            )
+            self.assertEqual(2, put.call_count)
+            self.assertEqual(2, len(keys))
+            self.assertEqual(2, len(set(keys)))
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                self.assertEqual(
+                    2, db.execute("SELECT COUNT(*) FROM seedance_pending_cleanup").fetchone()[0]
+                )
+
     def test_validate_micro_strips_client_internal_fields(self):
         body = self.video.validate_xiaole_video_payload({
             "channel": "micro", "prompt": "demo", "duration": 5,
@@ -375,9 +402,30 @@ class XiaoleVideoTests(unittest.TestCase):
                 )
                 db.commit()
             with patch.object(self.video, "_seedance_cos_delete") as delete:
-                processed = self.video.retry_pending_seedance_cleanups(limit=50)
-            self.assertEqual(1, processed)
-            delete.assert_called_once_with("eligible")
+                processed = sum(
+                    self.video.retry_pending_seedance_cleanups(limit=50)
+                    for _ in range(3)
+                )
+            self.assertEqual(101, processed)
+            self.assertIn("eligible", [call.args[0] for call in delete.call_args_list])
+
+    def test_cleanup_keeps_retrying_after_alert_threshold(self):
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False):
+            with _closing(self.video._cleanup_db()) as db:
+                db.execute(
+                    "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES('recover-after-five',NULL,0,?,'cleanup_pending',0,0)",
+                    (self.video.SEEDANCE_CLEANUP_MAX_ATTEMPTS,),
+                )
+                db.commit()
+            with patch.object(self.video, "_seedance_cos_delete") as delete:
+                self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
+            delete.assert_called_once_with("recover-after-five")
 
     def test_orphaned_staging_intent_is_recovered_after_grace(self):
         import sqlite3
