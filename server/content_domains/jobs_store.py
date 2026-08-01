@@ -25,7 +25,9 @@ from contextlib import closing
 def public_dict(row, phase=None):
     data = {key: row[key] for key in (
         "id", "kind", "username", "cost", "status", "result", "error", "created_at", "updated_at")}
-    data["refunded"] = bool(row["refunded"]) if "refunded" in row.keys() else False
+    # refunded=2 means the durable refund attempt is still pending.  Only 1 is
+    # a confirmed credit and may be shown to callers as refunded.
+    data["refunded"] = (int(row["refunded"] or 0) == 1) if "refunded" in row.keys() else False
     if data.get("result"):
         try:
             data["result"] = json.loads(data["result"])
@@ -91,11 +93,13 @@ def claim_running(jdb, job_id):
         return cur.rowcount >= 1
 
 
-def refund_once(jdb, job_id, username, cost, refund):
-    """退点 job 级幂等：refunded 列 CAS，仅第一次真正加回点数(#187)。
+def refund_once(jdb, job_id, username, cost, refund, *,
+                recover_pending=False, keep_pending=False):
+    """退点 job 级幂等：0=未退，2=处理中，1=已确认到账。
 
-    先置位再退点，保证「最多退一次」；但退点若真的失败，必须把 refunded 放回 0，
-    否则这条 job 被永久标记「已退过」，用户的点再也拿不回来。
+    先持久化处理中，再调用退款；只有退款明确成功后才写 1。进程若在两步之间退出，
+    状态会留在 2，使用稳定上游交易键的调用方可通过 recover_pending=True 安全重放。
+    旧调用方默认仍在普通失败时把 2 放回 0，保持既有重试语义。
 
     refund(username, cost) -> 真值表示退点成功。调用方各自决定怎么退：
         content_api  points.safe_refund_points（吞异常，永远算成功）
@@ -109,14 +113,37 @@ def refund_once(jdb, job_id, username, cost, refund):
     if cost <= 0:
         return False
     with closing(jdb()) as c:
-        # 双重保险：仅当终态确为 error 且尚未退过，才置位并退点
-        cur = c.execute("UPDATE jobs SET refunded=1 WHERE id=? AND refunded=0 AND status='error'", (job_id,))
+        # 双重保险：仅当终态确为 error 且尚未退过，才认领退款处理权。
+        cur = c.execute(
+            "UPDATE jobs SET refunded=2 WHERE id=? AND refunded=0 AND status='error'",
+            (job_id,),
+        )
         c.commit()
         if cur.rowcount < 1:
-            return False   # 已退过 / 非 error 终态，跳过
-    if refund(username, cost):
-        return True
-    with closing(jdb()) as c:   # 退点没成功，把幂等锁放回去，留给下次重试
-        c.execute("UPDATE jobs SET refunded=0 WHERE id=? AND refunded=1", (job_id,))
+            row = c.execute(
+                "SELECT status,refunded FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            if not (recover_pending and row and row["status"] == "error"
+                    and int(row["refunded"] or 0) == 2):
+                return False   # 已确认退款 / 非 error / 其他调用正在处理
+    try:
+        succeeded = bool(refund(username, cost))
+    except Exception:
+        succeeded = False
+    if succeeded:
+        with closing(jdb()) as c:
+            cur = c.execute(
+                "UPDATE jobs SET refunded=1 WHERE id=? AND refunded=2 AND status='error'",
+                (job_id,),
+            )
+            c.commit()
+            if cur.rowcount >= 1:
+                return True
+            row = c.execute("SELECT refunded FROM jobs WHERE id=?", (job_id,)).fetchone()
+            return bool(row and int(row["refunded"] or 0) == 1)
+    if keep_pending:
+        return False
+    with closing(jdb()) as c:   # 兼容旧调用：普通失败释放处理权，留给既有路径重试
+        c.execute("UPDATE jobs SET refunded=0 WHERE id=? AND refunded=2", (job_id,))
         c.commit()
     return False

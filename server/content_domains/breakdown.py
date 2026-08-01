@@ -302,6 +302,19 @@ def _upload_root():
     return root
 
 
+_LOCAL_UPLOAD_PAYMENT_FIELD = "_local_upload_payment"
+
+
+def _local_upload_payment_keys(username, endpoint, idem_key):
+    digest = hashlib.sha256(
+        (str(username) + "\0" + str(endpoint) + "\0" + str(idem_key)).encode("utf-8")
+    ).hexdigest()
+    return (
+        "breakdown-upload-charge:" + digest,
+        "breakdown-upload-refund:" + digest,
+    )
+
+
 def _normalize_supported_link(value):
     match = _SHARE_URL_RE.search(str(value or ""))
     if not match:
@@ -484,11 +497,8 @@ def handle_local_upload(handler, user):
     cost = points_domain.cost_of("breakdown", {
         "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
     })
-    transaction_digest = hashlib.sha256(
-        (user["username"] + "\0" + endpoint + "\0" + idem_key).encode("utf-8")
-    ).hexdigest()
-    charge_transaction_key = "breakdown-upload-charge:" + transaction_digest
-    refund_transaction_key = "breakdown-upload-refund:" + transaction_digest
+    charge_transaction_key, refund_transaction_key = _local_upload_payment_keys(
+        user["username"], endpoint, idem_key)
 
     def abort_idempotency():
         try:
@@ -535,6 +545,8 @@ def handle_local_upload(handler, user):
         refunded = jobs_store.refund_once(
             core.jdb, job_id, user["username"], cost,
             refund_with_stable_key,
+            recover_pending=True,
+            keep_pending=True,
         )
         if refunded:
             return True
@@ -787,6 +799,10 @@ def handle_local_upload(handler, user):
             "upload_token": upload_token,
             "media_type": media_type,
             "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
+            _LOCAL_UPLOAD_PAYMENT_FIELD: {
+                "charge_key": charge_transaction_key,
+                "refund_key": refund_transaction_key,
+            },
         }
         with core._submission_lock:
             if core.is_shutting_down():
@@ -1287,6 +1303,176 @@ def _remove_trusted_upload(token, username, job_id, path):
                 candidate.unlink()
             except Exception:
                 pass
+
+
+def _local_upload_idempotency_binding(connection, username, job_id):
+    """Find the exact private submission row that already names this job."""
+    rows = connection.execute(
+        "SELECT endpoint,idem_key,response_json FROM submission_idempotency "
+        "WHERE username=? AND response_json IS NOT NULL ORDER BY updated_at DESC LIMIT 200",
+        (username,),
+    ).fetchall()
+    for row in rows:
+        try:
+            snapshot = json.loads(row["response_json"] or "{}")
+        except Exception:
+            continue
+        if int(snapshot.get("job_id") or 0) == int(job_id):
+            return row["endpoint"], row["idem_key"], snapshot
+    return None
+
+
+def _local_upload_payment_payload(row):
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception:
+        return None, None
+    payment = payload.get(_LOCAL_UPLOAD_PAYMENT_FIELD)
+    if not isinstance(payment, dict) or not payload.get("upload_token"):
+        return None, None
+    charge_key = str(payment.get("charge_key") or "")
+    refund_key = str(payment.get("refund_key") or "")
+    if not charge_key.startswith("breakdown-upload-charge:"):
+        return None, None
+    if not refund_key.startswith("breakdown-upload-refund:"):
+        return None, None
+    return payload, payment
+
+
+def _reconcile_local_upload_refund(core, jobs_store, points_domain, row,
+                                   payment, binding):
+    job_id = int(row["id"])
+    username = row["username"]
+    cost = int(row["cost"] or 0)
+    refund_key = payment["refund_key"]
+
+    def refund_with_stable_key(refund_username, refund_amount):
+        try:
+            points_domain.refund_points(
+                refund_username, refund_amount, "job#%d" % job_id,
+                transaction_key=refund_key,
+            )
+            return True
+        except Exception:
+            return False
+
+    jobs_store.refund_once(
+        core.jdb, job_id, username, cost, refund_with_stable_key,
+        recover_pending=True, keep_pending=True,
+    )
+    with closing(core.jdb()) as connection:
+        current = connection.execute(
+            "SELECT refunded FROM jobs WHERE id=? AND username=? AND status='error'",
+            (job_id, username),
+        ).fetchone()
+        confirmed = bool(current and int(current["refunded"] or 0) == 1)
+        if confirmed and binding:
+            endpoint, idem_key, _ = binding
+            terminal = {
+                "job_id": job_id, "cost": cost, "status": "error",
+                "detail": "任务创建失败，点数已退回", "code": "queue_full",
+                "_http_status": 429,
+            }
+            connection.execute(
+                "UPDATE submission_idempotency SET response_json=?,updated_at=? "
+                "WHERE username=? AND endpoint=? AND idem_key=?",
+                (json.dumps(terminal, ensure_ascii=False), int(time.time()),
+                 username, endpoint, idem_key),
+            )
+            connection.commit()
+    return confirmed
+
+
+def reconcile_pending_local_uploads(limit=100):
+    """Converge local-upload charge/refund attempts without a browser retry.
+
+    The existing content recovery thread calls this at startup and every 30s.
+    Every upstream money retry uses the transaction key stored by the server in
+    the job payload, so concurrent scanners and process restarts stay idempotent.
+    """
+    from . import core, jobs_store
+    _, points_domain, _ = core._domains()
+    with closing(core.jdb()) as connection:
+        _ensure_upload_table(connection)
+        rows = connection.execute(
+            "SELECT id,username,cost,status,payload,refunded FROM jobs "
+            "WHERE kind='breakdown' AND COALESCE(owner,?)=? "
+            "AND payload LIKE ? "
+            "AND (status='reserved' OR (status='error' AND refunded IN (0,2))) "
+            "ORDER BY id ASC LIMIT ?",
+            (core.SERVICE_OWNER, core.SERVICE_OWNER,
+             '%"' + _LOCAL_UPLOAD_PAYMENT_FIELD + '"%',
+             max(1, int(limit or 100))),
+        ).fetchall()
+
+    recovered = 0
+    for row in rows:
+        payload, payment = _local_upload_payment_payload(row)
+        if not payment:
+            continue
+        job_id = int(row["id"])
+        username = row["username"]
+        with closing(core.jdb()) as connection:
+            binding = _local_upload_idempotency_binding(
+                connection, username, job_id)
+            upload = connection.execute(
+                "SELECT token,suffix FROM breakdown_uploads WHERE job_id=? AND username=?",
+                (job_id, username),
+            ).fetchone()
+
+        if row["status"] == "error":
+            if _reconcile_local_upload_refund(
+                    core, jobs_store, points_domain, row, payment, binding):
+                recovered += 1
+            continue
+
+        # A reserved job is never charged unless its exact idempotency row and
+        # server-created upload binding still exist.
+        if not binding or not upload:
+            continue
+        endpoint, idem_key, snapshot = binding
+        if str(snapshot.get("_local_upload_state") or "") != "charge_pending":
+            continue
+        expected_charge, expected_refund = _local_upload_payment_keys(
+            username, endpoint, idem_key)
+        if (payment["charge_key"] != expected_charge
+                or payment["refund_key"] != expected_refund):
+            continue
+        path = _upload_root() / (upload["token"] + upload["suffix"])
+        if not path.is_file():
+            continue
+        try:
+            points_left = points_domain.deduct_points(
+                username, int(row["cost"] or 0), "job:breakdown",
+                transaction_key=payment["charge_key"],
+            )
+        except Exception:
+            continue
+        success = {
+            "job_id": job_id, "cost": int(row["cost"] or 0),
+            "points_left": points_left,
+        }
+        with closing(core.jdb()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            activated = connection.execute(
+                "UPDATE jobs SET status='pending',updated_at=? "
+                "WHERE id=? AND username=? AND status='reserved'",
+                (int(time.time()), job_id, username),
+            ).rowcount == 1
+            if activated:
+                updated = connection.execute(
+                    "UPDATE submission_idempotency SET response_json=?,updated_at=? "
+                    "WHERE username=? AND endpoint=? AND idem_key=?",
+                    (json.dumps(success, ensure_ascii=False), int(time.time()),
+                     username, endpoint, idem_key),
+                )
+                if updated.rowcount != 1:
+                    connection.rollback()
+                    continue
+            connection.commit()
+        if activated:
+            recovered += 1
+    return recovered
 
 
 def _reverse_result_from_frames(

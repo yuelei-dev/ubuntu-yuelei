@@ -739,7 +739,7 @@ def _user_active_job_count(username):
         return 0
     with closing(jdb()) as c:
         row = c.execute("""SELECT COUNT(*) AS n FROM jobs
-                           WHERE username=? AND status IN ('pending','running')
+                           WHERE username=? AND status IN ('reserved','pending','running')
                              AND COALESCE(deleted,0)=0""",
                         (username,)).fetchone()
     return int(row["n"] if row else 0)
@@ -749,7 +749,7 @@ def _user_active_kind_count(username, kind):
         return 0
     with closing(jdb()) as c:
         row = c.execute("""SELECT COUNT(*) AS n FROM jobs
-                           WHERE username=? AND kind=? AND status IN ('pending','running')
+                           WHERE username=? AND kind=? AND status IN ('reserved','pending','running')
                              AND COALESCE(deleted,0)=0""",
                         (username, kind)).fetchone()
     return int(row["n"] if row else 0)
@@ -838,6 +838,8 @@ def _job_worker_loop(q):
             q.task_done()
 
 def _recover_pending_jobs(limit=None):
+    try: __import__(__package__ + ".breakdown", fromlist=["reconcile_pending_local_uploads"]).reconcile_pending_local_uploads(limit or JOB_QUEUE_MAX)
+    except Exception: pass
     limit = int(limit or JOB_QUEUE_MAX)
     with closing(jdb()) as c:
         rows = c.execute("SELECT id, kind, payload FROM jobs WHERE status='pending' AND COALESCE(owner,?)=? ORDER BY id ASC LIMIT ?",
@@ -852,7 +854,6 @@ def _recover_pending_jobs(limit=None):
             break
         recovered += 1
     return recovered
-
 def _pending_job_scanner():
     while True:
         try:
@@ -860,7 +861,6 @@ def _pending_job_scanner():
         except Exception:
             pass
         time.sleep(30)
-
 _ALL_JOB_QUEUES = (_job_queue, _fast_job_queue, _talking_job_queue,
                    _image_job_queue, _cinematic_job_queue, _avatar_job_queue)
 def start_job_workers():

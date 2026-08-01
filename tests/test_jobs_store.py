@@ -139,6 +139,72 @@ class JobsStoreTests(unittest.TestCase):
         self.assertEqual(self.refunds, [("u", 10)])
         self.assertEqual(self._row(jid)["refunded"], 1)
 
+    def test_refund_crash_after_cas_stays_pending_then_recovers(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+
+        def process_exit(_username, _cost):
+            raise SystemExit("process stopped after refund CAS")
+
+        with self.assertRaises(SystemExit):
+            jobs_store.refund_once(
+                self._jdb, jid, "u", 10, process_exit,
+                recover_pending=True, keep_pending=True,
+            )
+        self.assertEqual(self._row(jid)["refunded"], 2)
+        self.assertTrue(jobs_store.refund_once(
+            self._jdb, jid, "u", 10, self._ok_refund,
+            recover_pending=True, keep_pending=True,
+        ))
+        self.assertEqual(self.refunds, [("u", 10)])
+        self.assertEqual(self._row(jid)["refunded"], 1)
+
+    def test_refund_response_loss_replays_same_upstream_transaction_once(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+        applied_keys = set()
+        credited = 0
+        transaction_key = "breakdown-upload-refund:stable"
+
+        def lost_response(_username, amount):
+            nonlocal credited
+            if transaction_key not in applied_keys:
+                applied_keys.add(transaction_key)
+                credited += amount
+            raise RuntimeError("refund committed but response was lost")
+
+        def replay(_username, amount):
+            nonlocal credited
+            if transaction_key not in applied_keys:
+                applied_keys.add(transaction_key)
+                credited += amount
+            return True
+
+        self.assertFalse(jobs_store.refund_once(
+            self._jdb, jid, "u", 10, lost_response,
+            recover_pending=True, keep_pending=True,
+        ))
+        self.assertEqual((credited, self._row(jid)["refunded"]), (10, 2))
+        self.assertTrue(jobs_store.refund_once(
+            self._jdb, jid, "u", 10, replay,
+            recover_pending=True, keep_pending=True,
+        ))
+        self.assertEqual((credited, self._row(jid)["refunded"]), (10, 1))
+
+    def test_public_job_only_reports_confirmed_refund(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+        with closing(self._conn()) as connection:
+            connection.execute("UPDATE jobs SET refunded=2 WHERE id=?", (jid,))
+            connection.commit()
+            pending = connection.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        self.assertFalse(jobs_store.public_dict(pending)["refunded"])
+        with closing(self._conn()) as connection:
+            connection.execute("UPDATE jobs SET refunded=1 WHERE id=?", (jid,))
+            connection.commit()
+            confirmed = connection.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
+        self.assertTrue(jobs_store.public_dict(confirmed)["refunded"])
+
     # --- 端到端：reaper 与 worker 交错，钱只退一次，结果不覆写 ---
     def test_reaper_wins_race_money_is_correct(self):
         jid = self._insert(10)

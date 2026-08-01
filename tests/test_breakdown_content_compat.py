@@ -113,6 +113,47 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
         self.assertIn("handle_local_upload_request", route)
         self.assertNotIn("local_reverse_upload", route)
 
+    def test_content_recovery_runs_local_payment_reconcile_on_startup(self):
+        startup = __import__("inspect").getsource(self.core.start_job_workers)
+        periodic = __import__("inspect").getsource(self.core._pending_job_scanner)
+        recovery = __import__("inspect").getsource(self.core._recover_pending_jobs)
+        self.assertIn("_recover_pending_jobs(JOB_QUEUE_MAX)", startup)
+        self.assertIn("_recover_pending_jobs(JOB_QUEUE_MAX)", periodic)
+        self.assertIn("reconcile_pending_local_uploads", recovery)
+
+    def test_content_recovery_runs_local_payment_reconcile_periodically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "jobs.db"
+            self._create_jobs_database(database)
+            with mock.patch.object(self.core, "jdb", self._jdb(database)), \
+                    mock.patch.object(
+                        self.breakdown, "reconcile_pending_local_uploads",
+                        return_value=0,
+                    ) as reconcile:
+                self.assertEqual(self.core._recover_pending_jobs(7), 0)
+        reconcile.assert_called_once_with(7)
+
+    def test_local_payment_reconcile_failure_does_not_block_pending_jobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "jobs.db"
+            self._create_jobs_database(database)
+            with closing(self._jdb(database)()) as connection:
+                connection.execute(
+                    "INSERT INTO jobs(kind,username,cost,status,payload,owner) "
+                    "VALUES('copy','alice',0,'pending','{}',?)",
+                    (self.core.SERVICE_OWNER,),
+                )
+                connection.commit()
+            with mock.patch.object(self.core, "jdb", self._jdb(database)), \
+                    mock.patch.object(
+                        self.breakdown, "reconcile_pending_local_uploads",
+                        side_effect=RuntimeError("auth unavailable"),
+                    ), mock.patch.object(
+                        self.core, "enqueue_job", return_value=True
+                    ) as enqueue:
+                self.assertEqual(self.core._recover_pending_jobs(7), 1)
+        enqueue.assert_called_once_with(1, "copy", "")
+
     @staticmethod
     def _create_jobs_database(path):
         connection = sqlite3.connect(path)
@@ -401,6 +442,44 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                     "pending",
                 )
 
+    def test_background_scanner_recovers_charge_without_browser_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            lost = self.points.AuthPointsError(502, "response lost")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", side_effect=[lost, 80]
+            ) as deduct, mock.patch.object(
+                self.core, "enqueue_job", return_value=True
+            ) as enqueue:
+                self.breakdown.handle_local_upload(
+                    handler, {"username": "alice"}
+                )
+                self.assertEqual(handler._send.call_args.args[0], 503)
+                self.assertEqual(
+                    self.breakdown.reconcile_pending_local_uploads(), 1)
+                self.assertEqual(self.core._recover_pending_jobs(), 1)
+
+            self.assertEqual(deduct.call_count, 2)
+            self.assertEqual(
+                deduct.call_args_list[0].kwargs["transaction_key"],
+                deduct.call_args_list[1].kwargs["transaction_key"],
+            )
+            enqueue.assert_called_once_with(1, "breakdown", "reverse_prompt")
+            with closing(connect()) as connection:
+                job = connection.execute(
+                    "SELECT status FROM jobs WHERE id=1"
+                ).fetchone()
+                snapshot = json.loads(connection.execute(
+                    "SELECT response_json FROM submission_idempotency"
+                ).fetchone()["response_json"])
+            self.assertEqual(job["status"], "pending")
+            self.assertEqual(snapshot["job_id"], 1)
+            self.assertNotIn("_local_upload_state", snapshot)
+
     def test_local_upload_requires_stable_idempotency_key_before_body(self):
         handler = self._raw_upload_handler(
             b"\xff\xd8\xffvalid-jpeg", idem_key=None
@@ -606,6 +685,88 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                     "SELECT status,refunded FROM jobs"
                 ).fetchone()
             self.assertEqual((job["status"], job["refunded"]), ("error", 1))
+
+    def test_background_scanner_confirms_lost_refund_without_browser_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(
+                root, connect, enqueue=False
+            ), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ), mock.patch.object(
+                self.points, "refund_points",
+                side_effect=[RuntimeError("response lost"), 100],
+            ) as refund:
+                self.breakdown.handle_local_upload(
+                    handler, {"username": "alice"}
+                )
+                self.assertEqual(handler._send.call_args.args[0], 202)
+                with closing(connect()) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT refunded FROM jobs WHERE id=1"
+                        ).fetchone()["refunded"],
+                        2,
+                    )
+                self.assertEqual(
+                    self.breakdown.reconcile_pending_local_uploads(), 1)
+
+            self.assertEqual(refund.call_count, 2)
+            self.assertEqual(
+                refund.call_args_list[0].kwargs["transaction_key"],
+                refund.call_args_list[1].kwargs["transaction_key"],
+            )
+            with closing(connect()) as connection:
+                job = connection.execute(
+                    "SELECT status,refunded FROM jobs WHERE id=1"
+                ).fetchone()
+                snapshot = json.loads(connection.execute(
+                    "SELECT response_json FROM submission_idempotency"
+                ).fetchone()["response_json"])
+            self.assertEqual((job["status"], job["refunded"]), ("error", 1))
+            self.assertEqual(snapshot["code"], "queue_full")
+            self.assertNotIn("_local_upload_state", snapshot)
+
+    def test_local_payment_scanner_is_not_starved_by_unrelated_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            with closing(connect()) as connection:
+                for index in range(100):
+                    connection.execute(
+                        "INSERT INTO jobs(kind,username,cost,status,payload,refunded,owner) "
+                        "VALUES('breakdown','other',20,'error',?,0,?)",
+                        (json.dumps({"url": "https://example.invalid/%d" % index}),
+                         self.core.SERVICE_OWNER),
+                    )
+                connection.commit()
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(
+                root, connect, enqueue=False
+            ), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ), mock.patch.object(
+                self.points, "refund_points",
+                side_effect=[RuntimeError("auth unavailable"), 100],
+            ) as refund:
+                self.breakdown.handle_local_upload(
+                    handler, {"username": "alice"}
+                )
+                self.assertEqual(
+                    self.breakdown.reconcile_pending_local_uploads(limit=1), 1
+                )
+            self.assertEqual(refund.call_count, 2)
+            with closing(connect()) as connection:
+                target = connection.execute(
+                    "SELECT refunded FROM jobs WHERE username='alice'"
+                ).fetchone()
+            self.assertEqual(target["refunded"], 1)
 
     def test_local_upload_insufficient_points_rejects_before_body_or_database(self):
         with tempfile.TemporaryDirectory() as directory:

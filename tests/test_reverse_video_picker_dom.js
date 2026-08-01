@@ -13,6 +13,11 @@ const end = html.indexOf('function _setGenerateBusy', start);
 assert.notEqual(start, -1, 'reverse video picker source start should exist');
 assert.notEqual(end, -1, 'reverse video picker source end should exist');
 const pickerSource = html.slice(start, end);
+const localSubmitStart = html.indexOf('function _submitLocalReverse(');
+const localSubmitEnd = html.indexOf('if(bdImagePick)', localSubmitStart);
+assert.notEqual(localSubmitStart, -1, 'local reverse submit source should exist');
+assert.notEqual(localSubmitEnd, -1, 'local reverse submit source end should exist');
+const localSubmitSource = html.slice(localSubmitStart, localSubmitEnd);
 
 class FakeClassList {
   constructor(initial) {
@@ -290,4 +295,49 @@ test('Grok fallback keeps no-avatar generation selectable when Seedance is unava
   assert.equal(choice.avatarId, null);
   assert.equal(choice.channel, 'grok');
   assert.equal(choice.duration, 10);
+});
+
+test('refund pending preserves the exact local upload idempotency key', async () => {
+  let confirms = 0;
+  let polls = 0;
+  const failures = [];
+  const status = {style: {}, textContent: ''};
+  const context = {
+    Promise,
+    window: {},
+    bdProgress: {style: {}},
+    bdLocalStatus: status,
+    _localBusy: () => {},
+    _localFail: (message) => failures.push(message),
+    _videoDuration: () => Promise.resolve(1),
+    _localPointsCheck: () => Promise.resolve(),
+    _localFileSha256: () => Promise.resolve('a'.repeat(64)),
+    _pendingSubmission: () => ({key: 'stable-upload-key'}),
+    _confirmSubmission: () => { confirms += 1; },
+    _pollLocalReverse: () => { polls += 1; },
+    setBdPhase: () => {},
+    fetch: () => Promise.resolve({}),
+    _readApiResponse: () => Promise.resolve({
+      s: 202,
+      d: {
+        job_id: 41,
+        code: 'local_upload_refund_pending',
+        detail: '退款正在确认',
+      },
+    }),
+  };
+  vm.runInNewContext(localSubmitSource, context, {filename: 'script.html#local-reverse'});
+  context._submitLocalReverse('image', {
+    size: 10,
+    name: 'frame.jpg',
+    type: 'image/jpeg',
+    lastModified: 1,
+  }, {});
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(confirms, 0, 'refund pending must not clear the persisted key');
+  assert.equal(polls, 0, 'an error job must not be treated as active generation');
+  assert.match(status.textContent, /退款处理中/);
+  assert.match(failures.at(-1), /退款/);
 });

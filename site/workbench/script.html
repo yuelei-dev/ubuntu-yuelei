@@ -1201,6 +1201,15 @@
         }
         return;
       }
+      if(x.s===202&&x.d&&x.d.code==='local_upload_refund_pending'){
+        // The refund is not confirmed yet.  Keep the exact submission key so
+        // an explicit retry replays the same server transaction instead of
+        // creating and charging a new job.
+        _localBusy(btn,false);
+        if(bdLocalStatus){bdLocalStatus.textContent='退款处理中，请稍后使用原文件重试';bdLocalStatus.style.color='#e7b24c';}
+        _localFail((x.d&&x.d.detail)||'退款处理中，请稍后使用原文件重试');
+        return;
+      }
       if(!x.d.job_id){
         if(x.s<500&&x.s!==200) _confirmSubmission(localPending);
         _localBusy(btn,false);
