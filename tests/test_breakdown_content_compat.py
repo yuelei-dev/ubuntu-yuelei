@@ -240,7 +240,8 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
             "function reverseReferenceThumbnailIndices(bd)",
             "function reverseReferenceImages(bd)",
             "thumbs[index-1]||null",
-            "channel:'micro'",
+            "channel:choice.channel",
+            "reverse_remake_video_channel",
             "reference_images:reverseRefs",
         ):
             self.assertIn(marker, self.script)

@@ -66,8 +66,7 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn('id="reverseVideoConfirm"', self.html)
         self.assertIn("confirm.disabled=true", self.html)
         self.assertIn("if(submitted||confirm.disabled) return;", self.html)
-        self.assertIn("dismiss();\n      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
-        self.assertIn("onConfirm({avatarId:selectedAvatarId,duration:selectedDuration})", self.html)
+        self.assertIn("dismiss();\n      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration,channel:selectedAvatarId===null?noAvatarChannel:''})", self.html)
 
     def test_reverse_video_picker_ignores_stale_avatar_responses(self):
         self.assertIn("var reverseVideoPickerRequest=0", self.html)
@@ -140,8 +139,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
         self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn)", self.html)
 
-    def test_reverse_video_without_avatar_uses_seedance_micro_channel(self):
-        # 不选形象 → Seedance，并携带原视频关键帧作为视觉参考。
+    def test_reverse_video_without_avatar_uses_available_open_channel(self):
+        # 不选形象 → 后端声明的可用开放式通道，并携带原视频关键帧作为视觉参考。
         self.assertIn("_showReverseVideoPicker(prompt,function(choice)", self.html)
         self.assertIn(
             "var reverseRefs=reverseReferenceImages(lastBreakdownReverse)",
@@ -157,17 +156,20 @@ class ScriptActionsUiTests(unittest.TestCase):
             "frame_thumbnails)||[]).slice(0,4)",
             self.html,
         )
-        self.assertIn("prompt:seedancePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
+        self.assertIn("channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
+        self.assertIn("reference_mode:choice.channel==='grok'?'ordered_storyboard':undefined", self.html)
         self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
         self.assertNotIn("micro: seedance-2.0-fast", self.html)
-        self.assertIn("channel:'micro'", self.html)
+        self.assertIn("ratio:'9:16',resolution:'720p'", self.html)
         self.assertIn("{endpoint:'/api/gen/xiaole_video',sceneCount:1}", self.html)
 
-    def test_reverse_video_checks_seedance_health_before_no_avatar_submit(self):
+    def test_reverse_video_checks_open_channel_health_before_no_avatar_submit(self):
         self.assertIn('id="reverseVideoSeedanceStatus"', self.html)
         self.assertIn("fetch('/api/gen/health',{cache:'no-store'})", self.html)
+        self.assertIn("d&&d.reverse_remake_video_channel", self.html)
         self.assertIn("d&&d.seedance_video_enabled===true", self.html)
-        self.assertIn("noAvatar.disabled=!seedanceReady", self.html)
+        self.assertIn("noAvatar.disabled=!noAvatarChannel", self.html)
+        self.assertIn("setNoAvatarAvailability('grok','开放式生成通道可用（果肉视频）')", self.html)
         self.assertIn("if(submitted||confirm.disabled) return", self.html)
 
     def test_reverse_history_preserves_explicit_reference_indices(self):
