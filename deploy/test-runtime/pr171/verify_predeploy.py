@@ -11,7 +11,7 @@ import sys
 
 
 OVERLAY_DIR = pathlib.Path(__file__).resolve().parent
-REPO_ROOT = OVERLAY_DIR.parents[3]
+REPO_ROOT = OVERLAY_DIR.parents[2]
 MANIFEST_PATH = OVERLAY_DIR / "manifest.json"
 
 

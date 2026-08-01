@@ -3,6 +3,7 @@ import importlib.util
 import json
 import pathlib
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -86,6 +87,54 @@ class Pr171TestRuntimeCompatTests(unittest.TestCase):
             for entry in self.manifest["deploy_files"]
         }
         self.assertEqual(actual, EXPECTED_TARGET_PREIMAGES)
+
+    def test_predeploy_default_repo_root_is_the_checkout_root(self):
+        self.assertEqual(verify_predeploy.REPO_ROOT, ROOT)
+
+    def test_predeploy_cli_uses_default_repo_root_when_option_is_omitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            targets = root / "targets"
+            source_relative = pathlib.PurePosixPath("server/content_domains/video.py")
+            source = ROOT.joinpath(*source_relative.parts)
+            target = targets / "opt" / "video.py"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(source.read_bytes())
+            data = source.read_bytes()
+            header = f"blob {len(data)}\0".encode("ascii")
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "deploy_files": [
+                            {
+                                "source": str(source_relative),
+                                "target": "/opt/video.py",
+                                "sha256": hashlib.sha256(data).hexdigest(),
+                                "git_blob": hashlib.sha1(header + data).hexdigest(),
+                                "expected_target_sha256": hashlib.sha256(data).hexdigest(),
+                                "expected_target_git_blob": hashlib.sha1(header + data).hexdigest(),
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(VERIFY_PREDEPLOY),
+                    "--manifest",
+                    str(manifest),
+                    "--target-root",
+                    str(targets),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("verification passed", result.stdout)
 
     def test_predeploy_verifier_fails_closed_on_any_source_or_target_drift(self):
         with tempfile.TemporaryDirectory() as directory:
