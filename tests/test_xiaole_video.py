@@ -616,6 +616,20 @@ class XiaoleVideoTests(unittest.TestCase):
              patch.object(self.video.importlib.util, "find_spec", return_value=None):
             self.assertFalse(self.video.seedance_reference_upload_is_open())
 
+    def test_xai_reverse_storyboard_health_requires_public_staging(self):
+        from content_domains import cos
+
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(cos, "enabled", return_value=True), \
+             patch.object(self.video.importlib.util, "find_spec", return_value=object()):
+            self.assertTrue(self.video.grok_storyboard_upload_is_open())
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(cos, "enabled", return_value=False):
+            self.assertFalse(self.video.grok_storyboard_upload_is_open())
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xiaole"), \
+             patch.object(cos, "enabled", return_value=False):
+            self.assertTrue(self.video.grok_storyboard_upload_is_open())
+
     def test_content_service_dependency_manifest_pins_cos_sdk(self):
         root = Path(__file__).resolve().parents[1]
         requirements = (root / "deploy/requirements-content.txt").read_text(encoding="utf-8")
@@ -764,6 +778,56 @@ class XiaoleVideoTests(unittest.TestCase):
                     "reference_images": ["https://untrusted.example/frame.jpg"],
                     "reference_mode": "ordered_storyboard",
                 })
+
+    def test_reverse_grok_storyboard_is_published_before_charge_and_worker_reuses_url(self):
+        refs = [self._seedance_png_data(b"\x20"), self._seedance_png_data(b"\x80")]
+        public_url = "https://bucket.cos.example/reverse-storyboard.jpg"
+        generated = {
+            "request_id": "xai-staged-storyboard", "model": "grok-imagine-video",
+            "source_video_url": "https://vidgen.x.ai/staged.mp4", "duration": 10,
+        }
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            payload = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "按顺序还原", "duration": 10,
+                "ratio": "9:16", "resolution": "720p",
+                "reference_images": refs, "reference_mode": "ordered_storyboard",
+            })
+
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video, "grok_storyboard_upload_is_open", return_value=True), \
+             patch.object(self.video, "_persist_staging_cleanup_intent"), \
+             patch("content_domains.cos.put_bytes", return_value=public_url) as put:
+            keys, error = self.video.stage_xiaole_video_references(
+                "xiaole_video", payload, "fang", "a" * 32)
+
+        self.assertIsNone(error)
+        self.assertEqual(payload["reference_images"], [public_url])
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(payload["_seedance_staged_keys"], keys)
+        self.assertFalse(put.call_args.kwargs["private"])
+
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch("content_domains.video_xai.generate", return_value=generated) as generate, \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/staged.mp4"), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
+            self.video.gen_xiaole_video(payload)
+        self.assertEqual(generate.call_args.kwargs["image_url"], public_url)
+
+    def test_reverse_grok_storyboard_staging_failure_is_precharge_503(self):
+        refs = [self._seedance_png_data(b"\x20"), self._seedance_png_data(b"\x80")]
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            payload = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "按顺序还原",
+                "reference_images": refs, "reference_mode": "ordered_storyboard",
+            })
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video, "grok_storyboard_upload_is_open", return_value=False):
+            keys, error = self.video.stage_xiaole_video_references(
+                "xiaole_video", payload, "fang", "b" * 32)
+        self.assertIsNone(keys)
+        self.assertEqual(error[0], 503)
+        self.assertEqual(error[1]["code"], "grok_storyboard_upload_unavailable")
+        self.assertIn("未扣点", error[1]["detail"])
 
     def test_validate_video_15_requires_reference(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
