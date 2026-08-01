@@ -93,6 +93,16 @@ class OfficialSeedanceAdapterTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, text)
 
+    def test_error_summary_redacts_signed_url_query_credentials(self):
+        text = self.seedance._safe_text(
+            "COS https://bucket.example/ref.jpg?q-ak=AKID123&q-signature=COSSECRET "
+            "S3 https://s3.example/ref.jpg?X-Amz-Credential=USER%2Fscope&X-Amz-Signature=AWSSECRET"
+        )
+        self.assertIn("https://bucket.example/ref.jpg?[REDACTED]", text)
+        self.assertIn("https://s3.example/ref.jpg?[REDACTED]", text)
+        for secret in ("AKID123", "COSSECRET", "USER%2Fscope", "AWSSECRET"):
+            self.assertNotIn(secret, text)
+
 
 if __name__ == "__main__":
     unittest.main()

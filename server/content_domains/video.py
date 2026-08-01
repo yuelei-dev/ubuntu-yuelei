@@ -65,6 +65,8 @@ SEEDANCE_REFERENCE_SIGN_EXPIRE = 2 * 60 * 60
 # 签名 TTL 只需覆盖「提交 → Seedance 取图」的分钟级窗口，与排队时长彻底解耦。
 SEEDANCE_COS_KEY_SCHEME = "cos-key://"
 SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5   # 待清理重试上限：超过后保留记录并告警，人工介入
+SEEDANCE_STAGING_ORPHAN_GRACE = 10 * 60
+SEEDANCE_UNKNOWN_CLEANUP_DELAY = SEEDANCE_REFERENCE_SIGN_EXPIRE + 60
 _SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
 _SEEDANCE_IMAGE_TYPES = {
     "image/jpeg": ".jpg",
@@ -219,13 +221,13 @@ def _seedance_cos_delete(object_key):
 
 
 def _seedance_staging_token(token):
-    """每次提交唯一的对象键成分：对原始幂等键做 sha256 取前 24 hex
-    （不删字符不截断原文 —— ab.cd:ef 与 abcdef 这类仅标点不同的合法键不会碰撞），
-    无幂等键时用随机 uuid。跨提交不共享对象键，从源头消除失败清理误删在途请求。"""
-    raw = str(token or "")
-    if raw:
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
-    return uuid.uuid4().hex[:24]
+    """Return a unique token for one physical staging attempt.
+
+    Idempotency controls job creation, not object lifetime.  Reusing a stable
+    object key after an aborted request lets an old cleanup intent delete the
+    new retry's image, so every physical attempt must get a fresh key.
+    """
+    return uuid.uuid4().hex
 
 
 def _stage_seedance_reference(value, username=None, token=None):
@@ -241,15 +243,21 @@ def _stage_seedance_reference(value, username=None, token=None):
     mime, ext, data = _seedance_data_image(raw)
     owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
     content_hash = hashlib.sha256(data).hexdigest()
-    object_key = "seedance/reference/%s/%s-%s%s" % (owner_hash, _seedance_staging_token(token), content_hash[:16], ext)
+    staging_token = str(token or "").strip() or _seedance_staging_token(None)
+    if not re.fullmatch(r"[a-f0-9]{32}", staging_token):
+        raise ValueError("Seedance 参考图暂存标识不合法")
+    object_key = "seedance/reference/%s/%s-%s%s" % (owner_hash, staging_token, content_hash[:16], ext)
+    _persist_staging_cleanup_intent(object_key)
     try:
         from . import cos
         cos.put_bytes(data, object_key, mime, private=True)   # 用户肖像素材强制私有 ACL
         return SEEDANCE_COS_KEY_SCHEME + object_key, object_key
     except SeedanceReferenceUnavailable:
+        cleanup_staged_seedance_references([object_key])
         raise
     except Exception as exc:
         print("[seedance] reference staging failed: %s" % type(exc).__name__, flush=True)
+        cleanup_staged_seedance_references([object_key])
         raise SeedanceReferenceUnavailable("Seedance 参考图上传失败，本次未扣点") from exc
 
 
@@ -322,12 +330,15 @@ def xiaole_reference_needs_staging(kind, body):
             and any(item.startswith("data:") for item in refs))
 
 
-def xiaole_reference_precheck(kind, body, username, cost, points_domain):
-    """锁内快速资格检查：仅当需要转存时查余额（原子扣点仍是余额最终裁决）。
-    返回 None 放行，或 (status, payload) 由 core 直接 _send。"""
+def xiaole_reference_precheck(kind, body, cost, known_points=None):
+    """Fast in-memory eligibility hint; atomic deduct remains authoritative."""
     if not xiaole_reference_needs_staging(kind, body):
         return None
-    if points_domain.get_points(username) < cost:
+    try:
+        available = int(known_points)
+    except (TypeError, ValueError):
+        return None
+    if available < cost:
         return (402, {"detail": "点数不足，请先充值（未扣点）", "need": cost})
     return None
 
@@ -347,19 +358,60 @@ _cleanup_table_ready = False
 
 
 def _cleanup_db():
-    """待清理队列表（content_jobs.db 内新建小表，不动既有表结构）。"""
+    """Open the durable staging/cleanup journal and apply additive migration."""
     global _cleanup_table_ready
     c = jdb()
     if not _cleanup_table_ready:
         c.execute("""CREATE TABLE IF NOT EXISTS seedance_pending_cleanup(
-            key TEXT PRIMARY KEY, job_id INTEGER, created_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0)""")
+            key TEXT PRIMARY KEY, job_id INTEGER, created_at INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'cleanup_pending',
+            next_attempt_at INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0)""")
+        columns = {row[1] for row in c.execute("PRAGMA table_info(seedance_pending_cleanup)").fetchall()}
+        if "state" not in columns:
+            c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN state TEXT NOT NULL DEFAULT 'cleanup_pending'")
+        if "next_attempt_at" not in columns:
+            c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0")
+        if "updated_at" not in columns:
+            c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0")
         c.commit()
         _cleanup_table_ready = True
     return c
 
 
-def _enqueue_pending_cleanup(keys, job_id=None):
-    """删除失败的键持久化待重试，避免短暂 COS 故障导致敏感参考图长期残留。"""
+def _persist_staging_cleanup_intent(key):
+    """Journal an object key before upload so a process crash is recoverable."""
+    now = int(time.time())
+    try:
+        with closing(_cleanup_db()) as c:
+            c.execute(
+                """INSERT INTO seedance_pending_cleanup
+                   (key,job_id,created_at,attempts,state,next_attempt_at,updated_at)
+                   VALUES(?,?,?,0,'staged',?,?)""",
+                (str(key), None, now, now + SEEDANCE_STAGING_ORPHAN_GRACE, now),
+            )
+            c.commit()
+    except Exception as exc:
+        print("[seedance] ALARM staging cleanup intent persist failed: %s" % type(exc).__name__, flush=True)
+        raise SeedanceReferenceUnavailable("Seedance 参考图清理事务不可用，本次未扣点") from exc
+
+
+def link_staged_seedance_references(connection, keys, job_id):
+    """Atomically link staged objects to the job in the job INSERT transaction."""
+    now = int(time.time())
+    for key in [str(k) for k in (keys or []) if k]:
+        cur = connection.execute(
+            """UPDATE seedance_pending_cleanup
+               SET job_id=?,state='linked',updated_at=? WHERE key=? AND state='staged'""",
+            (int(job_id), now, key),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("Seedance 参考图暂存事务丢失")
+
+
+def _enqueue_pending_cleanup(keys, job_id=None, delay_seconds=0):
+    """Persist a cleanup request using the same object key and lifecycle row."""
     keys = [str(k) for k in (keys or []) if k]
     if not keys:
         return
@@ -367,59 +419,103 @@ def _enqueue_pending_cleanup(keys, job_id=None):
         with closing(_cleanup_db()) as c:
             now = int(time.time())
             for k in keys:
-                c.execute("INSERT OR IGNORE INTO seedance_pending_cleanup(key,job_id,created_at,attempts) VALUES(?,?,?,0)",
-                          (k, job_id, now))
+                c.execute(
+                    """INSERT INTO seedance_pending_cleanup
+                       (key,job_id,created_at,attempts,state,next_attempt_at,updated_at)
+                       VALUES(?,?,?,0,'cleanup_pending',?,?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         job_id=COALESCE(excluded.job_id,seedance_pending_cleanup.job_id),
+                         state='cleanup_pending',next_attempt_at=excluded.next_attempt_at,
+                         updated_at=excluded.updated_at""",
+                    (k, job_id, now, now + max(0, int(delay_seconds or 0)), now),
+                )
             c.commit()
     except Exception as exc:
         print("[seedance] ALARM pending cleanup persist failed: %s" % type(exc).__name__, flush=True)
 
 
-def cleanup_staged_seedance_references(object_keys, job_id=None):
+def _remove_cleanup_record(key):
+    try:
+        with closing(_cleanup_db()) as c:
+            c.execute("DELETE FROM seedance_pending_cleanup WHERE key=?", (str(key),))
+            c.commit()
+    except Exception:
+        pass
+
+
+def _record_cleanup_failure(key):
+    now = int(time.time())
+    try:
+        with closing(_cleanup_db()) as c:
+            row = c.execute(
+                "SELECT attempts FROM seedance_pending_cleanup WHERE key=?", (str(key),)
+            ).fetchone()
+            attempts = int((row["attempts"] if row else 0) or 0) + 1
+            next_attempt = now + min(300, 30 * (2 ** min(attempts - 1, 3)))
+            c.execute(
+                """UPDATE seedance_pending_cleanup SET attempts=?,state='cleanup_pending',
+                   next_attempt_at=?,updated_at=? WHERE key=?""",
+                (attempts, next_attempt, now, str(key)),
+            )
+            c.commit()
+    except Exception:
+        return
+    if attempts >= SEEDANCE_CLEANUP_MAX_ATTEMPTS:
+        print("[seedance] ALARM cleanup key %s failed %d times, manual intervention required" % (key, attempts), flush=True)
+
+
+def cleanup_staged_seedance_references(object_keys, job_id=None, delay_seconds=0):
     """best-effort 清理：扣点/入队失败或任务终态时删除已转存的参考图对象；
     删除失败的键落 seedance_pending_cleanup，由启动扫描和后续清理动作重试收敛。"""
-    failed = []
-    for key in object_keys or []:
+    keys = [str(k) for k in (object_keys or []) if k]
+    if not keys:
+        return
+    _enqueue_pending_cleanup(keys, job_id, delay_seconds=delay_seconds)
+    if int(delay_seconds or 0) > 0:
+        return
+    for key in keys:
         try:
             _seedance_cos_delete(key)
         except Exception as exc:
             print("[seedance] reference cleanup failed for %s: %s" % (key, type(exc).__name__), flush=True)
-            failed.append(key)
-    if failed:
-        _enqueue_pending_cleanup(failed, job_id)
+            _record_cleanup_failure(key)
+            continue
+        _remove_cleanup_record(key)
 
 
 def retry_pending_seedance_cleanups(limit=50):
-    """重试待清理队列：成功即移除记录；连续失败达上限保留记录并告警（人工介入）。"""
+    """Retry eligible cleanup rows without starving newer objects."""
+    now = int(time.time())
     try:
         with closing(_cleanup_db()) as c:
-            rows = c.execute("SELECT key,attempts FROM seedance_pending_cleanup ORDER BY created_at LIMIT ?",
-                             (int(limit),)).fetchall()
+            rows = c.execute(
+                """SELECT key,attempts,state FROM seedance_pending_cleanup
+                   WHERE attempts < ? AND (
+                     (state='cleanup_pending' AND next_attempt_at<=?) OR
+                     (state='staged' AND job_id IS NULL AND created_at<=?)
+                   ) ORDER BY created_at,key LIMIT ?""",
+                (SEEDANCE_CLEANUP_MAX_ATTEMPTS, now,
+                 now - SEEDANCE_STAGING_ORPHAN_GRACE, int(limit)),
+            ).fetchall()
     except Exception:
-        return
+        return 0
+    processed = 0
     for row in rows:
-        key, attempts = row["key"], int(row["attempts"] or 0)
+        key = row["key"]
+        if row["state"] == "staged":
+            _enqueue_pending_cleanup([key])
         try:
             _seedance_cos_delete(key)
         except Exception:
-            attempts += 1
-            try:
-                with closing(_cleanup_db()) as c:
-                    c.execute("UPDATE seedance_pending_cleanup SET attempts=? WHERE key=?", (attempts, key))
-                    c.commit()
-            except Exception:
-                pass
-            if attempts >= SEEDANCE_CLEANUP_MAX_ATTEMPTS:
-                print("[seedance] ALARM cleanup key %s failed %d times, manual intervention required" % (key, attempts), flush=True)
+            _record_cleanup_failure(key)
+            processed += 1
             continue
-        try:
-            with closing(_cleanup_db()) as c:
-                c.execute("DELETE FROM seedance_pending_cleanup WHERE key=?", (key,))
-                c.commit()
-        except Exception:
-            pass
+        _remove_cleanup_record(key)
+        processed += 1
+    return processed
 
 
-def cleanup_job_staged_seedance_references(job_id):
+def cleanup_job_staged_seedance_references(job_id, delay_seconds=0):
     """终态清理：job 进 done/error 后删除本次暂存的参考图对象。
     由 core._set_terminal 在 CAS 抢到终态后调用；best-effort，永不阻断主流程。
     防越权：任务必须是 xiaole_video，且每个键必须带该任务属主账号的
@@ -446,8 +542,20 @@ def cleanup_job_staged_seedance_references(job_id):
             safe.append(key)
         else:
             print("[seedance] ALARM refuse to delete foreign object key for job %s: %s" % (job_id, key[:80]), flush=True)
-    cleanup_staged_seedance_references(safe, job_id)
-    retry_pending_seedance_cleanups()   # 顺手收敛历史遗留
+    cleanup_staged_seedance_references(safe, job_id, delay_seconds=delay_seconds)
+
+
+def seedance_reference_cleanup_delay(kind, payload, error):
+    """Keep references alive when a paid create may have been accepted upstream."""
+    if kind != "xiaole_video" or str((payload or {}).get("channel") or "").lower() != "micro":
+        return 0
+    try:
+        from . import video_seedance
+        if isinstance(error, video_seedance.CreateOutcomeUnknown):
+            return SEEDANCE_UNKNOWN_CLEANUP_DELAY
+    except Exception:
+        pass
+    return 0
 
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。

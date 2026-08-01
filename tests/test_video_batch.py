@@ -555,11 +555,13 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.refunds = []
                 self.balance = 100
                 self.deduct_error = None
+                self.get_point_calls = 0
 
             def cost_of(self, kind, body):
                 return 20
 
             def get_points(self, username):
+                self.get_point_calls += 1
                 return self.balance
 
             def deduct_points(self, username, cost, reason):
@@ -594,7 +596,9 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
             core.JOB_DB = str(pathlib.Path(td) / "jobs.db")
             core.AUDIO_DB = str(pathlib.Path(td) / "assets.db")
             video._cleanup_table_ready = False
-            core.verify = lambda token: {"username": "fang", "must_change": False}
+            core.verify = lambda token: {
+                "username": "fang", "must_change": False, "points": fake.balance
+            }
             core.feature_flags.require_enabled = lambda kind: None
             core.feature_flags.is_enabled = lambda kind: True
             core.MAX_USER_ACTIVE_JOBS = 5
@@ -657,6 +661,8 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                     fake.refunds.clear()
                     fake.balance = 100
                     fake.deduct_error = None
+                    fake.get_point_calls = 0
+                    core._shutting_down.clear()
                     flags["upload_open"] = True
                     flags["enqueue_ok"] = True
                     core.MAX_USER_ACTIVE_JOBS = 5
@@ -673,11 +679,18 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertIs(put_calls[0]["private"], True)
                 self.assertIs(put_calls[0]["lock_held"], False)   # COS 网络上传不得持有全局提交锁
                 self.assertEqual(1, len(fake.deductions))
+                self.assertEqual(0, fake.get_point_calls)
                 with closing(core.jdb()) as db:
                     row = db.execute("SELECT payload FROM jobs").fetchone()
+                    lifecycle = db.execute(
+                        "SELECT state,job_id FROM seedance_pending_cleanup WHERE key=?",
+                        (put_calls[0]["key"],),
+                    ).fetchone()
                 self.assertIn("cos-key://" + put_calls[0]["key"], row["payload"])
+                self.assertEqual(("linked", resp["job_id"]), tuple(lifecycle))
                 self.assertNotIn("data:image", row["payload"])
                 self.assertNotIn("q-sign-algorithm", row["payload"])   # 提交时不签名，签名推迟到 worker
+                self.assertEqual(0, video.retry_pending_seedance_cleanups())
 
                 # 终态清理：job 进 done 后删除本次暂存对象；重复 CAS 不重复清理
                 self.assertEqual([], delete_calls)
@@ -771,6 +784,23 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
                 self.assertEqual(1, len(put_calls))
                 self.assertEqual([put_calls[0]["key"]], delete_calls)
                 self.assertEqual(1, len(fake.refunds))
+
+                # SIGTERM during COS upload: clean the object and stop before deduct/job creation.
+                reset()
+                def shutdown_during_put(data, key, content_type=None, private=False):
+                    put_calls.append({"key": key, "lock_held": core._submission_lock.locked()})
+                    core._shutting_down.set()
+                    return signed_url
+                cos.put_bytes = shutdown_during_put
+                status, resp = post(micro_body)
+                cos.put_bytes = fake_put
+                core._shutting_down.clear()
+                self.assertEqual(503, status)
+                self.assertEqual("shutting_down", resp["code"])
+                self.assertEqual([put_calls[0]["key"]], delete_calls)
+                self.assertEqual([], fake.deductions)
+                with closing(core.jdb()) as db:
+                    self.assertEqual(0, db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
 
                 # 并行提交：两个上传必须并发发生（证明上传不在全局提交锁内），且互不阻塞、各自成功
                 reset()

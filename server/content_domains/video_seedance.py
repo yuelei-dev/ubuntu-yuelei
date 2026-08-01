@@ -55,6 +55,13 @@ def _safe_text(value, limit=500):
     text = str(value or "")
     if ARK_API_KEY:
         text = re.sub(re.escape(ARK_API_KEY), "***", text, flags=re.IGNORECASE)
+    # Signed object URLs are credentials. Redact the complete query rather
+    # than chasing provider-specific names such as q-signature or X-Amz-*.
+    text = re.sub(
+        r"(?i)(https?://[^\s?#\"'<>]+)\?[^\s\"'<>]+",
+        lambda match: match.group(1) + "?[REDACTED]",
+        text,
+    )
     text = re.sub(
         r"(?i)\b(authorization\s*:\s*bearer|bearer|api[_-]?key|access[_-]?token|token|secret)"
         r"\s*[:=]?\s*[^\s,;\"']+",

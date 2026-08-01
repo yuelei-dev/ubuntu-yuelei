@@ -157,6 +157,9 @@ class XiaoleVideoTests(unittest.TestCase):
             patch.object(cos, "enabled", return_value=True),
             patch.object(cos, "put_bytes", side_effect=put_side_effect),
             patch.object(self.video, "_seedance_cos_presign", return_value=signed),
+            patch.object(self.video, "_persist_staging_cleanup_intent"),
+            patch.object(self.video, "_enqueue_pending_cleanup"),
+            patch.object(self.video, "_remove_cleanup_record"),
         ]
 
     def test_validate_micro_keeps_data_images_local_until_staging(self):
@@ -174,7 +177,8 @@ class XiaoleVideoTests(unittest.TestCase):
     def test_stage_seedance_references_uploads_private_and_returns_cos_keys(self):
         refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(4)]
         patches = self._stage_mocks()
-        with patches[0], patches[1], patches[2] as put, patches[3] as presign:
+        with patches[0], patches[1], patches[2] as put, patches[3] as presign, \
+             patches[4], patches[5], patches[6]:
             first = self.video.validate_xiaole_video_payload({
                 "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
             second = self.video.validate_xiaole_video_payload({
@@ -194,10 +198,10 @@ class XiaoleVideoTests(unittest.TestCase):
         repeat_keys_uploaded = [call.args[1] for call in put.call_args_list[8:]]
         # 跨提交不共享对象键（消除失败清理竞态）；同幂等键重试覆盖同一对象
         self.assertNotEqual(first_keys_uploaded, second_keys_uploaded)
-        self.assertEqual(first_keys_uploaded, repeat_keys_uploaded)
+        self.assertNotEqual(first_keys_uploaded, repeat_keys_uploaded)
         self.assertEqual(4, len(set(first_keys_uploaded)))
         self.assertRegex(first_keys_uploaded[0],
-                         r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{24}-[0-9a-f]{16}\.png$")
+                         r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{32}-[0-9a-f]{16}\.png$")
         self.assertEqual(first_keys, first_keys_uploaded)
         self.assertEqual(first_keys, first["_seedance_staged_keys"])   # 随 payload 落库供终态清理
         # payload 只存 cos-key:// 内部引用，不存签名 URL；跨提交引用不同（键不同）
@@ -206,14 +210,13 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertNotIn("data:", str(first["reference_images"]))
         self.assertNotIn("q-sign-algorithm", str(first["reference_images"]))
 
-    def test_staging_token_hashes_idem_key_without_collision(self):
+    def test_staging_token_is_unique_per_physical_attempt(self):
         # 仅标点不同的两个合法 Idempotency-Key 不得映射为同一 token
-        self.assertNotEqual(self.video._seedance_staging_token("ab.cd:ef"),
-                            self.video._seedance_staging_token("abcdef"))
-        self.assertEqual(self.video._seedance_staging_token("ab.cd:ef"),
-                         self.video._seedance_staging_token("ab.cd:ef"))
-        self.assertRegex(self.video._seedance_staging_token("ab.cd:ef"), r"^[0-9a-f]{24}$")
-        self.assertRegex(self.video._seedance_staging_token(""), r"^[0-9a-f]{24}$")
+        first = self.video._seedance_staging_token("same-idempotency-key")
+        retry = self.video._seedance_staging_token("same-idempotency-key")
+        self.assertNotEqual(first, retry)
+        self.assertRegex(first, r"^[0-9a-f]{32}$")
+        self.assertRegex(retry, r"^[0-9a-f]{32}$")
 
     def test_validate_micro_strips_client_internal_fields(self):
         body = self.video.validate_xiaole_video_payload({
@@ -266,7 +269,7 @@ class XiaoleVideoTests(unittest.TestCase):
     def test_stage_seedance_references_partial_failure_cleans_uploaded_batch(self):
         refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(3)]
         patches = self._stage_mocks(put_side_effect=[None, None, RuntimeError("cos boom")])
-        with patches[0], patches[1], patches[2] as put, patches[3], \
+        with patches[0], patches[1], patches[2] as put, patches[3], patches[4], patches[5], patches[6], \
              patch.object(self.video, "_seedance_cos_delete") as delete:
             body = self.video.validate_xiaole_video_payload({
                 "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
@@ -274,9 +277,9 @@ class XiaoleVideoTests(unittest.TestCase):
                 self.video.stage_seedance_references(body, "fang")
 
         self.assertEqual(3, put.call_count)
-        uploaded_keys = [call.args[1] for call in put.call_args_list[:2]]
-        self.assertEqual(2, delete.call_count)   # 本批已上传对象必须全部清理
-        self.assertEqual(uploaded_keys, [call.args[0] for call in delete.call_args_list])
+        attempted_keys = [call.args[1] for call in put.call_args_list]
+        self.assertEqual(3, delete.call_count)
+        self.assertCountEqual(attempted_keys, [call.args[0] for call in delete.call_args_list])
         self.assertEqual(refs, body["reference_images"])   # 失败不回退、不改写
 
     def test_stage_seedance_references_unavailable_is_explicit(self):
@@ -292,7 +295,7 @@ class XiaoleVideoTests(unittest.TestCase):
     def test_stage_seedance_references_upload_failure_never_falls_back_to_data_url(self):
         patches = self._stage_mocks(put_side_effect=ModuleNotFoundError("qcloud_cos"))
         ref = self._seedance_png_data()
-        with patches[0], patches[1], patches[2], patches[3]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             body = {"channel": "micro", "reference_images": [ref]}
             with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "上传失败.*未扣点"):
                 self.video.stage_seedance_references(body, "fang")
@@ -326,7 +329,12 @@ class XiaoleVideoTests(unittest.TestCase):
 
         def pending_rows():
             with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                return db.execute("SELECT key,job_id,attempts FROM seedance_pending_cleanup").fetchall()
+                return db.execute("SELECT key,job_id,attempts,state FROM seedance_pending_cleanup").fetchall()
+
+        def make_due():
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                db.execute("UPDATE seedance_pending_cleanup SET next_attempt_at=0")
+                db.commit()
 
         with tempfile.TemporaryDirectory() as td, \
              patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
@@ -334,16 +342,97 @@ class XiaoleVideoTests(unittest.TestCase):
             # 删除失败 → 持久化待清理
             with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("cos down")):
                 self.video.cleanup_staged_seedance_references(["k1"], job_id=7)
-            self.assertEqual([("k1", 7, 0)], [tuple(r) for r in pending_rows()])
+            self.assertEqual([("k1", 7, 1, "cleanup_pending")], [tuple(r) for r in pending_rows()])
             # 重试仍失败 → attempts+1，记录保留
             with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("still down")):
+                make_due()
                 self.video.retry_pending_seedance_cleanups()
-            self.assertEqual([("k1", 7, 1)], [tuple(r) for r in pending_rows()])
+            self.assertEqual([("k1", 7, 2, "cleanup_pending")], [tuple(r) for r in pending_rows()])
             # 故障恢复 → 重试成功 → 记录移除
             with patch.object(self.video, "_seedance_cos_delete") as delete:
+                make_due()
                 self.video.retry_pending_seedance_cleanups()
             delete.assert_called_once_with("k1")
             self.assertEqual([], pending_rows())
+
+    def test_cleanup_scan_does_not_starve_eligible_rows(self):
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False):
+            with _closing(self.video._cleanup_db()) as db:
+                for index in range(100):
+                    db.execute(
+                        "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES(?,?,?,?,'cleanup_pending',0,0)",
+                        ("exhausted-%03d" % index, None, index,
+                         self.video.SEEDANCE_CLEANUP_MAX_ATTEMPTS),
+                    )
+                db.execute(
+                    "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES('eligible',NULL,1000,0,'cleanup_pending',0,0)"
+                )
+                db.commit()
+            with patch.object(self.video, "_seedance_cos_delete") as delete:
+                processed = self.video.retry_pending_seedance_cleanups(limit=50)
+            self.assertEqual(1, processed)
+            delete.assert_called_once_with("eligible")
+
+    def test_orphaned_staging_intent_is_recovered_after_grace(self):
+        import sqlite3
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False):
+            self.video._persist_staging_cleanup_intent("orphan-key")
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                db.execute("UPDATE seedance_pending_cleanup SET created_at=0,next_attempt_at=0")
+                db.commit()
+            with patch.object(self.video, "_seedance_cos_delete") as delete:
+                self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
+            delete.assert_called_once_with("orphan-key")
+
+    def test_outcome_unknown_keeps_reference_until_signed_url_expires(self):
+        from content_domains import video_seedance
+        payload = {"channel": "micro"}
+        delay = self.video.seedance_reference_cleanup_delay(
+            "xiaole_video", payload, video_seedance.CreateOutcomeUnknown("unknown")
+        )
+        self.assertGreater(delay, self.video.SEEDANCE_REFERENCE_SIGN_EXPIRE)
+        self.assertEqual(0, self.video.seedance_reference_cleanup_delay(
+            "xiaole_video", payload, video_seedance.SeedanceRejected("rejected")
+        ))
+
+    def test_delayed_cleanup_is_durable_and_runs_once_when_due(self):
+        import sqlite3
+        import tempfile
+        from contextlib import closing as _closing
+        from content_domains import core
+
+        with tempfile.TemporaryDirectory() as td, \
+             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
+             patch.object(self.video, "_cleanup_table_ready", False), \
+             patch.object(self.video, "_seedance_cos_delete") as delete:
+            self.video._persist_staging_cleanup_intent("unknown-key")
+            self.video.cleanup_staged_seedance_references(
+                ["unknown-key"], job_id=8, delay_seconds=120
+            )
+            delete.assert_not_called()
+            self.assertEqual(0, self.video.retry_pending_seedance_cleanups())
+            with _closing(sqlite3.connect(core.JOB_DB)) as db:
+                row = db.execute(
+                    "SELECT state,job_id FROM seedance_pending_cleanup WHERE key='unknown-key'"
+                ).fetchone()
+                self.assertEqual(("cleanup_pending", 8), row)
+                db.execute("UPDATE seedance_pending_cleanup SET next_attempt_at=0")
+                db.commit()
+            self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
+            delete.assert_called_once_with("unknown-key")
+            self.assertEqual(0, self.video.retry_pending_seedance_cleanups())
 
     def test_terminal_cleanup_refuses_foreign_or_wrong_kind_keys(self):
         import hashlib as _hashlib
