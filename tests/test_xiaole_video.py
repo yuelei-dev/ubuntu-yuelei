@@ -696,6 +696,75 @@ class XiaoleVideoTests(unittest.TestCase):
             })
             self.assertEqual(len(cleaned["reference_images"]), 3)
 
+    def test_reverse_grok_storyboard_delivers_all_one_to_four_frames_to_xai(self):
+        import hashlib
+        import io as _io
+        from PIL import Image
+
+        generated = {
+            "request_id": "xai-storyboard", "model": "grok-imagine-video",
+            "source_video_url": "https://vidgen.x.ai/storyboard.mp4", "duration": 10,
+        }
+        for count in range(1, 5):
+            with self.subTest(count=count):
+                shades = [30 + index * 40 for index in range(count)]
+                refs = [self._seedance_png_data(bytes([shade])) for shade in shades]
+                raw_hashes = [
+                    hashlib.sha256(base64.b64decode(ref.split(",", 1)[1])).hexdigest()
+                    for ref in refs
+                ]
+                with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+                    payload = self.video.validate_xiaole_video_payload({
+                        "channel": "grok", "prompt": "逐段还原", "duration": 10,
+                        "ratio": "9:16", "resolution": "720p",
+                        "reference_images": refs,
+                        "reference_mode": "ordered_storyboard",
+                    })
+
+                self.assertEqual(payload["_reference_storyboard_count"], count)
+                self.assertEqual(payload["_reference_storyboard_source_hashes"], raw_hashes)
+                self.assertRegex(payload["_reference_storyboard_sha256"], r"^[0-9a-f]{64}$")
+                self.assertEqual(len(payload["reference_images"]), 1)
+                self.assertIn("按原视频时间从左到右排列", payload["prompt"])
+
+                delivered = []
+                def capture_storyboard(value):
+                    delivered.append(value)
+                    return "https://cos.example/reverse-storyboard.jpg"
+
+                with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+                     patch.object(self.video, "_xiaole_ref_to_url", side_effect=capture_storyboard), \
+                     patch("content_domains.video_xai.generate", return_value=generated) as generate, \
+                     patch.object(self.video, "_download_xiaole_video", return_value="video/storyboard.mp4"), \
+                     patch.object(self.video, "_extract_first_frame_cover", return_value=None):
+                    result = self.video.gen_xiaole_video(payload)
+
+                self.assertEqual(len(delivered), 1)
+                generate.assert_called_once()
+                self.assertEqual(generate.call_args.kwargs["image_url"], "https://cos.example/reverse-storyboard.jpg")
+                self.assertEqual(result["reference_storyboard_count"], count)
+                self.assertEqual(result["reference_storyboard_source_hashes"], raw_hashes)
+                self.assertEqual(result["reference_storyboard_sha256"], payload["_reference_storyboard_sha256"])
+
+                if count > 1:
+                    encoded = delivered[0].split(",", 1)[1]
+                    with Image.open(_io.BytesIO(base64.b64decode(encoded))) as storyboard:
+                        self.assertEqual(storyboard.size, (384 * count, 676))
+                        for index, shade in enumerate(shades):
+                            pixel = storyboard.convert("RGB").getpixel((index * 384 + 192, 356))
+                            self.assertLess(abs(pixel[0] - shade), 12)
+                            self.assertLess(abs(pixel[1] - 128), 12)
+                            self.assertLess(abs(pixel[2] - (255 - shade)), 12)
+
+    def test_reverse_grok_storyboard_rejects_unbound_remote_frames_before_generation(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            with self.assertRaisesRegex(ValueError, "本地关键帧"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "grok", "prompt": "逐段还原",
+                    "reference_images": ["https://untrusted.example/frame.jpg"],
+                    "reference_mode": "ordered_storyboard",
+                })
+
     def test_validate_video_15_requires_reference(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
             with self.assertRaisesRegex(ValueError, "仅支持图生视频"):

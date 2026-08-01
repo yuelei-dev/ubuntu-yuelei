@@ -157,6 +157,7 @@ class ScriptActionsUiTests(unittest.TestCase):
             self.html,
         )
         self.assertIn("channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration", self.html)
+        self.assertIn("reference_mode:choice.channel==='grok'?'ordered_storyboard':undefined", self.html)
         self.assertIn("严格按照所附参考关键帧的时间顺序生成", self.html)
         self.assertNotIn("micro: seedance-2.0-fast", self.html)
         self.assertIn("ratio:'9:16',resolution:'720p'", self.html)

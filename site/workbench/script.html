@@ -1875,7 +1875,7 @@
           return;
         }
         var remakePrompt='严格按照所附参考关键帧的时间顺序生成，保持动作节点、镜头转换、构图和场景布局。'+prompt;
-        _doGenerate({channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration,ratio:'9:16',resolution:'720p'},
+        _doGenerate({channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration,ratio:'9:16',resolution:'720p',reference_mode:choice.channel==='grok'?'ordered_storyboard':undefined},
                     bdRemakeBtn,{endpoint:'/api/gen/xiaole_video',sceneCount:1});
       });
       return;

@@ -270,12 +270,19 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
         from content_domains import core
 
         with patch.object(video, "seedance_video_health_enabled", return_value=True), \
+                patch.object(video, "seedance_reference_upload_is_open", return_value=True), \
                 patch.object(video, "grok_video_is_open", return_value=True):
             self.assertEqual("micro", video.reverse_remake_video_channel(core.feature_flags))
         with patch.object(video, "seedance_video_health_enabled", return_value=False), \
+                patch.object(video, "seedance_reference_upload_is_open", return_value=True), \
+                patch.object(video, "grok_video_is_open", return_value=True):
+            self.assertEqual("grok", video.reverse_remake_video_channel(core.feature_flags))
+        with patch.object(video, "seedance_video_health_enabled", return_value=True), \
+                patch.object(video, "seedance_reference_upload_is_open", return_value=False), \
                 patch.object(video, "grok_video_is_open", return_value=True):
             self.assertEqual("grok", video.reverse_remake_video_channel(core.feature_flags))
         with patch.object(video, "seedance_video_health_enabled", return_value=False), \
+                patch.object(video, "seedance_reference_upload_is_open", return_value=False), \
                 patch.object(video, "grok_video_is_open", return_value=False):
             self.assertEqual("", video.reverse_remake_video_channel(core.feature_flags))
 
