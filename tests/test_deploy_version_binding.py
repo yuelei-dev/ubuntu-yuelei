@@ -191,5 +191,31 @@ class ServiceShaColumnTests(unittest.TestCase):
             self.assertIsNone(row[0])
 
 
+class ServiceShaImportCacheTests(unittest.TestCase):
+    """SERVICE_SHA 只在模块导入（进程启动）时读一次 —— ship 必须先写版本文件再重启。"""
+
+    def test_service_sha_is_read_once_at_import(self):
+        path = Path(jobs_store.DEPLOY_VERSION_FILE)   # 真实默认位置：reload 会重置模块全局，patch 无效
+        backup = path.read_bytes() if path.exists() else None
+        try:
+            path.write_text("sha_before_restart\n", encoding="utf-8")
+            importlib.reload(jobs_store)              # 模拟服务启动：导入时读一次
+            self.assertEqual(jobs_store.SERVICE_SHA, "sha_before_restart")
+            # 部署写入新 SHA 但进程未重启：缓存仍是旧值，health 实时读已是新值
+            path.write_text("sha_after_deploy\n", encoding="utf-8")
+            self.assertEqual(jobs_store.SERVICE_SHA, "sha_before_restart")
+            self.assertEqual(jobs_store.read_deploy_sha(), "sha_after_deploy")
+            # 重启（重新导入）后二者收敛到同一精确 SHA —— 顺序合同成立的机制
+            importlib.reload(jobs_store)
+            self.assertEqual(jobs_store.SERVICE_SHA, "sha_after_deploy")
+            self.assertEqual(jobs_store.SERVICE_SHA, jobs_store.read_deploy_sha())
+        finally:
+            if backup is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(backup)
+            importlib.reload(jobs_store)              # 恢复自然状态，避免影响其他测试
+
+
 if __name__ == "__main__":
     unittest.main()
