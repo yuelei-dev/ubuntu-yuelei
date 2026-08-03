@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# ship — 黄雀一键上线：pull → commit → push → 部署 → 重启 → 验证
+# ship — 黄雀一键上线：pull → commit → push → 部署 → 版本标记 → 重启 → 验证
 #
-# 用法：  ./ship "提交说明" 文件1 [文件2 ...]
+# 用法：  ./ship [--exact-files] "提交说明" 文件1 [文件2 ...]
 #   后端：./ship "修获客超时" server/leadgen_api.py
 #   前端：./ship "改采集页文案" site/workbench/collect.html
 #   多个：./ship "联调获客" server/leadgen_api.py site/workbench/collect.html
+#
+# --exact-files（精确清单模式）：只部署命令行列出的文件，不触发 content_domains
+#   整目录 --delete 同步；content_domains 文件只允许覆盖远端已存在的文件。
+#   凡参数涉及 server/content_domains/ 必须显式加此标志 —— 整目录同步会清掉
+#   测试服手工登记的兼容层/例外文件（治理盘点 PR #173）。
 #
 # 全程在 git 里：自动备份 + 完整历史 + 一条命令回滚。绝不在服务器上直接改。
 
@@ -25,7 +30,13 @@ case "$SERVICE_WAIT_SECONDS" in
   0) echo "❌ HQ_SERVICE_WAIT_SECONDS 必须大于 0"; exit 1 ;;
 esac
 
-[ $# -lt 2 ] && { echo "用法: ./ship \"提交说明\" 文件1 [文件2 ...]"; exit 1; }
+EXACT_FILES=0
+if [ "${1:-}" = "--exact-files" ]; then
+  EXACT_FILES=1
+  shift
+fi
+
+[ $# -lt 2 ] && { echo "用法: ./ship [--exact-files] \"提交说明\" 文件1 [文件2 ...]"; exit 1; }
 
 $SSHC -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE" true 2>/dev/null || {
   echo "❌ 连不上 $REMOTE。设 HQ_REMOTE=user@host（和 HQ_SSH_KEY=私钥路径）再试。"; exit 1; }
@@ -62,6 +73,18 @@ push_dir(){
   fi
 }
 MSG="$1"; shift
+
+# 登记例外保护：content_domains 走整目录 --delete 同步会清掉测试服手工登记的
+# 兼容层/例外文件（PR #173 盘点）。凡涉及 server/content_domains/ 必须显式
+# --exact-files：只部署列出的文件，且只允许覆盖远端已存在的文件。
+if [ "$EXACT_FILES" = "0" ]; then
+  for target in "$@"; do
+    case "$target" in
+      server/content_domains/*)
+        echo "❌ 部署 content_domains 文件必须显式用 --exact-files（整目录 --delete 同步会覆盖测试服登记例外）"; exit 1 ;;
+    esac
+  done
+fi
 
 # 1. 先拉最新（治"覆盖别人的活"）
 echo "==> 1/5 git pull --rebase（先同步对方的改动）"
@@ -192,12 +215,25 @@ for f in "$@"; do
   if [ "$f" = "scripts/drift_sentinel.py" ]; then
     $SSHC "$REMOTE" "mkdir -p /home/ubuntu/hq-drift" || { echo "  ❌ hq-drift 目录创建失败"; exit 1; }
   fi
+  if [ "$EXACT_FILES" = "1" ]; then
+    case "$f" in
+      server/content_domains/*)
+        # 精确模式只允许覆盖远端已存在的文件：新建/改名文件必须走登记流程，
+        # 防止把未登记的兼容层文件随手推上测试服。
+        remote_file="${dest%/}/$(basename "$f")"
+        $SSHC "$REMOTE" "test -f '$remote_file'" \
+          || { echo "  ❌ 精确模式只允许覆盖远端已存在的 content_domains 文件：$f（新文件请先走登记流程）"; exit 1; }
+        ;;
+    esac
+  fi
   push_file "$f" "$dest" \
     && echo "  ✓ $f → $dest" || { echo "  ❌ $f 部署失败"; exit 1; }
   DEPLOYED="$DEPLOYED $f"
   case "$f" in
     server/content_api.py|server/content_domains/*)
-      if [ "$CONTENT_DOMAINS_SYNCED" = "0" ] && [ -d server/content_domains ]; then
+      if [ "$EXACT_FILES" = "1" ]; then
+        echo "  ✓ 精确模式：$f 不触发 content_domains 整目录同步"
+      elif [ "$CONTENT_DOMAINS_SYNCED" = "0" ] && [ -d server/content_domains ]; then
         $SSHC "$REMOTE" "sudo mkdir -p /home/ubuntu/content-api/content_domains" || { echo "  ❌ content_domains 目录创建失败"; exit 1; }
         push_dir server/content_domains/ /home/ubuntu/content-api/content_domains/ \
           && echo "  ✓ server/content_domains/ → /home/ubuntu/content-api/content_domains/（整目录同步）" \
@@ -215,6 +251,37 @@ done
 if [ -n "$RESTART" ]; then
   echo "==> 3.5/5 import 冒烟（每个待重启服务）"
   for s in $RESTART; do smoke_import "$s" || exit 1; done
+
+  # ==> 3.6 任务-代码版本绑定：重启「前」原子写入本次部署的精确 SHA。
+  # 顺序合同：jobs_store.SERVICE_SHA 只在进程启动（模块导入）时读一次，
+  # 而 /api/gen/health 的 deploy_sha 每次实时读文件 —— 版本文件必须先于
+  # restart 落盘，否则新进程记录的仍是上一次部署的 SHA，health 却已显示新
+  # SHA，任务-代码绑定断裂。纯前端部署（无重启）不写：进程没变，标记不变。
+  #
+  # 原子写：先写临时文件并回读校验内容等于精确 SHA，再 mv 覆盖正式文件。
+  # mv 是原子的 —— 旧标记要么完整保留、要么完整替换，不存在半改状态；
+  # 任一步失败直接中止发布（此时旧标记未被触碰，无需回滚动作）。
+  echo "==> 3.6/5 写入部署版本标记（原子，重启前）"
+  HEAD_SHA="$(git rev-parse HEAD)" || { echo "  ❌ 取本地 HEAD SHA 失败"; exit 1; }
+  VERSION_FILE="/home/ubuntu/content-api/.deploy-version"
+  VERSION_TMP="${VERSION_FILE}.tmp.$$"
+  if ! $SSHC "$REMOTE" "printf '%s\n' '$HEAD_SHA' | sudo tee '$VERSION_TMP' >/dev/null"; then
+    echo "  ❌ 版本标记临时文件写入失败 —— 中止发布（旧标记未被触碰）"
+    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
+    exit 1
+  fi
+  WRITTEN_SHA="$($SSHC "$REMOTE" "sudo cat '$VERSION_TMP'" 2>/dev/null | tr -d '[:space:]')"
+  if [ "$WRITTEN_SHA" != "$HEAD_SHA" ]; then
+    echo "  ❌ 版本标记校验失败（回读 '$WRITTEN_SHA' != 期望 '$HEAD_SHA'）—— 中止发布（旧标记未被触碰）"
+    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
+    exit 1
+  fi
+  if ! $SSHC "$REMOTE" "sudo mv '$VERSION_TMP' '$VERSION_FILE'"; then
+    echo "  ❌ 版本标记原子替换失败 —— 中止发布（旧标记未被触碰）"
+    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
+    exit 1
+  fi
+  echo "  ✓ 版本标记已原子写入（${HEAD_SHA:0:7}）：重启后 SERVICE_SHA == health.deploy_sha == 本次精确 SHA"
 fi
 
 # 4. 重启受影响的后端服务（纯前端则跳过）

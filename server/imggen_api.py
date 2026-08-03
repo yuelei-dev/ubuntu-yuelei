@@ -571,10 +571,13 @@ class H(BaseHTTPRequestHandler):
                     return self._send(500, {"detail": (deduct_data or {}).get("detail") or "点数扣除失败"})
                 points_left = (deduct_data.get("points") if isinstance(deduct_data, dict) else None)
                 now = int(time.time())
+                from content_domains import jobs_store
                 try:
                     with closing(jdb()) as c:
-                        cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES('image',?,?,?,?,?,?)",
-                                        (user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
+                        jobs_store.ensure_service_sha_column_on_conn(c)  # 兜底：启动 ensure 漏了也不至于 500
+                        cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner,service_sha) VALUES('image',?,?,?,?,?,?,?)",
+                                        (user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER,
+                                         jobs_store.SERVICE_SHA))
                         c.commit(); jid = cur.lastrowid
                 except Exception:
                     refund_status, refund_data = refund_points(user["username"], cost, "job:image:insert_failed")
@@ -656,6 +659,7 @@ if __name__ == "__main__":
         feature_flags.init_db()
     from content_domains import jobs_store
     jobs_store.ensure_owner_column(jdb)   # 必须在 start_job_workers 之前：重排扫描按 owner 过滤
+    jobs_store.ensure_service_sha_column(jdb)   # 同理：INSERT 带 service_sha，列不在会 500
     start_job_workers()
     print("huangque-imggen-api on 127.0.0.1:%d  models=%s workers=%d 单用户生图并发上限=%d"
           % (PORT, MODELS, JOB_WORKERS, MAX_USER_RUNNING_IMAGE))

@@ -58,7 +58,9 @@ class ContentDomainTests(unittest.TestCase):
         #   资格预检/转存/清理逻辑全在 video.stage_xiaole_video_references 等，core 只留 5 行薄接线，门禁上调到 1690。
         # Seedance 参考图复审(#169)：COS 网络上传移出全局提交锁（拆两段锁 + 扣点前重查上限）、
         #   _set_terminal 挂终态清理钩子，均属提交/任务生命周期胶水，门禁上调到 1715。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1715)
+        # 任务-代码版本绑定：init_db 加 service_sha 列 + health 带 deploy_sha + 两处建任务
+        #   INSERT 带守卫/写列，均属任务生命周期薄接线（版本读取/加列实现在 jobs_store），门禁上调到 1725。
+        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1725)
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，

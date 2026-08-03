@@ -56,6 +56,16 @@ case "$*" in
   *"systemctl is-active"*)
     if [ "$FAKE_SERVICE_INACTIVE" = "1" ]; then exit 1; fi
     ;;
+  # 3.6 版本标记原子写：tee 写临时文件 → cat 回读校验（回读=假 git 的 abc1234）→ mv 替换
+  *"deploy-version.tmp"*)
+    case "$*" in
+      *"sudo cat"*) echo abc1234 ;;
+    esac
+    exit 0
+    ;;
+  *"sudo mv"*"deploy-version"*)
+    exit 0
+    ;;
 esac
 exit 0
 """,
@@ -83,7 +93,7 @@ exit 0
         path.write_text(content, encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-    def _run_ship(self, target="unknown.file", **overrides):
+    def _run_ship(self, target="unknown.file", exact=False, **overrides):
         env = os.environ.copy()
         env.update({
             "PATH": str(self.bin) + os.pathsep + env.get("PATH", ""),
@@ -92,11 +102,17 @@ exit 0
             "HQ_SERVICE_WAIT_SECONDS": "1",
         })
         env.update(overrides)
+        argv = ["bash", str(SHIP)]
+        if exact:
+            argv.append("--exact-files")
+        argv += ["test deployment", target]
         return subprocess.run(
-            ["bash", str(SHIP), "test deployment", target],
+            argv,
             cwd=ROOT,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=10,
@@ -130,10 +146,23 @@ exit 0
         self.assertIn("未进入 active", result.stdout)
         self.assertNotIn("上线完成", result.stdout)
 
-    def test_content_domain_change_syncs_directory_and_imports_before_restart(self):
+    def test_content_domain_change_requires_exact_files_mode(self):
+        """默认模式部署 content_domains 文件被拒绝：整目录 --delete 同步会覆盖测试服登记例外。"""
         rsync_log = Path(self.tmp.name) / "rsync.log"
         result = self._run_ship(
             target="server/content_domains/core.py",
+            FAKE_CURL_CODE="200",
+            FAKE_RSYNC_LOG=str(rsync_log),
+        )
+        self.assertNotEqual(0, result.returncode, result.stdout)
+        self.assertIn("--exact-files", result.stdout)
+        self.assertNotIn("上线完成", result.stdout)
+        self.assertFalse(rsync_log.exists(), "拒绝发布前不应触发任何 rsync")
+
+    def test_content_api_change_syncs_directory_and_imports_before_restart(self):
+        rsync_log = Path(self.tmp.name) / "rsync.log"
+        result = self._run_ship(
+            target="server/content_api.py",
             FAKE_CURL_CODE="200",
             FAKE_RSYNC_LOG=str(rsync_log),
         )
@@ -144,7 +173,7 @@ exit 0
 
     def test_content_import_failure_stops_before_restart(self):
         result = self._run_ship(
-            target="server/content_domains/core.py",
+            target="server/content_api.py",
             FAKE_IMPORT_FAIL="1",
             FAKE_CURL_CODE="200",
         )
@@ -155,7 +184,7 @@ exit 0
     def test_silent_restart_blocks_deployment_success(self):
         """restart 没真的发生（启动时间早于 T0）→ 阻断，不打印上线完成。"""
         result = self._run_ship(
-            target="server/content_domains/core.py",
+            target="server/content_api.py",
             FAKE_RESTART_INEFFECTIVE="1",
             FAKE_CURL_CODE="200",
         )
@@ -166,7 +195,7 @@ exit 0
     def test_stale_env_not_loaded_blocks_deployment_success(self):
         """env 文件比进程启动还新（配置进了文件没进进程）→ 阻断。"""
         result = self._run_ship(
-            target="server/content_domains/core.py",
+            target="server/content_api.py",
             FAKE_ENV_NEWER="1",
             FAKE_CURL_CODE="200",
         )
