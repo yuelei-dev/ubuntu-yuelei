@@ -1,293 +1,574 @@
 {
+  "schema_version": 1,
   "exceptions": [
     {
-      "path": "server/content_domains/video.py",
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/video_seedance.py",
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/breakdown.py",
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/feature_flags.py",
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/script.html",
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
-    },
-    {
       "path": "scripts/drift_sentinel.py",
-      "reason": "yuelei 版本文件（登记 §2.1）",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "9e1f2723f92334960e3373103521a485e181cab4740fc22a0559d7d3d34a8c09"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）；指纹 = 本 PR 合并后 ship 部署的哨兵本体",
       "registered": "2026-08-03"
     },
     {
       "path": "server/admin_api.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "4c3577ab1f07bdf8179f815ec1a19e5c81adfecd947c5e1d1573e0e2010296f2"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     },
     {
       "path": "server/content_domains/audio.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "433851682966712b6b2e6aa503d1c051de7ed16110b6b4a9e725256bd1b35aec"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/breakdown.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "900255c9ccccbfe82b6a87f19b519617d4ed90ce6c9138e934d69348308516a1"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/canvas_agent.py",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
+      "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/core.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "ab48d8f920c20f5361af74ec0d5b5d6694ff2cbc2b6e9e3f79eb37adb06ed06a"
+      },
+      "reason": "PR171 测试覆盖层 e755f40（登记 §2.2）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/feature_flags.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "6d436734303365ac91d2741dc304e3ae36bd3487daceea374fe6bd88895b79e0"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）",
       "registered": "2026-08-03"
     },
     {
       "path": "server/content_domains/history.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "6387fb13a213f8d04ebf29b46cee6eb1d3f51278f5fe1ed03fa1ebf039ffaa8e"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/jobs_store.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "ref",
+        "value": "origin/main"
+      },
+      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/local_reverse_processor.py",
+      "drift_kind": "added",
+      "expected": {
+        "type": "sha256",
+        "value": "fbea9d8446960d58be63defc576aeb6411dadd44fedc499c9dabf349ab4435dd"
+      },
+      "reason": "yuelei 独有，tang 基线无此路径（登记 §2.1）",
       "registered": "2026-08-03"
     },
     {
       "path": "server/content_domains/registry.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "330fa002acf7125fc454b19f57955a7687d7169c082c13d44cc3487c9bd3cdff"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     },
     {
+      "path": "server/content_domains/video.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "afd69005bc56dd4c35aba43393672af49a8e0d7f70e3b1cdb254dddb4c4c1baa"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/video_seedance.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "1e851affe03c98f3da00c2916672e310ad7846b80201aaf9bd410b85c76cbd56"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/imggen_api.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "ref",
+        "value": "origin/main"
+      },
+      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "server/leadgen_api.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "ref",
+        "value": "origin/main"
+      },
+      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "registered": "2026-08-03"
+    },
+    {
       "path": "server/tikhub.py",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "67ccaf331ebef8cd5d684ce9b40f39daec771d72ab871c0e8f4818fbf58dabf7"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/admin/index.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "924e7ed32a794b74018fc5726b2a5e2344908c854b8623ced681a365e0398900"
+      },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/assets.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/audio.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/banana.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/bots.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-app.js",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-graph.js",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-short-drama-assembly.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-short-drama-production.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-short-drama-video.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-short-drama-voice.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas-short-drama.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/canvas/canvas.css",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/cloud-shell.js",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/collect.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/cost.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/dashboard.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/digital-ip-a.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/digital-ip-b.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/digital-ip-c.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/digital-ip.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/inspiration.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/inspirations.json",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/invite.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/ip12-report.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/ip12.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/leads.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/recharge.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/settings.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/tutorials.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "site/workbench/video.html",
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/core.py",
-      "reason": "PR171 测试覆盖层 e755f40（登记 §2.2）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/jobs_store.py",
-      "reason": "版本绑定部署（PR #174）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/imggen_api.py",
-      "reason": "版本绑定部署（PR #174）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/leadgen_api.py",
-      "reason": "版本绑定部署（PR #174）",
-      "registered": "2026-08-03"
-    },
-    {
-      "path": "server/content_domains/canvas_agent.py",
-      "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/install.sh",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.2.0/SHA256SUMS",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.2.0/huangque_hq_cli-0.2.0-py3-none-any.whl",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.3.0/SHA256SUMS",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.3.0/huangque_hq_cli-0.3.0-py3-none-any.whl",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.4.0/SHA256SUMS",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/downloads/hq/v0.4.0/huangque_hq_cli-0.4.0-py3-none-any.whl",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/assets.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "1d9e3edf3f208713e2d00321c4809449800a078fef9d8f516aec43034fceb3ba"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/audio.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "d8a953d160542cf613ae17d6a69cd2ac5793ecd5aa95b01ec4d42cfd06c01b83"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/banana.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "5b511cc7ca6b73e40dee80f5e35b4513486a2dc39e1b04dfd51ba856584aa27a"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/bots.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "92e3d1d64a2cdadb2346660a794a45b8acda682cb09d4193e7c7795bbf847754"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "0ef161e0cb45c7c84f14e904f8075b33dcb0a54261dfe4489f810a683c187d3e"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/workbench/canvas/canvas-agent.js",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-app.js",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "04c3dcc8e835e472895088e8b9345f22d026c0ab67406a7c5806401e15e7e889"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-graph.js",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "decc0dcf1cb31e001e0e17890468309106d541ab0e738eb8f51f45fa5c3854ef"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-short-drama-assembly.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "4352d929abc4797420fb73b516af187612f79c73f4f05d543949c747784953e9"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-short-drama-production.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "aa46a9c96a08238d5bab72e3df9a27558f8d4af87d42699e1799cf03c707e547"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-short-drama-video.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "4858ef36694b9d5e276575d3c0dfa390f0259751a734eb4b56c9b9fb7c242492"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-short-drama-voice.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "5ff01b312d90e4bc7ee384ab444ebc0360006f48734d39edcc2f1708e2a450a3"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-short-drama.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "3ad76bb21ad3b5f0c41527288ab2c2c7012cef27b7aaf3322747336215ba8c1a"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/canvas/canvas.css",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "61ffe941b7b710cee74669a3c8a6108d523ae489aca5e68c5f88001749ecb669"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/cloud-shell.js",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "141d98fcf0906ec650fb0ad4f1084c1580c8a662fe582531f18bc4a423a61fe7"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/collect.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "26b8569bfe0cdeed5264a544288a743812773d8eaacddc18707b9b844e7cbaa5"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/cost.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "4ad9f886a18acd902de222744cbc0b4242c1a9452709f278eb03fa004ba64fee"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/dashboard.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "147450832c44e89ce1a8f831f9ed3237754496414c095fed8a04e572eb504042"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     },
     {
       "path": "site/workbench/device.html",
+      "drift_kind": "missing",
+      "expected": {
+        "type": "absent"
+      },
       "reason": "git 有、服务器未部署；基线冻结不补（登记 §2.3）",
       "registered": "2026-08-03"
     },
     {
-      "path": "server/content_domains/local_reverse_processor.py",
-      "reason": "yuelei 独有，tang 基线无此路径（登记 §2.1）",
+      "path": "site/workbench/digital-ip-a.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "10e10d6e29f9286f2df6d09c794916407323f8ed8876b6626265a63624e6530f"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/digital-ip-b.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "752ac7135b624691f09ed66720cc75ed489db7084d13803020d388e0c72ed809"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/digital-ip-c.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "3c5c188a29bb187cdd22da27f1c7957c74af32a75fe6d9d0561ebda15521eb99"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/digital-ip.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "00f037e62cceafa83c1419e52bda01b8006de2c578aeb0b86128f0af07913eab"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/inspiration.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "df03b7d035f0375e241bbd8d28feeb5b065fdc4874344d07ec96fc7bfe830af8"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/inspirations.json",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "aeb32383adb7de151e8f91308e3643a02406f0d06f1dc4ce67cd49abdef7f118"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/invite.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "409b692899a8faa54de50ff3180368a3b8801d3dc8829e898874f279bee0249e"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/ip12-report.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "d5710c943f9dae144f148b4be03408775b653ad04f2fb238423a142112ed5219"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/ip12.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "194289598efc31ad4d789213466bb5549fc5fa91c651f26d872ef10a699016e0"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/leads.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "01d166efafd354e92c37f53d4f9a0d04011a103e34f2a4b9680871024db1700f"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/recharge.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "e45a6edf573edf3b0092216aee25133d4c18a844bc1d34cc6396f4615162318c"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/script.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "3d1049ae20c3e189cab66c851d4e31f97249cd637d8f56e1b47eec8f2cc9712d"
+      },
+      "reason": "yuelei 版本文件（登记 §2.1）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/settings.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "11f3cddefbee2656bf25bff423a2c0862bd74f74000ff5fa8c1a28be622d280c"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/tutorials.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "394caf77dd62694501ead5a9bf4da8fb25d07402c971c2c98ad90bf9658c8574"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
+      "registered": "2026-08-03"
+    },
+    {
+      "path": "site/workbench/video.html",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "sha256",
+        "value": "d9922a2361adc6707f33f646289566daa1482d864286df6d4b645b7c1f3dbce0"
+      },
+      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
     }
   ]
