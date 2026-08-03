@@ -20,6 +20,8 @@
   例外条目 = path + drift_kind + 指纹（expected: sha256 运行时内容哈希 / ref 等于某
   不可变提交（完整 40 位 SHA，拒绝分支名/tag/短 SHA）版本 / absent 仅用于 missing）。drift_kind 与指纹完全匹配才进 registered 桶单独汇总、
   不计入漂移数；命中但状态已变（kind/指纹不符）按真漂移处理并标注「登记例外状态已变」。
+  漂移桶之外还会独立遍历清单全部条目核对当前实际状态：恢复基线内容、missing 被补上、
+  added 被删除都算偏离登记 → exceptions_stale；stale-only（无普通漂移）同样返回非零并告警。
   清单来源顺序：env HQ_DRIFT_EXCEPTIONS（本地 JSON）→
   git show <HQ_DRIFT_EXCEPTIONS_REF 或 GIT_REF>:deploy/test-server-exceptions.json；
   读不到按无例外处理（行为同旧版）；schema 非法则告警并按零例外巡检，绝不崩溃。
@@ -223,15 +225,13 @@ def sha256_file(path):
         return None
 
 
-def _exception_matches(item, kind, git_path):
-    """命中例外的路径，校验 drift_kind 与内容指纹，完全匹配才可豁免。"""
-    if item['drift_kind'] != kind:
-        return False
+def _exception_state_matches(item, git_path):
+    """不看 drift_kind，只核对当前实际状态（存在性 + 指纹）是否等于登记值。"""
     expected = item['expected']
     etype = expected['type']
-    if etype == 'absent':
-        return kind == 'missing'
     rp = git_path_to_runtime(git_path)
+    if etype == 'absent':
+        return not (rp and os.path.exists(rp))
     if not rp or not os.path.exists(rp):
         return False
     if etype == 'sha256':
@@ -242,6 +242,23 @@ def _exception_matches(item, kind, git_path):
             return False
         return md5_file(rp) == md5_bytes(p.stdout)
     return False
+
+
+def _exception_matches(item, kind, git_path):
+    """命中例外的路径，校验 drift_kind 与内容指纹，完全匹配才可豁免。"""
+    return item['drift_kind'] == kind and _exception_state_matches(item, git_path)
+
+
+def _stale_reason(item, drift_kind, git_path):
+    """登记例外的当前状态偏离说明。drift_kind=None 表示该路径当前无普通漂移。"""
+    rp = git_path_to_runtime(git_path)
+    if item['expected']['type'] == 'absent':
+        return '登记为 missing（应不存在），当前文件已存在（可能被重新部署）'
+    if not (rp and os.path.exists(rp)):
+        return '登记为 %s 例外，当前文件不存在（可能被删除或回退）' % item['drift_kind']
+    if drift_kind is None:
+        return '登记为 %s 例外，当前无漂移但指纹与登记不符（可能已恢复基线内容）' % item['drift_kind']
+    return '登记为 %s 例外，当前为 %s 且 drift_kind/指纹与登记不符' % (item['drift_kind'], drift_kind)
 
 
 def git_path_to_runtime(git_path):
@@ -340,9 +357,11 @@ def diff_paths(git_paths=None, apply_exceptions=True):
         'added': sorted(set(added)),
         'registered': [],
         'exceptions_stale': [],
+        'exceptions_stale_reasons': {},
     }
     if apply_exceptions:
         exceptions = load_exceptions()
+        classified = set()
         for kind in EXCEPTION_KINDS:
             kept = []
             for gp in result[kind]:
@@ -354,8 +373,20 @@ def diff_paths(git_paths=None, apply_exceptions=True):
                 else:
                     # 命中例外但 drift_kind/指纹不符：登记状态已变，按真漂移处理
                     result['exceptions_stale'].append(gp)
+                    result['exceptions_stale_reasons'][gp] = _stale_reason(item, kind, gp)
                     kept.append(gp)
+                classified.add(gp)
             result[kind] = kept
+        # 独立遍历未进漂移桶的例外：恢复基线内容 / missing 被补上 / added 被删除
+        # 都会让路径从漂移集合消失，必须在这里核出，否则登记保留的功能被回退会静默漏报
+        for gp, item in exceptions.items():
+            if gp in classified:
+                continue
+            if _exception_state_matches(item, gp):
+                result['registered'].append(gp)
+            else:
+                result['exceptions_stale'].append(gp)
+                result['exceptions_stale_reasons'][gp] = _stale_reason(item, None, gp)
         result['registered'].sort()
         result['exceptions_stale'].sort()
     return result
@@ -437,15 +468,21 @@ def format_diff(d):
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
     registered = d.get('registered') or []
     stale = d.get('exceptions_stale') or []
-    lines = ['⚠️ 黄雀主站检测到 %d 处文件漂移（线上与 git %s 不一致）' % (total, GIT_REF)]
+    reasons = d.get('exceptions_stale_reasons') or {}
+    if total == 0 and stale:
+        # stale-only：无普通漂移，但登记例外的状态/指纹已偏离登记值
+        lines = ['‼️ 黄雀主站登记例外状态已变 %d 处（线上与 git %s 比对无普通漂移，但例外登记不再成立）' % (len(stale), GIT_REF)]
+    else:
+        lines = ['⚠️ 黄雀主站检测到 %d 处文件漂移（线上与 git %s 不一致）' % (total, GIT_REF)]
     for tag, key in (('改动', 'changed'), ('删除', 'missing'), ('新增', 'added')):
         if d[key]:
             lines.append('【%s %d】%s' % (tag, len(d[key]), '、'.join(short(p) for p in d[key][:12])))
     if registered:
         lines.append('已登记例外 %d 处（见 %s，指纹匹配，不计入漂移）' % (len(registered), EXCEPTIONS_GIT_PATH))
     if stale:
-        lines.append('‼️ 登记例外状态已变 %d 处（drift_kind/指纹与登记不符，按真漂移处理）：%s' % (
-            len(stale), '、'.join(short(p) for p in stale[:12])))
+        lines.append('‼️ 登记例外状态已变 %d 处（按真漂移处理）：' % len(stale))
+        for p in stale[:12]:
+            lines.append('  - %s：%s' % (p, reasons.get(p, '状态与登记不符')))
     lines.append('→ 请勿直接改服务器；正常上线必须走 PR 合并后由审核方执行 ship。')
     return '\n'.join(lines)
 
@@ -454,12 +491,14 @@ def handle_detect(print_only=False):
     d = diff_paths()
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
     n_reg = len(d.get('registered') or [])
-    if total == 0:
+    n_stale = len(d.get('exceptions_stale') or [])
+    if total == 0 and n_stale == 0:
         log('巡检正常：线上与 git %s 一致，无漂移%s' % (GIT_REF, '（已登记例外 %d 处）' % n_reg if n_reg else ''))
         return 0
+    # stale-only 也必须非零并告警：登记保留的功能被回退/删除时不能静默漏报
     msg = format_diff(d)
     log('检测到漂移: changed=%d missing=%d added=%d registered=%d stale=%d' % (
-        len(d['changed']), len(d['missing']), len(d['added']), n_reg, len(d.get('exceptions_stale') or [])))
+        len(d['changed']), len(d['missing']), len(d['added']), n_reg, n_stale))
     if print_only:
         print(msg)
         return 1

@@ -160,15 +160,16 @@ class DriftExceptionsTests(unittest.TestCase):
 
     def test_moving_ref_probe_regression(self):
         # 门禁探针回归：ref 锁定不可变提交后，分支前进 + 运行文件同步改成新内容，
-        # 不得再进 registered（旧版用分支名 origin/main 时会自动跟随 = 假阴性）
+        # 不得再进 registered（旧版用分支名 origin/main 时会自动跟随 = 假阴性），
+        # 且独立遍历时必须核出 stale（登记状态已不成立）
         (self.webroot / "refile.html").write_bytes(b"v2\n")
         e = entry("site/refile.html", "changed", {"type": "ref", "value": self.v1_sha})
         self.write_exceptions(self.good_doc([e]))
         d = self.ds.diff_paths()
-        # 运行文件 == git HEAD(v2)，本身无漂移；但对 v1 的例外登记而言状态已变？——
-        # 无漂移即无例外判定，refile 不得出现在 registered
+        # 运行文件 == git HEAD(v2)，本身无漂移；但对 v1 的例外登记而言状态已变
         self.assertEqual(d["registered"], [])
         self.assertNotIn("site/refile.html", d["changed"])
+        self.assertEqual(d["exceptions_stale"], ["site/refile.html"])
         # 反之：运行文件被改成 v1（真漂移），例外指纹虽匹配 v1……
         (self.webroot / "refile.html").write_bytes(b"v1\n")
         d = self.ds.diff_paths()
@@ -179,6 +180,63 @@ class DriftExceptionsTests(unittest.TestCase):
         self.assertIn("site/refile.html", d["changed"])
         self.assertEqual(d["exceptions_stale"], ["site/refile.html"])
         self.assertEqual(d["registered"], [])
+
+    # ---------- 独立遍历：恢复基线 / 补部署 / 被删除 → stale 且 handle_detect 非零 ----------
+
+    def prep_clean(self):
+        """让所有被监控路径无普通漂移：运行文件全部 == git HEAD。"""
+        (self.webroot / "changed.html").write_bytes(b"git version\n")
+        (self.webroot / "refile.html").write_bytes(b"v2\n")
+        (self.webroot / "missing.html").write_bytes(b"only in git\n")
+
+    def test_changed_exception_restored_to_baseline_is_stale(self):
+        # changed 例外文件被换回基线内容：路径从漂移集合消失，但必须报 stale 且返回非零
+        self.prep_clean()
+        self.write_exceptions(self.good_doc([self.sha_entry()]))
+        d = self.ds.diff_paths()
+        self.assertEqual(d["changed"], [])
+        self.assertEqual(d["registered"], [])
+        self.assertEqual(d["exceptions_stale"], ["site/changed.html"])
+        self.assertIn("恢复基线", d["exceptions_stale_reasons"]["site/changed.html"])
+        self.assertEqual(self.ds.handle_detect(print_only=True), 1)
+        self.assertIn("登记例外状态已变", self.ds.format_diff(d))
+
+    def test_missing_exception_redeployed_is_stale(self):
+        # missing 例外文件被重新部署：absent 登记不再成立 → stale 非零
+        self.prep_clean()
+        self.write_exceptions(self.good_doc([entry("site/missing.html", "missing", {"type": "absent"})]))
+        d = self.ds.diff_paths()
+        self.assertEqual(d["missing"], [])
+        self.assertEqual(d["registered"], [])
+        self.assertEqual(d["exceptions_stale"], ["site/missing.html"])
+        self.assertIn("重新部署", d["exceptions_stale_reasons"]["site/missing.html"])
+        self.assertEqual(self.ds.handle_detect(print_only=True), 1)
+
+    def test_added_exception_deleted_is_stale(self):
+        # added 例外文件被删除：登记内容已不存在 → stale 非零
+        self.prep_clean()
+        extra = self.webroot / "extra.html"
+        extra.write_bytes(b"yuelei only\n")
+        e = entry("site/extra.html", "added", {"type": "sha256", "value": sha256(b"yuelei only\n")})
+        self.write_exceptions(self.good_doc([e]))
+        d = self.ds.diff_paths()
+        self.assertEqual(d["registered"], ["site/extra.html"])  # 存在且指纹匹配 → 豁免
+        extra.unlink()
+        d = self.ds.diff_paths()
+        self.assertEqual(d["added"], [])
+        self.assertEqual(d["registered"], [])
+        self.assertEqual(d["exceptions_stale"], ["site/extra.html"])
+        self.assertIn("不存在", d["exceptions_stale_reasons"]["site/extra.html"])
+        self.assertEqual(self.ds.handle_detect(print_only=True), 1)
+
+    def test_all_matched_and_no_drift_returns_zero(self):
+        # 全部例外匹配且无普通漂移才返回 0
+        self.write_exceptions(self.good_doc([
+            self.sha_entry(),
+            entry("site/missing.html", "missing", {"type": "absent"}),
+            entry("site/refile.html", "changed", {"type": "ref", "value": self.v1_sha}),
+        ]))
+        self.assertEqual(self.ds.handle_detect(print_only=True), 0)
 
     def test_absent_match_registers(self):
         self.write_exceptions(self.good_doc([entry("site/missing.html", "missing", {"type": "absent"})]))

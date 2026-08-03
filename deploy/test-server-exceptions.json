@@ -6,7 +6,7 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "2bc0c7dcf32f115431aff7ac52313769a56af9c4dc8eb6c4657ccfab533ba49e"
+        "value": "48101cd2547ec6d74fe07cebe0ed94a9afd5cb12f1d90fab9a9119bebb2c19be"
       },
       "reason": "yuelei 版本文件（登记 §2.1）；指纹 = 本 PR 合并后 ship 部署的哨兵本体",
       "registered": "2026-08-03"
