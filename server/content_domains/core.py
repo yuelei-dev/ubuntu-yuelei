@@ -268,6 +268,7 @@ def init_db():
         _ensure_column(c, "jobs", "deleted", "INTEGER DEFAULT 0")
         _ensure_column(c, "jobs", "refunded", "INTEGER DEFAULT 0")  # 退点幂等键(#187)
         _ensure_column(c, "jobs", "owner", "TEXT")                  # 归属服务(#511)，见 SERVICE_OWNER
+        _ensure_column(c, "jobs", "service_sha", "TEXT")            # 任务执行版本：建任务时写入 .deploy-version 的 SHA，历史行 NULL=版本未知
         submission_idempotency.ensure_table(c)
         c.commit()
     feature_flags.init_db()
@@ -1290,10 +1291,12 @@ class H(BaseHTTPRequestHandler):
                 now, batch_id, job_ids, committed = int(time.time()), uuid.uuid4().hex, [], False
                 try:
                     with closing(jdb()) as c:
+                        jobs_store.ensure_service_sha_column_on_conn(c)  # 兜底：启动 ensure 漏了也不至于 500
                         for body, cost in zip(payloads, costs):
                             body["batch_id"] = batch_id
-                            cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
-                                ("video", user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
+                            cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner,service_sha) VALUES(?,?,?,?,?,?,?,?)",
+                                ("video", user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER,
+                                 jobs_store.SERVICE_SHA))
                             job_ids.append(cur.lastrowid)
                         c.commit()
                         committed = True
@@ -1447,8 +1450,10 @@ class H(BaseHTTPRequestHandler):
                     now = int(time.time())
                     try:
                         with closing(jdb()) as c:
-                            cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
-                                            (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
+                            jobs_store.ensure_service_sha_column_on_conn(c)  # 兜底：启动 ensure 漏了也不至于 500
+                            cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner,service_sha) VALUES(?,?,?,?,?,?,?,?)",
+                                            (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER,
+                                             jobs_store.SERVICE_SHA))
                             jid = cur.lastrowid; video_domain.link_staged_seedance_references(c, staged_ref_keys, jid); c.commit()
                     except Exception as exc: insert_error = exc
                 if post_stage_error is None and insert_error is None:
@@ -1695,6 +1700,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
+                                    "deploy_sha": jobs_store.read_deploy_sha(),
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags), "reverse_remake_video_channel": video_domain.reverse_remake_video_channel(feature_flags), "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})

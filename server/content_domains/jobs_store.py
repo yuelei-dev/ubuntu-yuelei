@@ -18,8 +18,35 @@ content_jobs.db 的 jobs 表被三个进程共写：
 就在 `from content_domains import cos / assets_store`）。
 """
 import json
+import os
 import time
 from contextlib import closing
+
+# ship 部署时写入的精确 commit SHA（content_api.py 所在目录，单行文本）。
+# 健康检查每次读文件；建任务写 jobs.service_sha 用启动时的缓存值，不每次碰盘。
+DEPLOY_VERSION_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".deploy-version")
+
+
+def read_deploy_sha():
+    """读取 .deploy-version；文件不存在或读取失败返回 "unknown"，绝不抛异常。"""
+    try:
+        with open(DEPLOY_VERSION_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _read_service_sha():
+    """启动时读一次 .deploy-version 供 jobs.service_sha 用；读不到存 NULL。"""
+    try:
+        with open(DEPLOY_VERSION_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except Exception:
+        return None
+
+
+SERVICE_SHA = _read_service_sha()
 
 
 def public_dict(row, phase=None):
@@ -50,6 +77,28 @@ def ensure_owner_column(jdb):
         if "owner" not in cols:
             c.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
             c.commit()
+
+
+def ensure_service_sha_column_on_conn(conn):
+    """在同一连接上保证 jobs.service_sha 存在（PRAGMA 守卫的 ALTER，不动既有数据）。
+
+    供已持有连接的写入路径（core 建任务、imggen/leadgen 直写 jobs 等）在 INSERT 前兜底：
+    服务启动时 ensure_service_sha_column 已建列，这里是第二道保险 —— 任何调用方漏了启动
+    ensure，也不至于让 INSERT 直接 500。SQLite 的 ALTER 是事务性的，跟随外层事务提交/回滚。
+    历史行 service_sha 为 NULL —— 显示「版本未知」，不回填。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "service_sha" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN service_sha TEXT")
+
+
+def ensure_service_sha_column(jdb):
+    """保证 jobs.service_sha 存在（任务-代码版本绑定）。与 ensure_owner_column 同款：
+    共写 jobs 表的服务启动时各调一次，谁先起谁建；不建列则 INSERT 带 service_sha 会直接 500。
+    """
+    with closing(jdb()) as c:
+        ensure_service_sha_column_on_conn(c)
+        c.commit()
 
 
 def set_terminal(jdb, job_id, status, result=None, error=None, from_states=("running",)):

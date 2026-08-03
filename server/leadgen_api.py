@@ -562,10 +562,13 @@ class H(BaseHTTPRequestHandler):
             if not add_points(user["username"], -cost, "job:" + kind):
                 return self._send(402, {"detail": "点数不足", "need": cost})
             now = int(time.time())
+            from content_domains import jobs_store
             with closing(jdb()) as c:
                 # owner 署名(#511)：jobs 表三服务共用，不署名 content 重启会把本服务在飞的任务判失败退点
-                cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
-                                (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER))
+                jobs_store.ensure_service_sha_column_on_conn(c)  # 兜底：启动 ensure 漏了也不至于 500
+                cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner,service_sha) VALUES(?,?,?,?,?,?,?,?)",
+                                (kind, user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER,
+                                 jobs_store.SERVICE_SHA))
                 c.commit(); jid = cur.lastrowid
             threading.Thread(target=run_job, args=(jid,), daemon=True).start()
             return self._send(200, {"job_id": jid, "cost": cost, "points_left": get_points(user["username"])})
@@ -602,5 +605,6 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     from content_domains import jobs_store
     jobs_store.ensure_owner_column(jdb)   # 谁先起谁建；不建列则 INSERT 带 owner 会直接 500
+    jobs_store.ensure_service_sha_column(jdb)   # 同理：INSERT 带 service_sha，列不在会 500
     print("huangque-leadgen-api on 127.0.0.1:%d  caps=%s" % (PORT, list(HANDLERS)))
     ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
