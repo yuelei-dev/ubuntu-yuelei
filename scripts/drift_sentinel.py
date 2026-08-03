@@ -17,8 +17,8 @@
   drift_sentinel.py --test                  发一条飞书自检消息
 
 已登记例外（仅巡检路径生效，--verify-deploy 一律绕开、严格比对）：
-  例外条目 = path + drift_kind + 指纹（expected: sha256 运行时内容哈希 / ref 等于某 git ref
-  版本 / absent 仅用于 missing）。drift_kind 与指纹完全匹配才进 registered 桶单独汇总、
+  例外条目 = path + drift_kind + 指纹（expected: sha256 运行时内容哈希 / ref 等于某
+  不可变提交（完整 40 位 SHA，拒绝分支名/tag/短 SHA）版本 / absent 仅用于 missing）。drift_kind 与指纹完全匹配才进 registered 桶单独汇总、
   不计入漂移数；命中但状态已变（kind/指纹不符）按真漂移处理并标注「登记例外状态已变」。
   清单来源顺序：env HQ_DRIFT_EXCEPTIONS（本地 JSON）→
   git show <HQ_DRIFT_EXCEPTIONS_REF 或 GIT_REF>:deploy/test-server-exceptions.json；
@@ -176,6 +176,10 @@ def _validate_exceptions(data):
                 raise ValueError('%s missing 类例外必须用 absent 型' % path)
             if etype == 'sha256' and not re.fullmatch(r'[0-9a-f]{64}', expected['value']):
                 raise ValueError('%s sha256 必须是 64 位小写十六进制' % path)
+            if etype == 'ref' and not re.fullmatch(r'[0-9a-f]{40}', expected['value']):
+                # 必须是完整 40 位不可变提交 SHA——分支名/tag/短 SHA 会随 fetch 移动，
+                # 移动 ref 会让「线上 == ref」的判定自动跟随，形成假阴性
+                raise ValueError('%s ref 必须是完整 40 位提交 SHA，拒绝分支名/tag/短 SHA: %r' % (path, expected['value']))
         if path in out:
             raise ValueError('重复 path: %s' % path)
         item = dict(item, path=path)

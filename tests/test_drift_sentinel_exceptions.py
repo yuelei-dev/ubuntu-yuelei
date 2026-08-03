@@ -72,6 +72,7 @@ class DriftExceptionsTests(unittest.TestCase):
         (self.repo / "site" / "refile.html").write_bytes(b"v2\n")
         git("add", ".")
         git("commit", "-q", "-m", "bump refile to v2")
+        self.v2_sha = git("rev-parse", "HEAD").stdout.decode().strip()
 
         self.ds = load_sentinel()
         self.ds.REPO = str(self.repo)
@@ -150,12 +151,34 @@ class DriftExceptionsTests(unittest.TestCase):
         self.assertNotIn("site/refile.html", d["changed"])
 
     def test_ref_mismatch_is_stale(self):
-        # 运行文件是 v1，例外要求等于 HEAD（v2）→ 不匹配
-        e = entry("site/refile.html", "changed", {"type": "ref", "value": "HEAD"})
+        # 运行文件是 v1，例外要求等于 v2 提交 → 不匹配
+        e = entry("site/refile.html", "changed", {"type": "ref", "value": self.v2_sha})
         self.write_exceptions(self.good_doc([e]))
         d = self.ds.diff_paths()
         self.assertIn("site/refile.html", d["changed"])
         self.assertEqual(d["exceptions_stale"], ["site/refile.html"])
+
+    def test_moving_ref_probe_regression(self):
+        # 门禁探针回归：ref 锁定不可变提交后，分支前进 + 运行文件同步改成新内容，
+        # 不得再进 registered（旧版用分支名 origin/main 时会自动跟随 = 假阴性）
+        (self.webroot / "refile.html").write_bytes(b"v2\n")
+        e = entry("site/refile.html", "changed", {"type": "ref", "value": self.v1_sha})
+        self.write_exceptions(self.good_doc([e]))
+        d = self.ds.diff_paths()
+        # 运行文件 == git HEAD(v2)，本身无漂移；但对 v1 的例外登记而言状态已变？——
+        # 无漂移即无例外判定，refile 不得出现在 registered
+        self.assertEqual(d["registered"], [])
+        self.assertNotIn("site/refile.html", d["changed"])
+        # 反之：运行文件被改成 v1（真漂移），例外指纹虽匹配 v1……
+        (self.webroot / "refile.html").write_bytes(b"v1\n")
+        d = self.ds.diff_paths()
+        self.assertEqual(d["registered"], ["site/refile.html"])  # kind+指纹完全匹配才豁免
+        # 再改成第三版内容：漂移且与登记指纹不符 → stale，绝不静默豁免
+        (self.webroot / "refile.html").write_bytes(b"v3\n")
+        d = self.ds.diff_paths()
+        self.assertIn("site/refile.html", d["changed"])
+        self.assertEqual(d["exceptions_stale"], ["site/refile.html"])
+        self.assertEqual(d["registered"], [])
 
     def test_absent_match_registers(self):
         self.write_exceptions(self.good_doc([entry("site/missing.html", "missing", {"type": "absent"})]))
@@ -280,6 +303,18 @@ class DriftExceptionsTests(unittest.TestCase):
     def test_schema_bad_sha256_format(self):
         self.assert_bad_schema(self.good_doc([
             entry("site/changed.html", "changed", {"type": "sha256", "value": "xyz"})]))
+
+    def test_schema_ref_rejects_branch_name(self):
+        self.assert_bad_schema(self.good_doc([
+            entry("site/refile.html", "changed", {"type": "ref", "value": "origin/main"})]))
+
+    def test_schema_ref_rejects_tag(self):
+        self.assert_bad_schema(self.good_doc([
+            entry("site/refile.html", "changed", {"type": "ref", "value": "v1.0"})]))
+
+    def test_schema_ref_rejects_short_sha(self):
+        self.assert_bad_schema(self.good_doc([
+            entry("site/refile.html", "changed", {"type": "ref", "value": "f03cab3"})]))
 
     def test_schema_malformed_json(self):
         self.assert_bad_schema("{not json")

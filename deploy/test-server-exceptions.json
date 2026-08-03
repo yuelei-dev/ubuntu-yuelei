@@ -6,7 +6,7 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "9e1f2723f92334960e3373103521a485e181cab4740fc22a0559d7d3d34a8c09"
+        "value": "2bc0c7dcf32f115431aff7ac52313769a56af9c4dc8eb6c4657ccfab533ba49e"
       },
       "reason": "yuelei 版本文件（登记 §2.1）；指纹 = 本 PR 合并后 ship 部署的哨兵本体",
       "registered": "2026-08-03"
@@ -85,9 +85,9 @@
       "drift_kind": "changed",
       "expected": {
         "type": "ref",
-        "value": "origin/main"
+        "value": "f03cab377875a2d47a9566bd51ccfccff5f29be8"
       },
-      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "reason": "版本绑定部署（PR #174），锁定 yuelei main 精确提交 f03cab37；再次部署后需重新登记",
       "registered": "2026-08-03"
     },
     {
@@ -135,9 +135,9 @@
       "drift_kind": "changed",
       "expected": {
         "type": "ref",
-        "value": "origin/main"
+        "value": "f03cab377875a2d47a9566bd51ccfccff5f29be8"
       },
-      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "reason": "版本绑定部署（PR #174），锁定 yuelei main 精确提交 f03cab37；再次部署后需重新登记",
       "registered": "2026-08-03"
     },
     {
@@ -145,9 +145,9 @@
       "drift_kind": "changed",
       "expected": {
         "type": "ref",
-        "value": "origin/main"
+        "value": "f03cab377875a2d47a9566bd51ccfccff5f29be8"
       },
-      "reason": "版本绑定部署（PR #174），随 yuelei main 部署",
+      "reason": "版本绑定部署（PR #174），锁定 yuelei main 精确提交 f03cab37；再次部署后需重新登记",
       "registered": "2026-08-03"
     },
     {
