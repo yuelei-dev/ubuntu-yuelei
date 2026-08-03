@@ -12,8 +12,13 @@
   drift_sentinel.py --print                 只打印漂移，不告警
   drift_sentinel.py --bless                 兼容旧调用：记录当前 origin/main 应有清单
   drift_sentinel.py --bless-deploy file...  记录本次 ship 部署的文件清单，不改变巡检判断
+                                            （可选 --pr <号> 或 env HQ_DEPLOY_PR 记录关联 PR）
   drift_sentinel.py --verify-deploy file... 校验本次 ship 文件线上 == git origin/main
   drift_sentinel.py --test                  发一条飞书自检消息
+
+已登记例外：命中例外清单的路径进 registered 桶单独汇总，不计入漂移数（v1 按路径豁免）。
+例外清单来源：env HQ_DRIFT_EXCEPTIONS 指定的本地 JSON；未设时从 GIT_REF 读
+deploy/test-server-exceptions.json（git show）；读不到则按无例外处理（行为同旧版）。
 
 告警渠道复用 openclaw 的飞书（~/.openclaw/openclaw.json）+ balance_alert 的告警群。
 零依赖（仅标准库）。
@@ -45,6 +50,7 @@ COOLDOWN = 6 * 3600
 WEBROOT = os.environ.get('HQ_WEBROOT', '/var/www/huangquechuanmei')
 REPO = os.environ.get('HQ_REPO', os.path.join(HOME, 'huangque-main-site'))
 GIT_REF = os.environ.get('HQ_DRIFT_REF', 'origin/main')
+EXCEPTIONS_GIT_PATH = 'deploy/test-server-exceptions.json'
 
 BACKEND_RUNTIME = {
     'server/auth_server.py': '/home/ubuntu/auth-service/auth_server.py',
@@ -118,6 +124,39 @@ def git_md5(git_path):
     if p.returncode != 0:
         return None
     return md5_bytes(p.stdout)
+
+
+def load_exceptions():
+    """读取已登记例外的 git 路径集合（v1 按路径豁免，不做内容指纹）。
+
+    来源：env HQ_DRIFT_EXCEPTIONS 指定的本地 JSON 文件；未设时从 GIT_REF 读
+    deploy/test-server-exceptions.json（git show）。读不到/解析失败返回空集，
+    按无例外处理（行为同旧版）。
+    """
+    src = os.environ.get('HQ_DRIFT_EXCEPTIONS')
+    data = None
+    if src:
+        try:
+            with open(src, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            log('例外清单读取失败（%s），按无例外处理: %s' % (src, e))
+            return set()
+    else:
+        p = git(['show', '%s:%s' % (GIT_REF, EXCEPTIONS_GIT_PATH)], check=False)
+        if p.returncode != 0:
+            return set()
+        try:
+            data = json.loads(p.stdout.decode('utf-8', 'ignore'))
+        except Exception as e:
+            log('例外清单解析失败，按无例外处理: %s' % e)
+            return set()
+    paths = set()
+    for item in (data or {}).get('exceptions') or []:
+        p = (item or {}).get('path')
+        if p:
+            paths.add(p.replace('\\', '/'))
+    return paths
 
 
 def git_path_to_runtime(git_path):
@@ -209,10 +248,13 @@ def diff_paths(git_paths=None):
             if gp and gp not in expected_git and git_md5(gp) is None:
                 added.append(gp)
 
+    exceptions = load_exceptions()
+    drifted = set(changed) | set(missing) | set(added)
     return {
-        'changed': sorted(changed),
-        'missing': sorted(missing),
-        'added': sorted(set(added)),
+        'changed': sorted(p for p in changed if p not in exceptions),
+        'missing': sorted(p for p in missing if p not in exceptions),
+        'added': sorted(set(p for p in added if p not in exceptions)),
+        'registered': sorted(drifted & exceptions),
     }
 
 
@@ -228,7 +270,7 @@ def snapshot():
     }
 
 
-def bless(paths=None):
+def bless(paths=None, pr=None):
     os.makedirs(DRIFT_DIR, exist_ok=True)
     paths = [p.replace('\\', '/') for p in (paths or [])]
     if paths:
@@ -240,9 +282,11 @@ def bless(paths=None):
             'files': paths,
             'verify': d,
         }
+        if pr:
+            record['pr'] = str(pr)
         with open(DEPLOY_LOG, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
-        log('部署 bless 已记录：%d 个文件' % len(paths))
+        log('部署 bless 已记录：%d 个文件%s' % (len(paths), '（PR #%s）' % pr if pr else ''))
         return
     snap = snapshot()
     with open(BASELINE, 'w', encoding='utf-8') as f:
@@ -288,10 +332,13 @@ def _feishu_send(text):
 
 def format_diff(d):
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
+    registered = d.get('registered') or []
     lines = ['⚠️ 黄雀主站检测到 %d 处文件漂移（线上与 git %s 不一致）' % (total, GIT_REF)]
     for tag, key in (('改动', 'changed'), ('删除', 'missing'), ('新增', 'added')):
         if d[key]:
             lines.append('【%s %d】%s' % (tag, len(d[key]), '、'.join(short(p) for p in d[key][:12])))
+    if registered:
+        lines.append('已登记例外 %d 处（见 %s，不计入漂移）' % (len(registered), EXCEPTIONS_GIT_PATH))
     lines.append('→ 请勿直接改服务器；正常上线必须走 PR 合并后由审核方执行 ship。')
     return '\n'.join(lines)
 
@@ -299,11 +346,13 @@ def format_diff(d):
 def handle_detect(print_only=False):
     d = diff_paths()
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
+    n_reg = len(d.get('registered') or [])
     if total == 0:
-        log('巡检正常：线上与 git %s 一致，无漂移' % GIT_REF)
+        log('巡检正常：线上与 git %s 一致，无漂移%s' % (GIT_REF, '（已登记例外 %d 处）' % n_reg if n_reg else ''))
         return 0
     msg = format_diff(d)
-    log('检测到漂移: changed=%d missing=%d added=%d' % (len(d['changed']), len(d['missing']), len(d['added'])))
+    log('检测到漂移: changed=%d missing=%d added=%d registered=%d' % (
+        len(d['changed']), len(d['missing']), len(d['added']), n_reg))
     if print_only:
         print(msg)
         return 1
@@ -338,6 +387,8 @@ def main():
     ap.add_argument('--bless', action='store_true')
     ap.add_argument('--bless-deploy', nargs='*')
     ap.add_argument('--verify-deploy', nargs='*')
+    ap.add_argument('--pr', default=os.environ.get('HQ_DEPLOY_PR'),
+                    help='--bless-deploy 记录的关联 PR 号（也可用 env HQ_DEPLOY_PR）')
     args = ap.parse_args()
 
     if args.test:
@@ -346,7 +397,7 @@ def main():
     if args.verify_deploy is not None:
         return handle_verify(args.verify_deploy)
     if args.bless_deploy is not None:
-        bless(args.bless_deploy)
+        bless(args.bless_deploy, pr=args.pr)
         return 0
     if args.bless:
         bless()
