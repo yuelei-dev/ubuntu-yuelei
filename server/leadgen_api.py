@@ -17,6 +17,10 @@ from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tikhub
+try:
+    import pricing_config
+except ModuleNotFoundError:
+    from . import pricing_config
 
 PORT      = int(os.environ.get("LEADGEN_API_PORT", "8100"))
 AUTH_BASE = os.environ.get("AUTH_BASE", "http://127.0.0.1:8095")
@@ -301,11 +305,10 @@ def verify(token):
 
 def cost_of(kind, body):
     if kind == "collect":
-        return 3 + (3 if "transcript" in (body.get("want") or []) else 0)
+        return pricing_config.get_price(
+            "collect.transcript" if "transcript" in (body.get("want") or []) else "collect.main")
     if kind == "leads":
-        n = max(1, min(30, int(body.get("count") or 12)))
-        p = max(1, min(3, int(body.get("pages") or 1)))
-        return 6 + (n * p) // 4
+        return pricing_config.get_price("leads")
     return 0
 
 
@@ -555,7 +558,11 @@ class H(BaseHTTPRequestHandler):
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录或登录已过期"})
             body = self._json_body()
-            cost = cost_of(kind, body)
+            try:
+                cost = cost_of(kind, body)
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             # 原来是「先 get_points 查余额，再 add_points 扣」——两步之间有并发超扣窗口。
             # 现在扣点直接走 auth 的 /deduct（BEGIN IMMEDIATE + points>=amount 原子校验），
             # 扣不动就说明余额不足，不建任务。
@@ -585,18 +592,23 @@ class H(BaseHTTPRequestHandler):
             try: page = int(q.get("page", ["1"])[0] or 1)
             except Exception: page = 1
             if not keyword: return self._send(400, {"detail": "缺少关键词"})
-            if get_points(user["username"]) < 1: return self._send(402, {"detail": "点数不足", "need": 1})
+            try:
+                search_cost = pricing_config.get_price("search")
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
+            if get_points(user["username"]) < search_cost: return self._send(402, {"detail": "点数不足", "need": search_cost})
             try:
                 r = tikhub.search(platform, keyword, page=page, video_only=False)
             except tikhub.TikHubError as e:
                 return self._send(502, {"detail": str(e)[:160]})
-            if not add_points(user["username"], -1, "search:" + platform):   # 并发下余额可能已被别的请求扣光
-                return self._send(402, {"detail": "点数不足", "need": 1})
+            if not add_points(user["username"], -search_cost, "search:" + platform):   # 并发下余额可能已被别的请求扣光
+                return self._send(402, {"detail": "点数不足", "need": search_cost})
             items = [{"id": it.get("id"), "platform": it.get("platform"), "title": it.get("title"),
                       "cover": it.get("cover"), "author": it.get("author"), "url": it.get("url"),
                       "note_type": it.get("note_type"),
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
-            return self._send(200, {"items": items, "cost": 1, "points_left": get_points(user["username"])})
+            return self._send(200, {"items": items, "cost": search_cost, "points_left": get_points(user["username"])})
         if p == "/api/gen/leadgen/health":
             return self._send(200, {"ok": True, "service": "huangque-leadgen", "caps": list(HANDLERS), "has_tikhub": bool(tikhub.KEY)})
         self._send(404, {"detail": "not found"})

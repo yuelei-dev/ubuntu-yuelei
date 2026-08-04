@@ -16,8 +16,10 @@ import re
 
 try:
     import func_names                    # 生产：admin_api.py 直接跑，同目录下就是 func_names.py
+    import pricing_config
 except ModuleNotFoundError:              # 测试：以包的形式 import server.admin_api，server/ 不在 sys.path 上
     from . import func_names
+    from . import pricing_config
 import sqlite3
 import time
 import urllib.error
@@ -1425,6 +1427,11 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": load_channels()})
         if path == "/api/admin/features":
             return self._send(200, {"items": load_features()})
+        if path == "/api/admin/pricing":
+            try:
+                return self._send(200, pricing_config.admin_catalog())
+            except Exception as e:
+                return self._send(500, {"detail": "读取收费标准失败: " + str(e)[:120]})
         if path == "/api/admin/users":
             q = urllib.parse.urlparse(self.path).query
             suffix = "/api/auth/admin/users" + (("?" + q) if q else "")
@@ -1544,6 +1551,16 @@ class H(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"detail": str(e)[:160] or "保存失败"})
             return self._send(200, {"ok": True, "feature": item})
+        if path == "/api/admin/pricing":
+            try:
+                item = pricing_config.save(user.get("username") or "admin", self._body())
+            except pricing_config.PricingConflict as e:
+                return self._send(409, {"detail": str(e)})
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return self._send(500, {"detail": "保存收费标准失败: " + str(e)[:120]})
+            return self._send(200, {"ok": True, "pricing": item})
         if path == "/api/admin/points/adjust":
             try:
                 return self._send(

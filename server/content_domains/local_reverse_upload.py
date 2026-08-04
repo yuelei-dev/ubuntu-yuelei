@@ -5,6 +5,10 @@ import pathlib
 import subprocess
 import urllib.parse
 import uuid
+try:
+    import pricing_config
+except ModuleNotFoundError:
+    from .. import pricing_config
 
 IMAGE_LIMIT = 20 * 1024 * 1024
 VIDEO_LIMIT = 200 * 1024 * 1024
@@ -78,9 +82,10 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
     if size > limit:
         label = "20MB" if media_type == "image" else "200MB"
         return handler._send(413, {"detail": "%s不能超过 %s" % ("图片" if media_type == "image" else "视频", label)})
+    upload_cost = pricing_config.get_price("breakdown.local_upload")
     points = int(points_domain.get_points(user["username"]) or 0)
-    if points < UPLOAD_COST:
-        return handler._send(402, {"detail": "点数不足", "need": UPLOAD_COST, "points": points})
+    if points < upload_cost:
+        return handler._send(402, {"detail": "点数不足", "need": upload_cost, "points": points})
     active = int(user_active_job_count(user["username"]) or 0)
     if active >= max_user_active_jobs:
         return handler._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active,
@@ -100,20 +105,20 @@ def handle_post(handler, *, verify, points_domain, jdb, jobs_store, enqueue_job,
                    "local_media_type": media_type, "source_title": title, "duration": duration}
         job_id, points_left = jobs_store.create_paid_job(
             jdb, points_domain.deduct_points, points_domain.refund_points,
-            "breakdown", user["username"], UPLOAD_COST, payload, service_owner)
+            "breakdown", user["username"], upload_cost, payload, service_owner)
         if not enqueue_job(job_id, "breakdown", "local_reverse"):
-            reject_pending_job(job_id, user["username"], UPLOAD_COST, "任务队列已满，请稍后再试")
+            reject_pending_job(job_id, user["username"], upload_cost, "任务队列已满，请稍后再试")
             _remove(path)
             return handler._send(429, {"detail": "任务队列已满，请稍后再试",
                                        "code": "queue_full", "retry_after_ms": 4000})
-        return handler._send(200, {"job_id": job_id, "cost": UPLOAD_COST, "points_left": points_left})
+        return handler._send(200, {"job_id": job_id, "cost": upload_cost, "points_left": points_left})
     except ValueError as error:
         _remove(path); return handler._send(400, {"detail": str(error)})
     except Exception as error:
         if job_id is not None:
-            reject_pending_job(job_id, user["username"], UPLOAD_COST, "上传任务入队失败")
+            reject_pending_job(job_id, user["username"], upload_cost, "上传任务入队失败")
         _remove(path)
         status = int(getattr(error, "status", 500) or 500)
         if status == 402:
-            return handler._send(402, {"detail": getattr(error, "detail", "点数不足"), "need": UPLOAD_COST})
+            return handler._send(402, {"detail": getattr(error, "detail", "点数不足"), "need": upload_cost})
         return handler._send(500, {"detail": "上传任务创建失败，请重试"})

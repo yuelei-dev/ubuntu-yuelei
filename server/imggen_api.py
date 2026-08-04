@@ -18,6 +18,10 @@ import os, json, time, base64, threading, queue, sqlite3, pathlib, urllib.reques
 from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+try:
+    import pricing_config
+except ModuleNotFoundError:
+    from . import pricing_config
 
 try:
     from content_domains import feature_flags
@@ -124,6 +128,17 @@ BASE_COST   = {"nb2": {"std": 15, "hd": 25}, "pro": {"std": 25, "hd": 30}}
 IMAGE_SIZES = {"nb2": {"std": "1K", "hd": "2K"}, "pro": {"std": "2K", "hd": "4K"}}
 RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+
+def banana_cost(model, quality, count=1):
+    model = model if model in MODELS else "nb2"
+    quality = quality if quality in {"std", "hd"} else "hd"
+    count = max(1, min(4, int(count or 1)))
+    return pricing_config.get_price("banana.%s.%s" % (model, quality)) * count
+
+
+def reverse_cost():
+    return pricing_config.get_price("image.reverse")
 
 def _clean_b64(value):
     raw = (value or "").strip()
@@ -556,7 +571,11 @@ class H(BaseHTTPRequestHandler):
             mk = body["model"]
             cq = body["quality"]
             cn = body["count"]
-            cost = BASE_COST[mk][cq] * cn  # 璐ㄩ噺鍩轰环 脳 鏁伴噺
+            try:
+                cost = banana_cost(mk, cq, cn)
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             with _submission_lock:
                 active_jobs = _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
@@ -605,7 +624,11 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"detail": "请先上传或粘贴一张图片"})
             if len(image) > 8 * 1024 * 1024:     # base64 ~8MB ≈ 原图 6MB
                 return self._send(400, {"detail": "图片太大，请压缩后再试"})
-            cost = REVERSE_COST
+            try:
+                cost = reverse_cost()
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             deduct_status, deduct_data = deduct_points(user["username"], cost, "reverse")
             if deduct_status == 402:
                 return self._send(402, {"detail": "点数不足", "need": cost})

@@ -73,7 +73,10 @@ class CinematicPanelTests(unittest.TestCase):
 class CreateAvatarTests(unittest.TestCase):
     def test_create_avatar_entry_shows_the_price(self):
         panel = HTML.split('id="cinematicPanel"')[1].split('id="tryonPanel"')[0]
-        self.assertIn("创建新形象（5 点）", panel, "要让用户知道这一步花多少点")
+        self.assertIn("创建新形象（价格加载中）", panel, "未校验目录前不得冒充实价")
+        self.assertIn("PRICING_VALUES.avatar+' 点", HTML, "目录就绪后要让用户知道这一步花多少点")
+        block = HTML.split("function submitCreateAvatar")[1].split("function pollCreateAvatar")[0]
+        self.assertIn("if(!ensurePricingReady()) return;", block, "价格失败时不得创建付费形象")
 
     def test_create_avatar_hits_its_own_endpoint(self):
         self.assertIn("fetch('/api/gen/avatar'", HTML)

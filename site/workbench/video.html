@@ -259,6 +259,10 @@
           <p id="modeSummary" class="muted" style="margin:7px 0 0;font-size:13px;">选择视频生成功能，创建对应的视频内容</p>
         </div>
       </div>
+      <div id="pricingLoadGate" role="alert" style="margin:12px 0 0;padding:11px 13px;border:1px solid rgba(244,205,114,.3);border-radius:11px;background:rgba(244,205,114,.08);display:flex;align-items:center;justify-content:space-between;gap:12px;color:#f4cd72;font-size:12.5px;">
+        <span id="pricingLoadMessage">正在加载权威收费标准，暂不能提交付费生成。</span>
+        <button id="pricingRetryBtn" type="button" hidden style="flex:none;padding:6px 12px;border:1px solid rgba(244,205,114,.45);border-radius:8px;background:rgba(244,205,114,.12);color:#f4cd72;cursor:pointer;font-family:inherit;">重试</button>
+      </div>
 
       <div class="function-tabs" aria-label="视频功能分页">
         <button class="function-tab on" type="button" data-function="talking">数字人口播</button>
@@ -407,8 +411,8 @@
         </div>
       </div>
 
-      <div id="talkingCostSummary" class="talking-cost">10 点/秒 · 按实际时长结算</div>
-      <button id="generateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+      <div id="talkingCostSummary" class="talking-cost">正在加载收费标准...</div>
+      <button id="generateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:10px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
         生成口播视频
       </button>
       <div id="statusText" class="faint" style="text-align:center;font-size:11.5px;margin-top:11px;">生成完成后会自动保存到视频资产</div>
@@ -426,14 +430,14 @@
         <div class="line-switch">
           <div class="label">玩法</div>
           <div class="line-tabs" id="cineModeTabs">
-            <button type="button" class="line-tab active" data-cine-mode="motion"><b>动作模仿</b><span>1 个形象 + 1 段参考视频 → 照着它的动作演 · 30 点/秒</span></button>
+            <button type="button" class="line-tab active" data-cine-mode="motion"><b>动作模仿</b><span>1 个形象 + 1 段参考视频 → 照着它的动作演 · 价格加载后显示</span></button>
             <!-- 双人动作模仿：页签已下掉。它在线上是 0 成 2 败 —— 被 HeyGen 的内容审核拦的
                  （网页原话 "Your content was flagged by our moderation system"，而 API 一个字
                  都不给）。中文提示词换过，但【一次都没实测】。与其让用户白等十几分钟再看到
                  「生成失败」，先下掉。
                  CINE_MODES 里的 duo 【保留】—— 后端仍然认这个玩法（只是拒绝提交），
                  实测通过后把 CINEMATIC_DUO_ENABLED=1 打开、把这个页签加回来即可，不用重写。 -->
-            <button type="button" class="line-tab" data-cine-mode="open"><b>开放式生成</b><span>最多 3 个形象 + 自己写画面描述 · 30 点/秒</span></button>
+            <button type="button" class="line-tab" data-cine-mode="open"><b>开放式生成</b><span>最多 3 个形象 + 自己写画面描述 · 价格加载后显示</span></button>
           </div>
         </div>
 
@@ -461,8 +465,8 @@
             <div class="avatar-empty">正在读取我的形象...</div>
           </div>
           <label id="cineNewAvatarDrop" class="motion-drop" style="margin-top:12px;">
-            <input id="cineNewAvatarFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-            <strong>+ 创建新形象（5 点）</strong>
+            <input id="cineNewAvatarFile" type="file" accept="image/png,image/jpeg,image/webp" hidden disabled>
+            <strong id="cineAvatarPriceLabel">+ 创建新形象（价格加载中）</strong>
             <span>上传一张正脸清晰的照片，约 25 秒建好，之后可反复使用</span>
           </label>
           <div id="cineAvatarStatus" class="faint" style="font-size:11.5px;margin-top:8px;"></div>
@@ -533,7 +537,7 @@
           <div id="cineDurationHint" class="faint" style="font-size:11.5px;margin-top:8px;"></div>
         </div>
 
-        <button id="cineGenerateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+        <button id="cineGenerateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
           生成视频
         </button>
         <div id="cineStatus" class="faint" style="text-align:center;font-size:11.5px;margin-top:11px;">约 6~9 分钟出片，完成后自动保存到视频资产</div>
@@ -589,7 +593,7 @@
         </div>
         <div id="tryonDurationNote" class="faint" style="font-size:11.5px;margin-top:8px;">生成失败自动退点。</div>
         <div id="tryonCostNote" class="talking-cost" style="margin-top:8px;"></div>
-        <button id="tryonGenerateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+        <button id="tryonGenerateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:20px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
           生成换装换背景视频
         </button>
         <div id="tryonStatus" class="faint" style="text-align:center;font-size:11.5px;margin-top:11px;">生成完成后会自动保存到视频资产</div>
@@ -640,7 +644,7 @@
           <div><div class="faint" style="font-size:12px;margin-bottom:8px;">生成时长</div><div class="seg" style="grid-template-columns:repeat(3,1fr);"><button data-grok-duration="5">5秒</button><button class="on" data-grok-duration="10">10秒</button><button data-grok-duration="15">15秒</button></div></div>
           <div><div class="faint" style="font-size:12px;margin-bottom:8px;">分辨率</div><div class="seg" style="grid-template-columns:repeat(3,1fr);"><button data-grok-resolution="480p">480p</button><button class="on" data-grok-resolution="720p">720p</button><button id="grok1080Btn" class="hidden" data-grok-resolution="1080p">1080p</button></div></div>
         </div>
-        <button id="grokGenerateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+        <button id="grokGenerateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
           生成果肉视频
         </button>
         <div id="grokCostNote" class="talking-cost" style="margin-top:9px;"></div>
@@ -668,7 +672,7 @@
             </label>
           </div>
         </div>
-        <button id="microGenerateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+        <button id="microGenerateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
           生成豆姐视频
         </button>
         <div id="microCostNote" class="talking-cost" style="margin-top:9px;"></div>
@@ -696,7 +700,7 @@
             </label>
           </div>
         </div>
-        <button id="omniGenerateBtn" class="hv-lift" style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
+        <button id="omniGenerateBtn" class="hv-lift" disabled style="width:100%;height:54px;margin-top:18px;display:flex;align-items:center;justify-content:center;gap:10px;font-size:16px;font-weight:800;color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);border:none;border-radius:14px;cursor:pointer;box-shadow:0 14px 34px -12px rgba(231,178,76,.7);font-family:inherit;">
           生成欧米视频
         </button>
         <div id="omniCostNote" class="talking-cost" style="margin-top:9px;"></div>
@@ -719,6 +723,7 @@
 
 <script src="../assets/cloud.js?v=8"></script>
 <script src="cloud-shell.js?v=642453c4"></script>
+<script src="pricing-gate.js?v=20260804"></script>
 <script>
 (function(){
   var token='__cookie__';
@@ -1494,7 +1499,7 @@
   function updateCineCount(){
     if($('cineAvatarCount')) $('cineAvatarCount').textContent=cineSelectedAvatarIds.length+' / '+cineCfg().avatars;
     renderCineRefs();          // 形象数一变，参考图的额度就变（两者共用 9 张图的预算）
-    updateCineDurationHint();  // 点数按秒算，三个玩法统一 30 点/秒
+    updateCineDurationHint();  // 点数按秒算，单价来自权威收费目录
   }
 
   // ===== 参考素材：视频 + 图片，多选，和形象共用媒体预算 =====
@@ -1548,6 +1553,14 @@
   function updateCineDurationHint(){
     var box=$('cineDurationHint');
     if(!box) return;
+    if(!(pricingGate&&pricingGate.guard())){
+      var state=pricingGate&&pricingGate.getState();
+      box.textContent=state&&state.status==='error'
+        ?'收费标准加载失败，暂不能提交付费生成，请重试。'
+        :'正在加载权威收费标准...';
+      box.style.color=state&&state.status==='error'?'#f4708a':'#5c6b82';
+      return;
+    }
     var cfg=cineCfg(), price='，预计 '+cineCost()+' 点（'+cfg.rate+' 点/秒）';
     if(selectedCineDuration!=='auto'){
       box.textContent='固定 '+selectedCineDuration+' 秒'+price;
@@ -1634,6 +1647,7 @@
 
   // ===== 创建形象：独立一步（5 点）。人脸检测不到会当场报错，不再让用户白扣 20 点跑一半 =====
   function submitCreateAvatar(dataUrl){
+    if(!ensurePricingReady()) return;
     var box=$('cineAvatarStatus');
     if(box){ box.style.color='#2dd4bf'; box.textContent='正在创建形象（约 25 秒）...'; }
     fetch('/api/gen/avatar',{
@@ -1688,6 +1702,7 @@
   }
 
   function submitCinematic(){
+    if(!ensurePricingReady()) return;
     var cfg=cineCfg();
     var prompt=($('cinePrompt')&&$('cinePrompt').value||'').trim();
     var n=cineSelectedAvatarIds.length;
@@ -1797,48 +1812,106 @@
   function syncVideoGenerateButtons(){
     var counts=activeVideoTaskCounts();
     var tryonState=getTryonHintState();
+    var pricingReady=!!(pricingGate&&pricingGate.guard());
+    var pricingState=pricingGate&&pricingGate.getState();
+    var pricingTitle=pricingState&&pricingState.status==='loading'?'正在加载权威收费标准，请稍候':'收费标准加载失败，暂不能提交付费生成，请重试';
     var xiaoleCapReached=counts.xiaole>=maxActiveXiaoleVideo;
     // 电影化身也有槽位上限（后端 MAX_USER_ACTIVE_CINEMATIC=2）。#603 统计了 counts.cinematic
     // 却没人用 —— 排到第 3 条时按钮还亮着，点下去只会吃一个 429。
     var cineCapReached=counts.cinematic>=maxActiveCinematic;
     var tryonCapReached=counts.tryon>=maxActiveTryon;
-    applyButtonState('generateBtn', !videoSubmitLocks.talking && !motionOptimizeBusy,
-      motionOptimizeBusy?'动作提示词优化中，请稍候':(videoSubmitLocks.talking?'口播视频提交中，请稍候':''));
+    applyButtonState('generateBtn', pricingReady && !videoSubmitLocks.talking && !motionOptimizeBusy,
+      !pricingReady?pricingTitle:(motionOptimizeBusy?'动作提示词优化中，请稍候':(videoSubmitLocks.talking?'口播视频提交中，请稍候':'')));
     applyButtonState('talkingMotionOptimize', !videoSubmitLocks.talking && !motionOptimizeBusy,
       videoSubmitLocks.talking?'口播视频提交中，请稍候':(motionOptimizeBusy?'正在优化动作提示词':''));
-    applyButtonState('cineGenerateBtn', !videoSubmitLocks.cinematic && !cineCapReached,
-      cineCapReached?('当前电影化身最多同时排队或生成 '+maxActiveCinematic+' 个任务，请等待部分完成后再继续')
-                    :(videoSubmitLocks.cinematic?'电影化身提交中，请稍候':''));
-    applyButtonState('tryonGenerateBtn', !!tryonState.enable && !videoSubmitLocks.tryon && !tryonCapReached, !tryonState.enable?tryonState.text:(tryonCapReached?('当前换装视频最多同时排队或生成 '+maxActiveTryon+' 个任务，请等待任务完成后再继续'):(videoSubmitLocks.tryon?'换装任务提交中，请稍候':'')));
-    var xiaoleEnabled=!videoSubmitLocks.xiaole && !xiaoleCapReached;
-    var xiaoleTitle=xiaoleCapReached?('当前果肉/豆姐/欧米视频最多同时排队或生成 '+maxActiveXiaoleVideo+' 个任务，请等待部分完成后再继续'):(videoSubmitLocks.xiaole?'视频任务提交中，请稍候':'');
+    applyButtonState('cineGenerateBtn', pricingReady && !videoSubmitLocks.cinematic && !cineCapReached,
+      !pricingReady?pricingTitle:(cineCapReached?('当前电影化身最多同时排队或生成 '+maxActiveCinematic+' 个任务，请等待部分完成后再继续')
+                    :(videoSubmitLocks.cinematic?'电影化身提交中，请稍候':'')));
+    applyButtonState('tryonGenerateBtn', pricingReady && !!tryonState.enable && !videoSubmitLocks.tryon && !tryonCapReached, !pricingReady?pricingTitle:(!tryonState.enable?tryonState.text:(tryonCapReached?('当前换装视频最多同时排队或生成 '+maxActiveTryon+' 个任务，请等待任务完成后再继续'):(videoSubmitLocks.tryon?'换装任务提交中，请稍候':''))));
+    var xiaoleEnabled=pricingReady && !videoSubmitLocks.xiaole && !xiaoleCapReached;
+    var xiaoleTitle=!pricingReady?pricingTitle:(xiaoleCapReached?('当前果肉/豆姐/欧米视频最多同时排队或生成 '+maxActiveXiaoleVideo+' 个任务，请等待部分完成后再继续'):(videoSubmitLocks.xiaole?'视频任务提交中，请稍候':''));
     applyButtonState('grokGenerateBtn', xiaoleEnabled, xiaoleTitle);
     applyButtonState('microGenerateBtn', xiaoleEnabled, xiaoleTitle);
     applyButtonState('omniGenerateBtn', xiaoleEnabled, xiaoleTitle);
+    var avatarInput=$('cineNewAvatarFile'),avatarDrop=$('cineNewAvatarDrop');
+    if(avatarInput) avatarInput.disabled=!pricingReady;
+    if(avatarDrop){avatarDrop.style.opacity=pricingReady?'1':'.72';avatarDrop.style.cursor=pricingReady?'pointer':'not-allowed';avatarDrop.title=pricingReady?'':pricingTitle;}
     updateVideoCosts();
   }
-  // 果肉/豆姐/欧米(xiaole_video) 与 试衣(tryon) 的前端预估价，必须和后端实扣对上。
-  var XIAOLE_RATE=30;   // 与后端 xiaole_video 30 点/秒一致
+  // 页面只有完整读取并校验权威目录后才允许付费生成；不存在前端默认价放行路径。
+  var PRICING_VALUES={};
+  var VIDEO_PRICING_KEYS=['avatar','talking.per_sec','cinematic.motion.per_sec','cinematic.duo.per_sec',
+    'cinematic.open.per_sec','tryon.single','tryon.combo','xiaole_video.per_sec',
+    'grok_video.v1.480p.per_sec','grok_video.v1.720p.per_sec','grok_video.v1_5.480p.per_sec',
+    'grok_video.v1_5.720p.per_sec','grok_video.v1_5.1080p.per_sec'];
+  var GROK_PRICE_KEYS={
+    'grok-imagine-video|480p':'grok_video.v1.480p.per_sec',
+    'grok-imagine-video|720p':'grok_video.v1.720p.per_sec',
+    'grok-imagine-video-1.5|480p':'grok_video.v1_5.480p.per_sec',
+    'grok-imagine-video-1.5|720p':'grok_video.v1_5.720p.per_sec',
+    'grok-imagine-video-1.5|1080p':'grok_video.v1_5.1080p.per_sec'
+  };
+  function xiaoleRate(channel){
+    if(channel!=='grok') return Number(PRICING_VALUES['xiaole_video.per_sec']);
+    var model=grokOperation==='edit'?'grok-imagine-video':selectedGrokModel;
+    var resolution=grokOperation==='edit'?'720p':selectedGrokResolution;
+    return Number(PRICING_VALUES[GROK_PRICE_KEYS[model+'|'+resolution]]);
+  }
   function xiaoleCostNote(channel){
+    var rate=xiaoleRate(channel);
     if(channel==='grok' && grokOperation==='edit'){
-      if(!grokEditDuration || grokEditDuration<=0) return '按参考视频时长计费（'+XIAOLE_RATE+' 点/秒，上限 8.7 秒）';
+      if(!grokEditDuration || grokEditDuration<=0) return '按参考视频时长计费（'+rate+' 点/秒，上限 8.7 秒）';
       var d=Math.max(1,Math.ceil(Math.min(8.7,grokEditDuration)));
-      return '预计 '+(d*XIAOLE_RATE)+' 点（'+XIAOLE_RATE+' 点/秒 × '+d+' 秒）';
+      return '预计 '+(d*rate)+' 点（'+rate+' 点/秒 × '+d+' 秒）';
     }
     // grok 生成用所选时长；豆姐/欧米固定 10 秒（后端缺省 10）
     var secs=channel==='grok' ? selectedGrokDuration : 10;
-    return '预计 '+(secs*XIAOLE_RATE)+' 点（'+XIAOLE_RATE+' 点/秒 × '+secs+' 秒）';
+    return '预计 '+(secs*rate)+' 点（'+rate+' 点/秒 × '+secs+' 秒）';
   }
   function updateVideoCosts(){
+    if(!(pricingGate&&pricingGate.guard())){
+      var waiting=pricingGate&&pricingGate.getState().status==='loading';
+      var message=waiting?'正在加载权威收费标准...':'收费标准加载失败，暂不能提交付费生成，请重试。';
+      ['grokCostNote','microCostNote','omniCostNote','tryonCostNote'].forEach(function(id){if($(id)) $(id).textContent=message;});
+      if($('cineAvatarPriceLabel')) $('cineAvatarPriceLabel').textContent='+ 创建新形象（'+(waiting?'价格加载中':'请先重试收费标准')+'）';
+      return;
+    }
     var g=$('grokCostNote'); if(g) g.textContent=xiaoleCostNote('grok');
     var mi=$('microCostNote'); if(mi) mi.textContent=xiaoleCostNote('micro');
     var o=$('omniCostNote'); if(o) o.textContent=xiaoleCostNote('omni');
     var t=$('tryonCostNote');
     if(t){   // 换装+换背景需同时有衣服图和背景图(与后端 40 判定一致)，否则 25
       var pricey=!!tryonClothesData && !!tryonBackgroundData;
-      t.textContent=(pricey?'换装+换背景 40 点':'换装 25 点')+' · 失败自动退点';
+      var rate=Number(PRICING_VALUES[pricey?'tryon.combo':'tryon.single']);
+      t.textContent=(pricey?'换装+换背景 ':'换装 ')+rate+' 点 · 失败自动退点';
     }
+    if($('cineAvatarPriceLabel')) $('cineAvatarPriceLabel').textContent='+ 创建新形象（'+PRICING_VALUES.avatar+' 点）';
   }
+  function renderPricingGate(state){
+    var box=$('pricingLoadGate'),message=$('pricingLoadMessage'),retry=$('pricingRetryBtn');
+    if(state.status==='ready'){
+      PRICING_VALUES=state.values;
+      TALKING_RATE=PRICING_VALUES['talking.per_sec'];
+      CINE_MODES.motion.rate=PRICING_VALUES['cinematic.motion.per_sec'];
+      CINE_MODES.duo.rate=PRICING_VALUES['cinematic.duo.per_sec'];
+      CINE_MODES.open.rate=PRICING_VALUES['cinematic.open.per_sec'];
+      if(box) box.hidden=true;
+    }else{
+      if(box) box.hidden=false;
+      if(message) message.textContent=state.status==='loading'?'正在加载权威收费标准，暂不能提交付费生成。':state.error;
+      if(retry){retry.hidden=state.status==='loading';retry.disabled=state.status==='loading';}
+    }
+    updateChecklist(); updateCineDurationHint(); syncVideoGenerateButtons();
+  }
+  var pricingGate=window.HQPricingGate.create({url:'/api/gen/pricing',requiredKeys:VIDEO_PRICING_KEYS,onState:renderPricingGate});
+  function loadPricingValues(){return pricingGate.load();}
+  function ensurePricingReady(){
+    if(pricingGate.guard()) return true;
+    var state=pricingGate.getState(),message=state.status==='loading'?'正在加载权威收费标准，请稍候。':'收费标准加载失败，暂不能提交付费生成，请点击重试。';
+    if($('pricingLoadGate')) $('pricingLoadGate').hidden=false;
+    toast(message); return false;
+  }
+  if($('pricingRetryBtn')) $('pricingRetryBtn').onclick=loadPricingValues;
   function readFileData(file){
     return new Promise(function(resolve,reject){
       var reader=new FileReader();
@@ -2008,13 +2081,20 @@
     if($('sideChecklist')) $('sideChecklist').innerHTML=items.map(function(x){return '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 11px;border:1px solid rgba(148,164,187,.1);border-radius:12px;background:rgba(148,164,187,.03);"><span style="font-size:12.5px;color:#cbd5e1;">'+esc(x[0])+'</span><span style="font-size:11.5px;color:#e7b24c;">'+esc(x[1])+'</span></div>';}).join('');
     if($('generateBtn')) $('generateBtn').textContent=talkingBatch?(imageCount?'批量生成 '+imageCount+' 条口播视频':'批量生成口播视频'):'生成口播视频';
     if($('talkingCostSummary')){
-      var perSec=TALKING_RATE+' 点/秒 · 按实际时长结算';
-      // text 模式按文案长度估算(4 字/秒，与后端预扣一致)；audio 模式时长要生成后才准，只标单价。
-      var estText=(mode==='text' && textReady)
-        ? Math.max(TALKING_RATE, Math.ceil($('scriptText').value.trim().length/4)*TALKING_RATE) : 0;
-      $('talkingCostSummary').textContent=talkingBatch
-        ?(perSec+(imageCount?('　·　共 '+imageCount+' 条'):''))
-        :(estText?('预计约 '+estText+' 点（'+perSec+'）'):perSec);
+      if(!(pricingGate&&pricingGate.guard())){
+        var pricingState=pricingGate&&pricingGate.getState();
+        $('talkingCostSummary').textContent=pricingState&&pricingState.status==='error'
+          ?'收费标准加载失败，暂不能提交付费生成，请重试。'
+          :'正在加载权威收费标准...';
+      }else{
+        var perSec=TALKING_RATE+' 点/秒 · 按实际时长结算';
+        // text 模式按文案长度估算(4 字/秒，与后端预扣一致)；audio 模式时长要生成后才准，只标单价。
+        var estText=(mode==='text' && textReady)
+          ? Math.max(TALKING_RATE, Math.ceil($('scriptText').value.trim().length/4)*TALKING_RATE) : 0;
+        $('talkingCostSummary').textContent=talkingBatch
+          ?(perSec+(imageCount?('　·　共 '+imageCount+' 条'):''))
+          :(estText?('预计约 '+estText+' 点（'+perSec+'）'):perSec);
+      }
     }
     if(mode==='text' && videoFunction==='talking') $('modeSummary').textContent=talkingBatch?'同一份口播文案将分别生成多条形象视频':'上传人物图，输入文案并选择音色生成口播视频';
     syncVideoGenerateButtons();
@@ -2478,6 +2558,7 @@
       });
   }
   function submitTryon(){
+    if(!ensurePricingReady()) return;
     if(tryonIsLine2()){
       if(!tryonPersonImageData){ toast('线路二请先上传人物照片'); return; }
       if(!tryonClothesData){ toast('请上传衣服图'); return; }
@@ -2539,6 +2620,7 @@
     };
   }
   function submitVideoBatch(text){
+    if(!ensurePricingReady()) return;
     setSubmitLock('talking',true);
     setBusy(true); currentVideoDraft=null;
     var body=talkingPayload({});
@@ -2566,6 +2648,7 @@
       .catch(function(e){setSubmitLock('talking',false);setBusy(false);loadVideoHistory();setVideoStatus(e.message||'批量任务提交失败');toast(e.message||'批量任务提交失败');});
   }
   function submitVideo(){
+    if(!ensurePricingReady()) return;
     if(talkingBatch){
       if(mode!=='text'){toast('批量出片仅支持文案配音');return;}
       if(talkingBatchItems.length<2){toast('请至少选择 2 个形象');return;}
@@ -2608,6 +2691,7 @@
   };
   // 果肉(Grok)/豆姐(Seedance) 统一视频生成 → /api/gen/xiaole_video
   function submitXiaole(channel){
+    if(!ensurePricingReady()) return;
     if(!token){ location.href='../login.html?redirect=workbench/video'; return; }
     var promptEl=$(channel+'Prompt');
     var statusEl=$(channel+'Status');
@@ -2770,6 +2854,7 @@
   $('scriptText').dispatchEvent(new Event('input'));
   $('talkingMotionPrompt').dispatchEvent(new Event('input'));
   loadTalkingLimits();
+  loadPricingValues();
   updateFunction('talking');
   syncVideoGenerateButtons();
   // F7 联动：资产页视频「重生成」跳转过来时，读 localStorage 预填(一次性)

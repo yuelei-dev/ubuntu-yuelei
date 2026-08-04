@@ -18,6 +18,10 @@ import shutil   # wg_red 字幕模板：探测 systemd-run/nice，给 ASR 子进
 import sys      # wg_red 字幕模板：TALKING_ASR_PYTHON 缺省回退 sys.executable
 
 from .audio import gen_audio
+try:
+    import pricing_config
+except ModuleNotFoundError:
+    from .. import pricing_config
 
 VALID_VIDEO_MODES = {"text", "audio"}
 VALID_VIDEO_RATIOS = {"9:16", "16:9", "1:1", "4:5", "5:4"}
@@ -825,8 +829,9 @@ def validate_xiaole_video_payload(payload, username=None):
         duration = _probe_data_video_duration(source)
         if duration <= 0 or duration > 8.7:
             raise ValueError("xAI 官方视频编辑仅支持不超过 8.7 秒的参考视频")
-        cleaned.update({"model": "grok-imagine-video", "reference_video_data": source,
-                        "source_duration": duration, "reference_images": []})
+        cleaned.update({"model": "grok-imagine-video", "resolution": "720p",
+                        "reference_video_data": source, "source_duration": duration,
+                        "reference_images": []})
         return cleaned
 
     model = str(cleaned.get("model") or "grok-imagine-video").strip()
@@ -3858,7 +3863,16 @@ CINEMATIC_RATE_FALLBACK = 30   # 玩法认不出来时按最贵的收，绝不�
 
 
 def cinematic_rate(cine_mode):
-    return CINEMATIC_RATE_PER_SEC.get(cine_mode, CINEMATIC_RATE_FALLBACK)
+    key = {
+        "motion": "cinematic.motion.per_sec",
+        "duo": "cinematic.duo.per_sec",
+        "open": "cinematic.open.per_sec",
+    }.get(cine_mode)
+    if key:
+        return pricing_config.get_price(key)
+    return max(pricing_config.get_price("cinematic.motion.per_sec"),
+               pricing_config.get_price("cinematic.duo.per_sec"),
+               pricing_config.get_price("cinematic.open.per_sec"))
 
 
 # ===== 口播(video kind)按秒计费：10 点/秒 × 输出时长（kongli 2026-07-15）=====
@@ -3870,6 +3884,10 @@ TALKING_RATE_PER_SEC = _env_positive_int("TALKING_RATE_PER_SEC", 10)
 # 中文口播语速估算：偏保守取 4 字/秒（估长一点→预扣偏高→跑完退差，避免系统性少扣）。
 TALKING_CHARS_PER_SEC = float(os.environ.get("TALKING_CHARS_PER_SEC", "4") or 4)
 TALKING_FALLBACK_SEC = 10.0   # 音频探不到时长时的兜底估算秒数
+
+
+def talking_rate():
+    return pricing_config.get_price("talking.per_sec")
 
 
 def _talking_estimate_seconds(body):
@@ -3902,7 +3920,8 @@ def _talking_estimate_seconds(body):
 def video_cost(body):
     """口播扣点前的预扣(hold)：10 点/秒 × 估算/精确输出秒数。text 模式偏估、跑完结算。"""
     secs = _talking_estimate_seconds(body)
-    return max(TALKING_RATE_PER_SEC, int(math.ceil(secs)) * TALKING_RATE_PER_SEC)
+    rate = talking_rate()
+    return max(rate, int(math.ceil(secs)) * rate)
 
 
 def talking_actual_cost(result):
@@ -3912,7 +3931,8 @@ def talking_actual_cost(result):
     if not secs:
         return None
     try:
-        return max(TALKING_RATE_PER_SEC, int(math.ceil(float(secs))) * TALKING_RATE_PER_SEC)
+        rate = talking_rate()
+        return max(rate, int(math.ceil(float(secs))) * rate)
     except (TypeError, ValueError):
         return None
 
