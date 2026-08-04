@@ -118,7 +118,10 @@ class VideoParameterUiTests(unittest.TestCase):
 
     def test_xiaole_and_tryon_show_cost_and_match_backend(self):
         """视频预估价必须读取与后端受理计价相同的实时收费目录。"""
-        self.assertIn("fetch(fresh('/api/gen/pricing')", VIDEO_HTML)
+        self.assertIn('src="pricing-gate.js', VIDEO_HTML)
+        self.assertIn("HQPricingGate.create", VIDEO_HTML)
+        self.assertIn("requiredKeys:VIDEO_PRICING_KEYS", VIDEO_HTML)
+        self.assertIn("if(pricingGate.guard()) return true", VIDEO_HTML)
         for key in ("grok_video.v1.480p.per_sec", "grok_video.v1.720p.per_sec",
                     "grok_video.v1_5.480p.per_sec", "grok_video.v1_5.720p.per_sec",
                     "grok_video.v1_5.1080p.per_sec", "xiaole_video.per_sec",
