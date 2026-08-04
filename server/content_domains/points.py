@@ -4,6 +4,10 @@ import os
 import time
 
 from .core import AUTH_BASE, AUTH_INTERNAL_TOKEN, COST, closing, jdb, json, urllib, _ensure_column
+try:
+    import pricing_config
+except ModuleNotFoundError:
+    from .. import pricing_config
 
 # 各引擎的质量基价（点）。**1 点 = 0.1 元**，按上游官网价折算（汇率 7.1）。
 # gpt-image-2 按官方 $30/M image output token 实测（2026-07-10，读 API 返回的 usage）：
@@ -29,6 +33,14 @@ SEEDREAM_VARIANT_COST = {
 # 数量上限必须与 image.gen_image 里的 cap 逐字一致，否则按 N 扣点却只出 cap 张 = 超收。
 _IMAGE_CAP_2 = {"zelong", "zelong2", "xiaole", "seedream"}
 
+_GROK_VIDEO_PRICE_KEYS = {
+    ("grok-imagine-video", "480p"): "grok_video.v1.480p.per_sec",
+    ("grok-imagine-video", "720p"): "grok_video.v1.720p.per_sec",
+    ("grok-imagine-video-1.5", "480p"): "grok_video.v1_5.480p.per_sec",
+    ("grok-imagine-video-1.5", "720p"): "grok_video.v1_5.720p.per_sec",
+    ("grok-imagine-video-1.5", "1080p"): "grok_video.v1_5.1080p.per_sec",
+}
+
 
 def cost_of(kind, body):
     """动态点数：TikHub 按次计费，采集/获客调用数随参数变。约 5x buff 折算成点。"""
@@ -38,19 +50,21 @@ def cost_of(kind, body):
         #   主爬取   want=['comments'] 或 ['video']  → 30
         #   提取文案 want=['transcript']              → 6
         if "transcript" in (body.get("want") or []):
-            return 6
-        return 30
+            return pricing_config.get_price("collect.transcript")
+        return pricing_config.get_price("collect.main")
     if kind == "leads":
-        return 30   # 获客固定 30 点/次（采集量前端固定 20 视频）；与 leads.html 成本徽章一致，防"消耗点数对不上"
+        return pricing_config.get_price("leads")
     if kind == "image":
         # 质量基价按引擎分档（IMAGE_BASE_COST）。gen_image 里 provider 缺省是 openai，这里保持一致。
         provider = (body.get("provider") or "openai").strip().lower()
         tier = "hd" if (body.get("quality") or "hd") == "hd" else "std"
         if provider == "seedream":
             variant = (body.get("variant") or "std").strip().lower()   # 5.0 标准 / 5.0 pro
-            base = (SEEDREAM_VARIANT_COST.get(variant) or SEEDREAM_VARIANT_COST["std"])[tier]
+            variant = variant if variant in SEEDREAM_VARIANT_COST else "std"
+            base = pricing_config.get_price("image.seedream.%s.%s" % (variant, tier))
         else:
-            base = (IMAGE_BASE_COST.get(provider) or _IMAGE_DEFAULT_COST)[tier]
+            key = "image.%s.%s" % (provider, tier) if provider in IMAGE_BASE_COST else "image.default.%s" % tier
+            base = pricing_config.get_price(key)
         # cap 必须与 image.gen_image 里的数量上限逐字一致，否则按 N 扣点却只出 cap 张 = 超收。
         cap = 2 if provider in _IMAGE_CAP_2 else 4
         cnt = 1 if body.get("mask") else max(1, min(cap, int(body.get("count") or 1)))
@@ -69,7 +83,7 @@ def cost_of(kind, body):
     if kind == "tryon":
         has_clothes = bool(body.get("clothes_data"))
         has_bg = bool(body.get("background_data"))
-        return 40 if (has_clothes and has_bg) else 25  # 两段(换装+换背景)40/单段25
+        return pricing_config.get_price("tryon.combo" if (has_clothes and has_bg) else "tryon.single")
         # TODO: 上线前与 kongli 确认点数
     if kind == "xiaole_video":
         # 果肉视频统一 30 点/秒 × 时长（kongli 2026-07-15）。此前是按 xAI 官方成本×汇率动态算/回滚线扁平 30。
@@ -78,7 +92,19 @@ def cost_of(kind, body):
             duration = min(8.7, float(body.get("source_duration") or 0.1))
         else:
             duration = min(15, int(body.get("duration") or 10))
-        return max(30, int(math.ceil(duration)) * 30)
+        channel = str(body.get("channel") or "grok").strip().lower()
+        if channel == "grok":
+            model = str(body.get("model") or "grok-imagine-video").strip().lower()
+            resolution = str(body.get("resolution") or "720p").strip().lower()
+            price_key = _GROK_VIDEO_PRICE_KEYS.get((model, resolution))
+            if not price_key:
+                # Payload validation normally rejects this first. Keeping the
+                # cost boundary fail-closed prevents an unpriced direct call.
+                raise ValueError("Grok 视频型号或分辨率没有有效收费标准")
+            rate = pricing_config.get_price(price_key)
+        else:
+            rate = pricing_config.get_price("xiaole_video.per_sec")
+        return max(rate, int(math.ceil(duration)) * rate)
     if kind == "script_to_video":
         # 提交前一次性冻结全部费用：数字人口播 + 没有命中用户资产的静态素材图。
         # 原子预扣避免生成到一半才发现点数不足；cost_breakdown 会返回前端明细。
@@ -88,7 +114,8 @@ def cost_of(kind, body):
                 duration = min(15, int(float(body.get("duration") or 10)))
             except (TypeError, ValueError):
                 duration = 10
-            return max(30, int(math.ceil(duration)) * 30)
+            rate = pricing_config.get_price("xiaole_video.per_sec")
+            return max(rate, int(math.ceil(duration)) * rate)
         from . import video as video_domain
         lines = [(s.get("line") or "").strip() for s in (body.get("scenes") or []) if isinstance(s, dict)]
         text = "\n\n".join([l for l in lines if l])
@@ -109,11 +136,20 @@ def cost_of(kind, body):
     if kind == "breakdown":
         # 分镜拆解与提示词反推均按每个有效链接 20 点；批量上限 5 条 = 100 点。
         urls = body.get("urls")
+        per_link = pricing_config.get_price("breakdown.per_link")
         if isinstance(urls, list):
             n = max(1, min(5, len([u for u in urls if isinstance(u, str) and u.strip()])))
-            return 20 * n
-        return 20
+            return per_link * n
+        return per_link
+    direct = {"copy": "copy", "audio": "audio", "avatar": "avatar"}
+    if kind in direct:
+        return pricing_config.get_price(direct[kind])
     return COST.get(kind, 0)
+
+
+def breakdown_local_upload_cost():
+    """Authoritative price for one local image/video reverse submission."""
+    return pricing_config.get_price("breakdown.local_upload")
 
 def breakdown_batch_refund(cost, total, failed):
     """批量拆解的退点额：全灭全退；部分失败每个失败链接退 20 点。
@@ -132,7 +168,9 @@ def breakdown_batch_refund(cost, total, failed):
     failed = min(failed, total)
     if failed >= total:
         return cost
-    return min(cost, 20 * failed)
+    # Use the price frozen in this job, not today's live admin price. Otherwise a
+    # mid-flight price edit could over/under-refund an already charged batch.
+    return min(cost, (cost // total) * failed)
 
 def settle_breakdown_batch(username, cost, result, job_id):
     """run_job 的批量拆解结算钩子：只对 breakdown_batch 结果按失败条数退点。
@@ -193,7 +231,7 @@ def get_points(username):
     except Exception:
         return 0
 
-def deduct_points(username, amount, reason=""):
+def deduct_points(username, amount, reason="", transaction_key=""):
     """预扣点。reason 落 points_audit，供对账。
 
     注意：三个服务都是「先扣点、后 INSERT jobs 行」，所以扣点这一刻还没有 job_id，
@@ -204,16 +242,20 @@ def deduct_points(username, amount, reason=""):
     amount = int(amount or 0)
     if amount <= 0:
         return get_points(username)
-    res = _auth_points_request("/api/auth/points/deduct",
-                               {"username": username, "amount": amount, "reason": reason})
+    payload = {"username": username, "amount": amount, "reason": reason}
+    if transaction_key:
+        payload["transaction_key"] = transaction_key
+    res = _auth_points_request("/api/auth/points/deduct", payload)
     return int(res.get("points") or 0)
 
-def refund_points(username, amount, reason=""):
+def refund_points(username, amount, reason="", transaction_key=""):
     amount = int(amount or 0)
     if amount <= 0:
         return get_points(username)
-    res = _auth_points_request("/api/auth/points/refund",
-                               {"username": username, "amount": amount, "reason": reason})
+    payload = {"username": username, "amount": amount, "reason": reason}
+    if transaction_key:
+        payload["transaction_key"] = transaction_key
+    res = _auth_points_request("/api/auth/points/refund", payload)
     return int(res.get("points") or 0)
 
 def safe_refund_points(username, amount, reason=""):

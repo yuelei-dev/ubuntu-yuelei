@@ -213,6 +213,9 @@ class ContentDomainTests(unittest.TestCase):
                 self.refunds.append((username, cost, reason))
                 return 0
 
+            def refund_points(self, username, cost, reason="", transaction_key=""):
+                return self.safe_refund_points(username, cost, reason)
+
         fake_points = FakePoints()
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "jobs.db"

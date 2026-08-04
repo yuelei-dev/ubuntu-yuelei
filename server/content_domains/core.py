@@ -17,7 +17,9 @@ from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tikhub  # 同目录 TikHub 客户端（抖音/小红书/视频号 采集+获客）
-import mimetypes; from . import assets_store, jobs_store, submission_idempotency  # 领域存储模块均无反向依赖
+import mimetypes; from . import assets_store, jobs_store, payment_recovery, submission_idempotency  # 领域存储模块均无反向依赖
+try: import pricing_config
+except ModuleNotFoundError: from .. import pricing_config
 try:
     from . import asset_batch, feature_flags
 except ImportError:  # Running core.py directly during local checks.
@@ -269,6 +271,7 @@ def init_db():
         _ensure_column(c, "jobs", "refunded", "INTEGER DEFAULT 0")  # 退点幂等键(#187)
         _ensure_column(c, "jobs", "owner", "TEXT")                  # 归属服务(#511)，见 SERVICE_OWNER
         _ensure_column(c, "jobs", "service_sha", "TEXT")            # 任务执行版本：建任务时写入 .deploy-version 的 SHA，历史行 NULL=版本未知
+        jobs_store.ensure_refund_lease_columns_on_conn(c)
         submission_idempotency.ensure_table(c)
         c.commit()
     feature_flags.init_db()
@@ -693,9 +696,8 @@ def _set_terminal(job_id, status, result=None, error=None, from_states=("running
     return claimed
 
 def _refund_once(job_id, username, cost):
-    # safe_refund_points 吞掉异常并返回当前点数，不让退点接口故障影响主流程 → 视为永远成功。
-    return jobs_store.refund_once(jdb, job_id, username, cost,
-                                  lambda u, c: (_domains()[1].safe_refund_points(u, c, "job#%d" % job_id), True)[1])
+    return payment_recovery.refund_once(jdb, jobs_store, _domains()[1], job_id, username, cost)
+def _retry_failed_refunds(limit=100): return payment_recovery.retry_failed_refunds(jdb, jobs_store, _domains()[1], limit)
 
 def _pick_job_queue(kind, mode=None):
     # kind缺省(旧调用/测试)保守走慢队列；生图(慢90~450s)走生图池；秒级快任务(音频/文案/采集/名单)走快队列；
@@ -857,7 +859,7 @@ def _recover_pending_jobs(limit=None):
 def _pending_job_scanner():
     while True:
         try:
-            _recover_pending_jobs(JOB_QUEUE_MAX)
+            payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX)
         except Exception:
             pass
         time.sleep(30)
@@ -878,7 +880,7 @@ def start_job_workers():
         for i in range(count):
             threading.Thread(target=_job_worker_loop, args=(q,), name="%s-%d" % (prefix, i + 1), daemon=True).start()
     threading.Thread(target=_pending_job_scanner, name="content-job-recover", daemon=True).start()
-    _recover_pending_jobs(JOB_QUEUE_MAX)
+    payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX)
 
 def drain_and_exit(signum=None, frame=None):
     """SIGTERM → 停止收新任务 → 等在飞的跑完 → 退出。
@@ -1059,6 +1061,7 @@ def reaper():
                 if _set_terminal(r["id"], "error", error="生成超时自动结束，已退点"):
                     _refund_once(r["id"], r["username"], r["cost"])
                     _mark_video_asset_failed(r["id"], r["kind"], "生成超时自动结束，已退点")
+            _retry_failed_refunds()
         except Exception:
             pass
         try: _domains()[2].retry_pending_seedance_cleanups()
@@ -1123,7 +1126,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         p = self.path.split("?")[0]
         audio_domain, points_domain, video_domain = _domains()
-        if p == "/api/gen/breakdown/local-upload": return __import__(__package__ + ".local_reverse_upload", fromlist=["handle_post"]).handle_post(self, verify=verify, points_domain=points_domain, jdb=jdb, jobs_store=jobs_store, enqueue_job=enqueue_job, reject_pending_job=_reject_pending_job, service_owner=SERVICE_OWNER, out_dir=OUT_DIR, is_shutting_down=is_shutting_down, user_active_job_count=_user_active_job_count, max_user_active_jobs=MAX_USER_ACTIVE_JOBS, must_change_password=_must_change_password)
+        if p == "/api/gen/breakdown/local-upload": user = verify(self._token()); return self._send(401 if not user else 403, {"detail": "未登录或登录已过期" if not user else "请先修改初始密码"}) if not user or _must_change_password(user) else __import__(__package__ + ".breakdown", fromlist=["handle_local_upload"]).handle_local_upload(self, user)
         if p == "/api/gen/asset/favorite":
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录"})
@@ -1192,7 +1195,7 @@ class H(BaseHTTPRequestHandler):
             except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
             except audio_domain.VoiceSlotError as e: return self._send(e.status, {"detail": str(e)})
             except points_domain.AuthPointsError as e:
-                return self._send(402 if e.status == 402 else 502, {"detail": e.detail, "need": audio_domain.VOICE_SLOT_COST})
+                return self._send(402 if e.status == 402 else 502, {"detail": e.detail, "need": audio_domain.voice_slot_cost()})
             except Exception as e:
                 return self._send(400, {"detail": str(e)[:160]})
         if p == "/api/gen/audio/redeem-slot":
@@ -1263,11 +1266,10 @@ class H(BaseHTTPRequestHandler):
                 payloads = video_domain.validate_video_batch_payload(
                     request_body, user["username"], min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS))
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
-            except feature_flags.FeatureDisabled as e:
-                return self._send(503, {"detail": str(e)})
-            except ValueError as e:
-                return self._send(400, {"detail": str(e)[:220]})
-            costs = [points_domain.cost_of("video", body) for body in payloads]
+            except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
+            except ValueError as e: return self._send(400, {"detail": str(e)[:220]})
+            try: costs = [points_domain.cost_of("video", body) for body in payloads]
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             total = sum(costs)
             with _submission_lock:
                 idem_state, idem_response = _idempotency_begin(user["username"], p, idem_key, request_body)
@@ -1401,10 +1403,9 @@ class H(BaseHTTPRequestHandler):
             from . import upstream_guard
             blocked = upstream_guard.exhausted_reason(kind, body)
             if not blocked and kind == "script_to_video" and int(body.get("material_generate_count") or 0) > 0: blocked = upstream_guard.exhausted_reason("image", {"provider": "openai", "quality": "standard", "count": 1})
-            if blocked:
-                return self._send(503, {"detail": blocked, "code": "upstream_exhausted",
-                                        "retry_after_ms": 60000})
-            cost = points_domain.cost_of(kind, body)
+            if blocked: return self._send(503, {"detail": blocked, "code": "upstream_exhausted", "retry_after_ms": 60000})
+            try: cost = points_domain.cost_of(kind, body)
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             with _submission_lock:
                 idem_state, idem_response = _idempotency_begin(user["username"], p, idem_key, request_body)
                 if idem_state == "replay":
@@ -1475,6 +1476,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?")[0]
         audio_domain, points_domain, video_domain = _domains()
+        if p == "/api/gen/pricing": return self._send(200, pricing_config.public_catalog())
         if p == "/api/gen/audio/clone-vip":
             return self._method_not_allowed()
         if p == "/api/gen/asset/marks":
@@ -1636,7 +1638,7 @@ class H(BaseHTTPRequestHandler):
             items = audio_domain.list_user_audio_voice_slots(user["username"])
             return self._send(200, {"items": items,
                 "slot_count": sum(1 for item in items if item.get("status") in audio_domain.VALID_VOICE_SLOT_STATUSES),
-                "slot_max": audio_domain.VOICE_SLOT_MAX_PER_USER, "slot_cost": audio_domain.VOICE_SLOT_COST,
+                "slot_max": audio_domain.VOICE_SLOT_MAX_PER_USER, "slot_cost": audio_domain.voice_slot_cost(),
                 "points": user.get("points")})
         if p == "/api/gen/audio/clone-status":
             user = verify(self._token())
@@ -1684,25 +1686,27 @@ class H(BaseHTTPRequestHandler):
             except Exception: page = 1
             if not keyword: return self._send(400, {"detail": "缺少关键词"})
             try:
-                points_left = points_domain.deduct_points(user["username"], 1, "search:" + platform)
+                search_cost = pricing_config.get_price("search")
+                points_left = points_domain.deduct_points(user["username"], search_cost, "search:" + platform)
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             except points_domain.AuthPointsError as e:
                 code = 402 if e.status == 402 else 502
-                return self._send(code, {"detail": e.detail, "need": 1})
+                return self._send(code, {"detail": e.detail, "need": search_cost})
             try:
                 r = tikhub.search(platform, keyword, page=page, video_only=False)  # 含图文
             except tikhub.TikHubError as e:
-                points_domain.safe_refund_points(user["username"], 1, "search:" + platform + ":refund")
+                points_domain.safe_refund_points(user["username"], search_cost, "search:" + platform + ":refund")
                 return self._send(502, {"detail": str(e)[:160]})
             items = [{"id": it.get("id"), "platform": it.get("platform"), "title": it.get("title"),
                       "cover": it.get("cover"), "author": it.get("author"), "url": it.get("url"),
                       "note_type": it.get("note_type"),
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
-            return self._send(200, {"items": items, "cost": 1, "points_left": points_left})
+            return self._send(200, {"items": items, "cost": search_cost, "points_left": points_left})
         if p == "/api/gen/health":
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS,
                                     "deploy_sha": jobs_store.read_deploy_sha(),
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC, "seedance_video_enabled": video_domain.seedance_video_health_enabled(feature_flags), "reverse_remake_video_channel": video_domain.reverse_remake_video_channel(feature_flags), "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(),
-                                    "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": VIDEO_COST, "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
+                                    "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": pricing_config.get_price("talking.per_sec"), "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
 
     def do_PUT(self):
@@ -1715,6 +1719,6 @@ class H(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/api/gen/audio/clone-vip": return self._method_not_allowed()
         self._send(404, {"detail": "not found"})
 if __name__ == "__main__":
-    init_db(); reclaim_orphaned_running()  # 回收上次重启遗留的 running 孤儿→秒退点
+    init_db(); reclaim_orphaned_running(); _retry_failed_refunds()
     start_job_workers(); threading.Thread(target=reaper, daemon=True).start()
     print("huangque-content-api on 127.0.0.1:%d  caps=%s" % (PORT, list(HANDLERS))); ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

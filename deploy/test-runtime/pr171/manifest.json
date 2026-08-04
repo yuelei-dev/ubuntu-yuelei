@@ -27,16 +27,16 @@
     {
       "source": "server/content_domains/video.py",
       "target": "/home/ubuntu/content-api/content_domains/video.py",
-      "sha256": "afd69005bc56dd4c35aba43393672af49a8e0d7f70e3b1cdb254dddb4c4c1baa",
-      "git_blob": "1943b8116a47adb1a01a18bee47d75db61fcf435",
+      "sha256": "2d343df789b270b9a0ebc7dafa9197546c118ac0768c6d7e2e7a4c45508d05c6",
+      "git_blob": "d0f2b9e4fe484a2027e633d13d8c0050df99abc6",
       "expected_target_sha256": "4bb22ffc1bf49983b42ed67294ea42328b0254056d45690bc3c47ea874b07172",
       "expected_target_git_blob": "b4892fc424afb2f293337e32e1c23784f5a3c98c"
     },
     {
       "source": "site/workbench/script.html",
       "target": "/var/www/huangquechuanmei/workbench/script.html",
-      "sha256": "3d1049ae20c3e189cab66c851d4e31f97249cd637d8f56e1b47eec8f2cc9712d",
-      "git_blob": "9fe59d5be46b2d7dd10b03141655fc31d5b9ec34",
+      "sha256": "0adb55a673cb5f883218b521645da9f4b3f13e44a09679f53c6135dbd87cc431",
+      "git_blob": "491f6123105dcf4fbbb8f3041bd30ef8b4ccea5a",
       "expected_target_sha256": "5d9d77b839f3796ae9e3a4ee2725530a34c84b0fd935fd8a94b086ee4d761b38",
       "expected_target_git_blob": "0922e656fedd1e8bcac40025cc8d2798f7cc337b"
     }

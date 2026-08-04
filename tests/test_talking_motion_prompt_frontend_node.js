@@ -47,6 +47,11 @@ globalThis.maxActiveTryon = 1;
 globalThis.maxActiveXiaoleVideo = 3;
 globalThis.videoSubmitLocks = {talking: false, cinematic: false, tryon: false, xiaole: false};
 globalThis.motionOptimizeBusy = false;
+// 这组测试验证动作提示词锁；收费目录在此场景已完整加载，价格门禁另有失败/重试合同测试。
+globalThis.pricingGate = {
+  guard: () => true,
+  getState: () => ({status: 'ready', values: {}}),
+};
 globalThis.talkingMotionOptimizedSource = null;
 globalThis.token = 'test-token';
 globalThis.location = {href: ''};
