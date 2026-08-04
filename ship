@@ -461,8 +461,11 @@ fi
 if [ -n "$DEPLOYED" ]; then
   VERIFY_REF="${HEAD_SHA:-$(git rev-parse HEAD)}"
   VERIFY_REPO_ENV=""
+  OVERLAY_GIT_SAFE_ENV=""
   [ -n "$OVERLAY_MANIFEST" ] && VERIFY_REPO_ENV="HQ_REPO=/opt/huangque-repository"
-  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && sudo -u ubuntu -H env $VERIFY_REPO_ENV HQ_DRIFT_REF='$VERIFY_REF' python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
+  # /opt checkout 属于 root；哨兵固定以 ubuntu 运行后，只为本进程白名单该精确仓库。
+  [ -n "$OVERLAY_MANIFEST" ] && OVERLAY_GIT_SAFE_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/opt/huangque-repository"
+  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && sudo -u ubuntu -H env $VERIFY_REPO_ENV $OVERLAY_GIT_SAFE_ENV HQ_DRIFT_REF='$VERIFY_REF' python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
     && echo "  ✓ 部署后漂移校验通过" || { echo "  ❌ 部署后漂移校验失败"; exit 1; }
   # 普通部署保持既有时序。test-runtime overlay 必须等 health/pricing/activate/patrol
   # 全部成功后才落成功记录，否则自动恢复了运行文件却留下“已部署”假账。
@@ -538,15 +541,15 @@ if any(not isinstance(values[key], int) or isinstance(values[key], bool) or valu
 print('  ✓ 权威价格接口返回完整 13 key 正整数目录')
 PY
   DEPLOY_SHA="${HEAD_SHA:-$(git rev-parse HEAD)}"
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --deploy-sha '$DEPLOY_SHA' --activate-overlay '$OVERLAY_MANIFEST'" \
+  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --deploy-sha '$DEPLOY_SHA' --activate-overlay '$OVERLAY_MANIFEST'" \
     || { echo "  ❌ 活动 overlay 不可变 postimage 启用失败"; exit 1; }
   # 立刻走一次常规巡检：旧 exception 必须被 postimage 原子取代，不能上线即 stale。
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF=origin/baseline/test-server python3 /home/ubuntu/hq-drift/drift_sentinel.py --print" \
+  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF=origin/baseline/test-server python3 /home/ubuntu/hq-drift/drift_sentinel.py --print" \
     || { echo "  ❌ 部署后常规漂移巡检未收敛"; exit 1; }
   echo "  ✓ 活动 overlay 已锁定 $DEPLOY_SHA，常规巡检无 stale"
   # deploy_bless.jsonl 是实际成功部署的权威账本，只能在全部后置条件通过后追加。
   # 此时 trap 仍武装：登记失败同样自动恢复运行文件/版本/活动 overlay/服务。
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --bless-deploy $DEPLOYED" \
+  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --bless-deploy $DEPLOYED" \
     && echo "  ✓ 本次完整 overlay 已记录（PR #$PR_NO，SHA ${DEPLOY_SHA:0:7}）" \
     || { echo "  ❌ overlay 部署登记失败（自动恢复仍已武装）"; exit 1; }
   OVERLAY_ROLLBACK_ARMED=0
