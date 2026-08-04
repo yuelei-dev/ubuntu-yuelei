@@ -17,7 +17,7 @@ from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tikhub  # 同目录 TikHub 客户端（抖音/小红书/视频号 采集+获客）
-import mimetypes; from . import assets_store, jobs_store, submission_idempotency  # 领域存储模块均无反向依赖
+import mimetypes; from . import assets_store, jobs_store, payment_recovery, submission_idempotency  # 领域存储模块均无反向依赖
 try: import pricing_config
 except ModuleNotFoundError: from .. import pricing_config
 try:
@@ -695,9 +695,8 @@ def _set_terminal(job_id, status, result=None, error=None, from_states=("running
     return claimed
 
 def _refund_once(job_id, username, cost):
-    # safe_refund_points 吞掉异常并返回当前点数，不让退点接口故障影响主流程 → 视为永远成功。
-    return jobs_store.refund_once(jdb, job_id, username, cost,
-                                  lambda u, c: (_domains()[1].safe_refund_points(u, c, "job#%d" % job_id), True)[1])
+    return payment_recovery.refund_once(jdb, jobs_store, _domains()[1], job_id, username, cost)
+def _retry_failed_refunds(limit=100): return payment_recovery.retry_failed_refunds(jdb, jobs_store, _domains()[1], limit)
 
 def _pick_job_queue(kind, mode=None):
     # kind缺省(旧调用/测试)保守走慢队列；生图(慢90~450s)走生图池；秒级快任务(音频/文案/采集/名单)走快队列；
@@ -859,7 +858,7 @@ def _recover_pending_jobs(limit=None):
 def _pending_job_scanner():
     while True:
         try:
-            _recover_pending_jobs(JOB_QUEUE_MAX)
+            payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX)
         except Exception:
             pass
         time.sleep(30)
@@ -880,7 +879,7 @@ def start_job_workers():
         for i in range(count):
             threading.Thread(target=_job_worker_loop, args=(q,), name="%s-%d" % (prefix, i + 1), daemon=True).start()
     threading.Thread(target=_pending_job_scanner, name="content-job-recover", daemon=True).start()
-    _recover_pending_jobs(JOB_QUEUE_MAX)
+    payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX)
 
 def drain_and_exit(signum=None, frame=None):
     """SIGTERM → 停止收新任务 → 等在飞的跑完 → 退出。
@@ -1061,6 +1060,7 @@ def reaper():
                 if _set_terminal(r["id"], "error", error="生成超时自动结束，已退点"):
                     _refund_once(r["id"], r["username"], r["cost"])
                     _mark_video_asset_failed(r["id"], r["kind"], "生成超时自动结束，已退点")
+            _retry_failed_refunds()
         except Exception:
             pass
         try: _domains()[2].retry_pending_seedance_cleanups()
@@ -1125,7 +1125,7 @@ class H(BaseHTTPRequestHandler):
     def do_POST(self):
         p = self.path.split("?")[0]
         audio_domain, points_domain, video_domain = _domains()
-        if p == "/api/gen/breakdown/local-upload": return __import__(__package__ + ".local_reverse_upload", fromlist=["handle_post"]).handle_post(self, verify=verify, points_domain=points_domain, jdb=jdb, jobs_store=jobs_store, enqueue_job=enqueue_job, reject_pending_job=_reject_pending_job, service_owner=SERVICE_OWNER, out_dir=OUT_DIR, is_shutting_down=is_shutting_down, user_active_job_count=_user_active_job_count, max_user_active_jobs=MAX_USER_ACTIVE_JOBS, must_change_password=_must_change_password)
+        if p == "/api/gen/breakdown/local-upload": user = verify(self._token()); return self._send(401 if not user else 403, {"detail": "未登录或登录已过期" if not user else "请先修改初始密码"}) if not user or _must_change_password(user) else __import__(__package__ + ".breakdown", fromlist=["handle_local_upload"]).handle_local_upload(self, user)
         if p == "/api/gen/asset/favorite":
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录"})
@@ -1718,6 +1718,6 @@ class H(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/api/gen/audio/clone-vip": return self._method_not_allowed()
         self._send(404, {"detail": "not found"})
 if __name__ == "__main__":
-    init_db(); reclaim_orphaned_running()  # 回收上次重启遗留的 running 孤儿→秒退点
+    init_db(); reclaim_orphaned_running(); _retry_failed_refunds()
     start_job_workers(); threading.Thread(target=reaper, daemon=True).start()
     print("huangque-content-api on 127.0.0.1:%d  caps=%s" % (PORT, list(HANDLERS))); ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

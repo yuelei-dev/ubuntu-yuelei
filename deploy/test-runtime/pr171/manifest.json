@@ -13,7 +13,8 @@
   "target_core_sha256": "ab48d8f920c20f5361af74ec0d5b5d6694ff2cbc2b6e9e3f79eb37adb06ed06a",
   "forward_ports": [
     "yuelei-dev/ubuntu-yuelei#169",
-    "yuelei-dev/ubuntu-yuelei#171"
+    "yuelei-dev/ubuntu-yuelei#171",
+    "yuelei-dev/ubuntu-yuelei#182"
   ],
   "deploy_files": [
     {
@@ -35,8 +36,8 @@
     {
       "source": "site/workbench/script.html",
       "target": "/var/www/huangquechuanmei/workbench/script.html",
-      "sha256": "3d1049ae20c3e189cab66c851d4e31f97249cd637d8f56e1b47eec8f2cc9712d",
-      "git_blob": "9fe59d5be46b2d7dd10b03141655fc31d5b9ec34",
+      "sha256": "efc8c2e404b1fe60abc1b0ca9c8b15276bcf0e7b0046de5fac1bd7278ab4b8f1",
+      "git_blob": "1858b6e0ada3b42f69e1a07677274421d0dd5f69",
       "expected_target_sha256": "5d9d77b839f3796ae9e3a4ee2725530a34c84b0fd935fd8a94b086ee4d761b38",
       "expected_target_git_blob": "0922e656fedd1e8bcac40025cc8d2798f7cc337b"
     }
