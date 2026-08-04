@@ -288,6 +288,43 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
                     connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0
                 )
 
+    def test_local_upload_price_is_independent_from_link_price_end_to_end(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            insufficient = self._raw_upload_handler(
+                b"\xff\xd8\xfflocal-price", idem_key="local-price-low-1"
+            )
+            accepted = self._raw_upload_handler(
+                b"\xff\xd8\xfflocal-price", idem_key="local-price-ok-01"
+            )
+            with self._local_upload_context(root, connect, points=36), mock.patch.object(
+                self.points, "breakdown_local_upload_cost", return_value=37
+            ), mock.patch.object(self.points, "deduct_points") as deduct:
+                self.breakdown.handle_local_upload(
+                    insufficient, {"username": "alice"}
+                )
+            self.assertEqual(insufficient._send.call_args.args[0], 402)
+            self.assertEqual(insufficient._send.call_args.args[1]["need"], 37)
+            deduct.assert_not_called()
+
+            with self._local_upload_context(root, connect, points=100), mock.patch.object(
+                self.points, "breakdown_local_upload_cost", return_value=37
+            ), mock.patch.object(
+                self.points, "cost_of", return_value=11
+            ), mock.patch.object(
+                self.points, "deduct_points", return_value=63
+            ) as deduct:
+                self.breakdown.handle_local_upload(accepted, {"username": "alice"})
+            self.assertEqual(accepted._send.call_args.args[0], 200)
+            self.assertEqual(accepted._send.call_args.args[1]["cost"], 37)
+            deduct.assert_called_once_with(
+                "alice", 37, "job:breakdown#1",
+                transaction_key="breakdown:1:charge",
+            )
+
     def test_local_upload_invalid_or_overlong_video_never_charges(self):
         for probe_result, label in ((ValueError("invalid video"), "invalid"),
                                     (121.0, "overlong")):

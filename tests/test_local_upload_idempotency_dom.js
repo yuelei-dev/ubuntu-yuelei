@@ -10,10 +10,18 @@ const html = fs.readFileSync(
 );
 const pendingStart = html.indexOf('var _pendingSubmissionMemory={}');
 const pendingEnd = html.indexOf('function currentTheme()', pendingStart);
+const pricingStart = html.indexOf('var BREAKDOWN_PRICING_VALUES={}');
+const pricingEnd = html.indexOf('function tok()', pricingStart);
+const pointsStart = html.indexOf('function _localPointsCheck()');
+const pointsEnd = html.indexOf('function _videoDuration', pointsStart);
 const submitStart = html.indexOf('function _submitLocalReverse(mediaType,file,btn)');
 const submitEnd = html.indexOf('if(bdImagePick)', submitStart);
 assert.notEqual(pendingStart, -1);
 assert.notEqual(pendingEnd, -1);
+assert.notEqual(pricingStart, -1);
+assert.notEqual(pricingEnd, -1);
+assert.notEqual(pointsStart, -1);
+assert.notEqual(pointsEnd, -1);
 assert.notEqual(submitStart, -1);
 assert.notEqual(submitEnd, -1);
 const source = html.slice(pendingStart, pendingEnd) + '\n' +
@@ -51,6 +59,7 @@ function createHarness(results) {
       return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
     },
     _localPointsCheck: () => Promise.resolve(),
+    _localUploadPrice: () => 20,
     _videoDuration: () => Promise.resolve(1),
     _localBusy: () => {},
     _localFail: (message) => failures.push(message),
@@ -144,4 +153,100 @@ test('terminal client rejection clears the key while 409 in-progress retains it'
   await settle();
   assert.equal(harness.requests[1].options.headers['Idempotency-Key'], key);
   assert.equal(harness.storage.size, 0);
+});
+
+test('local price display and balance gate use breakdown.local_upload only', async () => {
+  let currentState = {status: 'idle', values: null};
+  let createdGate;
+  const localHint = {textContent: ''};
+  const imageButton = {textContent: ''};
+  const videoButton = {textContent: ''};
+  const urlHint = {textContent: ''};
+  const genText = {textContent: ''};
+  let points = 36;
+  const context = {
+    Promise,
+    Number,
+    bdLocalPriceHint: localHint,
+    bdImageReverse: imageButton,
+    bdVideoReverse: videoButton,
+    bdUrlHint: urlHint,
+    bdGenText: genText,
+    isBreakdownReverseTool: () => true,
+    fetch: () => Promise.resolve({
+      status: 200, ok: true,
+      json: () => Promise.resolve({user: {points}}),
+    }),
+    window: {HQPricingGate: {create: (options) => {
+      createdGate = {
+        guard: () => currentState.status === 'ready',
+        getState: () => currentState,
+        load: () => Promise.resolve(currentState),
+        setState: (next) => { currentState = next; options.onState(next); },
+      };
+      return createdGate;
+    }}},
+  };
+  vm.runInNewContext(
+    html.slice(pricingStart, pricingEnd) + '\n' +
+      html.slice(pointsStart, pointsEnd),
+    context,
+    {filename: 'script.html#local-pricing'}
+  );
+
+  createdGate.setState({status: 'ready', values: {
+    'breakdown.per_link': 11,
+    'breakdown.local_upload': 37,
+  }});
+  assert.equal(localHint.textContent, '单独上传，不经过链接下载；每个文件 37 点');
+  assert.equal(imageButton.textContent, '反推图片（37 点）');
+  assert.equal(videoButton.textContent, '反推视频（37 点）');
+  assert.match(urlHint.textContent, /11 点/);
+  await assert.rejects(
+    context._localPointsCheck(),
+    (error) => /需要 37 点/.test(String(error && error.message))
+  );
+  points = 37;
+  await context._localPointsCheck();
+});
+
+test('local pricing fails closed and 402 uses the authoritative server need', async () => {
+  const harness = createHarness([
+    response(402, {detail: 'insufficient', need: 37}),
+  ]);
+  harness.context._submitLocalReverse('image', file, {});
+  await settle();
+  assert.match(harness.failures[0], /37/);
+
+  let createdGate;
+  const context = {
+    Promise,
+    Number,
+    bdLocalPriceHint: {textContent: ''},
+    bdImageReverse: {textContent: ''},
+    bdVideoReverse: {textContent: ''},
+    bdUrlHint: {textContent: ''},
+    bdGenText: {textContent: ''},
+    isBreakdownReverseTool: () => false,
+    fetch: () => { throw new Error('balance endpoint must not run'); },
+    window: {HQPricingGate: {create: (options) => {
+      createdGate = {
+        guard: () => false,
+        getState: () => ({status: 'error'}),
+        load: () => Promise.resolve(),
+      };
+      return createdGate;
+    }}},
+  };
+  vm.runInNewContext(
+    html.slice(pricingStart, pricingEnd) + '\n' +
+      html.slice(pointsStart, pointsEnd),
+    context,
+    {filename: 'script.html#local-pricing-fail-closed'}
+  );
+  await assert.rejects(
+    context._localPointsCheck(),
+    (error) => /收费标准尚未就绪/.test(String(error && error.message))
+  );
+  assert.ok(createdGate);
 });

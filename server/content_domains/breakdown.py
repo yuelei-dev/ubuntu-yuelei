@@ -689,9 +689,7 @@ def handle_local_upload(handler, user):
     maximum = 20 * 1024 * 1024 if media_type == "image" else 200 * 1024 * 1024
     if content_length <= 0 or content_length > maximum:
         return handler._send(413, {"detail": "图片最大 20MB，视频最大 200MB"})
-    cost = points_domain.cost_of("breakdown", {
-        "media_type": media_type, "mode": _BREAKDOWN_MODE_REVERSE_PROMPT,
-    })
+    cost = points_domain.breakdown_local_upload_cost()
     temp_path = ""
     upload_token = __import__("uuid").uuid4().hex
     suffix = allowed[media_type][content_type]

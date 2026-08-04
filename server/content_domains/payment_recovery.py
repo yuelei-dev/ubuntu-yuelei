@@ -1,8 +1,5 @@
 # -*- coding: utf-8 -*-
 """Durable paid-job recovery helpers shared by content workers."""
-from contextlib import closing
-
-
 def refund_once(jdb, jobs_store, points_domain, job_id, username, cost):
     def refund(refund_username, amount):
         try:
@@ -20,13 +17,7 @@ def refund_once(jdb, jobs_store, points_domain, job_id, username, cost):
 
 def retry_failed_refunds(jdb, jobs_store, points_domain, limit=100):
     """Retry only persisted unpaid refunds; unrelated errors cannot starve them."""
-    bounded = max(1, min(int(limit or 100), 500))
-    with closing(jdb()) as connection:
-        rows = connection.execute(
-            "SELECT id,username,cost FROM jobs "
-            "WHERE status='error' AND refunded=0 AND cost>0 "
-            "ORDER BY id ASC LIMIT ?", (bounded,),
-        ).fetchall()
+    rows = jobs_store.pending_refunds(jdb, limit)
     recovered = 0
     for row in rows:
         if refund_once(

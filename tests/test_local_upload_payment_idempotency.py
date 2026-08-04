@@ -21,7 +21,7 @@ class _IdempotentPoints:
         self._lock = threading.Lock()
 
     @staticmethod
-    def cost_of(kind, payload=None):
+    def breakdown_local_upload_cost():
         return 20
 
     @staticmethod
@@ -399,6 +399,62 @@ class RefundRecoveryTests(unittest.TestCase):
             with closing(connect()) as connection:
                 self.assertEqual(
                     connection.execute("SELECT refunded FROM jobs WHERE id=?", (target,)).fetchone()[0],
+                    1,
+                )
+
+    def test_process_exit_after_refund_claim_converges_on_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "jobs.db"
+            connect = self._jdb(database)
+            with closing(connect()) as connection:
+                target = connection.execute(
+                    "CREATE TABLE jobs(id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT,"
+                    "username TEXT,cost INTEGER,status TEXT,refunded INTEGER DEFAULT 0)"
+                )
+                target = connection.execute(
+                    "INSERT INTO jobs(kind,username,cost,status,refunded) "
+                    "VALUES('breakdown','alice',20,'error',0)"
+                ).lastrowid
+                connection.commit()
+
+            class RestartedPoints:
+                crash = True
+                calls = []
+
+                @classmethod
+                def refund_points(cls, username, amount, reason="", transaction_key=""):
+                    cls.calls.append(transaction_key)
+                    if cls.crash:
+                        raise SystemExit("process exited after lease claim")
+                    return 100
+
+            with mock.patch.object(self.core, "jdb", connect), mock.patch.object(
+                self.core, "_domains", return_value=(mock.Mock(), RestartedPoints, mock.Mock())
+            ):
+                with self.assertRaises(SystemExit):
+                    self.core._refund_once(target, "alice", 20)
+                with closing(connect()) as connection:
+                    pending = connection.execute(
+                        "SELECT refunded,refund_lease_token FROM jobs WHERE id=?",
+                        (target,),
+                    ).fetchone()
+                    self.assertEqual(pending["refunded"], 2)
+                    self.assertTrue(pending["refund_lease_token"])
+                    connection.execute(
+                        "UPDATE jobs SET refund_lease_until=0 WHERE id=?", (target,)
+                    )
+                    connection.commit()
+                RestartedPoints.crash = False
+                self.assertEqual(self.core._retry_failed_refunds(limit=10), 1)
+                self.assertEqual(self.core._retry_failed_refunds(limit=10), 0)
+
+            expected = "job:%d:refund" % target
+            self.assertEqual(RestartedPoints.calls, [expected, expected])
+            with closing(connect()) as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT refunded FROM jobs WHERE id=?", (target,)
+                    ).fetchone()[0],
                     1,
                 )
 

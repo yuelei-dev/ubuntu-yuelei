@@ -261,6 +261,11 @@ class Pr171TestRuntimeCompatTests(unittest.TestCase):
         self.assertIn('getattr(video_domain, "seedance_upscale_is_open"', block)
 
     def test_manifest_contains_only_test_runtime_targets(self):
+        self.assertNotIn(
+            "yuelei-dev/ubuntu-yuelei#182",
+            self.manifest.get("forward_ports", []),
+            "PR171's three-file overlay must not claim to deploy PR182 runtime files",
+        )
         self.assertEqual(
             [entry["source"] for entry in self.manifest["deploy_files"]],
             [

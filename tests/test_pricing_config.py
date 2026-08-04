@@ -271,6 +271,15 @@ class RuntimePricingIntegrationTests(PricingConfigTests):
         self.assertEqual(charged, 100)
         self.assertEqual(self.points.breakdown_batch_refund(charged, 4, 2), 50)
 
+    def test_local_upload_and_link_breakdown_prices_never_cross(self):
+        self.save("breakdown.per_link", 11)
+        self.save("breakdown.local_upload", 37)
+        self.assertEqual(
+            self.points.cost_of("breakdown", {"url": "https://example.test/1"}),
+            11,
+        )
+        self.assertEqual(self.points.breakdown_local_upload_cost(), 37)
+
 
 if __name__ == "__main__":
     unittest.main()

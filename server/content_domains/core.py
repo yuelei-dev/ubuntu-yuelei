@@ -271,6 +271,7 @@ def init_db():
         _ensure_column(c, "jobs", "refunded", "INTEGER DEFAULT 0")  # 退点幂等键(#187)
         _ensure_column(c, "jobs", "owner", "TEXT")                  # 归属服务(#511)，见 SERVICE_OWNER
         _ensure_column(c, "jobs", "service_sha", "TEXT")            # 任务执行版本：建任务时写入 .deploy-version 的 SHA，历史行 NULL=版本未知
+        jobs_store.ensure_refund_lease_columns_on_conn(c)
         submission_idempotency.ensure_table(c)
         c.commit()
     feature_flags.init_db()

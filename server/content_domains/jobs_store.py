@@ -20,7 +20,14 @@ content_jobs.db 的 jobs 表被三个进程共写：
 import json
 import os
 import time
+import uuid
 from contextlib import closing
+
+
+REFUND_UNCLAIMED = 0
+REFUND_CONFIRMED = 1
+REFUND_PENDING = 2
+REFUND_LEASE_SECONDS = 45
 
 # ship 部署时写入的精确 commit SHA（content_api.py 所在目录，单行文本）。
 # 健康检查每次读文件；建任务写 jobs.service_sha 用启动时的缓存值，不每次碰盘。
@@ -52,7 +59,10 @@ SERVICE_SHA = _read_service_sha()
 def public_dict(row, phase=None):
     data = {key: row[key] for key in (
         "id", "kind", "username", "cost", "status", "result", "error", "created_at", "updated_at")}
-    data["refunded"] = bool(row["refunded"]) if "refunded" in row.keys() else False
+    refund_state = int(row["refunded"] or 0) if "refunded" in row.keys() else 0
+    data["refunded"] = refund_state == REFUND_CONFIRMED
+    if refund_state == REFUND_PENDING:
+        data["refund_pending"] = True
     if data.get("result"):
         try:
             data["result"] = json.loads(data["result"])
@@ -101,6 +111,21 @@ def ensure_service_sha_column(jdb):
         c.commit()
 
 
+def ensure_refund_lease_columns_on_conn(conn):
+    """增加可恢复退款租约列；旧行保持未认领状态。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "refund_lease_token" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN refund_lease_token TEXT")
+    if "refund_lease_until" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN refund_lease_until INTEGER DEFAULT 0")
+
+
+def ensure_refund_lease_columns(jdb):
+    with closing(jdb()) as c:
+        ensure_refund_lease_columns_on_conn(c)
+        c.commit()
+
+
 def set_terminal(jdb, job_id, status, result=None, error=None, from_states=("running",)):
     """CAS 抢终态：仅当当前状态在 from_states 内才迁移，返回是否抢到(rowcount>=1)。
 
@@ -140,16 +165,20 @@ def claim_running(jdb, job_id):
         return cur.rowcount >= 1
 
 
-def refund_once(jdb, job_id, username, cost, refund):
-    """退点 job 级幂等：refunded 列 CAS，仅第一次真正加回点数(#187)。
+def _release_refund_lease(jdb, job_id, lease_token):
+    with closing(jdb()) as c:
+        c.execute(
+            "UPDATE jobs SET refunded=?,refund_lease_token=NULL,refund_lease_until=0 "
+            "WHERE id=? AND refunded=? AND refund_lease_token=?",
+            (REFUND_UNCLAIMED, job_id, REFUND_PENDING, lease_token))
+        c.commit()
 
-    先置位再退点，保证「最多退一次」；但退点若真的失败，必须把 refunded 放回 0，
-    否则这条 job 被永久标记「已退过」，用户的点再也拿不回来。
 
-    refund(username, cost) -> 真值表示退点成功。调用方各自决定怎么退：
-        content_api  points.safe_refund_points（吞异常，永远算成功）
-        imggen_api   auth 的 /api/auth/points/refund（无兜底，失败要回滚）
-        leadgen_api  auth 优先 + 直写 users.db 兜底
+def refund_once(jdb, job_id, username, cost, refund, lease_seconds=REFUND_LEASE_SECONDS):
+    """可恢复退点：0=未处理、2=租约处理中、1=上游已确认。
+
+    只有持有当前随机租约的调用方可落最终 1。进程在 CAS 后、发网前退出时会保留状态 2；
+    租约过期后 scanner 使用同一稳定交易键重放，避免永久漏退和双 scanner 重复执行。
     """
     try:
         cost = int(cost or 0)
@@ -157,15 +186,50 @@ def refund_once(jdb, job_id, username, cost, refund):
         cost = 0
     if cost <= 0:
         return False
+    try:
+        lease_seconds = max(1, int(lease_seconds or REFUND_LEASE_SECONDS))
+    except (TypeError, ValueError):
+        lease_seconds = REFUND_LEASE_SECONDS
+    now = int(time.time())
+    lease_token = uuid.uuid4().hex
     with closing(jdb()) as c:
-        # 双重保险：仅当终态确为 error 且尚未退过，才置位并退点
-        cur = c.execute("UPDATE jobs SET refunded=1 WHERE id=? AND refunded=0 AND status='error'", (job_id,))
+        c.execute("BEGIN IMMEDIATE")
+        ensure_refund_lease_columns_on_conn(c)
+        cur = c.execute(
+            "UPDATE jobs SET refunded=?,refund_lease_token=?,refund_lease_until=? "
+            "WHERE id=? AND status='error' AND (COALESCE(refunded,0)=? OR "
+            "(refunded=? AND COALESCE(refund_lease_until,0)<=?))",
+            (REFUND_PENDING, lease_token, now + lease_seconds, job_id,
+             REFUND_UNCLAIMED, REFUND_PENDING, now))
         c.commit()
         if cur.rowcount < 1:
-            return False   # 已退过 / 非 error 终态，跳过
-    if refund(username, cost):
-        return True
-    with closing(jdb()) as c:   # 退点没成功，把幂等锁放回去，留给下次重试
-        c.execute("UPDATE jobs SET refunded=0 WHERE id=? AND refunded=1", (job_id,))
+            return False
+    try:
+        succeeded = bool(refund(username, cost))
+    except Exception:
+        _release_refund_lease(jdb, job_id, lease_token)
+        raise
+    if not succeeded:
+        _release_refund_lease(jdb, job_id, lease_token)
+        return False
+    with closing(jdb()) as c:
+        cur = c.execute(
+            "UPDATE jobs SET refunded=?,refund_lease_token=NULL,refund_lease_until=0 "
+            "WHERE id=? AND refunded=? AND refund_lease_token=?",
+            (REFUND_CONFIRMED, job_id, REFUND_PENDING, lease_token))
         c.commit()
-    return False
+        return cur.rowcount >= 1
+
+
+def pending_refunds(jdb, limit=100):
+    """只返回到期的退款任务，避免被无关 error 行饿死。"""
+    bounded = max(1, min(int(limit or 100), 500))
+    now = int(time.time())
+    with closing(jdb()) as c:
+        ensure_refund_lease_columns_on_conn(c)
+        c.commit()
+        return c.execute(
+            "SELECT id,username,cost FROM jobs WHERE status='error' AND cost>0 AND "
+            "(COALESCE(refunded,0)=? OR (refunded=? AND COALESCE(refund_lease_until,0)<=?)) "
+            "ORDER BY id ASC LIMIT ?",
+            (REFUND_UNCLAIMED, REFUND_PENDING, now, bounded)).fetchall()

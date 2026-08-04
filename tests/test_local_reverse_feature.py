@@ -409,6 +409,8 @@ class LocalReverseFeatureSourceTests(unittest.TestCase):
         self.assertIn("'Idempotency-Key':localPending.key", self.ui)
         self.assertIn("x.d.code==='idempotency_in_progress'", self.ui)
         self.assertIn("x.d.code==='idempotency_conflict'", self.ui)
+        self.assertIn("job&&job.refunded===true?'已退点':'退款处理中'", self.ui)
+        self.assertIn("+_localRefundStatus(d)", self.ui)
 
     def test_nginx_streams_two_hundred_megabyte_uploads(self):
         self.assertIn("location = /api/gen/breakdown/local-upload", self.nginx)
