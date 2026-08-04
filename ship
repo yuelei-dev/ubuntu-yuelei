@@ -494,8 +494,8 @@ fi' >/dev/null 2>&1 && echo "  ✓ 服务器 checkout 提交保护已安装" || 
 # 5. 验证 + 给回滚命令
 echo "==> 5/5 验证"
 if [ -n "$OVERLAY_MANIFEST" ]; then
-  HEALTH_TARGET="测试服本机 nginx /api/gen/health"
-  HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: huangquechuanmei.com' http://127.0.0.1/api/gen/health")" || HEALTH_CODE=000
+  HEALTH_TARGET="测试服本机 HTTPS/SNI nginx /api/gen/health"
+  HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --noproxy '*' --resolve 'huangquechuanmei.com:443:127.0.0.1' https://huangquechuanmei.com/api/gen/health")" || HEALTH_CODE=000
 else
   HEALTH_TARGET="$HEALTH_URL"
   HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10) || HEALTH_CODE=000
@@ -525,8 +525,10 @@ required = {
     'grok_video.v1_5.480p.per_sec', 'grok_video.v1_5.720p.per_sec',
     'grok_video.v1_5.1080p.per_sec',
 }
-req = urllib.request.Request('http://127.0.0.1/api/gen/pricing', headers={'Host': 'huangquechuanmei.com'})
-with urllib.request.urlopen(req, timeout=10) as response:
+# 显式禁用环境代理并直连测试服 content 进程，避免 HTTP(S)_PROXY 把本机探针带离测试机。
+req = urllib.request.Request('http://127.0.0.1:8096/api/gen/pricing')
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(req, timeout=10) as response:
     data = json.load(response)
 values = data.get('values') if isinstance(data, dict) else None
 if not isinstance(values, dict) or not required.issubset(values):

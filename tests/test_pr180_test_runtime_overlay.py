@@ -114,7 +114,15 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         preflight = SHIP.index('echo "==> 2.5/5 test-runtime 全量预哈希')
         deployment_loop = SHIP.index('for f in "$@"; do\n  if [ -n "$OVERLAY_MANIFEST" ]')
         self.assertLess(preflight, deployment_loop)
-        self.assertIn("测试服本机 nginx /api/gen/health", SHIP)
+        self.assertIn("测试服本机 HTTPS/SNI nginx /api/gen/health", SHIP)
+        self.assertIn("--noproxy '*'", SHIP)
+        self.assertIn("--resolve 'huangquechuanmei.com:443:127.0.0.1'", SHIP)
+        self.assertIn("https://huangquechuanmei.com/api/gen/health", SHIP)
+        self.assertIn("http://127.0.0.1:8096/api/gen/pricing", SHIP)
+        self.assertIn("urllib.request.ProxyHandler({})", SHIP)
+        self.assertIn("opener.open(req, timeout=10)", SHIP)
+        self.assertNotIn("urllib.request.urlopen(req, timeout=10)", SHIP)
+        self.assertNotIn("http://127.0.0.1/api/gen/pricing", SHIP)
         self.assertIn("权威价格接口返回完整 13 key", SHIP)
 
     def test_ship_arms_automatic_restore_until_all_postconditions_pass(self):
