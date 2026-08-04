@@ -48,6 +48,20 @@ class Pr180OverlayManifestTests(unittest.TestCase):
             result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_resolve_preserves_empty_service_column_for_static_files(self):
+        source = "deploy/test-runtime/pr180/runtime/site/admin/index.html"
+        result = subprocess.run(
+            ["python", str(ROOT / "scripts/test_runtime_overlay.py"), "resolve",
+             str(MANIFEST_PATH.relative_to(ROOT)), source],
+            cwd=ROOT, text=True, capture_output=True,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        target, services, state, digest = result.stdout.strip().split("\t")
+        self.assertEqual("/var/www/huangquechuanmei/admin/index.html", target)
+        self.assertEqual("-", services)
+        self.assertEqual("sha256", state)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
 
 class Pr180OverlayPricingContractTests(unittest.TestCase):
     def test_test_only_video_features_are_preserved(self):

@@ -100,7 +100,7 @@ def resolve(path, source):
     entry = matches[0]
     print("\t".join((
         entry["target"],
-        " ".join(entry["services"]),
+        " ".join(entry["services"]) or "-",
         entry["expected_target_state"],
         entry.get("expected_target_sha256") or "-",
     )))

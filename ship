@@ -243,6 +243,7 @@ if [ -n "$OVERLAY_MANIFEST" ]; then
   for f in "$@"; do
     line="$(resolve_overlay "$f")" || exit 1
     IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    [ "$svc" = "-" ] && svc=""
     add_svc "$svc"
     case "$expected_state" in
       sha256)
@@ -270,6 +271,7 @@ if [ -n "$OVERLAY_MANIFEST" ]; then
   for f in "$@"; do
     line="$(resolve_overlay "$f")" || exit 1
     IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    [ "$svc" = "-" ] && svc=""
     if [ "$expected_state" = "sha256" ]; then
       rel="${remote_file#/}"
       parent="${rel%/*}"
@@ -331,6 +333,7 @@ for f in "$@"; do
   if [ -n "$OVERLAY_MANIFEST" ]; then
     line="$(resolve_overlay "$f")" || exit 1
     IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    [ "$svc" = "-" ] && svc=""
     dest="${remote_file%/*}/"
   else
     case "$f" in
