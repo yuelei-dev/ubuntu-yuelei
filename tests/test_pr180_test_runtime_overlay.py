@@ -116,6 +116,8 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         self.assertLess(preflight, deployment_loop)
         self.assertIn("测试服本机 HTTPS/SNI nginx /api/gen/health", SHIP)
         self.assertIn("--noproxy '*'", SHIP)
+        self.assertIn("HEALTH_DEADLINE=$(( $(date +%s) + SERVICE_WAIT_SECONDS ))", SHIP)
+        self.assertIn("等待健康接口就绪（当前 HTTP $HEALTH_CODE）", SHIP)
         self.assertIn("--resolve 'huangquechuanmei.com:443:127.0.0.1'", SHIP)
         self.assertIn("https://huangquechuanmei.com/api/gen/health", SHIP)
         self.assertIn("http://127.0.0.1:8096/api/gen/pricing", SHIP)
