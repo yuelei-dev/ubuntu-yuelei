@@ -67,8 +67,9 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
             log = pathlib.Path(os.environ["FAKE_REMOTE_LOG"])
             with log.open("a", encoding="utf-8") as f:
                 f.write("SSH " + command + "\\n")
+            stdin_payload = ""
             if " bash -s" in command or command.rstrip().endswith("python3 -"):
-                sys.stdin.read()
+                stdin_payload = sys.stdin.read()
             if "sudo test -f '/home/ubuntu/hq-drift/active_overlays.json'" in command:
                 raise SystemExit(1)
             if "sudo sha256sum '" in command and "cut -d" in command:
@@ -91,10 +92,16 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
             if "--verify-deploy" in command and os.environ.get("FAIL_STAGE") == "verify":
                 raise SystemExit(1)
             if "curl -sS -o /dev/null -w" in command:
+                if os.environ.get("HTTPS_PROXY") == "http://malicious.invalid:9" and "--noproxy '*'" not in command:
+                    raise SystemExit(96)
                 print("503" if os.environ.get("FAIL_STAGE") == "health" else "200", end="")
                 raise SystemExit(0)
-            if command.rstrip().endswith("python3 -") and os.environ.get("FAIL_STAGE") == "pricing":
-                raise SystemExit(1)
+            if command.rstrip().endswith("python3 -"):
+                if os.environ.get("HTTP_PROXY") == "http://malicious.invalid:9":
+                    if "urllib.request.ProxyHandler({})" not in stdin_payload or "opener.open(req, timeout=10)" not in stdin_payload:
+                        raise SystemExit(95)
+                if os.environ.get("FAIL_STAGE") == "pricing":
+                    raise SystemExit(1)
             if "--activate-overlay" in command and os.environ.get("FAIL_STAGE") == "activate":
                 raise SystemExit(1)
             if "HQ_DRIFT_REF=origin/baseline/test-server" in command and os.environ.get("FAIL_STAGE") == "patrol":
@@ -159,6 +166,24 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
                 result = self.run_ship(FAIL_STAGE=stage)
                 self.assert_restore_ran(result)
                 self.assertEqual(str(len(SOURCES)), self.push_count.read_text())
+
+    def test_malicious_proxy_environment_still_uses_local_probes(self):
+        result = self.run_ship(
+            HTTP_PROXY="http://malicious.invalid:9",
+            HTTPS_PROXY="http://malicious.invalid:9",
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertNotIn("RESTORE_EXECUTED", self.read_log())
+        blessings = [line for line in self.read_log().splitlines() if line.startswith("BLESS_SUCCESS ")]
+        self.assertEqual(1, len(blessings))
+
+    def test_malicious_proxy_environment_probe_failure_restores_without_bless(self):
+        result = self.run_ship(
+            HTTP_PROXY="http://malicious.invalid:9",
+            HTTPS_PROXY="http://malicious.invalid:9",
+            FAIL_STAGE="pricing",
+        )
+        self.assert_restore_ran(result)
 
     def test_success_disarms_restore_only_after_patrol(self):
         result = self.run_ship()
