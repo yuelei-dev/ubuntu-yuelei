@@ -106,7 +106,12 @@ def init_db():
     # 任务扣点/退点接入审计后，这张表按任务量增长（原来只有人工加减点，几乎不涨）。
     # 按用户查流水是后台最常用的路径，没索引会随表全扫。
     c.execute("CREATE INDEX IF NOT EXISTS idx_points_audit_user ON points_audit(username, id DESC)")
-    _ensure_points_transactions(c)
+    try:
+        _ensure_points_transactions(c)
+    except Exception:
+        c.rollback()
+        c.close()
+        raise
     c.execute("""CREATE TABLE IF NOT EXISTS friendships(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         username TEXT NOT NULL,
@@ -1102,6 +1107,20 @@ def _ensure_points_transactions(c):
     movement. Deployed databases may or may not already have an audit
     transaction_key column.
     """
+    audit_columns = {
+        row["name"] for row in c.execute("PRAGMA table_info(points_audit)").fetchall()
+    }
+    if "transaction_key" in audit_columns:
+        duplicate = c.execute(
+            "SELECT transaction_key,COUNT(*) AS row_count "
+            "FROM points_audit "
+            "WHERE transaction_key IS NOT NULL AND transaction_key<>'' "
+            "GROUP BY transaction_key HAVING COUNT(*)>1 LIMIT 1"
+        ).fetchone()
+        if duplicate:
+            raise PointsTransactionConflict(
+                "legacy transaction_key is ambiguous across multiple audit rows"
+            )
     c.execute("""CREATE TABLE IF NOT EXISTS points_transactions(
         transaction_key TEXT PRIMARY KEY,
         username TEXT NOT NULL,
@@ -1113,9 +1132,6 @@ def _ensure_points_transactions(c):
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
     )""")
-    audit_columns = {
-        row["name"] for row in c.execute("PRAGMA table_info(points_audit)").fetchall()
-    }
     if "transaction_key" not in audit_columns:
         return
     rows = c.execute(
@@ -1134,16 +1150,24 @@ def _ensure_points_transactions(c):
             "user_id": int(user["id"]) if user else 0,
             "points": int(row["after_points"]),
         }
+        created_at = int(row["created_at"] or 0)
         existing = c.execute(
-            "SELECT username,kind,amount,status FROM points_transactions "
+            "SELECT username,kind,amount,status,result_json,created_at "
+            "FROM points_transactions "
             "WHERE transaction_key=?", (str(row["transaction_key"]),)
         ).fetchone()
         if existing:
+            existing_result = (
+                json.loads(existing["result_json"])
+                if existing["result_json"] else None
+            )
             if (existing["username"], existing["kind"], int(existing["amount"]),
-                    existing["status"]) != (
-                    row["username"], kind, amount, "success"):
+                    existing["status"], existing_result,
+                    int(existing["created_at"])) != (
+                    row["username"], kind, amount, "success", snapshot,
+                    created_at):
                 raise PointsTransactionConflict(
-                    "legacy transaction_key has conflicting audit parameters"
+                    "legacy transaction_key conflicts with its transaction snapshot"
                 )
             continue
         c.execute(
@@ -1152,7 +1176,7 @@ def _ensure_points_transactions(c):
             "VALUES(?,?,?,?,?,?,?,?,?)",
             (str(row["transaction_key"]), row["username"], kind, amount,
              "success", json.dumps(snapshot, ensure_ascii=False), None,
-             int(row["created_at"] or 0), int(row["created_at"] or 0)),
+             created_at, created_at),
         )
 
 
@@ -1174,10 +1198,11 @@ def _points_transaction_replay(c, key, username, kind, amount):
     return result, row["error_code"]
 
 
-def _record_points_transaction(c, key, username, kind, amount, result, error):
+def _record_points_transaction(c, key, username, kind, amount, result, error,
+                               created_at=None):
     if not key:
         return
-    now = int(time.time())
+    now = int(time.time()) if created_at is None else int(created_at)
     c.execute(
         "INSERT INTO points_transactions"
         "(transaction_key,username,kind,amount,status,result_json,error_code,created_at,updated_at) "
@@ -1189,23 +1214,24 @@ def _record_points_transaction(c, key, username, kind, amount, result, error):
 
 
 def _write_audit(c, who_admin, username, delta, before, after, reason,
-                 transaction_key=""):
+                 transaction_key="", created_at=None):
     """在【同一个事务里】写审计流水。分开写会出现「扣了点但审计没记」或反过来。"""
     columns = {
         row["name"] for row in c.execute("PRAGMA table_info(points_audit)").fetchall()
     }
+    created_at = int(time.time()) if created_at is None else int(created_at)
     if transaction_key and "transaction_key" in columns:
         c.execute(
             "INSERT INTO points_audit(who_admin, username, delta, before_points, after_points, reason, created_at, transaction_key) "
             "VALUES(?,?,?,?,?,?,?,?)",
             (who_admin, username, delta, before, after, (reason or "")[:120],
-             int(time.time()), transaction_key))
+             created_at, transaction_key))
     else:
         c.execute(
             "INSERT INTO points_audit(who_admin, username, delta, before_points, after_points, reason, created_at) "
             "VALUES(?,?,?,?,?,?,?)",
             (who_admin, username, delta, before, after, (reason or "")[:120],
-             int(time.time())))
+             created_at))
 
 
 def deduct_points(username, amount, reason="", transaction_key=""):
@@ -1259,11 +1285,14 @@ def deduct_points(username, amount, reason="", transaction_key=""):
             c.commit()
             return None, "not_found"
         result = public_points(row)
+        transaction_created_at = int(time.time())
         if amount:
             _write_audit(c, SYSTEM_ACTOR, username, -amount, before,
-                         int(row["points"] or 0), reason, transaction_key)
+                         int(row["points"] or 0), reason, transaction_key,
+                         created_at=transaction_created_at)
         _record_points_transaction(
-            c, transaction_key, username, "deduct", amount, result, None
+            c, transaction_key, username, "deduct", amount, result, None,
+            created_at=transaction_created_at
         )
         c.commit()
         return result, None
@@ -1316,11 +1345,14 @@ def refund_points(username, amount, reason="", transaction_key=""):
             c.commit()
             return None, "not_found"
         result = public_points(row)
+        transaction_created_at = int(time.time())
         if amount:
             _write_audit(c, SYSTEM_ACTOR, username, amount, before,
-                         int(row["points"] or 0), reason, transaction_key)
+                         int(row["points"] or 0), reason, transaction_key,
+                         created_at=transaction_created_at)
         _record_points_transaction(
-            c, transaction_key, username, "refund", amount, result, None
+            c, transaction_key, username, "refund", amount, result, None,
+            created_at=transaction_created_at
         )
         c.commit()
         return result, None

@@ -212,6 +212,93 @@ class PointsTransactionIdempotencyTests(unittest.TestCase):
         self.assertEqual(self._count("points_audit"), 1)
         self.assertEqual(self._count("points_transactions"), 1)
 
+    def _prepare_legacy_audit_rows(self, rows, unique=False):
+        with closing(sqlite3.connect(self.auth.DB)) as connection:
+            connection.execute("ALTER TABLE points_audit ADD COLUMN transaction_key TEXT")
+            if unique:
+                connection.execute(
+                    "CREATE UNIQUE INDEX idx_points_audit_transaction_key "
+                    "ON points_audit(transaction_key) WHERE transaction_key IS NOT NULL"
+                )
+            connection.executemany(
+                "INSERT INTO points_audit"
+                "(who_admin,username,delta,before_points,after_points,reason,created_at,transaction_key) "
+                "VALUES('system',?,?,?,?,?,?,?)",
+                rows,
+            )
+            connection.execute("DROP TABLE points_transactions")
+            connection.commit()
+
+    def test_migration_rejects_duplicate_key_with_different_balance_snapshots(self):
+        key = "legacy:duplicate:balance"
+        self._prepare_legacy_audit_rows((
+            ("fang", -3, 10, 7, "first", 100, key),
+            ("fang", -3, 7, 4, "second", 101, key),
+        ))
+        with closing(sqlite3.connect(self.auth.DB)) as connection:
+            connection.execute("UPDATE users SET points=4 WHERE username='fang'")
+            connection.commit()
+
+        with self.assertRaises(self.auth.PointsTransactionConflict):
+            self.auth.init_db()
+        self.assertEqual(self._points(), 4)
+        self.assertEqual(self._count("points_audit"), 2)
+        with closing(sqlite3.connect(self.auth.DB)) as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='points_transactions'"
+            ).fetchone()
+        self.assertIsNone(table)
+
+    def test_migration_rejects_duplicate_key_with_conflicting_parameters(self):
+        key = "legacy:duplicate:params"
+        self._prepare_legacy_audit_rows((
+            ("fang", -3, 10, 7, "first", 100, key),
+            ("other", 3, 10, 13, "second", 101, key),
+        ))
+
+        with self.assertRaises(self.auth.PointsTransactionConflict):
+            self.auth.init_db()
+        self.assertEqual(self._count("points_audit"), 2)
+
+    def test_migration_accepts_single_legacy_row_with_unique_index(self):
+        key = "legacy:unique:charge"
+        self._prepare_legacy_audit_rows((
+            ("fang", -3, 10, 7, "single", 100, key),
+        ), unique=True)
+        with closing(sqlite3.connect(self.auth.DB)) as connection:
+            connection.execute("UPDATE users SET points=7 WHERE username='fang'")
+            connection.commit()
+
+        self.auth.init_db()
+        replay = self.auth.deduct_points("fang", 3, "replay", key)
+        self.assertEqual(replay[0]["points"], 7)
+        self.assertEqual(self._count("points_audit"), 1)
+        self.assertEqual(self._count("points_transactions"), 1)
+
+    def test_migration_rejects_existing_snapshot_balance_or_time_mismatch(self):
+        key = "legacy:snapshot:mismatch"
+        self._prepare_legacy_audit_rows((
+            ("fang", -3, 10, 7, "single", 100, key),
+        ))
+        self.auth.init_db()
+
+        for sql in (
+                "UPDATE points_transactions SET result_json='{\"username\":\"fang\",\"user_id\":1,\"points\":4}'",
+                "UPDATE points_transactions SET created_at=101,updated_at=101"):
+            with self.subTest(sql=sql):
+                with closing(sqlite3.connect(self.auth.DB)) as connection:
+                    connection.execute(sql)
+                    connection.commit()
+                with self.assertRaises(self.auth.PointsTransactionConflict):
+                    self.auth.init_db()
+                with closing(sqlite3.connect(self.auth.DB)) as connection:
+                    connection.execute(
+                        "UPDATE points_transactions SET result_json=?,created_at=100,updated_at=100",
+                        (json.dumps({"username": "fang", "user_id": 1, "points": 7}),),
+                    )
+                    connection.commit()
+
     def test_existing_audit_transaction_key_column_records_new_key(self):
         with closing(sqlite3.connect(self.auth.DB)) as connection:
             connection.execute("ALTER TABLE points_audit ADD COLUMN transaction_key TEXT")
