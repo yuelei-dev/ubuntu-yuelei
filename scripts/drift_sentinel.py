@@ -69,6 +69,7 @@ BACKEND_RUNTIME = {
     'server/func_names.py': '/home/ubuntu/content-api/func_names.py',
     'server/dl_service.py': '/home/ubuntu/dl-service/dl_service.py',
     'server/admin_api.py': '/home/ubuntu/content-api/admin_api.py',
+    'server/pricing_config.py': '/home/ubuntu/content-api/pricing_config.py',
     'scripts/drift_sentinel.py': '/home/ubuntu/hq-drift/drift_sentinel.py',
 }
 
@@ -261,8 +262,45 @@ def _stale_reason(item, drift_kind, git_path):
     return '登记为 %s 例外，当前为 %s 且 drift_kind/指纹与登记不符' % (item['drift_kind'], drift_kind)
 
 
+def _test_runtime_overlay_target(git_path):
+    """Resolve a committed overlay artifact through its sibling manifest.
+
+    Only overlay artifact paths use this indirection. Ordinary source paths keep
+    their stable mapping, so an old deployment manifest cannot shadow a future
+    normal deployment of the same source file.
+    """
+    match = re.fullmatch(r'(deploy/test-runtime/[^/]+)/runtime/.+', git_path)
+    if not match:
+        return None
+    manifest_path = match.group(1) + '/manifest.json'
+    p = git(['show', '%s:%s' % (GIT_REF, manifest_path)], check=False)
+    if p.returncode != 0:
+        return None
+    try:
+        manifest = json.loads(p.stdout.decode('utf-8'))
+        if manifest.get('schema_version') != 1 or not str(manifest.get('target', '')).startswith('test:'):
+            return None
+        matches = [entry for entry in manifest.get('deploy_files', [])
+                   if isinstance(entry, dict) and entry.get('source') == git_path]
+        if len(matches) != 1:
+            return None
+        target = matches[0].get('target')
+        allowed = ('/home/ubuntu/', '/var/www/huangquechuanmei/', '/etc/systemd/system/')
+        if (not isinstance(target, str) or not target.startswith(allowed) or target.endswith('/')
+                or not re.fullmatch(r'[A-Za-z0-9._/-]+', target)):
+            return None
+        if os.path.basename(target) != os.path.basename(git_path):
+            return None
+        return target
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return None
+
+
 def git_path_to_runtime(git_path):
     git_path = git_path.replace('\\', '/')
+    overlay_target = _test_runtime_overlay_target(git_path)
+    if overlay_target:
+        return overlay_target
     if git_path.startswith('site/'):
         return os.path.join(WEBROOT, git_path[len('site/'):])
     if git_path in BACKEND_RUNTIME:
@@ -332,7 +370,7 @@ def diff_paths(git_paths=None, apply_exceptions=True):
     """比对线上与 git。apply_exceptions=False 时（--verify-deploy）完全绕开例外机制。"""
     ensure_repo_ref()
     wanted = sorted(set(git_paths or expected_git_paths()))
-    changed, missing, added = [], [], []
+    changed, missing, added, unmapped = [], [], [], []
     expected_runtime = {}
     for gp in wanted:
         rp = git_path_to_runtime(gp)
@@ -343,6 +381,8 @@ def diff_paths(git_paths=None, apply_exceptions=True):
                 continue
             if md5_file(rp) != git_md5(gp):
                 changed.append(gp)
+        elif git_paths is not None:
+            unmapped.append(gp)
 
     if git_paths is None:
         expected_git = set(expected_runtime)
@@ -355,6 +395,7 @@ def diff_paths(git_paths=None, apply_exceptions=True):
         'changed': sorted(changed),
         'missing': sorted(missing),
         'added': sorted(set(added)),
+        'unmapped': sorted(unmapped),
         'registered': [],
         'exceptions_stale': [],
         'exceptions_stale_reasons': {},
@@ -518,12 +559,15 @@ def handle_verify(paths):
     paths = [p.replace('\\', '/') for p in paths]
     # 部署后校验必须严格：逐一比对 运行文件 == git GIT_REF，完全绕开巡检例外机制。
     d = diff_paths(paths, apply_exceptions=False)
-    total = len(d['changed']) + len(d['missing']) + len(d['added'])
+    total = len(d['changed']) + len(d['missing']) + len(d['added']) + len(d['unmapped'])
     if total == 0:
         log('部署后校验通过：%d 个文件线上 == git %s' % (len(paths), GIT_REF))
         return 0
     print(format_diff(d))
-    log('部署后校验失败：changed=%d missing=%d added=%d' % (len(d['changed']), len(d['missing']), len(d['added'])))
+    if d['unmapped']:
+        print('无法映射到运行路径: ' + ', '.join(d['unmapped']))
+    log('部署后校验失败：changed=%d missing=%d added=%d unmapped=%d' % (
+        len(d['changed']), len(d['missing']), len(d['added']), len(d['unmapped'])))
     return 2
 
 

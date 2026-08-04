@@ -53,9 +53,6 @@ esac
 
 [ $# -lt 2 ] && { echo "用法: ./ship [--exact-files] [--pr <号>] \"提交说明\" 文件1 [文件2 ...]"; exit 1; }
 
-$SSHC -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE" true 2>/dev/null || {
-  echo "❌ 连不上 $REMOTE。设 HQ_REMOTE=user@host（和 HQ_SSH_KEY=私钥路径）再试。"; exit 1; }
-
 # 传文件：有 rsync 就用 rsync；没有（Windows/Git Bash 自带 ssh 但没 rsync）就
 # scp 到 /tmp 再 sudo 安装到位。必须保留原属主 —— 直接 sudo install 会把
 # /var/www 下的文件从 www-data 变成 root。
@@ -89,6 +86,33 @@ push_dir(){
 }
 MSG="$1"; shift
 
+# 测试服运行时 overlay 是一个不可拆分的精确清单：它把测试服已登记功能作为
+# preimage，前向移植已合并功能。必须整单部署、逐目标预哈希，不能挑其中几项。
+OVERLAY_MANIFEST=""
+for target in "$@"; do
+  case "$target" in
+    deploy/test-runtime/*/runtime/*)
+      candidate="${target%%/runtime/*}/manifest.json"
+      if [ -n "$OVERLAY_MANIFEST" ] && [ "$OVERLAY_MANIFEST" != "$candidate" ]; then
+        echo "❌ 一次部署不能混用两个 test-runtime manifest"; exit 1
+      fi
+      OVERLAY_MANIFEST="$candidate"
+      ;;
+  esac
+done
+if [ -n "$OVERLAY_MANIFEST" ]; then
+  [ "$EXACT_FILES" = "1" ] || { echo "❌ test-runtime overlay 必须显式用 --exact-files"; exit 1; }
+  [ -n "$PR_NO" ] || { echo "❌ test-runtime overlay 必须显式传 --pr <号> 落账"; exit 1; }
+  [ "${HQ_SHIP_TARGET:-}" = "test" ] || { echo "❌ test-runtime overlay 只允许 HQ_SHIP_TARGET=test"; exit 1; }
+  case "$REMOTE" in
+    8.148.158.106|*@8.148.158.106) ;;
+    *) echo "❌ test-runtime overlay 的 HQ_REMOTE 必须明确指向测试服 8.148.158.106（收到 '$REMOTE'）"; exit 1 ;;
+  esac
+fi
+
+$SSHC -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE" true 2>/dev/null || {
+  echo "❌ 连不上 $REMOTE。设 HQ_REMOTE=user@host（和 HQ_SSH_KEY=私钥路径）再试。"; exit 1; }
+
 # 登记例外保护：content_domains 走整目录 --delete 同步会清掉测试服手工登记的
 # 兼容层/例外文件（PR #173 盘点）。凡涉及 server/content_domains/ 必须显式
 # --exact-files：只部署列出的文件，且只允许覆盖远端已存在的文件。
@@ -107,13 +131,25 @@ git pull --rebase || { echo "❌ pull 有冲突，先解决再 ship"; exit 1; }
 
 # 2. commit + push（进 git = 自动有备份）
 echo "==> 2/5 commit + push"
-git add "$@" || { echo "❌ 文件路径有误"; exit 1; }
-if git diff --cached --quiet; then
-  echo "  （这些文件没改动，跳过提交）"
+if [ -n "$OVERLAY_MANIFEST" ]; then
+  python3 scripts/test_runtime_overlay.py validate "$OVERLAY_MANIFEST" "$@" \
+    || { echo "❌ test-runtime 精确清单本地校验失败"; exit 1; }
+  for target in "$@"; do git ls-files --error-unmatch "$target" >/dev/null 2>&1 \
+    || { echo "❌ overlay 部署文件未提交到 Git：$target"; exit 1; }; done
+  git diff --quiet -- "$@" && git diff --cached --quiet -- "$@" \
+    || { echo "❌ overlay 只能从已合并的干净文件部署，检测到未提交改动"; exit 1; }
+  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
+    || { echo "❌ overlay 只能部署 origin/main 的精确已合并提交"; exit 1; }
+  echo "  ✓ 精确文件均已提交，HEAD == origin/main；不在部署命令中创建提交"
 else
-  git commit -m "$MSG" || exit 1
+  git add "$@" || { echo "❌ 文件路径有误"; exit 1; }
+  if git diff --cached --quiet; then
+    echo "  （这些文件没改动，跳过提交）"
+  else
+    git commit -m "$MSG" || exit 1
+  fi
+  git push || { echo "❌ push 失败（先 pull？）"; exit 1; }
 fi
-git push || { echo "❌ push 失败（先 pull？）"; exit 1; }
 
 # 3. 部署每个文件到对应位置 + 记下要重启的服务
 echo "==> 3/5 部署到服务器"
@@ -195,8 +231,77 @@ fi
 echo "    ✓ $svc 重启生效、配置已加载"
 RS
 }
+
+resolve_overlay(){
+  python3 scripts/test_runtime_overlay.py resolve "$OVERLAY_MANIFEST" "$1"
+}
+
+# 所有目标先验完再写第一个文件；任一 preimage 漂移都整单 fail-closed。
+OVERLAY_BACKUP_DIR=""
+if [ -n "$OVERLAY_MANIFEST" ]; then
+  echo "==> 2.5/5 test-runtime 全量预哈希（写入前）"
+  for f in "$@"; do
+    line="$(resolve_overlay "$f")" || exit 1
+    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    add_svc "$svc"
+    case "$expected_state" in
+      sha256)
+        actual_sha="$($SSHC "$REMOTE" "sudo sha256sum '$remote_file' 2>/dev/null | cut -d ' ' -f1")" \
+          || { echo "  ❌ 无法读取目标：$remote_file"; exit 1; }
+        [ "$actual_sha" = "$expected_sha" ] \
+          || { echo "  ❌ preimage 漂移：$remote_file（整单未写入）"; exit 1; }
+        ;;
+      absent)
+        $SSHC "$REMOTE" "sudo test ! -e '$remote_file'" \
+          || { echo "  ❌ 预期不存在但目标已出现：$remote_file（整单未写入）"; exit 1; }
+        ;;
+      *) echo "  ❌ manifest 目标状态非法：$f"; exit 1 ;;
+    esac
+    echo "  ✓ $remote_file preimage=$expected_state"
+  done
+
+  stamp="$($SSHC "$REMOTE" "date -u +%Y%m%dT%H%M%SZ")" || exit 1
+  OVERLAY_BACKUP_DIR="/opt/huangque-deploy-backups/pr${PR_NO}-$(git rev-parse --short=8 HEAD)-${stamp}"
+  $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR'" \
+    || { echo "❌ 无法创建备份目录，整单未写入"; exit 1; }
+  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
+    | $SSHC "$REMOTE" "sudo tee '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" \
+    || { echo "❌ 无法创建回滚脚本，整单未写入"; exit 1; }
+  for f in "$@"; do
+    line="$(resolve_overlay "$f")" || exit 1
+    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    if [ "$expected_state" = "sha256" ]; then
+      rel="${remote_file#/}"
+      parent="${rel%/*}"
+      $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/$parent' && sudo cp -a '$remote_file' '$OVERLAY_BACKUP_DIR/$rel'" \
+        || { echo "❌ 备份失败：$remote_file（整单未写入）"; exit 1; }
+      printf '%s\n' "sudo cp -a '$OVERLAY_BACKUP_DIR/$rel' '$remote_file'" \
+        | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
+    else
+      $SSHC "$REMOTE" "printf '%s\n' '$remote_file' | sudo tee -a '$OVERLAY_BACKUP_DIR/expected-absent.txt' >/dev/null" \
+        || { echo "❌ 备份清单写入失败（整单未写入）"; exit 1; }
+      printf '%s\n' "sudo rm -f '$remote_file'" \
+        | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
+    fi
+  done
+  # 部署会在重启前改版本标记，快照与回滚必须把它一起恢复。
+  version_rel="home/ubuntu/content-api/.deploy-version"
+  $SSHC "$REMOTE" "if sudo test -f '/$version_rel'; then sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/content-api' && sudo cp -a '/$version_rel' '$OVERLAY_BACKUP_DIR/$version_rel'; fi" || exit 1
+  restore_restart="sudo systemctl"
+  restore_restart="$restore_restart restart $RESTART"
+  printf '%s\n' "if sudo test -f '$OVERLAY_BACKUP_DIR/$version_rel'; then sudo cp -a '$OVERLAY_BACKUP_DIR/$version_rel' '/$version_rel'; fi" \
+    "$restore_restart" \
+    | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null && sudo chmod 700 '$OVERLAY_BACKUP_DIR/restore.sh'" || exit 1
+  echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"
+fi
+
 for f in "$@"; do
-  case "$f" in
+  if [ -n "$OVERLAY_MANIFEST" ]; then
+    line="$(resolve_overlay "$f")" || exit 1
+    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
+    dest="${remote_file%/*}/"
+  else
+    case "$f" in
     server/auth_server.py) dest=/home/ubuntu/auth-service/; svc=huangque-auth ;;
     server/content_api.py) dest=/home/ubuntu/content-api/;  svc=huangque-content ;;
     server/content_domains/*) dest=/home/ubuntu/content-api/content_domains/;  svc=huangque-content ;;
@@ -222,8 +327,9 @@ for f in "$@"; do
     site/*)  rel="${f#site/}"
              case "$rel" in */*) dest="$WWW/${rel%/*}/" ;; *) dest="$WWW/" ;; esac
              svc="" ;;
-    *) echo "  ⚠ 不认识 $f —— 不知道部署到哪，跳过（需要的话告诉我加进映射）"; continue ;;
-  esac
+      *) echo "  ⚠ 不认识 $f —— 不知道部署到哪，跳过（需要的话告诉我加进映射）"; continue ;;
+    esac
+  fi
   case "$dest" in /etc/systemd/system/*)
     $SSHC "$REMOTE" "sudo mkdir -p $dest" || { echo "  ❌ $dest 创建失败"; exit 1; } ;;
   esac
@@ -349,19 +455,54 @@ fi' >/dev/null 2>&1 && echo "  ✓ 服务器 checkout 提交保护已安装" || 
 
 # 5. 验证 + 给回滚命令
 echo "==> 5/5 验证"
-if ! HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10); then
-  echo "  ❌ 健康检查请求失败: ${HEALTH_URL} (HTTP ${HEALTH_CODE:-000})"
+if [ -n "$OVERLAY_MANIFEST" ]; then
+  HEALTH_TARGET="测试服本机 nginx /api/gen/health"
+  HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -H 'Host: huangquechuanmei.com' http://127.0.0.1/api/gen/health")" || HEALTH_CODE=000
+else
+  HEALTH_TARGET="$HEALTH_URL"
+  HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10) || HEALTH_CODE=000
+fi
+if [ "$HEALTH_CODE" = "000" ]; then
+  echo "  ❌ 健康检查请求失败: ${HEALTH_TARGET} (HTTP 000)"
   show_service_diagnostics
   exit 1
 fi
 case "$HEALTH_CODE" in
-  2??) echo "  ✓ 健康检查: HTTP $HEALTH_CODE" ;;
+  2??) echo "  ✓ 健康检查: HTTP $HEALTH_CODE（$HEALTH_TARGET）" ;;
   *)
-    echo "  ❌ 健康检查未通过: HTTP $HEALTH_CODE ($HEALTH_URL)"
+    echo "  ❌ 健康检查未通过: HTTP $HEALTH_CODE ($HEALTH_TARGET)"
     show_service_diagnostics
     exit 1
     ;;
 esac
+if [ -n "$OVERLAY_MANIFEST" ]; then
+  $SSHC "$REMOTE" python3 - <<'PY' || { echo "  ❌ 测试服权威价格接口校验失败"; exit 1; }
+import json
+import urllib.request
+
+required = {
+    'avatar', 'talking.per_sec', 'cinematic.motion.per_sec', 'cinematic.duo.per_sec',
+    'cinematic.open.per_sec', 'tryon.single', 'tryon.combo', 'xiaole_video.per_sec',
+    'grok_video.v1.480p.per_sec', 'grok_video.v1.720p.per_sec',
+    'grok_video.v1_5.480p.per_sec', 'grok_video.v1_5.720p.per_sec',
+    'grok_video.v1_5.1080p.per_sec',
+}
+req = urllib.request.Request('http://127.0.0.1/api/gen/pricing', headers={'Host': 'huangquechuanmei.com'})
+with urllib.request.urlopen(req, timeout=10) as response:
+    data = json.load(response)
+values = data.get('values') if isinstance(data, dict) else None
+if not isinstance(values, dict) or not required.issubset(values):
+    raise SystemExit('pricing key set mismatch')
+if any(not isinstance(values[key], int) or isinstance(values[key], bool) or values[key] <= 0 for key in required):
+    raise SystemExit('pricing value invalid')
+print('  ✓ 权威价格接口返回完整 13 key 正整数目录')
+PY
+fi
 SHA=$(git rev-parse --short HEAD)
 echo "✅ 上线完成 | 本次提交 $SHA"
-echo "   ↩ 要回滚这次：  git revert $SHA --no-edit && ./ship \"回滚 $SHA\" $*"
+if [ -n "$OVERLAY_BACKUP_DIR" ]; then
+  echo "   备份快照：$OVERLAY_BACKUP_DIR"
+  echo "   ↩ 精确回滚：ssh $REMOTE sudo '$OVERLAY_BACKUP_DIR/restore.sh'"
+else
+  echo "   ↩ 要回滚这次：  git revert $SHA --no-edit && ./ship \"回滚 $SHA\" $*"
+fi
