@@ -498,7 +498,14 @@ fi' >/dev/null 2>&1 && echo "  ✓ 服务器 checkout 提交保护已安装" || 
 echo "==> 5/5 验证"
 if [ -n "$OVERLAY_MANIFEST" ]; then
   HEALTH_TARGET="测试服本机 HTTPS/SNI nginx /api/gen/health"
-  HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --noproxy '*' --resolve 'huangquechuanmei.com:443:127.0.0.1' https://huangquechuanmei.com/api/gen/health")" || HEALTH_CODE=000
+  HEALTH_DEADLINE=$(( $(date +%s) + SERVICE_WAIT_SECONDS ))
+  while true; do
+    HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --noproxy '*' --resolve 'huangquechuanmei.com:443:127.0.0.1' https://huangquechuanmei.com/api/gen/health")" || HEALTH_CODE=000
+    case "$HEALTH_CODE" in 2??) break ;; esac
+    [ "$(date +%s)" -ge "$HEALTH_DEADLINE" ] && break
+    echo "  等待健康接口就绪（当前 HTTP $HEALTH_CODE）"
+    sleep 1
+  done
 else
   HEALTH_TARGET="$HEALTH_URL"
   HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10) || HEALTH_CODE=000

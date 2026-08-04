@@ -27,6 +27,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.bin_dir.mkdir()
         self.log = Path(self.tmp.name) / "remote.log"
         self.push_count = Path(self.tmp.name) / "push-count"
+        self.health_count = Path(self.tmp.name) / "health-count"
         self.real_git = shutil.which("git")
         self.assertIsNotNone(self.real_git)
         self._write_fake("git", f"""
@@ -102,7 +103,18 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
             if "curl -sS -o /dev/null -w" in command:
                 if os.environ.get("HTTPS_PROXY") == "http://malicious.invalid:9" and "--noproxy '*'" not in command:
                     raise SystemExit(96)
-                print("503" if os.environ.get("FAIL_STAGE") == "health" else "200", end="")
+                health_state = pathlib.Path(os.environ["FAKE_HEALTH_COUNT"])
+                health_count = int(health_state.read_text()) + 1 if health_state.exists() else 1
+                health_state.write_text(str(health_count))
+                if os.environ.get("FAIL_STAGE") == "health":
+                    code = "503"
+                elif os.environ.get("TRANSIENT_HEALTH_502") == "1" and health_count == 1:
+                    code = "502"
+                else:
+                    code = "200"
+                with log.open("a", encoding="utf-8") as f:
+                    f.write("HEALTH %d %s\\n" % (health_count, code))
+                print(code, end="")
                 raise SystemExit(0)
             if command.rstrip().endswith("python3 -"):
                 if os.environ.get("HTTP_PROXY") == "http://malicious.invalid:9":
@@ -144,6 +156,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
             "HQ_SERVICE_WAIT_SECONDS": "1",
             "FAKE_REMOTE_LOG": str(self.log),
             "FAKE_PUSH_COUNT": str(self.push_count),
+            "FAKE_HEALTH_COUNT": str(self.health_count),
         })
         env.update(extra_env)
         return subprocess.run(
@@ -184,6 +197,15 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.assertNotIn("RESTORE_EXECUTED", self.read_log())
         blessings = [line for line in self.read_log().splitlines() if line.startswith("BLESS_SUCCESS ")]
         self.assertEqual(1, len(blessings))
+
+    def test_transient_health_502_retries_then_succeeds(self):
+        result = self.run_ship(TRANSIENT_HEALTH_502="1")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("2", self.health_count.read_text())
+        self.assertIn("等待健康接口就绪（当前 HTTP 502）", result.stdout)
+        self.assertNotIn("RESTORE_EXECUTED", self.read_log())
+        self.assertEqual(1, sum(line.startswith("BLESS_SUCCESS ")
+                                for line in self.read_log().splitlines()))
 
     def test_malicious_proxy_environment_probe_failure_restores_without_bless(self):
         result = self.run_ship(
