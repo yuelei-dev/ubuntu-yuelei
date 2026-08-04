@@ -4,13 +4,15 @@
 
 Prices are positive integer Huangque points. Overrides live in the existing admin
 SQLite database and are read at order acceptance time, so changes do not require a
-service restart. The code catalog remains the fail-safe source for defaults.
+service restart. A successful database read seeds a process-local trusted snapshot;
+database failures use that snapshot or fail closed before points can be deducted.
 """
 
 from contextlib import closing
 import os
 import pathlib
 import sqlite3
+import threading
 import time
 
 
@@ -62,10 +64,6 @@ CATALOG = (
     {"key": "grok_video.v1_5.480p.per_sec", "group": "视频生成", "label": "Grok Video 1.5·480p", "unit": "每秒", "default": 15},
     {"key": "grok_video.v1_5.720p.per_sec", "group": "视频生成", "label": "Grok Video 1.5·720p", "unit": "每秒", "default": 25},
     {"key": "grok_video.v1_5.1080p.per_sec", "group": "视频生成", "label": "Grok Video 1.5·1080p", "unit": "每秒", "default": 44},
-    {"key": "sora.sora_2.720p.per_sec", "group": "视频生成", "label": "Sora 2·720p", "unit": "每秒", "default": 30},
-    {"key": "sora.sora_2_pro.720p.per_sec", "group": "视频生成", "label": "Sora 2 Pro·720p", "unit": "每秒", "default": 90},
-    {"key": "sora.sora_2_pro.1024p.per_sec", "group": "视频生成", "label": "Sora 2 Pro·1024p", "unit": "每秒", "default": 150},
-    {"key": "sora.sora_2_pro.1080p.per_sec", "group": "视频生成", "label": "Sora 2 Pro·1080p", "unit": "每秒", "default": 210},
 )
 
 _BY_KEY = {item["key"]: dict(item) for item in CATALOG}
@@ -75,6 +73,15 @@ class PricingConflict(ValueError):
     pass
 
 
+class PricingUnavailable(RuntimeError):
+    """No trusted price is available, so order acceptance must stop."""
+
+
+_CACHE_LOCK = threading.RLock()
+_TRUSTED_SNAPSHOTS = {}
+_INITIALIZED_DBS = set()
+
+
 def db_path():
     return pathlib.Path(os.environ.get("PRICING_DB") or os.environ.get("ADMIN_DB") or str(BASE / "admin_config.db"))
 
@@ -82,7 +89,8 @@ def db_path():
 def _connect():
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(path), timeout=10)
+    timeout = max(0.01, float(os.environ.get("PRICING_DB_TIMEOUT") or 1.0))
+    conn = sqlite3.connect(str(path), timeout=timeout)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -91,9 +99,28 @@ def _init(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS admin_pricing_config(
         pricing_key TEXT PRIMARY KEY,
         points INTEGER NOT NULL CHECK(points > 0),
+        configured INTEGER NOT NULL DEFAULT 1 CHECK(configured IN (0, 1)),
         updated_by TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        revision INTEGER NOT NULL DEFAULT 0
     )""")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(admin_pricing_config)").fetchall()}
+    if "configured" not in columns:
+        conn.execute("ALTER TABLE admin_pricing_config ADD COLUMN configured INTEGER NOT NULL DEFAULT 1")
+    if "revision" not in columns:
+        conn.execute("ALTER TABLE admin_pricing_config ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
+    # Existing pre-revision rows keep their last timestamp only as a migration
+    # seed. Every subsequent mutation receives a database-generated +1 revision.
+    conn.execute("UPDATE admin_pricing_config SET revision=updated_at WHERE revision=0 AND updated_at>0")
+    conn.execute("""CREATE TABLE IF NOT EXISTS admin_pricing_meta(
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        revision INTEGER NOT NULL
+    )""")
+    conn.execute("INSERT OR IGNORE INTO admin_pricing_meta(id, revision) VALUES(1, 0)")
+    conn.execute("""UPDATE admin_pricing_meta
+                    SET revision=MAX(revision, COALESCE(
+                        (SELECT MAX(revision) FROM admin_pricing_config), 0))
+                    WHERE id=1""")
     conn.execute("""CREATE TABLE IF NOT EXISTS admin_pricing_audit(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pricing_key TEXT NOT NULL,
@@ -107,6 +134,16 @@ def _init(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_pricing_audit_created ON admin_pricing_audit(created_at DESC, id DESC)")
 
 
+def _ensure_initialized(conn):
+    key = _cache_key()
+    with _CACHE_LOCK:
+        if key in _INITIALIZED_DBS:
+            return
+        _init(conn)
+        conn.commit()
+        _INITIALIZED_DBS.add(key)
+
+
 def default_price(key):
     item = _BY_KEY.get(str(key or ""))
     if not item:
@@ -114,38 +151,66 @@ def default_price(key):
     return int(item["default"])
 
 
+def _cache_key():
+    return str(db_path().resolve())
+
+
+def _remember(snapshot):
+    with _CACHE_LOCK:
+        _TRUSTED_SNAPSHOTS[_cache_key()] = dict(snapshot)
+
+
+def _trusted_snapshot():
+    with _CACHE_LOCK:
+        snapshot = _TRUSTED_SNAPSHOTS.get(_cache_key())
+        return dict(snapshot) if snapshot is not None else None
+
+
+def _clear_cache_for_tests():
+    with _CACHE_LOCK:
+        _TRUSTED_SNAPSHOTS.clear()
+        _INITIALIZED_DBS.clear()
+
+
+def _snapshot_from_rows(rows):
+    result = {key: int(item["default"]) for key, item in _BY_KEY.items()}
+    for row in rows:
+        key = row["pricing_key"]
+        if key in result and int(row["points"] or 0) > 0:
+            result[key] = int(row["points"])
+    return result
+
+
+def _read_values():
+    with closing(_connect()) as conn:
+        _ensure_initialized(conn)
+        rows = conn.execute(
+            "SELECT pricing_key, points FROM admin_pricing_config"
+        ).fetchall()
+    snapshot = _snapshot_from_rows(rows)
+    _remember(snapshot)
+    return snapshot
+
+
+def values():
+    try:
+        return _read_values()
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        snapshot = _trusted_snapshot()
+        if snapshot is not None:
+            return snapshot
+        raise PricingUnavailable("收费配置暂不可用，未扣点，请稍后重试") from exc
+
+
 def get_price(key, fallback=None):
-    """Return the current positive integer price; fail safely to the code default."""
+    """Return a trusted positive integer price or stop order acceptance."""
     key = str(key or "")
     item = _BY_KEY.get(key)
     if not item:
         if fallback is None:
             raise KeyError("unknown pricing key: %s" % key)
         return max(1, int(fallback))
-    try:
-        with closing(_connect()) as conn:
-            _init(conn)
-            row = conn.execute(
-                "SELECT points FROM admin_pricing_config WHERE pricing_key=?", (key,)
-            ).fetchone()
-        value = int(row["points"]) if row else int(item["default"])
-        return value if value > 0 else int(item["default"])
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        return int(item["default"])
-
-
-def values():
-    result = {key: int(item["default"]) for key, item in _BY_KEY.items()}
-    try:
-        with closing(_connect()) as conn:
-            _init(conn)
-            rows = conn.execute("SELECT pricing_key, points FROM admin_pricing_config").fetchall()
-        for row in rows:
-            if row["pricing_key"] in result and int(row["points"] or 0) > 0:
-                result[row["pricing_key"]] = int(row["points"])
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        pass
-    return result
+    return int(values()[key])
 
 
 def public_catalog():
@@ -164,7 +229,7 @@ def admin_catalog(audit_limit=50):
     overrides = {}
     audit = []
     with closing(_connect()) as conn:
-        _init(conn)
+        _ensure_initialized(conn)
         overrides = {
             row["pricing_key"]: dict(row)
             for row in conn.execute("SELECT * FROM admin_pricing_config").fetchall()
@@ -174,6 +239,7 @@ def admin_catalog(audit_limit=50):
                FROM admin_pricing_audit ORDER BY id DESC LIMIT ?""",
             (max(1, min(200, int(audit_limit or 50))),),
         ).fetchall()]
+    _remember(_snapshot_from_rows(overrides.values()))
     items = []
     for source in CATALOG:
         item = dict(source)
@@ -181,10 +247,10 @@ def admin_catalog(audit_limit=50):
         item.update({
             "default_points": int(item.pop("default")),
             "points": int(override["points"]) if override else int(source["default"]),
-            "configured": bool(override),
+            "configured": bool(override and override["configured"]),
             "updated_by": override["updated_by"] if override else "",
             "updated_at": int(override["updated_at"]) if override else 0,
-            "version": int(override["updated_at"]) if override else 0,
+            "version": int(override["revision"]) if override else 0,
         })
         items.append(item)
     return {"items": items, "audit": audit}
@@ -225,34 +291,41 @@ def save(actor, body):
     now = int(time.time() * 1000)
 
     with closing(_connect()) as conn:
-        _init(conn)
+        _ensure_initialized(conn)
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
-            "SELECT points, updated_at FROM admin_pricing_config WHERE pricing_key=?", (key,)
+            "SELECT points, configured, revision FROM admin_pricing_config WHERE pricing_key=?", (key,)
         ).fetchone()
-        current_version = int(row["updated_at"]) if row else 0
+        current_version = int(row["revision"]) if row else 0
         before = int(row["points"]) if row else default_price(key)
         if current_version != expected:
             raise PricingConflict("收费标准已被其他管理员修改，请刷新后重试")
-        if action == "reset":
-            conn.execute("DELETE FROM admin_pricing_config WHERE pricing_key=?", (key,))
-            version = 0
-        else:
-            conn.execute(
-                """INSERT INTO admin_pricing_config(pricing_key, points, updated_by, updated_at)
-                   VALUES(?,?,?,?)
-                   ON CONFLICT(pricing_key) DO UPDATE SET
-                     points=excluded.points, updated_by=excluded.updated_by, updated_at=excluded.updated_at""",
-                (key, target, actor, now),
-            )
-            version = now
+        conn.execute("UPDATE admin_pricing_meta SET revision=revision+1 WHERE id=1")
+        version = int(conn.execute(
+            "SELECT revision FROM admin_pricing_meta WHERE id=1"
+        ).fetchone()["revision"])
+        configured = 0 if action == "reset" else 1
+        conn.execute(
+            """INSERT INTO admin_pricing_config
+               (pricing_key, points, configured, updated_by, updated_at, revision)
+               VALUES(?,?,?,?,?,?)
+               ON CONFLICT(pricing_key) DO UPDATE SET
+                 points=excluded.points, configured=excluded.configured,
+                 updated_by=excluded.updated_by, updated_at=excluded.updated_at,
+                 revision=excluded.revision""",
+            (key, target, configured, actor, now, version),
+        )
         conn.execute(
             """INSERT INTO admin_pricing_audit
                (pricing_key, action, before_points, after_points, actor, reason, created_at)
                VALUES(?,?,?,?,?,?,?)""",
             (key, action, before, target, actor, reason, now),
         )
+        snapshot = _snapshot_from_rows(conn.execute(
+            "SELECT pricing_key, points FROM admin_pricing_config"
+        ).fetchall())
         conn.commit()
+    _remember(snapshot)
     return {"key": key, "points": target, "default_points": default_price(key),
             "configured": action != "reset", "updated_by": actor,
             "updated_at": now, "version": version}

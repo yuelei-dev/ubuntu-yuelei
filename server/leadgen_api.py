@@ -558,7 +558,11 @@ class H(BaseHTTPRequestHandler):
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录或登录已过期"})
             body = self._json_body()
-            cost = cost_of(kind, body)
+            try:
+                cost = cost_of(kind, body)
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             # 原来是「先 get_points 查余额，再 add_points 扣」——两步之间有并发超扣窗口。
             # 现在扣点直接走 auth 的 /deduct（BEGIN IMMEDIATE + points>=amount 原子校验），
             # 扣不动就说明余额不足，不建任务。
@@ -588,7 +592,11 @@ class H(BaseHTTPRequestHandler):
             try: page = int(q.get("page", ["1"])[0] or 1)
             except Exception: page = 1
             if not keyword: return self._send(400, {"detail": "缺少关键词"})
-            search_cost = pricing_config.get_price("search")
+            try:
+                search_cost = pricing_config.get_price("search")
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             if get_points(user["username"]) < search_cost: return self._send(402, {"detail": "点数不足", "need": search_cost})
             try:
                 r = tikhub.search(platform, keyword, page=page, video_only=False)

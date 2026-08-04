@@ -571,7 +571,11 @@ class H(BaseHTTPRequestHandler):
             mk = body["model"]
             cq = body["quality"]
             cn = body["count"]
-            cost = banana_cost(mk, cq, cn)
+            try:
+                cost = banana_cost(mk, cq, cn)
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             with _submission_lock:
                 active_jobs = _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
@@ -620,7 +624,11 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"detail": "请先上传或粘贴一张图片"})
             if len(image) > 8 * 1024 * 1024:     # base64 ~8MB ≈ 原图 6MB
                 return self._send(400, {"detail": "图片太大，请压缩后再试"})
-            cost = reverse_cost()
+            try:
+                cost = reverse_cost()
+            except pricing_config.PricingUnavailable as e:
+                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
+                                        "retry_after_ms": 1000})
             deduct_status, deduct_data = deduct_points(user["username"], cost, "reverse")
             if deduct_status == 402:
                 return self._send(402, {"detail": "点数不足", "need": cost})

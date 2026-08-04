@@ -33,6 +33,14 @@ SEEDREAM_VARIANT_COST = {
 # 数量上限必须与 image.gen_image 里的 cap 逐字一致，否则按 N 扣点却只出 cap 张 = 超收。
 _IMAGE_CAP_2 = {"zelong", "zelong2", "xiaole", "seedream"}
 
+_GROK_VIDEO_PRICE_KEYS = {
+    ("grok-imagine-video", "480p"): "grok_video.v1.480p.per_sec",
+    ("grok-imagine-video", "720p"): "grok_video.v1.720p.per_sec",
+    ("grok-imagine-video-1.5", "480p"): "grok_video.v1_5.480p.per_sec",
+    ("grok-imagine-video-1.5", "720p"): "grok_video.v1_5.720p.per_sec",
+    ("grok-imagine-video-1.5", "1080p"): "grok_video.v1_5.1080p.per_sec",
+}
+
 
 def cost_of(kind, body):
     """动态点数：TikHub 按次计费，采集/获客调用数随参数变。约 5x buff 折算成点。"""
@@ -84,7 +92,18 @@ def cost_of(kind, body):
             duration = min(8.7, float(body.get("source_duration") or 0.1))
         else:
             duration = min(15, int(body.get("duration") or 10))
-        rate = pricing_config.get_price("xiaole_video.per_sec")
+        channel = str(body.get("channel") or "grok").strip().lower()
+        if channel == "grok":
+            model = str(body.get("model") or "grok-imagine-video").strip().lower()
+            resolution = str(body.get("resolution") or "720p").strip().lower()
+            price_key = _GROK_VIDEO_PRICE_KEYS.get((model, resolution))
+            if not price_key:
+                # Payload validation normally rejects this first. Keeping the
+                # cost boundary fail-closed prevents an unpriced direct call.
+                raise ValueError("Grok 视频型号或分辨率没有有效收费标准")
+            rate = pricing_config.get_price(price_key)
+        else:
+            rate = pricing_config.get_price("xiaole_video.per_sec")
         return max(rate, int(math.ceil(duration)) * rate)
     if kind == "script_to_video":
         # 提交前一次性冻结全部费用：数字人口播 + 没有命中用户资产的静态素材图。

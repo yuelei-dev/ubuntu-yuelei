@@ -829,8 +829,9 @@ def validate_xiaole_video_payload(payload, username=None):
         duration = _probe_data_video_duration(source)
         if duration <= 0 or duration > 8.7:
             raise ValueError("xAI 官方视频编辑仅支持不超过 8.7 秒的参考视频")
-        cleaned.update({"model": "grok-imagine-video", "reference_video_data": source,
-                        "source_duration": duration, "reference_images": []})
+        cleaned.update({"model": "grok-imagine-video", "resolution": "720p",
+                        "reference_video_data": source, "source_duration": duration,
+                        "reference_images": []})
         return cleaned
 
     model = str(cleaned.get("model") or "grok-imagine-video").strip()

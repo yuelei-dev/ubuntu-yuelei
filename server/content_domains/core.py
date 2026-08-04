@@ -1265,11 +1265,10 @@ class H(BaseHTTPRequestHandler):
                 payloads = video_domain.validate_video_batch_payload(
                     request_body, user["username"], min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS))
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
-            except feature_flags.FeatureDisabled as e:
-                return self._send(503, {"detail": str(e)})
-            except ValueError as e:
-                return self._send(400, {"detail": str(e)[:220]})
-            costs = [points_domain.cost_of("video", body) for body in payloads]
+            except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
+            except ValueError as e: return self._send(400, {"detail": str(e)[:220]})
+            try: costs = [points_domain.cost_of("video", body) for body in payloads]
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             total = sum(costs)
             with _submission_lock:
                 idem_state, idem_response = _idempotency_begin(user["username"], p, idem_key, request_body)
@@ -1403,10 +1402,9 @@ class H(BaseHTTPRequestHandler):
             from . import upstream_guard
             blocked = upstream_guard.exhausted_reason(kind, body)
             if not blocked and kind == "script_to_video" and int(body.get("material_generate_count") or 0) > 0: blocked = upstream_guard.exhausted_reason("image", {"provider": "openai", "quality": "standard", "count": 1})
-            if blocked:
-                return self._send(503, {"detail": blocked, "code": "upstream_exhausted",
-                                        "retry_after_ms": 60000})
-            cost = points_domain.cost_of(kind, body)
+            if blocked: return self._send(503, {"detail": blocked, "code": "upstream_exhausted", "retry_after_ms": 60000})
+            try: cost = points_domain.cost_of(kind, body)
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             with _submission_lock:
                 idem_state, idem_response = _idempotency_begin(user["username"], p, idem_key, request_body)
                 if idem_state == "replay":
@@ -1689,9 +1687,10 @@ class H(BaseHTTPRequestHandler):
             try:
                 search_cost = pricing_config.get_price("search")
                 points_left = points_domain.deduct_points(user["username"], search_cost, "search:" + platform)
+            except pricing_config.PricingUnavailable as e: return self._send(503, {"detail": str(e), "code": "pricing_unavailable", "retry_after_ms": 1000})
             except points_domain.AuthPointsError as e:
                 code = 402 if e.status == 402 else 502
-                return self._send(code, {"detail": e.detail, "need": pricing_config.get_price("search")})
+                return self._send(code, {"detail": e.detail, "need": search_cost})
             try:
                 r = tikhub.search(platform, keyword, page=page, video_only=False)  # 含图文
             except tikhub.TikHubError as e:

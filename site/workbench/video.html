@@ -1817,17 +1817,44 @@
     applyButtonState('omniGenerateBtn', xiaoleEnabled, xiaoleTitle);
     updateVideoCosts();
   }
-  // 果肉/豆姐/欧米(xiaole_video) 与 试衣(tryon) 的前端预估价，必须和后端实扣对上。
-  var XIAOLE_RATE=30;   // 与后端 xiaole_video 30 点/秒一致
+  // 收费提示从后端公开价格目录读取；这里的值只用于网络失败时展示代码默认价。
+  var PRICING_VALUES={
+    'xiaole_video.per_sec':30,
+    'grok_video.v1.480p.per_sec':10,
+    'grok_video.v1.720p.per_sec':12,
+    'grok_video.v1_5.480p.per_sec':15,
+    'grok_video.v1_5.720p.per_sec':25,
+    'grok_video.v1_5.1080p.per_sec':44,
+    'talking.per_sec':10,
+    'cinematic.motion.per_sec':30,
+    'cinematic.duo.per_sec':30,
+    'cinematic.open.per_sec':30,
+    'tryon.single':25,
+    'tryon.combo':40
+  };
+  var GROK_PRICE_KEYS={
+    'grok-imagine-video|480p':'grok_video.v1.480p.per_sec',
+    'grok-imagine-video|720p':'grok_video.v1.720p.per_sec',
+    'grok-imagine-video-1.5|480p':'grok_video.v1_5.480p.per_sec',
+    'grok-imagine-video-1.5|720p':'grok_video.v1_5.720p.per_sec',
+    'grok-imagine-video-1.5|1080p':'grok_video.v1_5.1080p.per_sec'
+  };
+  function xiaoleRate(channel){
+    if(channel!=='grok') return Number(PRICING_VALUES['xiaole_video.per_sec'])||30;
+    var model=grokOperation==='edit'?'grok-imagine-video':selectedGrokModel;
+    var resolution=grokOperation==='edit'?'720p':selectedGrokResolution;
+    return Number(PRICING_VALUES[GROK_PRICE_KEYS[model+'|'+resolution]])||30;
+  }
   function xiaoleCostNote(channel){
+    var rate=xiaoleRate(channel);
     if(channel==='grok' && grokOperation==='edit'){
-      if(!grokEditDuration || grokEditDuration<=0) return '按参考视频时长计费（'+XIAOLE_RATE+' 点/秒，上限 8.7 秒）';
+      if(!grokEditDuration || grokEditDuration<=0) return '按参考视频时长计费（'+rate+' 点/秒，上限 8.7 秒）';
       var d=Math.max(1,Math.ceil(Math.min(8.7,grokEditDuration)));
-      return '预计 '+(d*XIAOLE_RATE)+' 点（'+XIAOLE_RATE+' 点/秒 × '+d+' 秒）';
+      return '预计 '+(d*rate)+' 点（'+rate+' 点/秒 × '+d+' 秒）';
     }
     // grok 生成用所选时长；豆姐/欧米固定 10 秒（后端缺省 10）
     var secs=channel==='grok' ? selectedGrokDuration : 10;
-    return '预计 '+(secs*XIAOLE_RATE)+' 点（'+XIAOLE_RATE+' 点/秒 × '+secs+' 秒）';
+    return '预计 '+(secs*rate)+' 点（'+rate+' 点/秒 × '+secs+' 秒）';
   }
   function updateVideoCosts(){
     var g=$('grokCostNote'); if(g) g.textContent=xiaoleCostNote('grok');
@@ -1836,8 +1863,24 @@
     var t=$('tryonCostNote');
     if(t){   // 换装+换背景需同时有衣服图和背景图(与后端 40 判定一致)，否则 25
       var pricey=!!tryonClothesData && !!tryonBackgroundData;
-      t.textContent=(pricey?'换装+换背景 40 点':'换装 25 点')+' · 失败自动退点';
+      var rate=Number(PRICING_VALUES[pricey?'tryon.combo':'tryon.single'])||(pricey?40:25);
+      t.textContent=(pricey?'换装+换背景 ':'换装 ')+rate+' 点 · 失败自动退点';
     }
+  }
+  function loadPricingValues(){
+    fetch(fresh('/api/gen/pricing'),{cache:'no-store'}).then(function(r){
+      return r.ok?r.json():Promise.reject();
+    }).then(function(d){
+      Object.keys((d&&d.values)||{}).forEach(function(key){
+        var value=Number(d.values[key]);
+        if(isFinite(value)&&value>0) PRICING_VALUES[key]=Math.round(value);
+      });
+      TALKING_RATE=PRICING_VALUES['talking.per_sec']||TALKING_RATE;
+      CINE_MODES.motion.rate=PRICING_VALUES['cinematic.motion.per_sec']||CINE_MODES.motion.rate;
+      CINE_MODES.duo.rate=PRICING_VALUES['cinematic.duo.per_sec']||CINE_MODES.duo.rate;
+      CINE_MODES.open.rate=PRICING_VALUES['cinematic.open.per_sec']||CINE_MODES.open.rate;
+      updateChecklist(); updateCineDurationHint(); updateVideoCosts();
+    }).catch(function(){ updateVideoCosts(); });
   }
   function readFileData(file){
     return new Promise(function(resolve,reject){
@@ -2770,6 +2813,7 @@
   $('scriptText').dispatchEvent(new Event('input'));
   $('talkingMotionPrompt').dispatchEvent(new Event('input'));
   loadTalkingLimits();
+  loadPricingValues();
   updateFunction('talking');
   syncVideoGenerateButtons();
   // F7 联动：资产页视频「重生成」跳转过来时，读 localStorage 预填(一次性)
