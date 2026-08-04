@@ -6,6 +6,7 @@ keeping Yue's existing reverse-analysis implementation unchanged.
 
 import hashlib
 import json
+import os
 import re
 import threading
 import time
@@ -41,7 +42,7 @@ def _audit(name, status, **fields):
     payload = {
         "resource_sha256": hashlib.sha256(
             str(name or "").encode("utf-8", "replace")
-        ).hexdigest(),
+        ).hexdigest()[:12],
         "status": status,
     }
     payload.update(fields)
@@ -116,8 +117,14 @@ def persist(jdb, name, attempts, now=None):
 def _claim(jdb, now=None):
     current = int(time.time() if now is None else now)
     ensure_table(jdb, now=current)
+    exhausted = []
     with closing(jdb()) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        exhausted = connection.execute(
+            "SELECT resource_name,attempts FROM gemini_file_cleanup_outbox "
+            "WHERE attempts>=? OR expires_at<=?",
+            (QUEUE_MAX_ATTEMPTS, current),
+        ).fetchall()
         connection.execute(
             "DELETE FROM gemini_file_cleanup_outbox "
             "WHERE attempts>=? OR expires_at<=?",
@@ -146,6 +153,12 @@ def _claim(jdb, now=None):
                     "expires_at": int(row["expires_at"] or 0),
                 }
         connection.commit()
+    for stale in exhausted:
+        _audit(
+            stale["resource_name"],
+            "retry_window_exhausted",
+            attempts=int(stale["attempts"] or 0),
+        )
     return claimed
 
 
@@ -197,13 +210,21 @@ def _reschedule(jdb, row, error, now=None):
                 ),
             )
         connection.commit()
-    _audit(
-        row["resource_name"],
-        "retry_window_exhausted" if expired else "recovery_retry_scheduled",
-        attempts=attempts,
-        cleanup_pending=not expired,
-        error=_safe_error(error),
-    )
+    if expired:
+        # 脱敏审计：只含资源哈希、次数和状态，不记录原始资源名。
+        _audit(
+            row["resource_name"],
+            "retry_window_exhausted",
+            attempts=attempts,
+        )
+    else:
+        _audit(
+            row["resource_name"],
+            "recovery_retry_scheduled",
+            attempts=attempts,
+            cleanup_pending=True,
+            error=_safe_error(error),
+        )
 
 
 def drain_once(jdb, delete_resource, now=None):
@@ -219,10 +240,34 @@ def drain_once(jdb, delete_resource, now=None):
     return True
 
 
-def scanner(jdb, delete_resource, interval=QUEUE_SCAN_SECONDS):
+def _api_key_configured():
+    return bool(str(os.environ.get("GEMINI_API_KEY") or "").strip())
+
+
+def scanner(
+    jdb,
+    delete_resource,
+    interval=QUEUE_SCAN_SECONDS,
+    sleep=time.sleep,
+    now=None,
+):
+    paused = False
     while True:
+        if not _api_key_configured():
+            # 缺密钥时在领取前暂停：不领取、不改 attempts/status/next_retry_at，
+            # 等密钥恢复后继续删除（对齐 Tang 来源行为）。
+            if not paused:
+                print(
+                    "[breakdown] gemini cleanup scanner paused:"
+                    " GEMINI_API_KEY is not configured",
+                    flush=True,
+                )
+                paused = True
+            sleep(interval)
+            continue
+        paused = False
         try:
-            while drain_once(jdb, delete_resource):
+            while drain_once(jdb, delete_resource, now=now):
                 pass
         except Exception as error:
             print(
@@ -230,7 +275,7 @@ def scanner(jdb, delete_resource, interval=QUEUE_SCAN_SECONDS):
                 % _safe_error(error),
                 flush=True,
             )
-        time.sleep(interval)
+        sleep(interval)
 
 
 def start_worker(jdb, delete_resource):

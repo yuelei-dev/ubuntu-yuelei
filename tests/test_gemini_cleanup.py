@@ -1,9 +1,13 @@
+import hashlib
 import importlib
+import io
+import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -110,6 +114,109 @@ class GeminiCleanupTests(unittest.TestCase):
                 ),
                 "already_absent",
             )
+
+    def _run_scans(self, scans, delete, now=None):
+        calls = []
+
+        def fake_sleep(_interval):
+            calls.append(1)
+            if len(calls) >= scans:
+                raise RuntimeError("stop scanner")
+
+        with self.assertRaisesRegex(RuntimeError, "stop scanner"):
+            self.cleanup.scanner(
+                self.jdb, delete, interval=0, sleep=fake_sleep, now=now
+            )
+        return calls
+
+    def test_missing_key_scans_do_not_consume_retry_budget(self):
+        self.cleanup.persist(self.jdb, "files/no-key", 3, now=100)
+        delete = mock.Mock(return_value="deleted")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": ""}):
+            self._run_scans(3, delete, now=131)
+        delete.assert_not_called()
+        rows = self._rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["attempts"], 3)
+        self.assertEqual(rows[0]["status"], "pending")
+        self.assertEqual(rows[0]["next_retry_at"], 130)
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "restored"}):
+            self._run_scans(1, delete, now=131)
+        delete.assert_called_once_with("files/no-key")
+        self.assertEqual(self._rows(), [])
+
+    def test_claim_audits_exhausted_rows_without_raw_resource_name(self):
+        self.cleanup.persist(
+            self.jdb, "files/maxed-out", self.cleanup.QUEUE_MAX_ATTEMPTS,
+            now=100,
+        )
+        self.cleanup.persist(self.jdb, "files/retention-gone", 3, now=100)
+        delete = mock.Mock()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertFalse(
+                self.cleanup.drain_once(
+                    self.jdb, delete, now=100 + 47 * 3600 + 1
+                )
+            )
+        delete.assert_not_called()
+        self.assertEqual(self._rows(), [])
+        audits = [
+            line
+            for line in output.getvalue().splitlines()
+            if "retry_window_exhausted" in line
+        ]
+        self.assertEqual(len(audits), 2)
+        for name in ("files/maxed-out", "files/retention-gone"):
+            digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:12]
+            match = [line for line in audits if digest in line]
+            self.assertEqual(len(match), 1)
+            self.assertNotIn(name, match[0])
+        maxed = hashlib.sha256(b"files/maxed-out").hexdigest()[:12]
+        line = next(line for line in audits if maxed in line)
+        self.assertIn(
+            '"attempts": %d' % self.cleanup.QUEUE_MAX_ATTEMPTS, line
+        )
+
+    def test_expired_lease_is_recovered_after_restart(self):
+        self.cleanup.persist(self.jdb, "files/lease-me", 1, now=100)
+        claimed = self.cleanup._claim(self.jdb, now=131)
+        self.assertIsNotNone(claimed)
+        row = self._rows()[0]
+        self.assertEqual(row["status"], "deleting")
+        lease_end = 131 + self.cleanup.QUEUE_LEASE_SECONDS
+        self.assertEqual(row["lease_until"], lease_end)
+        # 进程重启：ensure_table 回收过期租约，记录回到 pending
+        self.cleanup.ensure_table(self.jdb, now=lease_end + 1)
+        row = self._rows()[0]
+        self.assertEqual(row["status"], "pending")
+        delete = mock.Mock(return_value="deleted")
+        self.assertTrue(
+            self.cleanup.drain_once(self.jdb, delete, now=lease_end + 1)
+        )
+        delete.assert_called_once_with("files/lease-me")
+        self.assertEqual(self._rows(), [])
+
+    def test_concurrent_workers_claim_same_row_only_once(self):
+        self.cleanup.persist(self.jdb, "files/race-me", 1, now=100)
+        delete = mock.Mock(return_value="deleted")
+        barrier = threading.Barrier(2)
+        results = []
+
+        def worker():
+            barrier.wait(timeout=10)
+            results.append(
+                self.cleanup.drain_once(self.jdb, delete, now=131)
+            )
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(delete.call_count, 1)
+        self.assertEqual(self._rows(), [])
 
     def test_core_starts_cleanup_worker(self):
         source = (
