@@ -98,7 +98,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
                 raise SystemExit(0)
             if command.rstrip().endswith("python3 -"):
                 if os.environ.get("HTTP_PROXY") == "http://malicious.invalid:9":
-                    if "urllib.request.ProxyHandler({})" not in stdin_payload or "opener.open(req, timeout=10)" not in stdin_payload:
+                    if "urllib.request.ProxyHandler({{}})" not in stdin_payload or "opener.open(req, timeout=10)" not in stdin_payload:
                         raise SystemExit(95)
                 if os.environ.get("FAIL_STAGE") == "pricing":
                     raise SystemExit(1)
