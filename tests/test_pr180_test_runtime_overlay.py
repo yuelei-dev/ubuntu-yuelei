@@ -124,6 +124,12 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         self.assertNotIn("urllib.request.urlopen(req, timeout=10)", SHIP)
         self.assertNotIn("http://127.0.0.1/api/gen/pricing", SHIP)
         self.assertIn("权威价格接口返回完整 13 key", SHIP)
+        sentinel_calls = [line for line in SHIP.splitlines()
+                          if '$SSHC "$REMOTE"' in line and "drift_sentinel.py" in line]
+        self.assertEqual(6, len(sentinel_calls))
+        for call in sentinel_calls:
+            self.assertIn("sudo -u ubuntu -H env", call)
+        self.assertIn("sudo -u ubuntu -H env HQ_REPO=/opt/huangque-repository", SHIP)
 
     def test_ship_arms_automatic_restore_until_all_postconditions_pass(self):
         backup_ready = SHIP.index('echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"')
