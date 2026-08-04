@@ -29,19 +29,37 @@ def load_manifest():
 def seed():
     for entry in load_manifest()["deploy_files"]:
         artifact = entry.get("artifact")
-        preimage = entry.get("expected_target_git_blob")
+        preimage = entry.get("preimage")
         if not artifact or not preimage:
             continue
         target = ROOT / artifact
         if target.exists():
             raise SystemExit("refusing to overwrite existing artifact: %s" % artifact)
-        data = _blob(preimage)
+        data = (ROOT / preimage).read_bytes()
         expected = entry["expected_target_sha256"]
         if _sha256(data) != expected:
             raise SystemExit("preimage sha256 mismatch: %s" % artifact)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         print("seeded %s" % artifact)
+
+
+def capture_preimages():
+    """One-time capture from the audited local snapshot object database."""
+    for entry in load_manifest()["deploy_files"]:
+        preimage_path = entry.get("preimage")
+        blob = entry.get("expected_target_git_blob")
+        if not preimage_path or not blob:
+            continue
+        target = ROOT / preimage_path
+        if target.exists():
+            raise SystemExit("refusing to overwrite committed preimage: %s" % preimage_path)
+        data = _blob(blob)
+        if _sha256(data) != entry.get("expected_target_sha256"):
+            raise SystemExit("preimage sha256 mismatch: %s" % preimage_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        print("captured %s" % preimage_path)
 
 
 def merge_clean():
@@ -87,15 +105,18 @@ def check():
                                        text=True).strip()
         if blob != entry["git_blob"]:
             errors.append("source git blob mismatch: %s" % entry["source"])
-        preimage = entry.get("expected_target_git_blob")
-        if preimage:
-            try:
-                old = _blob(preimage)
-            except subprocess.CalledProcessError:
-                errors.append("missing preimage blob: %s" % preimage)
+        preimage_path = entry.get("preimage")
+        if entry.get("expected_target_state") == "sha256":
+            if not preimage_path or not (ROOT / preimage_path).is_file():
+                errors.append("missing committed preimage: %s" % entry["target"])
             else:
+                old = (ROOT / preimage_path).read_bytes()
                 if _sha256(old) != entry.get("expected_target_sha256"):
                     errors.append("preimage sha256 mismatch: %s" % entry["target"])
+                old_blob = subprocess.check_output(["git", "hash-object", "--stdin"], cwd=ROOT,
+                                                   input=old, text=False).decode().strip()
+                if old_blob != entry.get("expected_target_git_blob"):
+                    errors.append("preimage git blob mismatch: %s" % entry["target"])
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1
@@ -105,12 +126,15 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--capture-preimages", action="store_true")
     parser.add_argument("--seed", action="store_true")
     parser.add_argument("--merge-clean", action="store_true")
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
-    if sum((args.seed, args.merge_clean, args.check)) != 1:
+    if sum((args.capture_preimages, args.seed, args.merge_clean, args.check)) != 1:
         parser.error("choose exactly one action")
+    if args.capture_preimages:
+        return capture_preimages()
     if args.seed:
         return seed()
     if args.merge_clean:
