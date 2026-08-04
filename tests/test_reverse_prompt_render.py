@@ -50,6 +50,11 @@ class ReversePromptRenderTests(unittest.TestCase):
                 "validReversePromptText",
                 "reverseResultPrompt",
                 "reverseLegacyPrompt",
+                "reverseAuditData",
+                "reverseFixedSecond",
+                "reverseTransitionText",
+                "reverseTimelineSegments",
+                "reverseAuditHtml",
                 "renderBreakdownReverse",
             )
         )
@@ -152,6 +157,54 @@ process.stdout.write(JSON.stringify({{html:scenes.innerHTML}}));
         self.assertIn('id="bdReversePromptText"', html)
         self.assertIn("display:block", html)
         self.assertEqual(html.count('class="sc-card"'), 1)
+
+    def test_authoritative_timeline_transitions_and_scores_are_visible(self):
+        html = self._render(
+            {
+                "type": "breakdown_reverse",
+                "prompt": "[0.0-4.2秒] 第一段\n[4.2-8.0秒] 第二段",
+                "quality_score": {
+                    "total": 92,
+                    "components": {
+                        "source_evidence_coverage": 100,
+                        "generation_readiness": 92,
+                        "factual_consistency": 100,
+                    },
+                },
+                "reverse_audit": {
+                    "segments": [
+                        {
+                            "segment_id": 1,
+                            "start_seconds": 0,
+                            "end_seconds": 4.2,
+                            "readiness": {"ready": 24, "applicable": 26},
+                            "transition_from_previous": {
+                                "type": "none",
+                                "description": "首段",
+                            },
+                        },
+                        {
+                            "segment_id": 2,
+                            "start_seconds": 4.2,
+                            "end_seconds": 8,
+                            "readiness": {"ready": 26, "applicable": 26},
+                            "transition_from_previous": {
+                                "type": "hard_cut",
+                                "description": "背景瞬时切换",
+                            },
+                        },
+                    ]
+                },
+            }
+        )
+        self.assertIn("综合 92", html)
+        self.assertIn("证据覆盖 100", html)
+        self.assertIn("生成就绪 92", html)
+        self.assertIn("事实一致 100", html)
+        self.assertIn("0.0–4.2 秒", html)
+        self.assertIn("4.2–8.0 秒", html)
+        self.assertIn("直接硬切（背景瞬时切换）", html)
+        self.assertIn("生成槽位 24/26", html)
 
     def test_legacy_display_sections_are_not_rendered_as_seven_cards(self):
         html = self._render(

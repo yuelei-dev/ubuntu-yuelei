@@ -271,7 +271,7 @@ class Pr171TestRuntimeCompatTests(unittest.TestCase):
             [
                 "deploy/test-runtime/pr171/content_domains/core.py",
                 "server/content_domains/video.py",
-                "site/workbench/script.html",
+                "deploy/test-runtime/pr182/runtime/site/workbench/script.html",
             ],
         )
         targets = [entry["target"] for entry in self.manifest["deploy_files"]]
