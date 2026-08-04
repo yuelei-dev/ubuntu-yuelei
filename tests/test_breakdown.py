@@ -3865,7 +3865,11 @@ class BreakdownTests(unittest.TestCase):
             ui,
         )
         self.assertIn(
-            "reverse_audit||{}).reference_thumbnail_indices",
+            "var audit=reverseAuditData(bd)",
+            ui,
+        )
+        self.assertIn(
+            "Array.isArray(audit.reference_thumbnail_indices)",
             ui,
         )
         self.assertIn("channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration", ui)

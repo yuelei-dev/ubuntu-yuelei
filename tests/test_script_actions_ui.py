@@ -109,7 +109,8 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("BREAKDOWN_HISTORY_KEY='hq_script_breakdown_history'", self.html)
         self.assertIn("switchMode('breakdown')", self.html)
         self.assertIn("renderBreakdown({source_url:m.source_url", self.html)
-        self.assertIn("renderBreakdownReverse({type:'breakdown_reverse'", self.html)
+        self.assertIn("loadBreakdownHistoryDetail(item).then(function(detail)", self.html)
+        self.assertIn("renderBreakdownReverse(Object.assign({},detail", self.html)
         self.assertIn("analysis:m.analysis||''", self.html)
 
     def test_breakdown_analysis_is_rendered_and_saved_to_history(self):
@@ -174,15 +175,15 @@ class ScriptActionsUiTests(unittest.TestCase):
 
     def test_reverse_history_preserves_explicit_reference_indices(self):
         self.assertIn(
-            "reference_thumbnail_indices:isReverse?reverseRefs.map",
+            "reference_thumbnail_indices:isReverse?(bd.reference_thumbnail_indices||[]):[]",
             self.html,
         )
         self.assertIn(
-            "reverse_audit||{}).reference_thumbnail_indices",
+            "var audit=reverseAuditData(bd)",
             self.html,
         )
         self.assertIn(
-            "reference_thumbnail_indices:m.reference_thumbnail_indices||",
+            "loadBreakdownHistoryDetail(item).then(function(detail)",
             self.html,
         )
 
@@ -226,7 +227,10 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("render({scenes:list},heading", self.html)
         self.assertIn("readBreakdownHistory()", self.html)
         self.assertIn("flattenBreakdownAsset(item)", self.html)
-        self.assertIn("saveBreakdownHistory(item);", self.html)
+        self.assertIn(
+            "saveBreakdownHistory(breakdownHistoryResult(item,x.d.job_id,index))",
+            self.html,
+        )
 
     def test_reverse_history_is_saved_and_restored(self):
         self.assertIn("prompt:isReverse?reverseResultPrompt(bd):(bd.prompt||'')", self.html)

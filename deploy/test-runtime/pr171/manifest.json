@@ -33,7 +33,7 @@
       "expected_target_git_blob": "b4892fc424afb2f293337e32e1c23784f5a3c98c"
     },
     {
-      "source": "site/workbench/script.html",
+      "source": "deploy/test-runtime/pr182/runtime/site/workbench/script.html",
       "target": "/var/www/huangquechuanmei/workbench/script.html",
       "sha256": "0adb55a673cb5f883218b521645da9f4b3f13e44a09679f53c6135dbd87cc431",
       "git_blob": "491f6123105dcf4fbbb8f3041bd30ef8b4ccea5a",
