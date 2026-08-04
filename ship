@@ -276,23 +276,55 @@ if [ -n "$OVERLAY_MANIFEST" ]; then
       $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/$parent' && sudo cp -a '$remote_file' '$OVERLAY_BACKUP_DIR/$rel'" \
         || { echo "❌ 备份失败：$remote_file（整单未写入）"; exit 1; }
       printf '%s\n' "sudo cp -a '$OVERLAY_BACKUP_DIR/$rel' '$remote_file'" \
+        "test \"\$(sudo sha256sum '$remote_file' | cut -d ' ' -f1)\" = '$expected_sha'" \
         | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
     else
       $SSHC "$REMOTE" "printf '%s\n' '$remote_file' | sudo tee -a '$OVERLAY_BACKUP_DIR/expected-absent.txt' >/dev/null" \
         || { echo "❌ 备份清单写入失败（整单未写入）"; exit 1; }
       printf '%s\n' "sudo rm -f '$remote_file'" \
+        "sudo test ! -e '$remote_file'" \
         | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
     fi
   done
   # 部署会在重启前改版本标记，快照与回滚必须把它一起恢复。
   version_rel="home/ubuntu/content-api/.deploy-version"
-  $SSHC "$REMOTE" "if sudo test -f '/$version_rel'; then sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/content-api' && sudo cp -a '/$version_rel' '$OVERLAY_BACKUP_DIR/$version_rel'; fi" || exit 1
+  if $SSHC "$REMOTE" "sudo test -f '/$version_rel'"; then
+    $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/content-api' && sudo cp -a '/$version_rel' '$OVERLAY_BACKUP_DIR/$version_rel'" || exit 1
+    version_restore="sudo cp -a '$OVERLAY_BACKUP_DIR/$version_rel' '/$version_rel'"
+  else
+    version_restore="sudo rm -f '/$version_rel'"
+  fi
+  active_rel="home/ubuntu/hq-drift/active_overlays.json"
+  if $SSHC "$REMOTE" "sudo test -f '/$active_rel'"; then
+    $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/hq-drift' && sudo cp -a '/$active_rel' '$OVERLAY_BACKUP_DIR/$active_rel'" || exit 1
+    active_restore="sudo cp -a '$OVERLAY_BACKUP_DIR/$active_rel' '/$active_rel'"
+  else
+    active_restore="sudo rm -f '/$active_rel'"
+  fi
   restore_restart="sudo systemctl"
   restore_restart="$restore_restart restart $RESTART"
-  printf '%s\n' "if sudo test -f '$OVERLAY_BACKUP_DIR/$version_rel'; then sudo cp -a '$OVERLAY_BACKUP_DIR/$version_rel' '/$version_rel'; fi" \
+  printf '%s\n' "$version_restore" \
+    "$active_restore" \
     "$restore_restart" \
+    "for service in $RESTART; do sudo systemctl is-active --quiet \"\$service\"; done" \
     | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null && sudo chmod 700 '$OVERLAY_BACKUP_DIR/restore.sh'" || exit 1
   echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"
+
+  # 从首次运行文件写入起，任一 push/import/restart/verify/health/pricing 失败都自动恢复。
+  OVERLAY_ROLLBACK_ARMED=1
+  rollback_overlay_on_exit(){
+    status=$?
+    [ "$status" -ne 0 ] && [ "${OVERLAY_ROLLBACK_ARMED:-0}" = "1" ] || return "$status"
+    trap - EXIT
+    echo "  ⚠ 部署未完成，自动执行精确恢复：$OVERLAY_BACKUP_DIR/restore.sh"
+    if $SSHC "$REMOTE" "sudo '$OVERLAY_BACKUP_DIR/restore.sh'"; then
+      echo "  ✓ 自动恢复通过：preimage/absent 与服务 active 均已复核"
+    else
+      echo "  ❌ 自动恢复失败，请立即人工执行：ssh $REMOTE sudo '$OVERLAY_BACKUP_DIR/restore.sh'" >&2
+    fi
+    exit "$status"
+  }
+  trap rollback_overlay_on_exit EXIT
 fi
 
 for f in "$@"; do
@@ -424,7 +456,10 @@ fi
 
 # 部署后校验：只校验本次 ship 实际推送的文件线上 == git origin/main。
 if [ -n "$DEPLOYED" ]; then
-  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
+  VERIFY_REF="${HEAD_SHA:-$(git rev-parse HEAD)}"
+  VERIFY_REPO_ENV=""
+  [ -n "$OVERLAY_MANIFEST" ] && VERIFY_REPO_ENV="HQ_REPO=/opt/huangque-repository"
+  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && $VERIFY_REPO_ENV HQ_DRIFT_REF='$VERIFY_REF' python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
     && echo "  ✓ 部署后漂移校验通过" || { echo "  ❌ 部署后漂移校验失败"; exit 1; }
   # --pr 透传：落账 PR 号到 deploy_bless.jsonl。
   # 注意顺序必须 --pr 在前：哨兵 --bless-deploy 是 nargs='*'，
@@ -432,7 +467,9 @@ if [ -n "$DEPLOYED" ]; then
   # 显式传了 --pr = 要求登记，失败必须非零中止（不能被 || echo 吞掉）；
   # 不传 --pr 保持旧容错：远端旧哨兵/未安装时跳过登记、发布照常完成。
   if [ -n "$PR_NO" ]; then
-    $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
+    BLESS_ENV=""
+    [ -n "$OVERLAY_MANIFEST" ] && BLESS_ENV="HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$VERIFY_REF'"
+    $SSHC "$REMOTE" "$BLESS_ENV python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
       && echo "  ✓ 本次部署文件已记录（PR #$PR_NO）" || { echo "  ❌ 部署登记失败（--pr $PR_NO）——远端哨兵报错"; exit 1; }
   else
     $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
@@ -497,6 +534,15 @@ if any(not isinstance(values[key], int) or isinstance(values[key], bool) or valu
     raise SystemExit('pricing value invalid')
 print('  ✓ 权威价格接口返回完整 13 key 正整数目录')
 PY
+  DEPLOY_SHA="${HEAD_SHA:-$(git rev-parse HEAD)}"
+  $SSHC "$REMOTE" "HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --deploy-sha '$DEPLOY_SHA' --activate-overlay '$OVERLAY_MANIFEST'" \
+    || { echo "  ❌ 活动 overlay 不可变 postimage 启用失败"; exit 1; }
+  # 立刻走一次常规巡检：旧 exception 必须被 postimage 原子取代，不能上线即 stale。
+  $SSHC "$REMOTE" "HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF=origin/baseline/test-server python3 /home/ubuntu/hq-drift/drift_sentinel.py --print" \
+    || { echo "  ❌ 部署后常规漂移巡检未收敛"; exit 1; }
+  echo "  ✓ 活动 overlay 已锁定 $DEPLOY_SHA，常规巡检无 stale"
+  OVERLAY_ROLLBACK_ARMED=0
+  trap - EXIT
 fi
 SHA=$(git rev-parse --short HEAD)
 echo "✅ 上线完成 | 本次提交 $SHA"

@@ -103,6 +103,29 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         self.assertIn("测试服本机 nginx /api/gen/health", SHIP)
         self.assertIn("权威价格接口返回完整 13 key", SHIP)
 
+    def test_ship_arms_automatic_restore_until_all_postconditions_pass(self):
+        backup_ready = SHIP.index('echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"')
+        armed = SHIP.index("OVERLAY_ROLLBACK_ARMED=1")
+        first_push = SHIP.index('push_file "$f" "$dest"')
+        activation = SHIP.index("--activate-overlay '$OVERLAY_MANIFEST'")
+        patrol = SHIP.index("HQ_DRIFT_REF=origin/baseline/test-server")
+        disarmed = SHIP.index("OVERLAY_ROLLBACK_ARMED=0")
+        self.assertLess(backup_ready, armed)
+        self.assertLess(armed, first_push)
+        self.assertLess(first_push, activation)
+        self.assertLess(activation, patrol)
+        self.assertLess(patrol, disarmed)
+        for marker in (
+            "trap rollback_overlay_on_exit EXIT",
+            "sudo '$OVERLAY_BACKUP_DIR/restore.sh'",
+            "sudo sha256sum '$remote_file'",
+            "sudo test ! -e '$remote_file'",
+            "version_restore=\"sudo rm -f '/$version_rel'\"",
+            r'systemctl is-active --quiet \"\$service\"',
+            "active_overlays.json",
+        ):
+            self.assertIn(marker, SHIP)
+
     def test_drift_overlay_mapping_comes_from_committed_manifest(self):
         spec = importlib.util.spec_from_file_location("drift_overlay_test", ROOT / "scripts/drift_sentinel.py")
         module = importlib.util.module_from_spec(spec)
