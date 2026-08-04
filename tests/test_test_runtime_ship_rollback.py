@@ -75,6 +75,11 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
             if "python3 /home/ubuntu/hq-drift/drift_sentinel.py" in command and os.environ.get("REQUIRE_SENTINEL_IDENTITY") == "1":
                 if "sudo -u ubuntu -H env" not in command:
                     raise SystemExit(94)
+            if "python3 /home/ubuntu/hq-drift/drift_sentinel.py" in command and "HQ_REPO=/opt/huangque-repository" in command and os.environ.get("REQUIRE_SENTINEL_GIT_SAFE") == "1":
+                required = ("GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=safe.directory",
+                            "GIT_CONFIG_VALUE_0=/opt/huangque-repository")
+                if any(marker not in command for marker in required):
+                    raise SystemExit(93)
             if "sudo sha256sum '" in command and "cut -d" in command:
                 count_path = pathlib.Path(os.environ["FAKE_PUSH_COUNT"])
                 pushed = int(count_path.read_text()) if count_path.exists() else 0
@@ -189,12 +194,17 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.assert_restore_ran(result)
 
     def test_all_sentinel_calls_use_canonical_ubuntu_identity(self):
-        result = self.run_ship(REQUIRE_SENTINEL_IDENTITY="1")
+        result = self.run_ship(REQUIRE_SENTINEL_IDENTITY="1", REQUIRE_SENTINEL_GIT_SAFE="1")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         sentinel_calls = [line for line in self.read_log().splitlines()
                           if line.startswith("SSH ") and "python3 /home/ubuntu/hq-drift/drift_sentinel.py" in line]
         self.assertGreaterEqual(len(sentinel_calls), 4)
         self.assertTrue(all("sudo -u ubuntu -H env" in line for line in sentinel_calls))
+        overlay_calls = [line for line in sentinel_calls if "HQ_REPO=/opt/huangque-repository" in line]
+        self.assertTrue(overlay_calls)
+        self.assertTrue(all("GIT_CONFIG_KEY_0=safe.directory" in line and
+                            "GIT_CONFIG_VALUE_0=/opt/huangque-repository" in line
+                            for line in overlay_calls))
         self.assertEqual(1, sum(line.startswith("BLESS_SUCCESS ")
                                 for line in self.read_log().splitlines()))
 

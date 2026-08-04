@@ -129,7 +129,14 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         self.assertEqual(6, len(sentinel_calls))
         for call in sentinel_calls:
             self.assertIn("sudo -u ubuntu -H env", call)
-        self.assertIn("sudo -u ubuntu -H env HQ_REPO=/opt/huangque-repository", SHIP)
+        self.assertIn("sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository", SHIP)
+        self.assertIn("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory ", SHIP)
+        self.assertIn("GIT_CONFIG_VALUE_0=/opt/huangque-repository", SHIP)
+        self.assertIn("$VERIFY_REPO_ENV $OVERLAY_GIT_SAFE_ENV HQ_DRIFT_REF", SHIP)
+        for operation in ("--activate-overlay", "HQ_DRIFT_REF=origin/baseline/test-server", "--bless-deploy $DEPLOYED"):
+            matching = [line for line in sentinel_calls if operation in line and "HQ_REPO=/opt/huangque-repository" in line]
+            if matching:
+                self.assertTrue(all("$OVERLAY_GIT_SAFE_ENV" in line for line in matching))
 
     def test_ship_arms_automatic_restore_until_all_postconditions_pass(self):
         backup_ready = SHIP.index('echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"')
