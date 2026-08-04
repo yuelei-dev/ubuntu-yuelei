@@ -69,7 +69,6 @@ BACKEND_RUNTIME = {
     'server/func_names.py': '/home/ubuntu/content-api/func_names.py',
     'server/dl_service.py': '/home/ubuntu/dl-service/dl_service.py',
     'server/admin_api.py': '/home/ubuntu/content-api/admin_api.py',
-    'server/pricing_config.py': '/home/ubuntu/content-api/pricing_config.py',
     'scripts/drift_sentinel.py': '/home/ubuntu/hq-drift/drift_sentinel.py',
 }
 
@@ -132,114 +131,6 @@ def git_md5(git_path):
     if p.returncode != 0:
         return None
     return md5_bytes(p.stdout)
-
-
-def git_ref_bytes(ref, git_path):
-    p = git(['show', '%s:%s' % (ref, git_path)], check=False)
-    return p.stdout if p.returncode == 0 else None
-
-
-def _active_overlays_path():
-    return os.path.join(DRIFT_DIR, 'active_overlays.json')
-
-
-def _overlay_expectations_from_record(record):
-    """Return {normal git path: immutable deployed postimage metadata}."""
-    if not isinstance(record, dict):
-        raise ValueError('overlay record 必须是对象')
-    ref = record.get('deploy_sha')
-    manifest_path = record.get('manifest')
-    if not isinstance(ref, str) or not re.fullmatch(r'[0-9a-f]{40}', ref):
-        raise ValueError('overlay deploy_sha 必须是完整 40 位 SHA')
-    if not isinstance(manifest_path, str) or not re.fullmatch(r'deploy/test-runtime/[^/]+/manifest\.json', manifest_path):
-        raise ValueError('overlay manifest 路径非法')
-    raw = git_ref_bytes(ref, manifest_path)
-    if raw is None:
-        raise ValueError('不可变 overlay manifest 不可读取: %s:%s' % (ref, manifest_path))
-    manifest = json.loads(raw.decode('utf-8'))
-    if manifest.get('schema_version') != 1 or not str(manifest.get('target', '')).startswith('test:'):
-        raise ValueError('overlay manifest schema/target 非法')
-    out = {}
-    for entry in manifest.get('deploy_files', []):
-        if not isinstance(entry, dict):
-            raise ValueError('overlay deploy_files 条目非法')
-        source, target = entry.get('source'), entry.get('target')
-        if not isinstance(source, str) or not isinstance(target, str):
-            raise ValueError('overlay source/target 非法')
-        allowed = ('/home/ubuntu/', '/var/www/huangquechuanmei/', '/etc/systemd/system/')
-        if (not target.startswith(allowed) or target.endswith('/')
-                or not re.fullmatch(r'[A-Za-z0-9._/-]+', target)):
-            raise ValueError('overlay target 越界: %s' % target)
-        runtime_git_path = runtime_to_git_path(target)
-        if not runtime_git_path:
-            raise ValueError('overlay target 无法映射到巡检路径: %s' % target)
-        postimage = git_ref_bytes(ref, source)
-        if postimage is None:
-            raise ValueError('overlay postimage 不可读取: %s:%s' % (ref, source))
-        if hashlib.sha256(postimage).hexdigest() != entry.get('sha256'):
-            raise ValueError('overlay postimage sha256 与 manifest 不一致: %s' % source)
-        if runtime_git_path in out:
-            raise ValueError('overlay runtime path 重复: %s' % runtime_git_path)
-        out[runtime_git_path] = {
-            'runtime': target,
-            'source': source,
-            'deploy_sha': ref,
-            'md5': md5_bytes(postimage),
-            'manifest': manifest_path,
-        }
-    if not out:
-        raise ValueError('overlay manifest 没有部署文件')
-    return out
-
-
-def load_active_overlay_expectations():
-    path = _active_overlays_path()
-    if not os.path.exists(path):
-        return {}
-    try:
-        with open(path, encoding='utf-8') as f:
-            doc = json.load(f)
-        if not isinstance(doc, dict) or doc.get('schema_version') != 1 or not isinstance(doc.get('overlays'), list):
-            raise ValueError('active_overlays schema 非法')
-        out = {}
-        for record in doc['overlays']:
-            for git_path, item in _overlay_expectations_from_record(record).items():
-                if git_path in out:
-                    raise ValueError('活动 overlay 目标冲突: %s' % git_path)
-                out[git_path] = item
-        return out
-    except Exception as exc:
-        # 活动 overlay 已成为该运行路径的权威期望。清单损坏时若退回旧例外，
-        # 旧 preimage 可能再次被豁免，形成假阴性；必须让本次巡检非零失败。
-        log('活动 overlay 清单无效，巡检 fail-closed: %s' % exc)
-        raise ValueError('活动 overlay 清单无效: %s' % exc) from exc
-
-
-def activate_overlay(manifest_path, deploy_sha, pr=None):
-    record = {'manifest': manifest_path.replace('\\', '/'), 'deploy_sha': deploy_sha,
-              'activated_at': int(time.time())}
-    if pr:
-        record['pr'] = str(pr)
-    # 写状态前先从不可变提交完整解析 postimage，任何缺项均 fail-closed。
-    _overlay_expectations_from_record(record)
-    path = _active_overlays_path()
-    os.makedirs(DRIFT_DIR, exist_ok=True)
-    overlays = []
-    if os.path.exists(path):
-        with open(path, encoding='utf-8') as f:
-            old = json.load(f)
-        if old.get('schema_version') != 1 or not isinstance(old.get('overlays'), list):
-            raise ValueError('现有 active_overlays schema 非法，拒绝覆盖')
-        overlays = [item for item in old['overlays'] if item.get('manifest') != record['manifest']]
-    overlays.append(record)
-    temp = path + '.tmp.%s' % os.getpid()
-    with open(temp, 'w', encoding='utf-8') as f:
-        json.dump({'schema_version': 1, 'overlays': overlays}, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(temp, path)
-    log('活动 overlay 已原子启用：%s @ %s%s' % (
-        record['manifest'], deploy_sha, '（PR #%s）' % pr if pr else ''))
 
 
 EXCEPTION_KINDS = ('changed', 'missing', 'added')
@@ -370,45 +261,8 @@ def _stale_reason(item, drift_kind, git_path):
     return '登记为 %s 例外，当前为 %s 且 drift_kind/指纹与登记不符' % (item['drift_kind'], drift_kind)
 
 
-def _test_runtime_overlay_target(git_path):
-    """Resolve a committed overlay artifact through its sibling manifest.
-
-    Only overlay artifact paths use this indirection. Ordinary source paths keep
-    their stable mapping, so an old deployment manifest cannot shadow a future
-    normal deployment of the same source file.
-    """
-    match = re.fullmatch(r'(deploy/test-runtime/[^/]+)/runtime/.+', git_path)
-    if not match:
-        return None
-    manifest_path = match.group(1) + '/manifest.json'
-    p = git(['show', '%s:%s' % (GIT_REF, manifest_path)], check=False)
-    if p.returncode != 0:
-        return None
-    try:
-        manifest = json.loads(p.stdout.decode('utf-8'))
-        if manifest.get('schema_version') != 1 or not str(manifest.get('target', '')).startswith('test:'):
-            return None
-        matches = [entry for entry in manifest.get('deploy_files', [])
-                   if isinstance(entry, dict) and entry.get('source') == git_path]
-        if len(matches) != 1:
-            return None
-        target = matches[0].get('target')
-        allowed = ('/home/ubuntu/', '/var/www/huangquechuanmei/', '/etc/systemd/system/')
-        if (not isinstance(target, str) or not target.startswith(allowed) or target.endswith('/')
-                or not re.fullmatch(r'[A-Za-z0-9._/-]+', target)):
-            return None
-        if os.path.basename(target) != os.path.basename(git_path):
-            return None
-        return target
-    except (UnicodeDecodeError, ValueError, TypeError):
-        return None
-
-
 def git_path_to_runtime(git_path):
     git_path = git_path.replace('\\', '/')
-    overlay_target = _test_runtime_overlay_target(git_path)
-    if overlay_target:
-        return overlay_target
     if git_path.startswith('site/'):
         return os.path.join(WEBROOT, git_path[len('site/'):])
     if git_path in BACKEND_RUNTIME:
@@ -477,23 +331,18 @@ def runtime_files():
 def diff_paths(git_paths=None, apply_exceptions=True):
     """比对线上与 git。apply_exceptions=False 时（--verify-deploy）完全绕开例外机制。"""
     ensure_repo_ref()
-    active_overlays = load_active_overlay_expectations() if git_paths is None and apply_exceptions else {}
-    wanted = sorted(set(git_paths or expected_git_paths()) | set(active_overlays))
-    changed, missing, added, unmapped = [], [], [], []
+    wanted = sorted(set(git_paths or expected_git_paths()))
+    changed, missing, added = [], [], []
     expected_runtime = {}
     for gp in wanted:
-        active = active_overlays.get(gp)
-        rp = active['runtime'] if active else git_path_to_runtime(gp)
+        rp = git_path_to_runtime(gp)
         if rp:
             expected_runtime[gp] = rp
             if not os.path.exists(rp):
                 missing.append(gp)
                 continue
-            expected_md5 = active['md5'] if active else git_md5(gp)
-            if md5_file(rp) != expected_md5:
+            if md5_file(rp) != git_md5(gp):
                 changed.append(gp)
-        elif git_paths is not None:
-            unmapped.append(gp)
 
     if git_paths is None:
         expected_git = set(expected_runtime)
@@ -506,8 +355,6 @@ def diff_paths(git_paths=None, apply_exceptions=True):
         'changed': sorted(changed),
         'missing': sorted(missing),
         'added': sorted(set(added)),
-        'unmapped': sorted(unmapped),
-        'active_overlays': sorted(active_overlays),
         'registered': [],
         'exceptions_stale': [],
         'exceptions_stale_reasons': {},
@@ -518,11 +365,6 @@ def diff_paths(git_paths=None, apply_exceptions=True):
         for kind in EXCEPTION_KINDS:
             kept = []
             for gp in result[kind]:
-                if gp in active_overlays:
-                    # 不可变 postimage 是该运行路径的新期望；旧 preimage 例外已被原子取代。
-                    kept.append(gp)
-                    classified.add(gp)
-                    continue
                 item = exceptions.get(gp)
                 if item is None:
                     kept.append(gp)
@@ -538,7 +380,7 @@ def diff_paths(git_paths=None, apply_exceptions=True):
         # 独立遍历未进漂移桶的例外：恢复基线内容 / missing 被补上 / added 被删除
         # 都会让路径从漂移集合消失，必须在这里核出，否则登记保留的功能被回退会静默漏报
         for gp, item in exceptions.items():
-            if gp in classified or gp in active_overlays:
+            if gp in classified:
                 continue
             if _exception_state_matches(item, gp):
                 result['registered'].append(gp)
@@ -627,7 +469,6 @@ def format_diff(d):
     registered = d.get('registered') or []
     stale = d.get('exceptions_stale') or []
     reasons = d.get('exceptions_stale_reasons') or {}
-    active = d.get('active_overlays') or []
     if total == 0 and stale:
         # stale-only：无普通漂移，但登记例外的状态/指纹已偏离登记值
         lines = ['‼️ 黄雀主站登记例外状态已变 %d 处（线上与 git %s 比对无普通漂移，但例外登记不再成立）' % (len(stale), GIT_REF)]
@@ -638,8 +479,6 @@ def format_diff(d):
             lines.append('【%s %d】%s' % (tag, len(d[key]), '、'.join(short(p) for p in d[key][:12])))
     if registered:
         lines.append('已登记例外 %d 处（见 %s，指纹匹配，不计入漂移）' % (len(registered), EXCEPTIONS_GIT_PATH))
-    if active:
-        lines.append('活动部署 overlay %d 个运行路径（不可变 postimage 指纹）' % len(active))
     if stale:
         lines.append('‼️ 登记例外状态已变 %d 处（按真漂移处理）：' % len(stale))
         for p in stale[:12]:
@@ -652,16 +491,9 @@ def handle_detect(print_only=False):
     d = diff_paths()
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
     n_reg = len(d.get('registered') or [])
-    n_active = len(d.get('active_overlays') or [])
     n_stale = len(d.get('exceptions_stale') or [])
     if total == 0 and n_stale == 0:
-        notes = []
-        if n_reg:
-            notes.append('已登记例外 %d 处' % n_reg)
-        if n_active:
-            notes.append('活动 overlay %d 个运行路径' % n_active)
-        log('巡检正常：线上与 git %s 一致，无漂移%s' % (
-            GIT_REF, '（%s）' % '，'.join(notes) if notes else ''))
+        log('巡检正常：线上与 git %s 一致，无漂移%s' % (GIT_REF, '（已登记例外 %d 处）' % n_reg if n_reg else ''))
         return 0
     # stale-only 也必须非零并告警：登记保留的功能被回退/删除时不能静默漏报
     msg = format_diff(d)
@@ -686,15 +518,12 @@ def handle_verify(paths):
     paths = [p.replace('\\', '/') for p in paths]
     # 部署后校验必须严格：逐一比对 运行文件 == git GIT_REF，完全绕开巡检例外机制。
     d = diff_paths(paths, apply_exceptions=False)
-    total = len(d['changed']) + len(d['missing']) + len(d['added']) + len(d['unmapped'])
+    total = len(d['changed']) + len(d['missing']) + len(d['added'])
     if total == 0:
         log('部署后校验通过：%d 个文件线上 == git %s' % (len(paths), GIT_REF))
         return 0
     print(format_diff(d))
-    if d['unmapped']:
-        print('无法映射到运行路径: ' + ', '.join(d['unmapped']))
-    log('部署后校验失败：changed=%d missing=%d added=%d unmapped=%d' % (
-        len(d['changed']), len(d['missing']), len(d['added']), len(d['unmapped'])))
+    log('部署后校验失败：changed=%d missing=%d added=%d' % (len(d['changed']), len(d['missing']), len(d['added'])))
     return 2
 
 
@@ -705,23 +534,12 @@ def main():
     ap.add_argument('--bless', action='store_true')
     ap.add_argument('--bless-deploy', nargs='*')
     ap.add_argument('--verify-deploy', nargs='*')
-    ap.add_argument('--activate-overlay')
-    ap.add_argument('--deploy-sha')
     ap.add_argument('--pr', default=os.environ.get('HQ_DEPLOY_PR'),
                     help='--bless-deploy 记录的关联 PR 号（也可用 env HQ_DEPLOY_PR）')
     args = ap.parse_args()
 
     if args.test:
         print('飞书自检:', _feishu_send('【漂移哨兵自检】黄雀主站文件漂移监测通道正常，可忽略'))
-        return 0
-    if args.activate_overlay is not None:
-        if not args.deploy_sha:
-            ap.error('--activate-overlay 必须同时传 --deploy-sha <40位SHA>')
-        try:
-            activate_overlay(args.activate_overlay, args.deploy_sha, pr=args.pr)
-        except Exception as exc:
-            log('活动 overlay 启用失败: %s' % exc)
-            return 2
         return 0
     if args.verify_deploy is not None:
         return handle_verify(args.verify_deploy)
