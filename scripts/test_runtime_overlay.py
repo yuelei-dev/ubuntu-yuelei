@@ -35,6 +35,14 @@ def load_manifest(path):
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
     if data.get("schema_version") != 1 or data.get("target") != "test:8.148.158.106":
         raise ValueError("unsupported or non-test manifest")
+    overrides = data.get("overrides", [])
+    if (not isinstance(overrides, list)
+            or any(not isinstance(item, str)
+                   or not re.fullmatch(r"deploy/test-runtime/[^/]+/manifest\.json", item)
+                   for item in overrides)
+            or len(overrides) != len(set(overrides))
+            or str(path).replace("\\", "/") in overrides):
+        raise ValueError("invalid overlay overrides")
     entries = data.get("deploy_files")
     if not isinstance(entries, list) or not entries:
         raise ValueError("deploy_files must be a non-empty array")
