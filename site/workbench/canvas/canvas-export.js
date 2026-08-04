@@ -131,21 +131,32 @@
     options=options||{};
     var bounds=options.bounds,nodes=options.nodes||[],edges=options.edges||[],theme=options.theme==='light'?'light':'dark',later=options.setTimeoutImpl||setTimeout;
     if(!bounds) return Promise.reject(new Error('canvas bounds unavailable'));
+    if(typeof bounds.w!=='number'||typeof bounds.h!=='number'||!Number.isFinite(bounds.w)||!Number.isFinite(bounds.h)||bounds.w<=0||bounds.h<=0){
+      return Promise.reject(new Error('canvas bounds must have finite positive width and height'));
+    }
     var sources={};
     nodes.forEach(function(node){var src=nodeImageSource(node);if(src) sources[src]=null;});
     return Promise.all(Object.keys(sources).map(function(src){
       return Promise.resolve().then(function(){return options.loadImage(src);}).catch(function(){return null;}).then(function(img){sources[src]=img;});
     })).then(function(){
-      var maxSide=Math.max(bounds.w,bounds.h),pixelScale=Math.min(2,4096/maxSide,Math.sqrt(16000000/(bounds.w*bounds.h)));
-      pixelScale=Math.max(.25,pixelScale);
+      var maxCanvasSide=4096,maxCanvasPixels=16000000;
+      var pixelScale=Math.min(2,maxCanvasSide/bounds.w,maxCanvasSide/bounds.h);
+      var canvasWidth=Math.max(1,Math.floor(bounds.w*pixelScale)),canvasHeight=Math.max(1,Math.floor(bounds.h*pixelScale));
+      if(canvasWidth*canvasHeight>maxCanvasPixels){
+        var areaScale=Math.sqrt(maxCanvasPixels/(canvasWidth*canvasHeight));
+        canvasWidth=Math.max(1,Math.floor(canvasWidth*areaScale));
+        canvasHeight=Math.max(1,Math.floor(canvasHeight*areaScale));
+      }
+      pixelScale=Math.min(pixelScale,canvasWidth/bounds.w,canvasHeight/bounds.h);
       var canvas=options.createCanvas();
-      canvas.width=Math.max(1,Math.ceil(bounds.w*pixelScale)); canvas.height=Math.max(1,Math.ceil(bounds.h*pixelScale));
+      canvas.width=canvasWidth; canvas.height=canvasHeight;
       var ctx=canvas.getContext('2d');
       if(!ctx) throw new Error('canvas context unavailable');
       ctx.scale(pixelScale,pixelScale);
       ctx.fillStyle=theme==='light'?'#f5f8fc':'#070b13'; ctx.fillRect(0,0,bounds.w,bounds.h);
       ctx.fillStyle=theme==='light'?'rgba(116,137,164,.22)':'rgba(148,164,187,.12)';
-      for(var gx=12;gx<bounds.w;gx+=24){for(var gy=12;gy<bounds.h;gy+=24){ctx.fillRect(gx,gy,1,1);}}
+      var gridStep=24*Math.max(1,Math.ceil(1/pixelScale));
+      for(var gx=12;gx<bounds.w;gx+=gridStep){for(var gy=12;gy<bounds.h;gy+=gridStep){ctx.fillRect(gx,gy,1,1);}}
       ctx.save(); ctx.translate(-bounds.x,-bounds.y);
       edges.forEach(function(edge){
         var a=edge&&edge.from,b=edge&&edge.to;

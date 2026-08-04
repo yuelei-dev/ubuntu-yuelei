@@ -123,6 +123,45 @@ async function testExportJpegRejectsMissingContextAndBlob() {
   await assert.rejects(exporter.exportJpeg(missingBlob.options), /canvas blob unavailable/);
 }
 
+async function testExportJpegCapsOversizedCanvasBeforeRendering() {
+  const fixture = exportOptions({ bounds: { x: 0, y: 0, w: 20000, h: 20000 } });
+  await exporter.exportJpeg(fixture.options);
+  assert.equal(fixture.canvas.width, 4000);
+  assert.equal(fixture.canvas.height, 4000);
+  assert.ok(fixture.canvas.width <= 4096);
+  assert.ok(fixture.canvas.height <= 4096);
+  assert.ok(fixture.canvas.width * fixture.canvas.height <= 16000000);
+  assert.ok(fixture.context.calls.some((call) => call[0] === 'scale' && call[1] === 0.2 && call[2] === 0.2));
+}
+
+async function testExportJpegCapsExtremeAspectRatios() {
+  for (const bounds of [
+    { x: 0, y: 0, w: 1000000000, h: 1 },
+    { x: 0, y: 0, w: 1, h: 1000000000 },
+  ]) {
+    const fixture = exportOptions({ bounds });
+    await exporter.exportJpeg(fixture.options);
+    assert.ok(fixture.canvas.width >= 1 && fixture.canvas.width <= 4096);
+    assert.ok(fixture.canvas.height >= 1 && fixture.canvas.height <= 4096);
+    assert.ok(fixture.canvas.width * fixture.canvas.height <= 16000000);
+    const scaleCall = fixture.context.calls.find((call) => call[0] === 'scale');
+    assert.ok(scaleCall && Number.isFinite(scaleCall[1]) && scaleCall[1] > 0);
+    assert.equal(scaleCall[1], scaleCall[2]);
+  }
+}
+
+async function testExportJpegRejectsInvalidBounds() {
+  for (const value of [0, -1, NaN, Infinity, -Infinity]) {
+    const invalidWidth = exportOptions({ bounds: { x: 0, y: 0, w: value, h: 100 } });
+    await assert.rejects(exporter.exportJpeg(invalidWidth.options), /finite positive width and height/);
+    assert.equal(invalidWidth.loaded.length, 0);
+
+    const invalidHeight = exportOptions({ bounds: { x: 0, y: 0, w: 100, h: value } });
+    await assert.rejects(exporter.exportJpeg(invalidHeight.options), /finite positive width and height/);
+    assert.equal(invalidHeight.loaded.length, 0);
+  }
+}
+
 async function testDownloadFailureStillCleansUrl() {
   const fixture = exportOptions({ download() { throw new Error('download blocked'); } });
   await assert.rejects(exporter.exportJpeg(fixture.options), /download blocked/);
@@ -163,6 +202,9 @@ Promise.resolve()
   .then(testNodeImageSource)
   .then(testExportJpegUsesExplicitGeometryAndDrawingConstants)
   .then(testExportJpegRejectsMissingContextAndBlob)
+  .then(testExportJpegCapsOversizedCanvasBeforeRendering)
+  .then(testExportJpegCapsExtremeAspectRatios)
+  .then(testExportJpegRejectsInvalidBounds)
   .then(testDownloadFailureStillCleansUrl)
   .then(testBlobImageUrlIsRevokedOnSynchronousImageErrors)
   .then(testModuleHasNoDomAccess)
