@@ -72,7 +72,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
                 stdin_payload = sys.stdin.read()
             if "sudo test -f '/home/ubuntu/hq-drift/active_overlays.json'" in command:
                 raise SystemExit(1)
-            if "drift_sentinel.py" in command and os.environ.get("REQUIRE_SENTINEL_IDENTITY") == "1":
+            if "python3 /home/ubuntu/hq-drift/drift_sentinel.py" in command and os.environ.get("REQUIRE_SENTINEL_IDENTITY") == "1":
                 if "sudo -u ubuntu -H env" not in command:
                     raise SystemExit(94)
             if "sudo sha256sum '" in command and "cut -d" in command:
@@ -192,7 +192,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         result = self.run_ship(REQUIRE_SENTINEL_IDENTITY="1")
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         sentinel_calls = [line for line in self.read_log().splitlines()
-                          if line.startswith("SSH ") and "drift_sentinel.py" in line]
+                          if line.startswith("SSH ") and "python3 /home/ubuntu/hq-drift/drift_sentinel.py" in line]
         self.assertGreaterEqual(len(sentinel_calls), 4)
         self.assertTrue(all("sudo -u ubuntu -H env" in line for line in sentinel_calls))
         self.assertEqual(1, sum(line.startswith("BLESS_SUCCESS ")
