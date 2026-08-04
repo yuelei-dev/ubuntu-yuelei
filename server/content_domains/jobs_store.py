@@ -74,6 +74,12 @@ def public_dict(row, phase=None):
     return data
 
 
+def ensure_owner_column_on_conn(conn):
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "owner" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
+
+
 def ensure_owner_column(jdb):
     """保证 jobs.owner 存在（#511）。三个服务启动时各调一次，谁先起谁建，与部署顺序无关。
 
@@ -83,10 +89,8 @@ def ensure_owner_column(jdb):
     COALESCE(owner,'content') 把它们仍归自己，语义与建列前完全一致。
     """
     with closing(jdb()) as c:
-        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)").fetchall()}
-        if "owner" not in cols:
-            c.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
-            c.commit()
+        ensure_owner_column_on_conn(c)
+        c.commit()
 
 
 def ensure_service_sha_column_on_conn(conn):
@@ -174,7 +178,32 @@ def _release_refund_lease(jdb, job_id, lease_token):
         c.commit()
 
 
-def refund_once(jdb, job_id, username, cost, refund, lease_seconds=REFUND_LEASE_SECONDS):
+def refund_once(jdb, job_id, username, cost, refund):
+    """保留三个共享服务既有退款 ABI；失败回滚 0，成功落 1。"""
+    try:
+        cost = int(cost or 0)
+    except (TypeError, ValueError):
+        cost = 0
+    if cost <= 0:
+        return False
+    with closing(jdb()) as c:
+        cur = c.execute(
+            "UPDATE jobs SET refunded=1 WHERE id=? AND refunded=0 AND status='error'",
+            (job_id,))
+        c.commit()
+        if cur.rowcount < 1:
+            return False
+    if refund(username, cost):
+        return True
+    with closing(jdb()) as c:
+        c.execute(
+            "UPDATE jobs SET refunded=0 WHERE id=? AND refunded=1", (job_id,))
+        c.commit()
+    return False
+
+
+def refund_once_recoverable(jdb, job_id, username, cost, refund,
+                            lease_seconds=REFUND_LEASE_SECONDS):
     """可恢复退点：0=未处理、2=租约处理中、1=上游已确认。
 
     只有持有当前随机租约的调用方可落最终 1。进程在 CAS 后、发网前退出时会保留状态 2；
@@ -221,15 +250,17 @@ def refund_once(jdb, job_id, username, cost, refund, lease_seconds=REFUND_LEASE_
         return cur.rowcount >= 1
 
 
-def pending_refunds(jdb, limit=100):
-    """只返回到期的退款任务，避免被无关 error 行饿死。"""
+def pending_refunds(jdb, limit=100, owner="content"):
+    """只返回指定服务到期的退款任务，避免跨服务退款和无关行饿死。"""
     bounded = max(1, min(int(limit or 100), 500))
     now = int(time.time())
     with closing(jdb()) as c:
+        ensure_owner_column_on_conn(c)
         ensure_refund_lease_columns_on_conn(c)
         c.commit()
         return c.execute(
-            "SELECT id,username,cost FROM jobs WHERE status='error' AND cost>0 AND "
+            "SELECT id,username,cost FROM jobs WHERE status='error' AND cost>0 "
+            "AND COALESCE(owner,'content')=? AND "
             "(COALESCE(refunded,0)=? OR (refunded=? AND COALESCE(refund_lease_until,0)<=?)) "
             "ORDER BY id ASC LIMIT ?",
-            (REFUND_UNCLAIMED, REFUND_PENDING, now, bounded)).fetchall()
+            (owner, REFUND_UNCLAIMED, REFUND_PENDING, now, bounded)).fetchall()

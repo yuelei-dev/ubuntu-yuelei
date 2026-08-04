@@ -12,12 +12,14 @@ def refund_once(jdb, jobs_store, points_domain, job_id, username, cost):
             print("[refund] job=%d retryable failure: %s" % (
                 job_id, type(exc).__name__), flush=True)
             return False
-    return jobs_store.refund_once(jdb, job_id, username, cost, refund)
+    return jobs_store.refund_once_recoverable(
+        jdb, job_id, username, cost, refund
+    )
 
 
 def retry_failed_refunds(jdb, jobs_store, points_domain, limit=100):
     """Retry only persisted unpaid refunds; unrelated errors cannot starve them."""
-    rows = jobs_store.pending_refunds(jdb, limit)
+    rows = jobs_store.pending_refunds(jdb, limit, owner="content")
     recovered = 0
     for row in rows:
         if refund_once(

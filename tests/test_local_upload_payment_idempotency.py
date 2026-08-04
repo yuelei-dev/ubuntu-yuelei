@@ -359,12 +359,12 @@ class RefundRecoveryTests(unittest.TestCase):
                 )""")
                 for _ in range(100):
                     connection.execute(
-                        "INSERT INTO jobs(kind,username,cost,status,refunded) "
-                        "VALUES('video','u',20,'error',1)"
+                        "INSERT INTO jobs(kind,username,cost,status,refunded,owner) "
+                        "VALUES('video','u',20,'error',0,'leadgen')"
                     )
                 target = connection.execute(
-                    "INSERT INTO jobs(kind,username,cost,status,refunded) "
-                    "VALUES('breakdown','alice',20,'error',0)"
+                    "INSERT INTO jobs(kind,username,cost,status,refunded,owner) "
+                    "VALUES('breakdown','alice',20,'error',0,'content')"
                 ).lastrowid
                 connection.commit()
 
@@ -400,6 +400,12 @@ class RefundRecoveryTests(unittest.TestCase):
                 self.assertEqual(
                     connection.execute("SELECT refunded FROM jobs WHERE id=?", (target,)).fetchone()[0],
                     1,
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE owner='leadgen' AND refunded<>0"
+                    ).fetchone()[0],
+                    0,
                 )
 
     def test_process_exit_after_refund_claim_converges_on_restart(self):
@@ -445,6 +451,8 @@ class RefundRecoveryTests(unittest.TestCase):
                     )
                     connection.commit()
                 RestartedPoints.crash = False
+                # Historical rows created before jobs.owner existed are owned by
+                # content and remain eligible for content-only reconciliation.
                 self.assertEqual(self.core._retry_failed_refunds(limit=10), 1)
                 self.assertEqual(self.core._retry_failed_refunds(limit=10), 0)
 
