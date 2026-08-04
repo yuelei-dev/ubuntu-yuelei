@@ -167,7 +167,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.assertNotIn("RESTORE_EXECUTED", self.read_log())
         blessings = [line for line in self.read_log().splitlines() if line.startswith("BLESS_SUCCESS ")]
         self.assertEqual(1, len(blessings))
-        self.assertIn("--pr 184", blessings[0])
+        self.assertIn("--pr '184'", blessings[0])
         self.assertIn(HEAD_SHA, blessings[0])
         for source in SOURCES:
             self.assertIn(source, blessings[0])
