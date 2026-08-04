@@ -1478,6 +1478,7 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?")[0]
         audio_domain, points_domain, video_domain = _domains()
+        if p == "/api/gen/pricing": return self._send(200, pricing_config.public_catalog())
         if p == "/api/gen/audio/clone-vip":
             return self._method_not_allowed()
         if p == "/api/gen/asset/marks":
