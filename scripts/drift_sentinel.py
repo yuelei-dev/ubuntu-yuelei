@@ -12,8 +12,19 @@
   drift_sentinel.py --print                 只打印漂移，不告警
   drift_sentinel.py --bless                 兼容旧调用：记录当前 origin/main 应有清单
   drift_sentinel.py --bless-deploy file...  记录本次 ship 部署的文件清单，不改变巡检判断
+                                            （可选 --pr <号> 或 env HQ_DEPLOY_PR 记录关联 PR）
   drift_sentinel.py --verify-deploy file... 校验本次 ship 文件线上 == git origin/main
   drift_sentinel.py --test                  发一条飞书自检消息
+
+已登记例外（仅巡检路径生效，--verify-deploy 一律绕开、严格比对）：
+  例外条目 = path + drift_kind + 指纹（expected: sha256 运行时内容哈希 / ref 等于某
+  不可变提交（完整 40 位 SHA，拒绝分支名/tag/短 SHA）版本 / absent 仅用于 missing）。drift_kind 与指纹完全匹配才进 registered 桶单独汇总、
+  不计入漂移数；命中但状态已变（kind/指纹不符）按真漂移处理并标注「登记例外状态已变」。
+  漂移桶之外还会独立遍历清单全部条目核对当前实际状态：恢复基线内容、missing 被补上、
+  added 被删除都算偏离登记 → exceptions_stale；stale-only（无普通漂移）同样返回非零并告警。
+  清单来源顺序：env HQ_DRIFT_EXCEPTIONS（本地 JSON）→
+  git show <HQ_DRIFT_EXCEPTIONS_REF 或 GIT_REF>:deploy/test-server-exceptions.json；
+  读不到按无例外处理（行为同旧版）；schema 非法则告警并按零例外巡检，绝不崩溃。
 
 告警渠道复用 openclaw 的飞书（~/.openclaw/openclaw.json）+ balance_alert 的告警群。
 零依赖（仅标准库）。
@@ -23,6 +34,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -45,6 +57,7 @@ COOLDOWN = 6 * 3600
 WEBROOT = os.environ.get('HQ_WEBROOT', '/var/www/huangquechuanmei')
 REPO = os.environ.get('HQ_REPO', os.path.join(HOME, 'huangque-main-site'))
 GIT_REF = os.environ.get('HQ_DRIFT_REF', 'origin/main')
+EXCEPTIONS_GIT_PATH = 'deploy/test-server-exceptions.json'
 
 BACKEND_RUNTIME = {
     'server/auth_server.py': '/home/ubuntu/auth-service/auth_server.py',
@@ -120,6 +133,134 @@ def git_md5(git_path):
     return md5_bytes(p.stdout)
 
 
+EXCEPTION_KINDS = ('changed', 'missing', 'added')
+EXPECTED_TYPES = ('sha256', 'ref', 'absent')
+EXCEPTION_KEYS = {'path', 'drift_kind', 'expected', 'reason', 'registered'}
+
+
+def _validate_exceptions(data):
+    """严格 schema 校验，返回 {git path: 条目}；任何非法抛 ValueError。"""
+    if not isinstance(data, dict):
+        raise ValueError('顶层必须是对象')
+    if data.get('schema_version') != 1:
+        raise ValueError('schema_version 缺失或不支持（需要 1）')
+    items = data.get('exceptions')
+    if not isinstance(items, list):
+        raise ValueError('exceptions 必须是数组')
+    out = {}
+    for i, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError('第 %d 条不是对象' % i)
+        if set(item) != EXCEPTION_KEYS:
+            raise ValueError('第 %d 条字段必须恰好为 %s，实际 %s' % (i, sorted(EXCEPTION_KEYS), sorted(item)))
+        path, kind, expected = item['path'], item['drift_kind'], item['expected']
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError('第 %d 条 path 非法' % i)
+        path = path.replace('\\', '/')
+        if kind not in EXCEPTION_KINDS:
+            raise ValueError('%s drift_kind 非法: %r' % (path, kind))
+        if not isinstance(item['reason'], str) or not isinstance(item['registered'], str):
+            raise ValueError('%s reason/registered 必须是字符串' % path)
+        if not isinstance(expected, dict):
+            raise ValueError('%s expected 必须是对象' % path)
+        etype = expected.get('type')
+        if etype not in EXPECTED_TYPES:
+            raise ValueError('%s expected.type 非法: %r' % (path, etype))
+        if etype == 'absent':
+            if set(expected) != {'type'}:
+                raise ValueError('%s absent 型 expected 不允许 value 字段' % path)
+            if kind != 'missing':
+                raise ValueError('%s absent 型只用于 missing 类例外' % path)
+        else:
+            if set(expected) != {'type', 'value'} or not isinstance(expected.get('value'), str) or not expected['value']:
+                raise ValueError('%s expected.value 缺失或非法' % path)
+            if kind == 'missing':
+                raise ValueError('%s missing 类例外必须用 absent 型' % path)
+            if etype == 'sha256' and not re.fullmatch(r'[0-9a-f]{64}', expected['value']):
+                raise ValueError('%s sha256 必须是 64 位小写十六进制' % path)
+            if etype == 'ref' and not re.fullmatch(r'[0-9a-f]{40}', expected['value']):
+                # 必须是完整 40 位不可变提交 SHA——分支名/tag/短 SHA 会随 fetch 移动，
+                # 移动 ref 会让「线上 == ref」的判定自动跟随，形成假阴性
+                raise ValueError('%s ref 必须是完整 40 位提交 SHA，拒绝分支名/tag/短 SHA: %r' % (path, expected['value']))
+        if path in out:
+            raise ValueError('重复 path: %s' % path)
+        item = dict(item, path=path)
+        out[path] = item
+    return out
+
+
+def load_exceptions():
+    """读取并校验已登记例外，返回 {git path: 条目}。
+
+    来源顺序：env HQ_DRIFT_EXCEPTIONS（本地 JSON 文件）→
+    git show <HQ_DRIFT_EXCEPTIONS_REF 或 GIT_REF>:deploy/test-server-exceptions.json。
+    读不到文件 → 空表（静默，行为同旧版）；内容非法 → 告警并按零例外巡检，绝不崩溃。
+    """
+    src = os.environ.get('HQ_DRIFT_EXCEPTIONS')
+    if src:
+        try:
+            with open(src, 'r', encoding='utf-8') as f:
+                raw = f.read()
+        except Exception as e:
+            log('例外清单配置错误，按零例外巡检（%s 读取失败: %s）' % (src, e))
+            return {}
+    else:
+        ref = os.environ.get('HQ_DRIFT_EXCEPTIONS_REF') or GIT_REF
+        p = git(['show', '%s:%s' % (ref, EXCEPTIONS_GIT_PATH)], check=False)
+        if p.returncode != 0:
+            return {}
+        raw = p.stdout.decode('utf-8', 'ignore')
+    try:
+        return _validate_exceptions(json.loads(raw))
+    except Exception as e:
+        log('例外清单配置错误，按零例外巡检: %s' % e)
+        return {}
+
+
+def sha256_file(path):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except Exception:
+        return None
+
+
+def _exception_state_matches(item, git_path):
+    """不看 drift_kind，只核对当前实际状态（存在性 + 指纹）是否等于登记值。"""
+    expected = item['expected']
+    etype = expected['type']
+    rp = git_path_to_runtime(git_path)
+    if etype == 'absent':
+        return not (rp and os.path.exists(rp))
+    if not rp or not os.path.exists(rp):
+        return False
+    if etype == 'sha256':
+        return sha256_file(rp) == expected['value']
+    if etype == 'ref':
+        p = git(['show', '%s:%s' % (expected['value'], git_path)], check=False)
+        if p.returncode != 0:
+            return False
+        return md5_file(rp) == md5_bytes(p.stdout)
+    return False
+
+
+def _exception_matches(item, kind, git_path):
+    """命中例外的路径，校验 drift_kind 与内容指纹，完全匹配才可豁免。"""
+    return item['drift_kind'] == kind and _exception_state_matches(item, git_path)
+
+
+def _stale_reason(item, drift_kind, git_path):
+    """登记例外的当前状态偏离说明。drift_kind=None 表示该路径当前无普通漂移。"""
+    rp = git_path_to_runtime(git_path)
+    if item['expected']['type'] == 'absent':
+        return '登记为 missing（应不存在），当前文件已存在（可能被重新部署）'
+    if not (rp and os.path.exists(rp)):
+        return '登记为 %s 例外，当前文件不存在（可能被删除或回退）' % item['drift_kind']
+    if drift_kind is None:
+        return '登记为 %s 例外，当前无漂移但指纹与登记不符（可能已恢复基线内容）' % item['drift_kind']
+    return '登记为 %s 例外，当前为 %s 且 drift_kind/指纹与登记不符' % (item['drift_kind'], drift_kind)
+
+
 def git_path_to_runtime(git_path):
     git_path = git_path.replace('\\', '/')
     if git_path.startswith('site/'):
@@ -187,7 +328,8 @@ def runtime_files():
     return sorted(set(files))
 
 
-def diff_paths(git_paths=None):
+def diff_paths(git_paths=None, apply_exceptions=True):
+    """比对线上与 git。apply_exceptions=False 时（--verify-deploy）完全绕开例外机制。"""
     ensure_repo_ref()
     wanted = sorted(set(git_paths or expected_git_paths()))
     changed, missing, added = [], [], []
@@ -209,11 +351,45 @@ def diff_paths(git_paths=None):
             if gp and gp not in expected_git and git_md5(gp) is None:
                 added.append(gp)
 
-    return {
+    result = {
         'changed': sorted(changed),
         'missing': sorted(missing),
         'added': sorted(set(added)),
+        'registered': [],
+        'exceptions_stale': [],
+        'exceptions_stale_reasons': {},
     }
+    if apply_exceptions:
+        exceptions = load_exceptions()
+        classified = set()
+        for kind in EXCEPTION_KINDS:
+            kept = []
+            for gp in result[kind]:
+                item = exceptions.get(gp)
+                if item is None:
+                    kept.append(gp)
+                elif _exception_matches(item, kind, gp):
+                    result['registered'].append(gp)
+                else:
+                    # 命中例外但 drift_kind/指纹不符：登记状态已变，按真漂移处理
+                    result['exceptions_stale'].append(gp)
+                    result['exceptions_stale_reasons'][gp] = _stale_reason(item, kind, gp)
+                    kept.append(gp)
+                classified.add(gp)
+            result[kind] = kept
+        # 独立遍历未进漂移桶的例外：恢复基线内容 / missing 被补上 / added 被删除
+        # 都会让路径从漂移集合消失，必须在这里核出，否则登记保留的功能被回退会静默漏报
+        for gp, item in exceptions.items():
+            if gp in classified:
+                continue
+            if _exception_state_matches(item, gp):
+                result['registered'].append(gp)
+            else:
+                result['exceptions_stale'].append(gp)
+                result['exceptions_stale_reasons'][gp] = _stale_reason(item, None, gp)
+        result['registered'].sort()
+        result['exceptions_stale'].sort()
+    return result
 
 
 def snapshot():
@@ -228,7 +404,7 @@ def snapshot():
     }
 
 
-def bless(paths=None):
+def bless(paths=None, pr=None):
     os.makedirs(DRIFT_DIR, exist_ok=True)
     paths = [p.replace('\\', '/') for p in (paths or [])]
     if paths:
@@ -240,9 +416,11 @@ def bless(paths=None):
             'files': paths,
             'verify': d,
         }
+        if pr:
+            record['pr'] = str(pr)
         with open(DEPLOY_LOG, 'a', encoding='utf-8') as f:
             f.write(json.dumps(record, ensure_ascii=False) + '\n')
-        log('部署 bless 已记录：%d 个文件' % len(paths))
+        log('部署 bless 已记录：%d 个文件%s' % (len(paths), '（PR #%s）' % pr if pr else ''))
         return
     snap = snapshot()
     with open(BASELINE, 'w', encoding='utf-8') as f:
@@ -288,10 +466,23 @@ def _feishu_send(text):
 
 def format_diff(d):
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
-    lines = ['⚠️ 黄雀主站检测到 %d 处文件漂移（线上与 git %s 不一致）' % (total, GIT_REF)]
+    registered = d.get('registered') or []
+    stale = d.get('exceptions_stale') or []
+    reasons = d.get('exceptions_stale_reasons') or {}
+    if total == 0 and stale:
+        # stale-only：无普通漂移，但登记例外的状态/指纹已偏离登记值
+        lines = ['‼️ 黄雀主站登记例外状态已变 %d 处（线上与 git %s 比对无普通漂移，但例外登记不再成立）' % (len(stale), GIT_REF)]
+    else:
+        lines = ['⚠️ 黄雀主站检测到 %d 处文件漂移（线上与 git %s 不一致）' % (total, GIT_REF)]
     for tag, key in (('改动', 'changed'), ('删除', 'missing'), ('新增', 'added')):
         if d[key]:
             lines.append('【%s %d】%s' % (tag, len(d[key]), '、'.join(short(p) for p in d[key][:12])))
+    if registered:
+        lines.append('已登记例外 %d 处（见 %s，指纹匹配，不计入漂移）' % (len(registered), EXCEPTIONS_GIT_PATH))
+    if stale:
+        lines.append('‼️ 登记例外状态已变 %d 处（按真漂移处理）：' % len(stale))
+        for p in stale[:12]:
+            lines.append('  - %s：%s' % (p, reasons.get(p, '状态与登记不符')))
     lines.append('→ 请勿直接改服务器；正常上线必须走 PR 合并后由审核方执行 ship。')
     return '\n'.join(lines)
 
@@ -299,11 +490,15 @@ def format_diff(d):
 def handle_detect(print_only=False):
     d = diff_paths()
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
-    if total == 0:
-        log('巡检正常：线上与 git %s 一致，无漂移' % GIT_REF)
+    n_reg = len(d.get('registered') or [])
+    n_stale = len(d.get('exceptions_stale') or [])
+    if total == 0 and n_stale == 0:
+        log('巡检正常：线上与 git %s 一致，无漂移%s' % (GIT_REF, '（已登记例外 %d 处）' % n_reg if n_reg else ''))
         return 0
+    # stale-only 也必须非零并告警：登记保留的功能被回退/删除时不能静默漏报
     msg = format_diff(d)
-    log('检测到漂移: changed=%d missing=%d added=%d' % (len(d['changed']), len(d['missing']), len(d['added'])))
+    log('检测到漂移: changed=%d missing=%d added=%d registered=%d stale=%d' % (
+        len(d['changed']), len(d['missing']), len(d['added']), n_reg, n_stale))
     if print_only:
         print(msg)
         return 1
@@ -321,7 +516,8 @@ def handle_detect(print_only=False):
 
 def handle_verify(paths):
     paths = [p.replace('\\', '/') for p in paths]
-    d = diff_paths(paths)
+    # 部署后校验必须严格：逐一比对 运行文件 == git GIT_REF，完全绕开巡检例外机制。
+    d = diff_paths(paths, apply_exceptions=False)
     total = len(d['changed']) + len(d['missing']) + len(d['added'])
     if total == 0:
         log('部署后校验通过：%d 个文件线上 == git %s' % (len(paths), GIT_REF))
@@ -338,6 +534,8 @@ def main():
     ap.add_argument('--bless', action='store_true')
     ap.add_argument('--bless-deploy', nargs='*')
     ap.add_argument('--verify-deploy', nargs='*')
+    ap.add_argument('--pr', default=os.environ.get('HQ_DEPLOY_PR'),
+                    help='--bless-deploy 记录的关联 PR 号（也可用 env HQ_DEPLOY_PR）')
     args = ap.parse_args()
 
     if args.test:
@@ -346,7 +544,7 @@ def main():
     if args.verify_deploy is not None:
         return handle_verify(args.verify_deploy)
     if args.bless_deploy is not None:
-        bless(args.bless_deploy)
+        bless(args.bless_deploy, pr=args.pr)
         return 0
     if args.bless:
         bless()
