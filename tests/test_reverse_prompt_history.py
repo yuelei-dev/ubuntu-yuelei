@@ -57,6 +57,7 @@ class ReversePromptHistoryTests(unittest.TestCase):
                 "compactBreakdownHistoryMeta",
                 "isBreakdownHistoryMeta",
                 "saveBreakdownHistory",
+                "breakdownHistoryResult",
                 "loadBreakdownHistoryDetail",
             )
         )
@@ -211,6 +212,100 @@ loadBreakdownHistoryDetail({{job_id:3258,meta:{{type:'breakdown_reverse'}}}}).th
         self.assertEqual(got["detail"]["reference_thumbnail_indices"], [2, 4, 6, 8])
         self.assertEqual(got["detail"]["_history_job_id"], 3258)
         self.assertEqual(got["loginCalls"], 0)
+
+    def test_real_completion_paths_attach_job_and_batch_identity(self):
+        self.assertIn(
+            "var localResult=breakdownHistoryResult(d.result||{},jobId)",
+            self.html,
+        )
+        self.assertIn(
+            "saveBreakdownHistory(breakdownHistoryResult(item,x.d.job_id,index))",
+            self.html,
+        )
+        self.assertGreaterEqual(
+            self.html.count("result=breakdownHistoryResult(result,x.d.job_id)"),
+            2,
+        )
+
+    def test_all_completion_identities_survive_compact_local_history(self):
+        harness = f"""
+var BREAKDOWN_HISTORY_KEY='history';
+var storage={{}};
+var historyState={{textContent:''}};
+var localStorage={{
+  getItem:function(key){{return storage[key]||null;}},
+  setItem:function(key,value){{storage[key]=value;}}
+}};
+var window={{HQ:{{toast:function(){{}}}}}};
+var HQ=window.HQ;
+function normalizeBreakdownScenes(value){{return value||[];}}
+{self.functions}
+saveBreakdownHistory(breakdownHistoryResult({{
+  type:'breakdown_reverse',source_url:'https://example.invalid/local',prompt:'LOCAL'
+}},701));
+saveBreakdownHistory(breakdownHistoryResult({{
+  type:'breakdown_reverse',source_url:'https://example.invalid/link',prompt:'LINK'
+}},702));
+saveBreakdownHistory(breakdownHistoryResult({{
+  type:'breakdown',source_url:'https://example.invalid/batch-1',scenes:[{{scene:'S1'}}]
+}},703,0));
+saveBreakdownHistory(breakdownHistoryResult({{
+  type:'breakdown',source_url:'https://example.invalid/batch-2',scenes:[{{scene:'S2'}}]
+}},703,1));
+var items=JSON.parse(storage[BREAKDOWN_HISTORY_KEY]);
+process.stdout.write(JSON.stringify(items.map(function(item){{return {{
+  job_id:item.job_id,meta_job_id:item.meta.job_id,batch_index:item.meta._batch_index,
+  source_url:item.meta.source_url
+}};}})));
+"""
+        result = subprocess.run(
+            ["node", "-e", harness],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        got = json.loads(result.stdout)
+        by_source = {item["source_url"]: item for item in got}
+        self.assertEqual(by_source["https://example.invalid/local"]["job_id"], 701)
+        self.assertIsNone(by_source["https://example.invalid/local"]["batch_index"])
+        self.assertEqual(by_source["https://example.invalid/link"]["meta_job_id"], 702)
+        self.assertIsNone(by_source["https://example.invalid/link"]["batch_index"])
+        self.assertEqual(by_source["https://example.invalid/batch-1"]["job_id"], 703)
+        self.assertEqual(by_source["https://example.invalid/batch-1"]["batch_index"], 0)
+        self.assertEqual(by_source["https://example.invalid/batch-2"]["batch_index"], 1)
+
+    def test_batch_history_detail_uses_parent_job_and_stable_index(self):
+        harness = f"""
+var window={{HQ:{{login:function(){{}}}}}};
+var HQ=window.HQ;
+function tok(){{return 'cookie';}}
+var requested='';
+function fetch(url,options){{
+  requested=url;
+  return Promise.resolve({{ok:true,status:200,json:function(){{return Promise.resolve({{
+    result:{{type:'breakdown_batch',results:[
+      {{type:'breakdown',prompt:'FIRST'}},
+      {{type:'breakdown_reverse',prompt:'SECOND',frame_thumbnails:['f1','f2']}}
+    ]}}
+  }});}}}});
+}}
+{self.functions}
+loadBreakdownHistoryDetail({{job_id:703,meta:{{_batch_index:1}}}}).then(function(detail){{
+  process.stdout.write(JSON.stringify({{requested:requested,detail:detail}}));
+}});
+"""
+        result = subprocess.run(
+            ["node", "-e", harness],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        got = json.loads(result.stdout)
+        self.assertEqual(got["requested"], "/api/gen/job/703")
+        self.assertEqual(got["detail"]["prompt"], "SECOND")
+        self.assertEqual(got["detail"]["_history_job_id"], 703)
 
 
 if __name__ == "__main__":

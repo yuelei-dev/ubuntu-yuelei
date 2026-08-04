@@ -899,9 +899,12 @@
   function breakdownMetaFromResult(bd){
     bd=bd||{};
     var isReverse=(bd.type==='breakdown_reverse');
+    var hasBatchIndex=bd._batch_index!==undefined&&bd._batch_index!==null&&bd._batch_index!=='';
+    var batchIndex=hasBatchIndex?Number(bd._batch_index):null;
     return {
       type:bd.type||'breakdown',
       job_id:bd.job_id||bd._history_job_id||null,
+      _batch_index:hasBatchIndex&&Number.isInteger(batchIndex)&&batchIndex>=0?batchIndex:null,
       source_url:bd.source_url||'',
       source_title:bd.source_title||'',
       source_platform:bd.source_platform||'',
@@ -923,7 +926,7 @@
   function compactBreakdownHistoryMeta(bd){
     var meta=breakdownMetaFromResult(bd);
     return {
-      type:meta.type,job_id:meta.job_id,source_url:meta.source_url,
+      type:meta.type,job_id:meta.job_id,_batch_index:meta._batch_index,source_url:meta.source_url,
       source_title:meta.source_title,source_platform:meta.source_platform,
       duration:meta.duration,analysis:meta.analysis,scenes:meta.scenes,
       prompt:meta.prompt,source_type:meta.source_type
@@ -959,6 +962,12 @@
       if(window.HQ&&window.HQ.toast) HQ.toast('本机历史保存失败，完整结果仍保存在服务器');
       return false;
     }
+  }
+  function breakdownHistoryResult(bd,jobId,batchIndex){
+    var result=Object.assign({},bd||{});
+    if(jobId!==undefined&&jobId!==null&&String(jobId).trim()) result._history_job_id=jobId;
+    if(Number.isInteger(batchIndex)&&batchIndex>=0) result._batch_index=batchIndex;
+    return result;
   }
   function readBreakdownHistory(){
     try{
@@ -1278,8 +1287,9 @@
         if(d.phase&&d.phase!==lastPhase){ lastPhase=d.phase; setBdPhase(d.phase,'active'); }
         if(d.status==='done'){
           clearInterval(iv); _localBusy(btn,false); markAllBdPhasesDone();
-          switchBreakdownTool('reverse_prompt'); renderBreakdownReverse(d.result||{});
-          saveBreakdownHistory(d.result||{}); loadHistory();
+          var localResult=breakdownHistoryResult(d.result||{},jobId);
+          switchBreakdownTool('reverse_prompt'); renderBreakdownReverse(localResult);
+          saveBreakdownHistory(localResult); loadHistory();
           if(bdLocalStatus){bdLocalStatus.textContent='反推完成，已保存到生成记录';bdLocalStatus.style.color='#4ade80';}
           if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
         }else if(d.status==='error'||d.status==='failed'){
@@ -1430,15 +1440,19 @@
                 });
                 if(first) renderBreakdown(first);
                 else scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">批量拆解没有生成有效分镜，请重试</div>';
-                (result.results||[]).forEach(function(item){ saveBreakdownHistory(item); });
+                (result.results||[]).forEach(function(item,index){
+                  saveBreakdownHistory(breakdownHistoryResult(item,x.d.job_id,index));
+                });
                 var msg='批量完成：'+result.results.length+'/'+result.total+' 成功';
                 if(result.errors.length) msg+='，'+result.errors.length+' 条失败';
                 if(window.HQ&&window.HQ.toast) HQ.toast(msg);
                 loadHistory();
               } else if(result.type==='breakdown_reverse'){
+                result=breakdownHistoryResult(result,x.d.job_id);
                 switchBreakdownTool('reverse_prompt');
                 renderBreakdownReverse(result); saveBreakdownHistory(result); loadHistory();
               } else {
+                result=breakdownHistoryResult(result,x.d.job_id);
                 switchBreakdownTool('scenes');
                 renderBreakdown(result); saveBreakdownHistory(result); loadHistory();
               }

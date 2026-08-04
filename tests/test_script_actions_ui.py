@@ -227,7 +227,10 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("render({scenes:list},heading", self.html)
         self.assertIn("readBreakdownHistory()", self.html)
         self.assertIn("flattenBreakdownAsset(item)", self.html)
-        self.assertIn("saveBreakdownHistory(item);", self.html)
+        self.assertIn(
+            "saveBreakdownHistory(breakdownHistoryResult(item,x.d.job_id,index))",
+            self.html,
+        )
 
     def test_reverse_history_is_saved_and_restored(self):
         self.assertIn("prompt:isReverse?reverseResultPrompt(bd):(bd.prompt||'')", self.html)
