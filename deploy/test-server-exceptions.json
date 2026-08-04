@@ -54,11 +54,11 @@
       "path": "server/content_domains/core.py",
       "drift_kind": "changed",
       "expected": {
-        "type": "sha256",
-        "value": "ab48d8f920c20f5361af74ec0d5b5d6694ff2cbc2b6e9e3f79eb37adb06ed06a"
+        "type": "ref",
+        "value": "f03cab377875a2d47a9566bd51ccfccff5f29be8"
       },
-      "reason": "PR171 测试覆盖层 e755f40（登记 §2.2）",
-      "registered": "2026-08-03"
+      "reason": "版本绑定部署（PR #174）；原 PR171 覆盖层已被该部署替换",
+      "registered": "2026-08-04"
     },
     {
       "path": "server/content_domains/feature_flags.py",
