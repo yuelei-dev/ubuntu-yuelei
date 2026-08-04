@@ -5,6 +5,14 @@ const cloned = state.cloneSnapshot(original);
 cloned.nodes[0].params.text = 'changed';
 assert.equal(original.nodes[0].params.text, 'one');
 
+const sourceNode = { type: 'image', params: { src: 'asset.png', privateToken: 'secret' } };
+const sanitized = state.sanitizeNodeData(sourceNode, {
+  image(node) { delete node.params.privateToken; return node; },
+});
+assert.deepEqual(sanitized, { type: 'image', params: { src: 'asset.png' } });
+assert.equal(sourceNode.params.privateToken, 'secret', 'sanitizers must not mutate the source node');
+assert.deepEqual(state.sanitizeNodeData(sourceNode), sourceNode, 'missing sanitizers return a defensive copy');
+
 const history = state.createHistory({ limit: 2 });
 history.push({ value: 1 }); history.push({ value: 2 }); history.push({ value: 3 });
 assert.equal(history.canUndo(), true);
