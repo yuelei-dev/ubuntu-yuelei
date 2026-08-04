@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import importlib.util
 import io
@@ -151,6 +152,28 @@ class Pr182DeploymentManifestTests(unittest.TestCase):
         self.assertIn("def breakdown_local_upload_cost", by_path["server/content_domains/points.py"])
         self.assertIn("pricing_config.get_price(\"breakdown.local_upload\")", by_path["server/content_domains/points.py"])
         self.assertIn("transaction_key", by_path["server/content_domains/points.py"])
+
+    def test_core_overlay_serves_the_authoritative_public_pricing_catalog(self):
+        core_path = DEPLOY_DIR / "runtime" / "server" / "content_domains" / "core.py"
+        tree = ast.parse(core_path.read_text(encoding="utf-8"), filename=str(core_path))
+        handler = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "H")
+        do_get = next(node for node in handler.body if isinstance(node, ast.FunctionDef) and node.name == "do_GET")
+        namespace = {
+            "_domains": lambda: (object(), object(), object()),
+            "pricing_config": types.SimpleNamespace(
+                public_catalog=lambda: {"values": {"breakdown.local_upload": 37}}
+            ),
+        }
+        ast.fix_missing_locations(do_get)
+        exec(compile(ast.Module(body=[do_get], type_ignores=[]), str(core_path), "exec"), namespace)
+
+        calls = []
+        request = types.SimpleNamespace(
+            path="/api/gen/pricing?cache_bust=1",
+            _send=lambda status, body: calls.append((status, body)),
+        )
+        namespace["do_GET"](request)
+        self.assertEqual(calls, [(200, {"values": {"breakdown.local_upload": 37}})])
 
     def test_points_overlay_is_exact_pr180_postimage_plus_local_upload_helper(self):
         baseline = (
