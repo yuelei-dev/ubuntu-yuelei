@@ -146,6 +146,11 @@ def cost_of(kind, body):
         return pricing_config.get_price(direct[kind])
     return COST.get(kind, 0)
 
+
+def breakdown_local_upload_cost():
+    """Authoritative price for one local image/video reverse submission."""
+    return pricing_config.get_price("breakdown.local_upload")
+
 def breakdown_batch_refund(cost, total, failed):
     """批量拆解的退点额：全灭全退；部分失败每个失败链接退 20 点。
 

@@ -14,6 +14,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import closing
@@ -56,7 +57,7 @@ class JobsStoreTests(unittest.TestCase):
 
     def _row(self, jid):
         with closing(self._conn()) as c:
-            return c.execute("SELECT status, refunded, result, error FROM jobs WHERE id=?", (jid,)).fetchone()
+            return c.execute("SELECT * FROM jobs WHERE id=?", (jid,)).fetchone()
 
     def _ok_refund(self, u, c):
         self.refunds.append((u, c))
@@ -138,6 +139,114 @@ class JobsStoreTests(unittest.TestCase):
         self.assertTrue(jobs_store.refund_once(self._jdb, jid, "u", 10, self._ok_refund))
         self.assertEqual(self.refunds, [("u", 10)])
         self.assertEqual(self._row(jid)["refunded"], 1)
+
+    def test_process_exit_after_claim_is_recovered_after_lease_expiry(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+
+        def process_exit(_username, _cost):
+            raise SystemExit("simulated process exit before Auth request")
+
+        with self.assertRaises(SystemExit):
+            jobs_store.refund_once_recoverable(
+                self._jdb, jid, "u", 10, process_exit
+            )
+        pending = self._row(jid)
+        self.assertEqual(pending["refunded"], jobs_store.REFUND_PENDING)
+        self.assertTrue(pending["refund_lease_token"])
+        self.assertFalse(jobs_store.public_dict(pending)["refunded"])
+        self.assertTrue(jobs_store.public_dict(pending)["refund_pending"])
+
+        with closing(self._conn()) as connection:
+            connection.execute(
+                "UPDATE jobs SET refund_lease_until=0 WHERE id=?", (jid,)
+            )
+            connection.commit()
+        self.assertTrue(
+            jobs_store.refund_once_recoverable(
+                self._jdb, jid, "u", 10, self._ok_refund
+            )
+        )
+        self.assertEqual(self.refunds, [("u", 10)])
+        self.assertEqual(self._row(jid)["refunded"], jobs_store.REFUND_CONFIRMED)
+
+    def test_two_scanners_share_one_live_refund_lease(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+        results = []
+
+        def slow_refund(username, cost):
+            calls.append((username, cost))
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return True
+
+        first = threading.Thread(target=lambda: results.append(
+            jobs_store.refund_once_recoverable(
+                self._jdb, jid, "u", 10, slow_refund
+            )
+        ))
+        first.start()
+        self.assertTrue(entered.wait(5))
+        second = threading.Thread(target=lambda: results.append(
+            jobs_store.refund_once_recoverable(
+                self._jdb, jid, "u", 10, slow_refund
+            )
+        ))
+        second.start()
+        second.join(5)
+        self.assertFalse(second.is_alive())
+        release.set()
+        first.join(5)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(calls, [("u", 10)])
+        self.assertCountEqual(results, [False, True])
+        self.assertEqual(self._row(jid)["refunded"], jobs_store.REFUND_CONFIRMED)
+
+    def test_legacy_non_idempotent_refund_is_not_replayed_after_process_exit(self):
+        jid = self._insert(10)
+        jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+        calls = []
+
+        def committed_then_exit(username, cost):
+            calls.append((username, cost))
+            raise SystemExit("response lost after non-idempotent refund committed")
+
+        with self.assertRaises(SystemExit):
+            jobs_store.refund_once(
+                self._jdb, jid, "u", 10, committed_then_exit
+            )
+        self.assertEqual(self._row(jid)["refunded"], jobs_store.REFUND_CONFIRMED)
+        self.assertFalse(
+            jobs_store.refund_once(
+                self._jdb, jid, "u", 10, committed_then_exit
+            )
+        )
+        self.assertEqual(calls, [("u", 10)])
+
+    def test_pending_refunds_only_returns_content_and_legacy_null_owner(self):
+        jobs_store.ensure_owner_column(self._jdb)
+        ids = {}
+        for owner in ("content", None, "imggen", "leadgen"):
+            jid = self._insert(10)
+            jobs_store.set_terminal(self._jdb, jid, "error", error="boom")
+            with closing(self._conn()) as connection:
+                connection.execute(
+                    "UPDATE jobs SET owner=? WHERE id=?", (owner, jid)
+                )
+                connection.commit()
+            ids[owner] = jid
+
+        pending = jobs_store.pending_refunds(
+            self._jdb, limit=10, owner="content"
+        )
+        self.assertEqual(
+            {row["id"] for row in pending},
+            {ids["content"], ids[None]},
+        )
 
     # --- 端到端：reaper 与 worker 交错，钱只退一次，结果不覆写 ---
     def test_reaper_wins_race_money_is_correct(self):

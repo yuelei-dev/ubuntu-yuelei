@@ -4,6 +4,10 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+// The standard CI entrypoint also runs the local-upload retry credential
+// contracts added for the breakdown upload flow.
+require('./test_local_upload_idempotency_dom.js');
+
 const html = fs.readFileSync(
   path.join(__dirname, '..', 'site', 'workbench', 'script.html'),
   'utf8'

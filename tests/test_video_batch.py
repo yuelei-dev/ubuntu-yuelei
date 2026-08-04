@@ -192,6 +192,9 @@ class VideoBatchIntegrationGuardTests(unittest.TestCase):
             def safe_refund_points(self, username, cost, reason):
                 return 100
 
+            def refund_points(self, username, cost, reason, transaction_key=""):
+                return self.safe_refund_points(username, cost, reason)
+
         originals = {
             "JOB_DB": core.JOB_DB, "AUDIO_DB": core.AUDIO_DB, "_domains": core._domains,
             "verify": core.verify, "require_enabled": core.feature_flags.require_enabled,
@@ -397,6 +400,9 @@ class VideoSingleRouteSubLimitTests(unittest.TestCase):
 
             def safe_refund_points(self, username, cost, reason):
                 return 100
+
+            def refund_points(self, username, cost, reason, transaction_key=""):
+                return self.safe_refund_points(username, cost, reason)
 
         originals = {
             "JOB_DB": core.JOB_DB,
@@ -622,6 +628,9 @@ class SeedanceReferenceOrderingTests(unittest.TestCase):
             def safe_refund_points(self, username, cost, reason):
                 self.refunds.append((username, cost, reason))
                 return self.balance
+
+            def refund_points(self, username, cost, reason, transaction_key=""):
+                return self.safe_refund_points(username, cost, reason)
 
         signed_url = "https://bucket-1250000000.cos.ap-guangzhou.myqcloud.com/seedance/reference/x?q-sign-algorithm=sha1"
         flags = {"upload_open": True, "enqueue_ok": True}

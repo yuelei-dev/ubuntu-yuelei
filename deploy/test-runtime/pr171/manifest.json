@@ -35,8 +35,8 @@
     {
       "source": "site/workbench/script.html",
       "target": "/var/www/huangquechuanmei/workbench/script.html",
-      "sha256": "3d1049ae20c3e189cab66c851d4e31f97249cd637d8f56e1b47eec8f2cc9712d",
-      "git_blob": "9fe59d5be46b2d7dd10b03141655fc31d5b9ec34",
+      "sha256": "0adb55a673cb5f883218b521645da9f4b3f13e44a09679f53c6135dbd87cc431",
+      "git_blob": "491f6123105dcf4fbbb8f3041bd30ef8b4ccea5a",
       "expected_target_sha256": "5d9d77b839f3796ae9e3a4ee2725530a34c84b0fd935fd8a94b086ee4d761b38",
       "expected_target_git_blob": "0922e656fedd1e8bcac40025cc8d2798f7cc337b"
     }

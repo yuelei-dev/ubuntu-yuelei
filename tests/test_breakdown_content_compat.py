@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import importlib
+import io
+import json
 import sqlite3
 import sys
 import tempfile
@@ -19,6 +21,7 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
         cls.breakdown = importlib.import_module("content_domains.breakdown")
         cls.core = importlib.import_module("content_domains.core")
         cls.egress = importlib.import_module("content_domains.egress")
+        cls.points = importlib.import_module("content_domains.points")
         cls.script = (cls.root / "site/workbench/script.html").read_text(
             encoding="utf-8"
         )
@@ -42,6 +45,364 @@ class BreakdownContentCompatibilityTests(unittest.TestCase):
             self.assertTrue(callable(getattr(self.breakdown, name, None)), name)
         for name in ("heygen_proxy", "post_image_json", "post_json_idempotent"):
             self.assertTrue(callable(getattr(self.egress, name, None)), name)
+
+    @staticmethod
+    def _raw_upload_handler(data, media_type="image", content_type="image/jpeg",
+                            idem_key="local-test-key-0001"):
+        handler = mock.Mock()
+        handler.path = "/api/gen/breakdown/local-upload?media_type=" + media_type
+        handler.headers = {
+            "Content-Type": content_type,
+            "Content-Length": str(len(data)),
+        }
+        if idem_key is not None:
+            handler.headers["Idempotency-Key"] = idem_key
+        handler.rfile = io.BytesIO(data)
+        handler._token.return_value = "session-token"
+        return handler
+
+    @staticmethod
+    def _create_jobs_database(path):
+        connection = sqlite3.connect(path)
+        connection.execute("""CREATE TABLE jobs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind TEXT, username TEXT, cost INTEGER,
+            status TEXT DEFAULT 'pending', payload TEXT, result TEXT, error TEXT,
+            created_at INTEGER, updated_at INTEGER,
+            deleted INTEGER DEFAULT 0, refunded INTEGER DEFAULT 0,
+            owner TEXT, service_sha TEXT
+        )""")
+        connection.commit()
+        connection.close()
+
+    def _local_upload_context(self, root, connect, *, points=100, enqueue=True):
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(self.core, "OUT_DIR", root))
+        stack.enter_context(mock.patch.object(self.core, "jdb", connect))
+        stack.enter_context(mock.patch.object(
+            self.core, "_domains", return_value=(mock.Mock(), self.points, mock.Mock())
+        ))
+        stack.enter_context(mock.patch.object(
+            self.core.feature_flags, "require_enabled", return_value=None
+        ))
+        stack.enter_context(mock.patch.object(
+            self.core, "is_shutting_down", return_value=False
+        ))
+        stack.enter_context(mock.patch.object(
+            self.core, "_user_active_job_count", return_value=0
+        ))
+        stack.enter_context(mock.patch.object(
+            self.core, "enqueue_job", return_value=enqueue
+        ))
+        stack.enter_context(mock.patch.object(
+            self.points, "get_points", return_value=points
+        ))
+        return stack
+
+    def test_core_local_upload_authenticates_and_uses_bound_token_handler(self):
+        handler = self._raw_upload_handler(b"")
+        user = {"username": "alice", "must_change": False}
+        with mock.patch.object(
+            self.core, "_domains", return_value=(mock.Mock(), mock.Mock(), mock.Mock())
+        ), mock.patch.object(
+            self.core, "verify", return_value=user
+        ), mock.patch.object(
+            self.core, "_must_change_password", return_value=False
+        ), mock.patch.object(
+            self.breakdown, "handle_local_upload", return_value="accepted"
+        ) as upload:
+            result = self.core.H.do_POST(handler)
+
+        self.assertEqual(result, "accepted")
+        upload.assert_called_once_with(handler, user)
+
+    def test_core_local_upload_rejects_unauthenticated_before_reading_body(self):
+        handler = self._raw_upload_handler(b"secret")
+        with mock.patch.object(
+            self.core, "_domains", return_value=(mock.Mock(), mock.Mock(), mock.Mock())
+        ), mock.patch.object(
+            self.core, "verify", return_value=None
+        ), mock.patch.object(self.breakdown, "handle_local_upload") as upload:
+            self.core.H.do_POST(handler)
+
+        upload.assert_not_called()
+        self.assertEqual(handler.rfile.tell(), 0)
+        self.assertEqual(handler._send.call_args.args[0], 401)
+
+    def test_core_local_upload_has_no_missing_optional_module_dependency(self):
+        source = (self.root / "server/content_domains/core.py").read_text(
+            encoding="utf-8"
+        )
+        route = source.split(
+            'if p == "/api/gen/breakdown/local-upload":', 1
+        )[1].split('if p == "/api/gen/asset/favorite":', 1)[0]
+        self.assertIn('fromlist=["handle_local_upload"]', route)
+        self.assertIn(".handle_local_upload(self, user)", route)
+        self.assertNotIn("local_reverse_upload", route)
+
+    def test_real_local_upload_creates_one_job_token_and_charge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct:
+                self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+            self.assertEqual(handler._send.call_args.args[0], 200)
+            self.assertEqual(handler._send.call_args.args[1]["points_left"], 80)
+            deduct.assert_called_once_with(
+                "alice", 20, "job:breakdown#1",
+                transaction_key="breakdown:1:charge",
+            )
+            with closing(connect()) as connection:
+                jobs = connection.execute(
+                    "SELECT id,status,payload,service_sha FROM jobs"
+                ).fetchall()
+                uploads = connection.execute(
+                    "SELECT token,username,job_id,suffix FROM breakdown_uploads"
+                ).fetchall()
+            self.assertEqual(len(jobs), 1)
+            self.assertEqual(jobs[0]["status"], "pending")
+            self.assertEqual(jobs[0]["service_sha"], self.core.jobs_store.SERVICE_SHA)
+            self.assertEqual(json.loads(jobs[0]["payload"])["upload_token"], uploads[0]["token"])
+            self.assertEqual((uploads[0]["username"], uploads[0]["job_id"]),
+                             ("alice", jobs[0]["id"]))
+            self.assertTrue(
+                (root / "_breakdown_uploads" /
+                 (uploads[0]["token"] + uploads[0]["suffix"])).is_file()
+            )
+
+    def test_same_key_local_upload_replays_without_second_charge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            first = self._raw_upload_handler(b"\xff\xd8\xffsame-jpeg")
+            second = self._raw_upload_handler(b"\xff\xd8\xffsame-jpeg")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct:
+                self.breakdown.handle_local_upload(first, {"username": "alice"})
+                self.breakdown.handle_local_upload(second, {"username": "alice"})
+
+            first_response = first._send.call_args.args[1]
+            second_response = second._send.call_args.args[1]
+            self.assertEqual(second_response["job_id"], first_response["job_id"])
+            self.assertEqual(second_response, first_response)
+            deduct.assert_called_once_with(
+                "alice", 20, "job:breakdown#1",
+                transaction_key="breakdown:1:charge",
+            )
+            with closing(connect()) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 1
+                )
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM breakdown_uploads"
+                    ).fetchone()[0], 1
+                )
+
+    def test_upload_table_migration_adds_idempotency_state_without_changing_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "jobs.db"
+            connection = sqlite3.connect(database)
+            connection.execute("""CREATE TABLE breakdown_uploads(
+                token TEXT PRIMARY KEY, username TEXT NOT NULL,
+                suffix TEXT NOT NULL, job_id INTEGER NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL
+            )""")
+            connection.execute(
+                "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at) "
+                "VALUES('legacy','alice','.jpg',7,1)"
+            )
+            self.breakdown._ensure_upload_table(connection)
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(breakdown_uploads)"
+                ).fetchall()
+            }
+            row = connection.execute(
+                "SELECT token,idem_key,payment_state,charge_key,refund_key "
+                "FROM breakdown_uploads"
+            ).fetchone()
+            connection.close()
+
+            for column in ("idem_key", "payment_state", "charge_key", "refund_key"):
+                self.assertIn(column, columns)
+            self.assertEqual(row[0], "legacy")
+            self.assertIsNone(row[1])
+            self.assertEqual(row[2], "legacy")
+
+    def test_local_upload_broken_response_keeps_job_binding_and_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            handler._send.side_effect = BrokenPipeError("client disconnected")
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct:
+                with self.assertRaises(BrokenPipeError):
+                    self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+            deduct.assert_called_once()
+            with closing(connect()) as connection:
+                job = connection.execute(
+                    "SELECT id,status,refunded FROM jobs"
+                ).fetchone()
+                upload = connection.execute(
+                    "SELECT token,job_id,suffix FROM breakdown_uploads"
+                ).fetchone()
+            self.assertEqual((job["status"], job["refunded"]), ("pending", 0))
+            self.assertEqual(upload["job_id"], job["id"])
+            self.assertTrue(
+                (root / "_breakdown_uploads" /
+                 (upload["token"] + upload["suffix"])).is_file()
+            )
+
+    def test_local_upload_rejects_insufficient_points_before_reservation_or_charge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(
+                root, connect, points=0
+            ), mock.patch.object(self.points, "deduct_points") as deduct:
+                self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+            self.assertEqual(handler._send.call_args.args[0], 402)
+            self.assertEqual(handler.rfile.tell(), len(b"\xff\xd8\xffvalid-jpeg"))
+            deduct.assert_not_called()
+            with closing(connect()) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0
+                )
+
+    def test_local_upload_price_is_independent_from_link_price_end_to_end(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            insufficient = self._raw_upload_handler(
+                b"\xff\xd8\xfflocal-price", idem_key="local-price-low-1"
+            )
+            accepted = self._raw_upload_handler(
+                b"\xff\xd8\xfflocal-price", idem_key="local-price-ok-01"
+            )
+            with self._local_upload_context(root, connect, points=36), mock.patch.object(
+                self.points, "breakdown_local_upload_cost", return_value=37
+            ), mock.patch.object(self.points, "deduct_points") as deduct:
+                self.breakdown.handle_local_upload(
+                    insufficient, {"username": "alice"}
+                )
+            self.assertEqual(insufficient._send.call_args.args[0], 402)
+            self.assertEqual(insufficient._send.call_args.args[1]["need"], 37)
+            deduct.assert_not_called()
+
+            with self._local_upload_context(root, connect, points=100), mock.patch.object(
+                self.points, "breakdown_local_upload_cost", return_value=37
+            ), mock.patch.object(
+                self.points, "cost_of", return_value=11
+            ), mock.patch.object(
+                self.points, "deduct_points", return_value=63
+            ) as deduct:
+                self.breakdown.handle_local_upload(accepted, {"username": "alice"})
+            self.assertEqual(accepted._send.call_args.args[0], 200)
+            self.assertEqual(accepted._send.call_args.args[1]["cost"], 37)
+            deduct.assert_called_once_with(
+                "alice", 37, "job:breakdown#1",
+                transaction_key="breakdown:1:charge",
+            )
+
+    def test_local_upload_invalid_or_overlong_video_never_charges(self):
+        for probe_result, label in ((ValueError("invalid video"), "invalid"),
+                                    (121.0, "overlong")):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                database = root / "jobs.db"
+                self._create_jobs_database(database)
+                connect = self._jdb(database)
+                handler = self._raw_upload_handler(
+                    b"\x00\x00\x00\x18ftypisom",
+                    media_type="video", content_type="video/mp4",
+                )
+                patcher = mock.patch.object(
+                    self.breakdown, "_probe_duration",
+                    side_effect=probe_result if isinstance(probe_result, Exception) else None,
+                    return_value=probe_result if not isinstance(probe_result, Exception) else None,
+                )
+                with self._local_upload_context(root, connect), patcher, mock.patch.object(
+                    self.points, "deduct_points"
+                ) as deduct:
+                    self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+                self.assertEqual(handler._send.call_args.args[0], 400)
+                deduct.assert_not_called()
+                with closing(connect()) as connection:
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0
+                    )
+
+    def test_local_upload_queue_failure_keeps_pending_job_for_scanner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+            with self._local_upload_context(
+                root, connect, enqueue=False
+            ), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ):
+                self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+            self.assertEqual(handler._send.call_args.args[0], 200)
+            with closing(connect()) as connection:
+                job = connection.execute(
+                    "SELECT status,refunded FROM jobs"
+                ).fetchone()
+                uploads = connection.execute(
+                    "SELECT COUNT(*) FROM breakdown_uploads"
+                ).fetchone()[0]
+            self.assertEqual((job["status"], job["refunded"]), ("pending", 0))
+            self.assertEqual(uploads, 1)
+
+    def test_local_upload_reservation_failure_never_charges_and_removes_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "jobs.db"
+            self._create_jobs_database(database)
+            connect = self._jdb(database)
+            handler = self._raw_upload_handler(b"\xff\xd8\xffvalid-jpeg")
+
+            with self._local_upload_context(root, connect), mock.patch.object(
+                self.points, "deduct_points", return_value=80
+            ) as deduct, mock.patch.object(
+                self.core.jobs_store, "ensure_service_sha_column_on_conn",
+                side_effect=sqlite3.OperationalError("job insert unavailable"),
+            ):
+                self.breakdown.handle_local_upload(handler, {"username": "alice"})
+
+            self.assertEqual(handler._send.call_args.args[0], 500)
+            deduct.assert_not_called()
+            with closing(connect()) as connection:
+                self.assertEqual(
+                    connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0
+                )
+            upload_root = root / "_breakdown_uploads"
+            self.assertFalse(upload_root.exists() and any(upload_root.iterdir()))
 
     def test_public_link_validation_resolves_before_worker(self):
         payload = self.breakdown.validate_breakdown_payload({

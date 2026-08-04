@@ -18,14 +18,14 @@ def clean_key(raw):
         raise ValueError("Idempotency-Key 需为 8-128 位字母、数字或 . _ : -")
     return key
 
-def _request_hash(body):
+def request_hash(body):
     canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 def begin(db_factory, username, endpoint, key, body):
     if not key:
         return "disabled", None
-    digest, now = _request_hash(body), int(time.time())
+    digest, now = request_hash(body), int(time.time())
     with closing(db_factory()) as connection:
         ensure_table(connection)
         row = connection.execute(
