@@ -123,12 +123,14 @@ class TestRuntimeDeploymentGateTests(unittest.TestCase):
         first_push = SHIP.index('push_file "$f" "$dest"')
         activation = SHIP.index("--activate-overlay '$OVERLAY_MANIFEST'")
         patrol = SHIP.index("HQ_DRIFT_REF=origin/baseline/test-server")
+        bless = SHIP.index("本次完整 overlay 已记录")
         disarmed = SHIP.index("OVERLAY_ROLLBACK_ARMED=0")
         self.assertLess(backup_ready, armed)
         self.assertLess(armed, first_push)
         self.assertLess(first_push, activation)
         self.assertLess(activation, patrol)
-        self.assertLess(patrol, disarmed)
+        self.assertLess(patrol, bless)
+        self.assertLess(bless, disarmed)
         for marker in (
             "trap rollback_overlay_on_exit EXIT",
             "sudo '$OVERLAY_BACKUP_DIR/restore.sh'",

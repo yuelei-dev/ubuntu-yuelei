@@ -99,6 +99,12 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
                 raise SystemExit(1)
             if "HQ_DRIFT_REF=origin/baseline/test-server" in command and os.environ.get("FAIL_STAGE") == "patrol":
                 raise SystemExit(1)
+            if "--bless-deploy" in command:
+                if os.environ.get("FAIL_STAGE") == "bless":
+                    raise SystemExit(1)
+                with log.open("a", encoding="utf-8") as f:
+                    f.write("BLESS_SUCCESS " + command + "\\n")
+                raise SystemExit(0)
             if "sudo '/opt/huangque-deploy-backups/" in command and command.rstrip().endswith("/restore.sh'"):
                 with log.open("a", encoding="utf-8") as f:
                     f.write("RESTORE_EXECUTED preimage absent services-active\\n")
@@ -137,6 +143,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
     def assert_restore_ran(self, result):
         self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("RESTORE_EXECUTED preimage absent services-active", self.read_log())
+        self.assertNotIn("BLESS_SUCCESS", self.read_log())
         self.assertIn("自动恢复通过", result.stdout)
 
     def test_nth_push_failure_automatically_restores(self):
@@ -145,7 +152,7 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.assertEqual("5", self.push_count.read_text())
 
     def test_each_late_postcondition_failure_automatically_restores(self):
-        for stage in ("smoke", "restart", "verify", "health", "pricing", "activate", "patrol"):
+        for stage in ("smoke", "restart", "verify", "health", "pricing", "activate", "patrol", "bless"):
             with self.subTest(stage=stage):
                 self.log.unlink(missing_ok=True)
                 self.push_count.unlink(missing_ok=True)
@@ -158,6 +165,12 @@ class TestRuntimeShipRollbackTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertEqual(str(len(SOURCES)), self.push_count.read_text())
         self.assertNotIn("RESTORE_EXECUTED", self.read_log())
+        blessings = [line for line in self.read_log().splitlines() if line.startswith("BLESS_SUCCESS ")]
+        self.assertEqual(1, len(blessings))
+        self.assertIn("--pr 184", blessings[0])
+        self.assertIn(HEAD_SHA, blessings[0])
+        for source in SOURCES:
+            self.assertIn(source, blessings[0])
         self.assertIn("常规巡检无 stale", result.stdout)
         self.assertIn("上线完成", result.stdout)
 

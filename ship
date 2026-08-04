@@ -464,19 +464,17 @@ if [ -n "$DEPLOYED" ]; then
   [ -n "$OVERLAY_MANIFEST" ] && VERIFY_REPO_ENV="HQ_REPO=/opt/huangque-repository"
   $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && $VERIFY_REPO_ENV HQ_DRIFT_REF='$VERIFY_REF' python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
     && echo "  ✓ 部署后漂移校验通过" || { echo "  ❌ 部署后漂移校验失败"; exit 1; }
-  # --pr 透传：落账 PR 号到 deploy_bless.jsonl。
-  # 注意顺序必须 --pr 在前：哨兵 --bless-deploy 是 nargs='*'，
-  # 「--bless-deploy --pr N 文件」会把文件判为未识别参数（退出码 2）。
-  # 显式传了 --pr = 要求登记，失败必须非零中止（不能被 || echo 吞掉）；
-  # 不传 --pr 保持旧容错：远端旧哨兵/未安装时跳过登记、发布照常完成。
-  if [ -n "$PR_NO" ]; then
-    BLESS_ENV=""
-    [ -n "$OVERLAY_MANIFEST" ] && BLESS_ENV="HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$VERIFY_REF'"
-    $SSHC "$REMOTE" "$BLESS_ENV python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
-      && echo "  ✓ 本次部署文件已记录（PR #$PR_NO）" || { echo "  ❌ 部署登记失败（--pr $PR_NO）——远端哨兵报错"; exit 1; }
-  else
-    $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
-      && echo "  ✓ 本次部署文件已记录" || echo "  （跳过部署记录：哨兵未安装）"
+  # 普通部署保持既有时序。test-runtime overlay 必须等 health/pricing/activate/patrol
+  # 全部成功后才落成功记录，否则自动恢复了运行文件却留下“已部署”假账。
+  if [ -z "$OVERLAY_MANIFEST" ]; then
+    # --pr 必须在 --bless-deploy 前（后者 nargs='*'）。显式 PR 的登记失败必须中止。
+    if [ -n "$PR_NO" ]; then
+      $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
+        && echo "  ✓ 本次部署文件已记录（PR #$PR_NO）" || { echo "  ❌ 部署登记失败（--pr $PR_NO）——远端哨兵报错"; exit 1; }
+    else
+      $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
+        && echo "  ✓ 本次部署文件已记录" || echo "  （跳过部署记录：哨兵未安装）"
+    fi
   fi
 fi
 
@@ -544,6 +542,11 @@ PY
   $SSHC "$REMOTE" "HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF=origin/baseline/test-server python3 /home/ubuntu/hq-drift/drift_sentinel.py --print" \
     || { echo "  ❌ 部署后常规漂移巡检未收敛"; exit 1; }
   echo "  ✓ 活动 overlay 已锁定 $DEPLOY_SHA，常规巡检无 stale"
+  # deploy_bless.jsonl 是实际成功部署的权威账本，只能在全部后置条件通过后追加。
+  # 此时 trap 仍武装：登记失败同样自动恢复运行文件/版本/活动 overlay/服务。
+  $SSHC "$REMOTE" "HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --bless-deploy $DEPLOYED" \
+    && echo "  ✓ 本次完整 overlay 已记录（PR #$PR_NO，SHA ${DEPLOY_SHA:0:7}）" \
+    || { echo "  ❌ overlay 部署登记失败（自动恢复仍已武装）"; exit 1; }
   OVERLAY_ROLLBACK_ARMED=0
   trap - EXIT
 fi
