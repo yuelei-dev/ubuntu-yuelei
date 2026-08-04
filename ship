@@ -320,11 +320,18 @@ fi
 if [ -n "$DEPLOYED" ]; then
   $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
     && echo "  ✓ 部署后漂移校验通过" || { echo "  ❌ 部署后漂移校验失败"; exit 1; }
-  # --pr 透传：落账 PR 号到 deploy_bless.jsonl；不传时命令与旧版完全一致
-  BLESS_PR=""
-  [ -n "$PR_NO" ] && BLESS_PR=" --pr $PR_NO"
-  $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy$BLESS_PR $DEPLOYED" >/dev/null 2>&1 \
-    && echo "  ✓ 本次部署文件已记录${PR_NO:+（PR #$PR_NO）}" || echo "  （跳过部署记录：哨兵未安装）"
+  # --pr 透传：落账 PR 号到 deploy_bless.jsonl。
+  # 注意顺序必须 --pr 在前：哨兵 --bless-deploy 是 nargs='*'，
+  # 「--bless-deploy --pr N 文件」会把文件判为未识别参数（退出码 2）。
+  # 显式传了 --pr = 要求登记，失败必须非零中止（不能被 || echo 吞掉）；
+  # 不传 --pr 保持旧容错：远端旧哨兵/未安装时跳过登记、发布照常完成。
+  if [ -n "$PR_NO" ]; then
+    $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
+      && echo "  ✓ 本次部署文件已记录（PR #$PR_NO）" || { echo "  ❌ 部署登记失败（--pr $PR_NO）——远端哨兵报错"; exit 1; }
+  else
+    $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
+      && echo "  ✓ 本次部署文件已记录" || echo "  （跳过部署记录：哨兵未安装）"
+  fi
 fi
 
 # 服务器 checkout 只作为 git 镜像，不允许在服务器上直接提交热改。
