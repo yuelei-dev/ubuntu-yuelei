@@ -106,25 +106,19 @@ class BillingTests(_Base):
         self.assertGreater(points.cost_of("cinematic", {}), 0, "空 payload 也不能免费")
 
     def test_the_frontend_estimate_matches_the_backend(self):
-        """前端预估的点数和后端扣的必须一致，否则就是「界面说 27 点、实际扣 90 点」。
-
-        不再逐字比对整行 —— 那样一改缩进就红。直接把前端 CINE_MODES 里的 rate 抠出来
-        跟后端的表比。
-        """
-        block = HTML.split("var CINE_MODES={")[1].split("};")[0]
-        for mode, rate in video.CINEMATIC_RATE_PER_SEC.items():
-            m = re.search(r"\b%s:\s*\{[^}]*\brate:\s*(\d+)" % mode, block)
-            self.assertIsNotNone(m, "前端 CINE_MODES 里没有 %s" % mode)
-            self.assertEqual(int(m.group(1)), rate,
-                             "%s：前端标 %s 点/秒，后端扣 %d 点/秒" % (mode, m.group(1), rate))
+        """前端预估必须在权威目录就绪后采用与后端扣点相同的动态价格。"""
+        for mode in video.CINEMATIC_RATE_PER_SEC:
+            assignment = "CINE_MODES.%s.rate=PRICING_VALUES['cinematic.%s.per_sec']" % (mode, mode)
+            self.assertIn(assignment, HTML, "%s 未采用权威价格目录" % mode)
+        self.assertIn("if(!(pricingGate&&pricingGate.guard()))", HTML)
         self.assertIn("function cineCost(){ return cineSeconds()*cineCfg().rate; }", HTML)
 
     def test_the_tab_labels_show_the_real_price(self):
-        """页签上写的价钱是用户【下单前】唯一能看到的价 —— 写错就是明码标错价。"""
+        """目录就绪前页签不得冒充实价；就绪后必须在下单前显示动态价。"""
         for mode, label in (("motion", "动作模仿"), ("open", "开放式生成")):
             tab = HTML.split('data-cine-mode="%s"' % mode)[1].split("</button>")[0]
-            self.assertIn("%d 点/秒" % video.cinematic_rate(mode), tab,
-                          "%s 页签上的单价和后端对不上" % label)
+            self.assertIn("价格加载后显示", tab, "%s 页签不应显示未校验默认价" % label)
+            self.assertNotRegex(tab, r"\d+ 点/秒")
         # 秒数的算法也要一致：向上取整、夹进 4~15、无参考视频回落 10
         self.assertIn("return Math.max(4, Math.min(15, Math.ceil(cineRefSeconds)));", HTML)
         self.assertIn("if(!cineRefSeconds) return 10;", HTML)
@@ -331,7 +325,7 @@ class SubmitButtonTests(unittest.TestCase):
         """后端 MAX_USER_ACTIVE_CINEMATIC=2。#603 统计了 counts.cinematic 却没人用 ——
         排到第 3 条时按钮还亮着，点下去只会吃一个 429。"""
         self.assertIn("var cineCapReached=counts.cinematic>=maxActiveCinematic;", HTML)
-        self.assertIn("applyButtonState('cineGenerateBtn', !videoSubmitLocks.cinematic && !cineCapReached,", HTML)
+        self.assertIn("applyButtonState('cineGenerateBtn', pricingReady && !videoSubmitLocks.cinematic && !cineCapReached,", HTML)
 
     def test_the_cap_comes_from_the_backend(self):
         """写死在前端会跟 env 漂移（MAX_USER_ACTIVE_CINEMATIC 是 _env_positive_int）。"""
