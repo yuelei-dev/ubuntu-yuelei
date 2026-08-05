@@ -36,10 +36,10 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "900255c9ccccbfe82b6a87f19b519617d4ed90ce6c9138e934d69348308516a1"
+        "value": "5c4953080e2f05ec125e7a8b7b6dd02cedf3818f2ec2b16958c88aba97501e5a"
       },
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
+      "reason": "yuelei 版本文件（登记 §2.1）；PR #192 Gemini 清理部署后指纹更新",
+      "registered": "2026-08-05"
     },
     {
       "path": "server/content_domains/canvas_agent.py",
@@ -55,10 +55,10 @@
       "drift_kind": "changed",
       "expected": {
         "type": "ref",
-        "value": "f03cab377875a2d47a9566bd51ccfccff5f29be8"
+        "value": "65cf973f1b0b7b762b62126bb9a7a5861dc53a18"
       },
-      "reason": "版本绑定部署（PR #174）；原 PR171 覆盖层已被该部署替换",
-      "registered": "2026-08-04"
+      "reason": "版本绑定 + Gemini 清理部署（PR #174/#192）",
+      "registered": "2026-08-05"
     },
     {
       "path": "server/content_domains/feature_flags.py",
@@ -536,10 +536,10 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "3d1049ae20c3e189cab66c851d4e31f97249cd637d8f56e1b47eec8f2cc9712d"
+        "value": "289a94a7a02375f0d0595261569c2f6b8c5f3c52af0302ecdb8ecc5c24d6c778"
       },
-      "reason": "yuelei 版本文件（登记 §2.1）",
-      "registered": "2026-08-03"
+      "reason": "yuelei 版本文件（登记 §2.1）；2026-08-05 部署后指纹更新",
+      "registered": "2026-08-05"
     },
     {
       "path": "site/workbench/settings.html",
@@ -570,6 +570,36 @@
       },
       "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
       "registered": "2026-08-03"
+    },
+    {
+      "path": "server/content_domains/gemini_cleanup.py",
+      "drift_kind": "added",
+      "expected": {
+        "type": "sha256",
+        "value": "abfc752473a5b1211db5c7e00b5b4046efb5fbf9611b693f9ca47f105163cb00"
+      },
+      "reason": "PR #192 新增（Gemini 持久化清理队列），登记放置 2026-08-05",
+      "registered": "2026-08-05"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-export.js",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "ref",
+        "value": "65cf973f1b0b7b762b62126bb9a7a5861dc53a18"
+      },
+      "reason": "与 yuelei main 一致（2026-08-05 实测部署）",
+      "registered": "2026-08-05"
+    },
+    {
+      "path": "site/workbench/canvas/canvas-state.js",
+      "drift_kind": "changed",
+      "expected": {
+        "type": "ref",
+        "value": "65cf973f1b0b7b762b62126bb9a7a5861dc53a18"
+      },
+      "reason": "与 yuelei main 一致（2026-08-05 实测部署）",
+      "registered": "2026-08-05"
     }
   ]
 }
