@@ -3,12 +3,14 @@
 """Huangque operations admin API.
 
 Stage 1 covers service/key/channel visibility and read-only job statistics.
-All /api/admin/* routes require a platform token whose user role is admin.
+Admin routes require an admin token; the two explicitly named public inspiration
+read/event routes are consumed by the public gallery.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import closing
 from http import cookies
+from importlib import import_module
 import json
 import os
 import pathlib
@@ -16,20 +18,48 @@ import re
 
 try:
     import func_names                    # 生产：admin_api.py 直接跑，同目录下就是 func_names.py
-    import pricing_config
+    import inspiration_cases
 except ModuleNotFoundError:              # 测试：以包的形式 import server.admin_api，server/ 不在 sys.path 上
     from . import func_names
-    from . import pricing_config
+    from . import inspiration_cases
 import sqlite3
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-try:
-    from content_domains import feature_flags
-except ImportError:
-    feature_flags = None
+_DOMAIN_PACKAGE = (
+    __package__ + ".content_domains" if __package__ else "content_domains"
+)
+egress = import_module(_DOMAIN_PACKAGE + ".egress")
+feature_flags = import_module(_DOMAIN_PACKAGE + ".feature_flags")
+provider_keys = import_module(_DOMAIN_PACKAGE + ".provider_keys")
+pricing = import_module(_DOMAIN_PACKAGE + ".pricing")
+
+
+def _optional_content_domain(name):
+    try:
+        return import_module(_DOMAIN_PACKAGE + "." + name)
+    except ImportError:
+        return None
+
+
+points_domain = _optional_content_domain("points")
+short_drama_lipsync_diagnostics = _optional_content_domain(
+    "short_drama_lipsync_diagnostics"
+)
+short_drama_lipsync_jobs = _optional_content_domain(
+    "short_drama_lipsync_jobs"
+)
+short_drama_lipsync_observability = _optional_content_domain(
+    "short_drama_lipsync_observability"
+)
+short_drama_lipsync_reconcile = _optional_content_domain(
+    "short_drama_lipsync_reconcile"
+)
+short_drama_lipsync_rollout = _optional_content_domain(
+    "short_drama_lipsync_rollout"
+)
 
 AUTH_COOKIE_NAME = os.environ.get("HQ_AUTH_COOKIE_NAME", "hq_session")
 
@@ -110,21 +140,63 @@ SERVICES = [
     },
 ]
 
-# 服务器实际在用的全部外部 API（来源:content.env/runninghub.env 变量盘点 2026-07-09）
+# 服务器实际在用的全部外部 API。
+# 名称按真实 API 提供方统一；features 负责映射用户在前端看到的功能名。
 KEY_GROUPS = [
-    {"key": "openai", "name": "OpenAI 生图 gpt-image(经泽龙中转)", "env": ["OPENAI_API_KEY"]},
-    {"key": "gemini", "name": "Gemini 生图 nano banana", "env": ["GEMINI_API_KEY"]},
-    {"key": "zelong", "name": "泽龙生图渠道1(小乐AI)", "env": ["ZELONG_KEY"]},
-    {"key": "zelong2", "name": "泽龙生图渠道2(zelong.vip)", "env": ["ZELONG2_KEY"]},
-    {"key": "heygen", "name": "HeyGen 数字人视频(直连)", "env": ["HEYGEN_API_KEY"]},
-    {"key": "heygen_relay", "name": "HeyGen 中转(泽龙 relay)", "env": ["HEYGEN_RELAY_TOKEN"]},
-    {"key": "xiaolevideo", "name": "小乐视频生成", "env": ["XIAOLEVIDEO_API_KEY"]},
-    {"key": "runninghub", "name": "RunningHub 换装/动作模仿(线路一)", "env": ["RUNNINGHUB_API_KEY", "RUNNINGHUB_KEY"]},
-    {"key": "wavespeed", "name": "WaveSpeed 换装(线路二)", "env": ["WAVESPEED_API_KEY"]},
-    {"key": "doubao", "name": "豆包语音 TTS/声音克隆", "env": ["DOUBAO_APP_ID", "DOUBAO_ACCESS_TOKEN", "DOUBAO_APPID", "DOUBAO_TOKEN"]},
-    {"key": "tikhub", "name": "TikHub 抖音数据", "env": ["TIKHUB_KEY", "TIKHUB_API_KEY"]},
-    {"key": "cos", "name": "腾讯云 COS 存储", "env": ["COS_SECRET_ID", "COS_SECRET_KEY", "COS_REGION", "COS_BUCKET"]},
+    {"key": "xai", "name": "xAI API", "category": "视频生成",
+     "features": ["视频模块 → 果肉视频生成"], "env_features": [],
+     "pool_features": ["视频模块 → 果肉视频生成"],
+     "pool_base_env": ["XAI_API_BASE"], "pool_base_default": "https://api.x.ai/v1",
+     "env": ["XAI_API_KEY"], "pool_provider": "xai"},
+    {"key": "openai", "name": "OpenAI API", "category": "图片生成 / 视频生成",
+     "features": ["图片生成 → 黄雀引擎 2", "视频模块 → Sora 2"],
+     "env_features": ["图片生成 → 黄雀引擎 2"], "pool_features": ["视频模块 → Sora 2"],
+     "env_base_env": ["OPENAI_OFFICIAL_BASE"], "env_base_default": "https://api.openai.com",
+     "pool_base_env": ["OPENAI_BASE"], "pool_base_default": "https://api.openai.com",
+     "env": ["OPENAI_API_KEY"], "pool_provider": "sora"},
+    {"key": "gemini", "name": "Google Gemini API", "category": "图片生成 / 视频生成",
+     "features": ["图片生成 → 纳米香蕉", "视频模块 → Omni 视频"],
+     "env_features": ["图片生成 → 纳米香蕉"], "pool_features": ["视频模块 → Omni 视频"],
+     "env_base_env": ["GEMINI_OFFICIAL_BASE"], "env_base_default": "https://generativelanguage.googleapis.com",
+     "pool_base_env": ["GEMINI_OMNI_BASE", "GEMINI_BASE"], "pool_base_default": "https://generativelanguage.googleapis.com",
+     "env": ["GEMINI_API_KEY"], "pool_provider": "omni"},
+    {"key": "seedance", "name": "火山方舟 API", "category": "图片生成 / 视频生成",
+     "features": ["图片生成 → 黄雀引擎 1（Seedream）", "视频模块 → Seedance 视频"],
+     "env_features": ["图片生成 → 黄雀引擎 1（Seedream）"], "pool_features": ["视频模块 → Seedance 视频"],
+     "env_base_env": ["ARK_BASE"], "env_base_default": "https://ark.cn-beijing.volces.com/api/v3",
+     "pool_base_env": ["ARK_BASE"], "pool_base_default": "https://ark.cn-beijing.volces.com/api/v3",
+     "env": ["ARK_API_KEY"], "pool_provider": "seedance"},
+    {"key": "minimax", "name": "MiniMax 中国区 API", "category": "视频生成",
+     "features": ["视频模块 → 麦克视频"], "env_features": [],
+     "pool_features": ["视频模块 → 麦克视频"],
+     "pool_base_env": ["MINIMAX_API_BASE"], "pool_base_default": "https://api.minimaxi.com",
+     "env": ["MINIMAX_API_KEY"], "pool_provider": "minimax"},
+    {"key": "zelong", "name": "小乐 AI API", "category": "图片生成",
+     "features": ["图片生成 → 黄雀引擎 2 备用线路"], "env": ["ZELONG_KEY"]},
+    {"key": "zelong2", "name": "泽龙 API", "category": "图片生成",
+     "features": ["图片生成 → 泽龙 2 备用线路（维护中）"], "env": ["ZELONG2_KEY"]},
+    {"key": "heygen", "name": "HeyGen API", "category": "数字化 IP / 视频生成",
+     "features": ["视频模块 → 电影化身", "视频模块 → 数字人口播", "我的资产 → 数字人形象"],
+     "env_base_env": ["HEYGEN_API_BASE"], "env_base_default": "https://api.heygen.com/v3",
+     "env": ["HEYGEN_API_KEY"]},
+    {"key": "heygen_relay", "name": "HeyGen 中转 API", "category": "数字化 IP / 视频生成",
+     "features": ["电影化身 / 数字人口播 → 中转与下载兜底"],
+     "env_base_env": ["HEYGEN_RELAY_BASE"], "env_base_default": "",
+     "env": ["HEYGEN_RELAY_TOKEN"]},
+    {"key": "xiaolevideo", "name": "小乐视频 API", "category": "图片生成 / 视频生成",
+     "features": ["图片生成 → 果肉生图", "视频模块 → 历史兼容线路"], "env": ["XIAOLEVIDEO_API_KEY"]},
+    {"key": "runninghub", "name": "RunningHub API", "category": "视频处理",
+     "features": ["视频模块 → 换装换背景 · 线路一"], "env": ["RUNNINGHUB_API_KEY", "RUNNINGHUB_KEY"]},
+    {"key": "wavespeed", "name": "WaveSpeed API", "category": "视频处理",
+     "features": ["视频模块 → 换装换背景 · 线路二", "视频模块 → Seedance AI 超清"], "env": ["WAVESPEED_API_KEY"]},
+    {"key": "cosyvoice", "name": "阿里百炼 API", "category": "音频生成",
+     "features": ["AI 配音 → 公共音色", "AI 配音 → 声音克隆"], "env": ["DASHSCOPE_API_KEY"]},
+    {"key": "tikhub", "name": "TikHub API", "category": "内容采集 / 获客",
+     "features": ["内容采集 → 抖音 / 小红书 / 视频号", "获客分析 → 评论与线索"], "env": ["TIKHUB_KEY", "TIKHUB_API_KEY"]},
+    {"key": "cos", "name": "腾讯云 COS", "category": "基础设施",
+     "features": ["我的资产 → 生成结果存储", "视频模块 → 参考素材与成片存储"], "env": ["COS_SECRET_ID", "COS_SECRET_KEY", "COS_REGION", "COS_BUCKET"]},
 ]
+KEY_GROUP_MAP = {item["key"]: item for item in KEY_GROUPS}
 
 # 各渠道实际在用的业务接口清单(2026-07-09 全代码扫描产出,展示用;fee=调用计费)
 ENDPOINT_CATALOG = json.loads(r"""
@@ -225,13 +297,13 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/v1/images/generations",
-   "d": "gpt-image-2 文生图",
+   "d": "黄雀引擎 2 文生图",
    "fee": true
   },
   {
    "m": "POST",
    "p": "/v1/images/edits",
-   "d": "gpt-image-2 图生图/局部修改",
+   "d": "黄雀引擎 2 图生图/局部修改",
    "fee": true
   },
   {
@@ -251,7 +323,7 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/api/v1/generations",
-   "d": "gpt-image-2 文生图/图生图 创建生成任务",
+   "d": "黄雀引擎 2 文生图/图生图 创建生成任务",
    "fee": true
   },
   {
@@ -277,13 +349,13 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/v1/images/generations",
-   "d": "gpt-image-2 文生图",
+   "d": "黄雀引擎 2 文生图",
    "fee": true
   },
   {
    "m": "POST",
    "p": "/v1/images/edits",
-   "d": "gpt-image-2 图生图/局部修改",
+   "d": "黄雀引擎 2 图生图/局部修改",
    "fee": true
   }
  ],
@@ -291,13 +363,13 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/image-pool/v1/images/generations",
-   "d": "gpt-image-2 文生图",
+   "d": "黄雀引擎 2 文生图",
    "fee": true
   },
   {
    "m": "POST",
    "p": "/image-pool/v1/images/edits",
-   "d": "gpt-image-2 图生图/局部修改",
+   "d": "黄雀引擎 2 图生图/局部修改",
    "fee": true
   }
  ],
@@ -305,7 +377,7 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/v1beta/models/gemini-3.1-flash-image:generateContent",
-   "d": "Nano Banana 2 作图",
+   "d": "纳米香蕉 2 作图",
    "fee": true
   }
  ],
@@ -339,7 +411,7 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/videos",
-   "d": "数字人口播视频生成，泽龙中转路径",
+   "d": "数字化 IP 视频生成，泽龙中转路径",
    "fee": true
   },
   {
@@ -381,13 +453,13 @@ ENDPOINT_CATALOG = json.loads(r"""
   {
    "m": "POST",
    "p": "/v1/asset",
-   "d": "口播直连：上传豆包合成的 mp3 音频换 asset_id",
+   "d": "口播直连：上传已合成的 mp3 音频换 asset_id",
    "fee": false
   },
   {
    "m": "POST",
    "p": "/v2/video/generate",
-   "d": "口播直连：talking_photo + 音频 asset 生成数字人口播视",
+   "d": "口播直连：talking_photo + 音频 asset 生成数字化 IP 视频",
    "fee": true
   },
   {
@@ -461,28 +533,27 @@ ENDPOINT_CATALOG = json.loads(r"""
    "fee": false
   }
  ],
- "doubao": [
+ "cosyvoice": [
   {
-   "m": "POST",
-   "p": "/api/v3/tts/unidirectional/sse",
-   "d": "豆包大模型 TTS 单向流式语音合成",
+   "m": "WS",
+   "p": "/api-ws/v1/inference",
+   "d": "CosyVoice 公共及个人音色语音合成",
    "fee": true
   },
   {
    "m": "POST",
-   "p": "/api/v1/mega_tts/audio/upload",
-   "d": "豆包 VIP 声音克隆——上传样音启动音色复刻训练",
+   "p": "/api/v1/services/audio/tts/customization",
+   "d": "CosyVoice 创建、查询和删除复刻音色",
    "fee": true
-  },
-  {
-   "m": "POST",
-   "p": "/api/v1/mega_tts/status",
-   "d": "查询豆包声音克隆训练状态",
-   "fee": false
   }
  ]
 }
 """)
+ENDPOINT_CATALOG["xai"] = [
+    {"m": "POST", "p": "/v1/videos/generations", "d": "果肉视频生成", "fee": True},
+    {"m": "POST", "p": "/v1/videos/edits", "d": "果肉视频编辑", "fee": True},
+    {"m": "GET", "p": "/v1/videos/{request_id}", "d": "查询果肉视频状态", "fee": False},
+]
 
 CHANNELS = {
     item["key"]: {
@@ -505,11 +576,22 @@ NGINX_ACCESS_LOGS = [
     ).split(",")
     if p.strip()
 ]
+HERMES_AUDIT_LOGS = [
+    pathlib.Path(p.strip())
+    for p in os.environ.get(
+        "HERMES_AUDIT_LOGS",
+        "/home/ubuntu/hermes-web/data/audit/security.jsonl",
+    ).split(",")
+    if p.strip()
+]
 # nginx combined 格式：ip - user [time] "METHOD path HTTP/x" status size "referer" "ua"
 # remote_user 可能带空格（basic auth），所以 ip 之后宽松匹配到第一个 [
 LOG_LINE_RE = re.compile(
     r'^(?P<ip>\S+) [^\[]*\[(?P<time>[^\]]+)\] "(?P<method>[A-Z]+) (?P<path>\S+)[^"]*" '
     r'(?P<status>\d{3}) (?P<size>\d+|-) "[^"]*" "(?P<ua>[^"]*)"'
+)
+LOG_META_RE = re.compile(
+    r"\srt=(?P<duration>[0-9]+(?:\.[0-9]+)?)\srid=(?P<request_id>[A-Za-z0-9_-]+)\s*$"
 )
 _MONTHS = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
@@ -558,9 +640,26 @@ PROXY_OPENER = (
 )
 
 
+def _xai_proxy_url():
+    """Use the same egress route as paid xAI video requests."""
+    return egress.preferred_proxy(PROXY_URL) if egress is not None else PROXY_URL
+
+
+def _heygen_proxy_url():
+    """Use the same dedicated egress route as direct HeyGen video requests."""
+    return egress.heygen_proxy() if egress is not None else PROXY_URL
+
+
 def db():
     ADMIN_DB.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(ADMIN_DB), timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def lipsync_db():
+    JOB_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(JOB_DB), timeout=10)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -589,6 +688,16 @@ def init_db():
         c.commit()
     if feature_flags is not None:
         feature_flags.init_db()
+    pricing.init_db()
+    if provider_keys is not None:
+        provider_keys.init_db()
+    if short_drama_lipsync_rollout is not None:
+        short_drama_lipsync_rollout.init_db(lipsync_db)
+    if short_drama_lipsync_observability is not None:
+        short_drama_lipsync_observability.init_db(lipsync_db)
+
+
+    inspiration_cases.init_db(ADMIN_DB)
 
 
 def verify(token):
@@ -631,6 +740,27 @@ def auth_admin_request(path, token, method="GET", payload=None):
         raise err
 
 
+def auth_admin_raw(path, token):
+    if not AUTH_INTERNAL_TOKEN:
+        raise RuntimeError("auth internal token not configured")
+    req = urllib.request.Request(AUTH_BASE + path, headers={
+        "Authorization": "Bearer " + (token or ""),
+        "X-HQ-Internal-Token": AUTH_INTERNAL_TOKEN,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.read(), r.headers.get("Content-Type"), r.headers.get("Content-Disposition")
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"{}")
+        except Exception:
+            body = {}
+        err = RuntimeError(body.get("detail") or "auth admin export failed")
+        err.status = e.code
+        err.body = body
+        raise err
+
+
 def auth_error_response(handler, exc):
     status = int(getattr(exc, "status", 502) or 502)
     body = getattr(exc, "body", None) or {"detail": str(exc)[:180]}
@@ -664,27 +794,71 @@ def env_sources():
     return sources
 
 
+def _key_group_values(item, sources=None):
+    sources = env_sources() if sources is None else sources
+    found = []
+    for env_name in item["env"]:
+        for src in sources:
+            value = (src["values"].get(env_name) or "").strip()
+            if value:
+                found.append(
+                    {"env": env_name, "source": src["name"], "value": value}
+                )
+                break
+    return found
+
+
+def _key_group_base_host(item, prefix, sources):
+    value = ""
+    for env_name in item.get(prefix + "_base_env", []):
+        for src in sources:
+            value = (src["values"].get(env_name) or "").strip()
+            if value:
+                break
+        if value:
+            break
+    value = value or str(item.get(prefix + "_base_default") or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(
+            value if "://" in value else "https://" + value
+        )
+        host = parsed.hostname or ""
+        return host + ((":" + str(parsed.port)) if parsed.port else "")
+    except (TypeError, ValueError):
+        return ""
+
+
 def key_status():
     sources = env_sources()
     items = []
     for item in KEY_GROUPS:
-        found = []
-        for env_name in item["env"]:
-            for src in sources:
-                value = (src["values"].get(env_name) or "").strip()
-                if value:
-                    found.append({"env": env_name, "source": src["name"]})
-                    break
+        values = _key_group_values(item, sources)
+        found = [
+            {"env": value["env"], "source": value["source"]}
+            for value in values
+        ]
+        last4 = values[0]["value"][-4:] if values else ""
         configured = len(found) == len(item["env"])
-        if item["key"] in {"runninghub", "tikhub", "doubao", "heygen_relay"}:
+        if item["key"] in {"runninghub", "tikhub", "heygen_relay"}:
             configured = bool(found)
         items.append(
             {
                 "key": item["key"],
                 "name": item["name"],
+                "category": item["category"],
+                "features": list(item["features"]),
+                "env_features": list(item.get("env_features", item["features"])),
+                "pool_features": list(item.get("pool_features", [])),
+                "env_base_host": _key_group_base_host(item, "env", sources),
+                "pool_base_host": _key_group_base_host(item, "pool", sources),
+                "pool_provider": item.get("pool_provider"),
                 "configured": configured,
                 "required_env": item["env"],
                 "sources": found,
+                "last4": last4,
+                "management": "server_env",
                 "pingable": item["key"] in KEY_PINGS,
                 "endpoints": ENDPOINT_CATALOG.get(item["key"], []),
             }
@@ -730,9 +904,17 @@ def _find_balance(detail, depth=0):
     return None
 
 
-def _ping_upstream(method, url, headers=None, body=None, proxied=False, timeout=12):
+def _ping_upstream(method, url, headers=None, body=None, proxied=False, timeout=12,
+                   proxy_url=None):
     """真实调一次上游 API。只返回状态码/耗时/错误摘要，绝不含密钥。"""
-    opener = PROXY_OPENER if proxied else DIRECT_OPENER
+    if proxy_url is None:
+        opener = PROXY_OPENER if proxied else DIRECT_OPENER
+    elif proxy_url:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        )
+    else:
+        opener = DIRECT_OPENER
     data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
     headers = dict(headers or {})
     # Python-urllib 默认 UA 会被 TikHub 等家的 Cloudflare 拦成 403
@@ -791,12 +973,25 @@ def _key_ping_openai():
     )
 
 
+def _key_ping_xai():
+    key = _env_value(["XAI_API_KEY"])
+    if not key:
+        return {"ok": False, "error": "密钥未配置"}
+    base = (_env_value(["XAI_API_BASE"]) or "https://api.x.ai/v1").rstrip("/")
+    return _ping_upstream(
+        "GET", base + "/models",
+        headers={"Authorization": "Bearer " + key},
+        proxy_url=_xai_proxy_url() if "api.x.ai" in base else "",
+    )
+
+
 def _key_ping_heygen():
     key = _env_value(["HEYGEN_API_KEY"])
     if not key:
         return {"ok": False, "error": "密钥未配置"}
     return _ping_upstream(
-        "GET", "https://api.heygen.com/v2/user/remaining_quota", headers={"X-Api-Key": key}, proxied=True
+        "GET", "https://api.heygen.com/v2/user/remaining_quota",
+        headers={"X-Api-Key": key}, proxy_url=_heygen_proxy_url(),
     )
 
 
@@ -832,6 +1027,20 @@ def _key_ping_gemini():
     return _ping_upstream(
         "GET", base + "/v1beta/models", headers={"x-goog-api-key": key}, proxied="googleapis.com" in base
     )
+
+
+def _key_ping_seedance():
+    key = _env_value(["ARK_API_KEY"])
+    if not key:
+        return {"ok": False, "error": "密钥未配置", "mode": "auth"}
+    return probe_provider_secret("seedance", key)
+
+
+def _key_ping_minimax():
+    key = _env_value(["MINIMAX_API_KEY"])
+    if not key:
+        return {"ok": False, "error": "密钥未配置", "mode": "auth"}
+    return probe_provider_secret("minimax", key)
 
 
 def _openai_compat_ping(key_names, base_names, default_base):
@@ -873,8 +1082,20 @@ def _key_ping_wavespeed():
     )
 
 
-def _key_ping_doubao():
-    return _reach_ping("https://openspeech.bytedance.com")
+def _key_ping_cosyvoice():
+    key = _env_value(["DASHSCOPE_API_KEY"])
+    if not key:
+        return {"ok": False, "error": "密钥未配置", "mode": "auth"}
+    return _ping_upstream(
+        "POST",
+        "https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization",
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        body={
+            "model": "voice-enrollment",
+            "input": {"action": "list_voice", "page_index": 0, "page_size": 1},
+        },
+        proxied=False,
+    )
 
 
 def _key_ping_cos():
@@ -891,8 +1112,11 @@ def _key_ping_cos():
 
 # auth=真调上游验证密钥有效; reach=签名类/未知协议渠道,只测连通与延迟
 KEY_PINGS = {
+    "xai": _key_ping_xai,
     "openai": _key_ping_openai,
     "gemini": _key_ping_gemini,
+    "seedance": _key_ping_seedance,
+    "minimax": _key_ping_minimax,
     "zelong": _key_ping_zelong,
     "zelong2": _key_ping_zelong2,
     "heygen": _key_ping_heygen,
@@ -900,10 +1124,241 @@ KEY_PINGS = {
     "xiaolevideo": _key_ping_xiaolevideo,
     "runninghub": _key_ping_runninghub,
     "wavespeed": _key_ping_wavespeed,
-    "doubao": _key_ping_doubao,
+    "cosyvoice": _key_ping_cosyvoice,
     "tikhub": _key_ping_tikhub,
     "cos": _key_ping_cos,
 }
+
+PROVIDER_KEY_NAMES = {
+    "xai": "果肉视频",
+    "sora": "OpenAI Sora",
+    "seedance": "火山 Seedance",
+    "omni": "Gemini Omni",
+    "minimax": "MiniMax H3",
+}
+
+
+def _probe_is_credential_rejection(probe):
+    # 403 也可能只是模型/功能未开通；探针拿不到足够错误细节时宁可保留 Key。
+    return int((probe or {}).get("http_status") or 0) == 401
+
+
+def probe_provider_secret(provider, secret):
+    """Validate a candidate key with a non-generating authenticated GET."""
+    provider = str(provider or "").strip().lower()
+    secret = str(secret or "").strip()
+    if provider not in PROVIDER_KEY_NAMES:
+        raise ValueError("不支持的视频渠道")
+    if len(secret) < 8:
+        raise ValueError("API 密钥格式无效")
+    if provider == "xai":
+        base = (_env_value(["XAI_API_BASE"]) or "https://api.x.ai/v1").rstrip("/")
+        return _ping_upstream(
+            "GET", base + "/models",
+            headers={"Authorization": "Bearer " + secret},
+            proxy_url=_xai_proxy_url() if "api.x.ai" in base else "",
+        )
+    if provider == "sora":
+        base = (_env_value(["OPENAI_BASE"]) or "https://api.openai.com").rstrip("/")
+        url = base + "/videos?limit=1" if base.endswith("/v1") else base + "/v1/videos?limit=1"
+        return _ping_upstream(
+            "GET", url, headers={"Authorization": "Bearer " + secret},
+            proxied="api.openai.com" in base,
+        )
+    if provider == "seedance":
+        base = (
+            _env_value(["ARK_BASE"])
+            or "https://ark.cn-beijing.volces.com/api/v3"
+        ).rstrip("/")
+        return _ping_upstream(
+            "GET",
+            base + "/contents/generations/tasks?page_num=1&page_size=1",
+            headers={"Authorization": "Bearer " + secret},
+            proxied=False,
+        )
+    if provider == "minimax":
+        base = (
+            _env_value(["MINIMAX_API_BASE"])
+            or "https://api.minimaxi.com"
+        ).rstrip("/")
+        return _ping_upstream(
+            "GET", base + "/v2/query/video_generation?page_num=1&page_size=1",
+            headers={"Authorization": "Bearer " + secret}, proxied=False,
+        )
+    base = (
+        _env_value(["GEMINI_OMNI_BASE", "GEMINI_BASE"])
+        or "https://generativelanguage.googleapis.com"
+    ).rstrip("/")
+    return _ping_upstream(
+        "GET",
+        base + "/v1beta/models/gemini-omni-flash-preview",
+        headers={"x-goog-api-key": secret},
+        proxied="googleapis.com" in base,
+    )
+
+
+def provider_key_list():
+    if provider_keys is None:
+        return {"configured": False, "items": [], "detail": "密钥池模块不可用"}
+    try:
+        items = provider_keys.list_public()
+        return {
+            "configured": provider_keys.vault_ready(),
+            "items": items,
+        }
+    except Exception as exc:
+        return {"configured": False, "items": [], "detail": str(exc)[:180]}
+
+
+def _admin_audit(actor, action, target, detail, conn=None):
+    now = int(time.time())
+    values = (
+        str(actor or "admin")[:80],
+        str(action)[:80],
+        str(target)[:120],
+        json.dumps(detail or {}, ensure_ascii=False),
+        now,
+    )
+    if conn is not None:
+        conn.execute(
+            "INSERT INTO admin_audit(actor, action, target, detail, created_at) VALUES(?,?,?,?,?)",
+            values,
+        )
+        return
+    with closing(db()) as audit_conn:
+        audit_conn.execute(
+            "INSERT INTO admin_audit(actor, action, target, detail, created_at) VALUES(?,?,?,?,?)",
+            values,
+        )
+        audit_conn.commit()
+
+
+def add_provider_key(actor, body):
+    if provider_keys is None:
+        raise RuntimeError("密钥池模块不可用")
+    provider = str(body.get("provider") or "").strip().lower()
+    label = str(body.get("label") or "").strip()
+    secret = str(body.get("secret") or "").strip()
+    probe = probe_provider_secret(provider, secret)
+    if not probe.get("ok"):
+        status = probe.get("http_status")
+        suffix = "（HTTP %s）" % status if status else ""
+        raise ValueError("API 检测未通过，请更换有效密钥%s" % suffix)
+    item = provider_keys.add_key(provider, label, secret, actor, health=probe)
+    _admin_audit(
+        actor,
+        "provider_key.add",
+        item["id"],
+        {
+            "provider": item["provider"],
+            "label": item["label"],
+            "last4": item["last4"],
+            "latency_ms": probe.get("latency_ms"),
+        },
+    )
+    return {"ok": True, "item": item, "probe": probe}
+
+
+def test_provider_key(actor, body):
+    if provider_keys is None:
+        raise RuntimeError("密钥池模块不可用")
+    key_id = str(body.get("id") or "").strip()
+    provider = str(body.get("provider") or "").strip().lower()
+    if not key_id:
+        raise ValueError("缺少 API 密钥编号")
+    if key_id != "env":
+        item = provider_keys.public_key(key_id)
+        provider = item["provider"]
+    candidates = provider_keys.candidates(provider, preferred_id=key_id)
+    if not candidates:
+        raise ValueError("API 密钥不存在")
+    probe = probe_provider_secret(provider, candidates[0]["secret"])
+    if key_id != "env":
+        if probe.get("ok") or _probe_is_credential_rejection(probe):
+            provider_keys.set_health(
+                key_id,
+                bool(probe.get("ok")),
+                probe.get("latency_ms"),
+                probe.get("error") or ("HTTP %s" % probe.get("http_status") if probe.get("http_status") else ""),
+            )
+    _admin_audit(
+        actor,
+        "provider_key.test",
+        key_id,
+        {
+            "provider": provider,
+            "ok": bool(probe.get("ok")),
+            "http_status": probe.get("http_status"),
+            "latency_ms": probe.get("latency_ms"),
+        },
+    )
+    return {"ok": bool(probe.get("ok")), "probe": probe}
+
+
+def delete_provider_key(actor, body):
+    if provider_keys is None:
+        raise RuntimeError("密钥池模块不可用")
+    key_id = str(body.get("id") or "").strip()
+    item = provider_keys.public_key(key_id)
+    provider_keys.retire_key(key_id)
+    _admin_audit(
+        actor,
+        "provider_key.retire",
+        key_id,
+        {
+            "provider": item["provider"],
+            "label": item["label"],
+            "last4": item["last4"],
+        },
+    )
+    return {"ok": True}
+
+
+def reveal_provider_key(actor, body):
+    if provider_keys is None:
+        raise RuntimeError("密钥池模块不可用")
+    key_id = str(body.get("id") or "").strip()
+    item = provider_keys.public_key(key_id)
+    secret = provider_keys.reveal_key(key_id)
+    _admin_audit(
+        actor,
+        "provider_key.reveal",
+        key_id,
+        {
+            "provider": item["provider"],
+            "label": item["label"],
+            "last4": item["last4"],
+        },
+    )
+    return {"ok": True, "id": key_id, "secret": secret, "expires_in": 5}
+
+
+def reveal_server_key(actor, body):
+    channel = str(body.get("channel") or body.get("key") or "").strip().lower()
+    item = KEY_GROUP_MAP.get(channel)
+    if not item:
+        raise ValueError("API 渠道不存在")
+    values = _key_group_values(item)
+    if not values:
+        raise ValueError("该 API 渠道尚未配置密钥")
+    _admin_audit(
+        actor,
+        "server_key.reveal",
+        channel,
+        {
+            "env": [value["env"] for value in values],
+            "last4": [value["value"][-4:] for value in values],
+        },
+    )
+    return {
+        "ok": True,
+        "key": channel,
+        "secrets": [
+            {"env": value["env"], "secret": value["value"]}
+            for value in values
+        ],
+        "expires_in": 5,
+    }
 
 
 def _sanitize_path(raw):
@@ -965,6 +1420,8 @@ def _collect_request_entries(limit, status="", q="", include_noise=False):
             if not include_noise and NOISE_PATH_RE.match(path):
                 continue
             code = m.group("status")
+            meta = LOG_META_RE.search(line)
+            request_id = meta.group("request_id") if meta else ""
             if status:
                 # ok/fail = 统一语义(给合并时间线用)；单数字=状态码前缀；三位=精确
                 if status == "ok":
@@ -975,7 +1432,7 @@ def _collect_request_entries(limit, status="", q="", include_noise=False):
                         continue
                 elif code[:1] != status if len(status) == 1 else code != status:
                     continue
-            if q and q not in path:
+            if q and q not in path and q not in request_id:
                 continue
             sort_key, disp = _parse_log_time(m.group("time"))
             jid_match = JOB_PATH_RE.match(path)
@@ -992,6 +1449,8 @@ def _collect_request_entries(limit, status="", q="", include_noise=False):
                         "status": int(code),
                         "size": 0 if m.group("size") == "-" else int(m.group("size")),
                         "ua": m.group("ua")[:120],
+                        "duration_sec": float(meta.group("duration")) if meta else None,
+                        "request_id": request_id,
                         "_jid": int(jid_match.group(1)) if jid_match else None,
                     },
                 )
@@ -1010,6 +1469,85 @@ def _collect_request_entries(limit, status="", q="", include_noise=False):
     return entries, message
 
 
+def _hermes_func(method, path, event):
+    if event == "authentication":
+        return "IP12 · 登录验证"
+    if event == "authorization":
+        return "IP12 · 权限验证"
+    if event == "rate_limit":
+        return "IP12 · 请求限流"
+    if event == "concurrency_limit":
+        return "IP12 · 并发限制"
+    if event == "storage_quota":
+        return "IP12 · 存储空间"
+    if path == "/api/conversations":
+        return "IP12 · 新建项目" if method == "POST" else "IP12 · 项目列表"
+    if path.startswith("/api/conversations/"):
+        return "IP12 · 删除项目" if method == "DELETE" else "IP12 · 打开项目"
+    for prefix, name in (
+        ("/api/foundation-report/generate", "IP12 · 生成初稿 PDF"),
+        ("/api/foundation-report/confirm", "IP12 · 确认初稿"),
+        ("/api/foundation-report/", "IP12 · 查看 PDF"),
+        ("/api/chat-complete", "IP12 · 完整对话"),
+        ("/api/chat", "IP12 · 教练对话"),
+        ("/api/generate-report", "IP12 · 生成模块报告"),
+        ("/api/generate-deliverable", "IP12 · 生成交付物"),
+        ("/api/jump-module", "IP12 · 切换模块"),
+        ("/api/", "IP12 · 其他功能"),
+    ):
+        if path.startswith(prefix):
+            return name
+    return "IP12"
+
+
+def _collect_hermes_entries(limit):
+    entries = []
+    for log_path in (p for p in HERMES_AUDIT_LOGS if p.exists()):
+        try:
+            lines = _tail_lines(log_path)
+        except Exception:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+                timestamp = int(row.get("time") or 0)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            status = row.get("status")
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                status_code = None
+            failed = status_code >= 400 if status_code is not None else str(status) not in {"ok", "success"}
+            local = time.localtime(timestamp)
+            key = (local.tm_year, local.tm_mon, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec)
+            duration_ms = row.get("duration_ms")
+            try:
+                duration_sec = float(duration_ms) / 1000 if duration_ms is not None else None
+            except (TypeError, ValueError):
+                duration_sec = None
+            method = str(row.get("method") or "")[:12]
+            path = str(row.get("path") or "")[:500]
+            event = str(row.get("event") or "")[:80]
+            entries.append((key, {
+                "source": "ip12",
+                "time": "%02d-%02d %02d:%02d:%02d" % key[1:],
+                "user": str(row.get("username") or "-")[:120],
+                "func": _hermes_func(method, path, event),
+                "cat": "fail" if failed else "ok",
+                "status_text": str(status or "-"),
+                "duration_sec": duration_sec,
+                "cost": None,
+                "path": path,
+                "method": method,
+                "ip": str(row.get("ip") or "")[:80],
+                "ua": "",
+                "request_id": str(row.get("request_id") or "")[:128],
+            }))
+    entries.sort(key=lambda x: x[0], reverse=True)
+    return entries[:limit]
+
+
 def request_logs(limit=200, status="", q="", include_noise=False):
     """聚合各 nginx access log 尾部的后端 /api/ 请求日志（最新在前）。"""
     limit = max(1, min(int(limit or 200), 500))
@@ -1020,22 +1558,24 @@ def request_logs(limit=200, status="", q="", include_noise=False):
     return out
 
 
-def activity_logs(days=7, limit=200, category="", q="", source="", include_noise=False):
+def activity_logs(days=7, limit=200, category="", q="", source="", include_noise=False, offset=0):
     """任务记录(jobs 库) + HTTP 请求(nginx) 合并成一条时间线，最新在前。
 
     category: '' | ok | fail | running（统一语义：任务 done/error/排队中 ↔ HTTP <400/>=400）
-    source:   '' | job | http
+    source:   '' | job | http | ip12
     """
-    limit = max(1, min(int(limit or 200), 500))
+    limit = max(1, min(int(limit or 200), 100))
+    offset = max(0, int(offset or 0))
     q = str(q or "").strip()
     category = str(category or "").strip()
     source = str(source or "").strip()
     merged, message = [], None
+    source_limit = 500
 
     if source in ("", "http") and category != "running":
         # 成功/失败下推到采集层，避免"失败行被截断挤掉"
         entries, message = _collect_request_entries(
-            limit, status=category if category in ("ok", "fail") else "", include_noise=include_noise
+            source_limit, status=category if category in ("ok", "fail") else "", include_noise=include_noise
         )
         for key, it in entries:
             cat = "ok" if it["status"] < 400 else "fail"
@@ -1049,18 +1589,22 @@ def activity_logs(days=7, limit=200, category="", q="", source="", include_noise
                         "func": it["func"],
                         "cat": cat,
                         "status_text": str(it["status"]),
-                        "duration_sec": None,
+                        "duration_sec": it["duration_sec"],
                         "cost": None,
                         "path": it["path"],
                         "method": it["method"],
                         "ip": it["ip"],
                         "ua": it["ua"],
+                        "request_id": it["request_id"],
                     },
                 )
             )
 
+    if source in ("", "ip12") and category != "running":
+        merged.extend(_collect_hermes_entries(source_limit))
+
     if source in ("", "job"):
-        for j in call_logs(days, limit)["items"]:
+        for j in call_logs(days, source_limit)["items"]:
             t = time.localtime(j["created_at"]) if j["created_at"] else None
             key = (t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec) if t else (0, 0, 0, 0, 0, 0)
             cat = "ok" if j["status"] == "done" else ("fail" if j["status"] == "error" else "running")
@@ -1080,20 +1624,27 @@ def activity_logs(days=7, limit=200, category="", q="", source="", include_noise
                         "method": "",
                         "ip": "",
                         "ua": "",
+                        "request_id": "",
                     },
                 )
             )
 
-    items = []
+    matching = []
     for key, it in sorted(merged, key=lambda x: x[0], reverse=True):
         if category and it["cat"] != category:
             continue
-        if q and q not in it["path"] and q not in (it["user"] or "") and q not in (it["func"] or ""):
+        if q and all(q not in (it.get(field) or "") for field in ("path", "user", "func", "request_id")):
             continue
-        items.append(it)
-        if len(items) >= limit:
-            break
-    out = {"items": items, "limit": limit, "days": days}
+        matching.append(it)
+    total = len(matching)
+    items = matching[offset:offset + limit]
+    out = {
+        "items": items,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+        "days": days,
+    }
     if message and source != "job":
         out["message"] = message
     return out
@@ -1178,6 +1729,10 @@ def load_features(services=None):
     return feature_flags.list_features(services or service_status())
 
 
+def load_pricing():
+    return pricing.list_prices()
+
+
 def _validate_config(value, prefix="config"):
     if not isinstance(value, dict):
         raise ValueError("config must be an object")
@@ -1240,6 +1795,27 @@ def save_feature(actor, body):
             (actor, "feature.toggle", feature, json.dumps(detail, ensure_ascii=False), now),
         )
         c.commit()
+    return item
+
+
+def save_pricing(actor, body):
+    key = str(body.get("key") or body.get("rule") or "").strip()
+    reason = str(body.get("reason") or "").strip()[:200]
+    if not reason:
+        raise ValueError("请填写改价原因")
+    old = pricing.get_rule(key)
+    item = pricing.set_price(key, body.get("points"), actor)
+    detail = {
+        "old_points": old["points"],
+        "new_points": item["points"],
+        "reason": reason,
+    }
+    with closing(db()) as conn:
+        conn.execute(
+            "INSERT INTO admin_audit(actor, action, target, detail, created_at) VALUES(?,?,?,?,?)",
+            (actor, "pricing.update", key, json.dumps(detail, ensure_ascii=False), int(time.time())),
+        )
+        conn.commit()
     return item
 
 
@@ -1315,7 +1891,7 @@ def job_stats(days=7):
     }
 
 
-_PAYLOAD_FIELD_RE = re.compile(r'"(model|provider|mode|keyword|url|line)"\s*:\s*"([^"]*)"')
+_PAYLOAD_FIELD_RE = re.compile(r'"(model|provider|channel|mode|keyword|url|line)"\s*:\s*"([^"]*)"')
 
 
 def _job_payload(raw):
@@ -1378,6 +1954,77 @@ def call_logs(days=7, limit=200):
     return {"days": days, "limit": limit, "items": items}
 
 
+def user_job_insights(username):
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("缺少用户账号")
+    if len(username) > 64:
+        raise ValueError("用户账号过长")
+    empty = {
+        "total": 0, "done": 0, "error": 0, "running": 0, "other": 0,
+        "success_rate": 0, "by_function": [], "by_channel": [],
+        "by_model": [], "recent": [],
+    }
+    if not JOB_DB.exists():
+        return empty
+    with closing(sqlite3.connect(str(JOB_DB), timeout=10)) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            """SELECT id,kind,cost,status,substr(payload,1,4096) AS payload,created_at
+               FROM jobs WHERE username=? ORDER BY created_at DESC,id DESC""",
+            (username,),
+        ).fetchall()
+
+    summary = dict(empty)
+    groups = {"by_function": {}, "by_channel": {}, "by_model": {}}
+
+    def add_group(group, name, status):
+        item = group.setdefault(name or "未记录", {
+            "name": name or "未记录", "total": 0, "done": 0, "error": 0,
+        })
+        item["total"] += 1
+        if status in {"done", "error"}:
+            item[status] += 1
+
+    for row in rows:
+        status = str(row["status"] or "unknown").lower()
+        bucket = status if status in {"done", "error"} else (
+            "running" if status in {"pending", "queued", "running"} else "other"
+        )
+        summary["total"] += 1
+        summary[bucket] += 1
+        payload = _job_payload(row["payload"])
+        kind = row["kind"] or "unknown"
+        channel = payload.get("channel") or payload.get("provider")
+        if not channel and payload.get("line"):
+            channel = "线路 " + str(payload["line"])
+        add_group(groups["by_function"], call_func_name(kind, payload), bucket)
+        add_group(groups["by_channel"], str(channel or "未记录"), bucket)
+        add_group(groups["by_model"], str(payload.get("model") or "未记录"), bucket)
+        if len(summary["recent"]) < 20:
+            created_at = int(row["created_at"] or 0)
+            summary["recent"].append({
+                "id": int(row["id"]),
+                "func": call_func_name(kind, payload),
+                "channel": str(channel or "未记录"),
+                "model": str(payload.get("model") or "未记录"),
+                "status": status,
+                "cost": int(row["cost"] or 0),
+                "created_at": created_at,
+            })
+    settled = summary["done"] + summary["error"]
+    summary["success_rate"] = round(
+        summary["done"] / settled, 4,
+    ) if settled else 0
+    for key, values in groups.items():
+        items = list(values.values())
+        for item in items:
+            settled = item["done"] + item["error"]
+            item["success_rate"] = round(item["done"] / settled, 4) if settled else 0
+        summary[key] = sorted(items, key=lambda item: (-item["total"], item["name"]))[:30]
+    return summary
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -1386,6 +2033,16 @@ class H(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_raw(self, code, body, content_type, disposition=None):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type or "application/octet-stream")
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1414,6 +2071,11 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if not path.startswith("/api/admin/"):
             return self._send(404, {"detail": "not found"})
+        if path == "/api/admin/public/inspirations":
+            try:
+                return self._send(200, inspiration_cases.list_public(ADMIN_DB))
+            except Exception:
+                return self._send(500, {"detail": "灵感案例加载失败"})
         user = self._admin()
         if not user:
             return
@@ -1423,20 +2085,96 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"items": service_status()})
         if path == "/api/admin/keys":
             return self._send(200, {"items": key_status()})
+        if path == "/api/admin/provider-keys":
+            return self._send(200, provider_key_list())
         if path == "/api/admin/channels":
             return self._send(200, {"items": load_channels()})
         if path == "/api/admin/features":
             return self._send(200, {"items": load_features()})
         if path == "/api/admin/pricing":
+            return self._send(200, {"items": load_pricing()})
+        if path == "/api/admin/short-drama/lipsync/health":
+            if short_drama_lipsync_observability is None:
+                return self._send(503, {"detail": "lipsync observability unavailable"})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
-                return self._send(200, pricing_config.admin_catalog())
+                window = int((q.get("window_seconds") or ["3600"])[0])
+                result = short_drama_lipsync_observability.health(
+                    lipsync_db, window_seconds=window
+                )
+                result["rollout"] = short_drama_lipsync_rollout.get_config(
+                    lipsync_db
+                )
+                result["providers"] = (
+                    short_drama_lipsync_rollout.provider_controls(lipsync_db)
+                )
+                return self._send(200, result)
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/short-drama/lipsync/diagnostics":
+            if short_drama_lipsync_diagnostics is None:
+                return self._send(503, {"detail": "lipsync diagnostics unavailable"})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            filters = {
+                key: (q.get(key) or [""])[0]
+                for key in (
+                    "project_id", "job_id", "attempt_id", "provider_job_id",
+                    "version_id", "trace_id",
+                )
+            }
+            try:
+                return self._send(
+                    200,
+                    short_drama_lipsync_diagnostics.query(
+                        lipsync_db, filters,
+                        actor=user.get("username") or "admin",
+                        limit=(q.get("limit") or ["100"])[0],
+                    ),
+                )
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/announcements":
+            q = urllib.parse.urlparse(self.path).query
+            suffix = "/api/auth/admin/announcements" + (("?" + q) if q else "")
+            try:
+                return self._send(200, auth_admin_request(suffix, self._token()))
             except Exception as e:
-                return self._send(500, {"detail": "读取收费标准失败: " + str(e)[:120]})
+                return auth_error_response(self, e)
+        if path == "/api/admin/inspirations":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                return self._send(200, inspiration_cases.list_admin(
+                    ADMIN_DB, JOB_DB, (q.get("days") or ["30"])[0]
+                ))
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180] or "案例加载失败"})
         if path == "/api/admin/users":
             q = urllib.parse.urlparse(self.path).query
             suffix = "/api/auth/admin/users" + (("?" + q) if q else "")
             try:
                 return self._send(200, auth_admin_request(suffix, self._token()))
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/users/detail":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            username = (q.get("username") or [""])[0].strip()
+            user_id = (q.get("user_id") or [""])[0].strip()
+            if not username and not user_id:
+                return self._send(400, {"detail": "缺少用户账号或 ID"})
+            try:
+                identity = ("user_id=" + urllib.parse.quote(user_id)) if user_id else (
+                    "username=" + urllib.parse.quote(username)
+                )
+                data = auth_admin_request(
+                    "/api/auth/admin/user-insights?" + identity,
+                    self._token(),
+                )
+                data["tasks"] = user_job_insights(data["user"]["username"])
+                return self._send(200, data)
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
             except Exception as e:
                 return auth_error_response(self, e)
         if path == "/api/admin/points/audit":
@@ -1451,6 +2189,26 @@ class H(BaseHTTPRequestHandler):
             suffix = "/api/auth/admin/recharge/orders" + (("?" + q) if q else "")
             try:
                 return self._send(200, auth_admin_request(suffix, self._token()))
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path in {
+            "/api/admin/invite/config", "/api/admin/invite/stats",
+            "/api/admin/invite/relations", "/api/admin/invite/audit",
+            "/api/admin/invite/reward-points", "/api/admin/invite/reward-claims",
+            "/api/admin/invite/journeys", "/api/admin/invite/network",
+        }:
+            q = urllib.parse.urlparse(self.path).query
+            suffix = path.replace("/api/admin/", "/api/auth/admin/", 1) + (("?" + q) if q else "")
+            try:
+                return self._send(200, auth_admin_request(suffix, self._token()))
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/invite/export.xlsx":
+            q = urllib.parse.urlparse(self.path).query
+            suffix = path.replace("/api/admin/", "/api/auth/admin/", 1) + (("?" + q) if q else "")
+            try:
+                body, content_type, disposition = auth_admin_raw(suffix, self._token())
+                return self._send_raw(200, body, content_type, disposition)
             except Exception as e:
                 return auth_error_response(self, e)
         if path == "/api/admin/ping":
@@ -1494,6 +2252,7 @@ class H(BaseHTTPRequestHandler):
                         (q.get("q") or [""])[0],
                         (q.get("source") or [""])[0],
                         (q.get("noise") or ["0"])[0] in ("1", "true"),
+                        (q.get("offset") or ["0"])[0],
                     ),
                 )
             except Exception as e:
@@ -1521,8 +2280,10 @@ class H(BaseHTTPRequestHandler):
                     "user": {"username": user.get("username"), "name": user.get("name"), "role": user.get("role")},
                     "services": services,
                     "keys": key_status(),
+                    "provider_keys": provider_key_list(),
                     "channels": load_channels(),
                     "features": load_features(services),
+                    "pricing": load_pricing(),
                     "stats": job_stats(days),
                 },
             )
@@ -1532,9 +2293,231 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if not path.startswith("/api/admin/"):
             return self._send(404, {"detail": "not found"})
+        if path == "/api/admin/public/inspiration-events":
+            try:
+                if int(self.headers.get("Content-Length") or 0) > 16384:
+                    raise ValueError("事件请求过大")
+                return self._send(200, inspiration_cases.record_events(ADMIN_DB, self._body()))
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception:
+                return self._send(500, {"detail": "事件记录失败"})
         user = self._admin()
         if not user:
             return
+        if path == "/api/admin/short-drama/lipsync/rollout":
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if str(body.get("confirmation") or "") != "CONFIRM":
+                    raise ValueError("confirmation must be CONFIRM")
+                result = short_drama_lipsync_rollout.set_config(
+                    lipsync_db, actor, body,
+                    expected_version=body.get("expected_version"),
+                )
+                feature_flags.set_enabled(
+                    short_drama_lipsync_rollout.FEATURE,
+                    bool(result["enabled"]), actor,
+                )
+                return self._send(200, {"ok": True, "rollout": result})
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except short_drama_lipsync_rollout.RolloutError as exc:
+                return self._send(exc.status, {
+                    "detail": str(exc), "code": exc.code
+                })
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/short-drama/lipsync/provider":
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if str(body.get("confirmation") or "") != "CONFIRM":
+                    raise ValueError("confirmation must be CONFIRM")
+                result = short_drama_lipsync_rollout.set_provider_paused(
+                    lipsync_db, actor, body.get("provider"),
+                    bool(body.get("paused")), body.get("reason"),
+                    incident_id=body.get("incident_id") or "",
+                )
+                return self._send(200, {"ok": True, "provider": result})
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/short-drama/lipsync/reconcile":
+            if (
+                short_drama_lipsync_reconcile is None
+                or short_drama_lipsync_observability is None
+            ):
+                return self._send(503, {
+                    "detail": "lipsync reconciliation unavailable"
+                })
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if str(body.get("confirmation") or "") != "CONFIRM":
+                    raise ValueError("confirmation must be CONFIRM")
+                reason = str(body.get("reason") or "").strip()
+                if not reason:
+                    raise ValueError("reason is required")
+                job_id = str(body.get("job_id") or "").strip()
+                if not job_id:
+                    raise ValueError("job_id is required")
+                released = short_drama_lipsync_reconcile.release_expired_leases(
+                    lipsync_db, now=int(time.time()), limit=1, job_id=job_id
+                )
+                changed = job_id in released
+                short_drama_lipsync_observability.emit(
+                    lipsync_db, "lipsync.admin.reconcile",
+                    severity="warning", job_id=job_id, actor=actor,
+                    detail={
+                        "reason": reason,
+                        "incident_id": body.get("incident_id") or "",
+                        "changed": changed,
+                    },
+                )
+                return self._send(200, {"ok": True, "changed": changed})
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/short-drama/lipsync/refund":
+            if (
+                short_drama_lipsync_rollout is None
+                or short_drama_lipsync_jobs is None
+                or short_drama_lipsync_observability is None
+                or points_domain is None
+            ):
+                return self._send(503, {
+                    "detail": "lipsync refund recovery unavailable"
+                })
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if str(body.get("confirmation") or "") != "CONFIRM":
+                    raise ValueError("confirmation must be CONFIRM")
+                reason = str(body.get("reason") or "").strip()
+                attempt_id = str(body.get("attempt_id") or "").strip()
+                if not reason or not attempt_id:
+                    raise ValueError("attempt_id and reason are required")
+                claimed = short_drama_lipsync_rollout.request_manual_refund(
+                    lipsync_db, actor, attempt_id, reason,
+                    incident_id=body.get("incident_id") or "",
+                )
+                ledger = short_drama_lipsync_jobs.PointsLedger(points_domain)
+                refunded = (
+                    claimed["state"] == "refunded"
+                    or short_drama_lipsync_jobs.reconcile_refund_attempt(
+                        lipsync_db, ledger, attempt_id
+                    )
+                )
+                short_drama_lipsync_observability.emit(
+                    lipsync_db, "lipsync.admin.refund",
+                    severity="warning", attempt_id=attempt_id, actor=actor,
+                    detail={
+                        "reason": reason,
+                        "incident_id": body.get("incident_id") or "",
+                        "old_state": claimed["attempt_state"],
+                        "new_state": (
+                            "refunded" if refunded else "refund_pending"
+                        ),
+                        "job_state": claimed["job_state"],
+                        "refunded": refunded,
+                    },
+                )
+                return self._send(200, {
+                    "ok": True, "refunded": refunded,
+                    "replayed": bool(claimed.get("replayed")),
+                })
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except short_drama_lipsync_rollout.RolloutError as exc:
+                return self._send(exc.status, {
+                    "detail": str(exc), "code": exc.code,
+                })
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180]})
+        if path == "/api/admin/inspirations/media":
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                result = inspiration_cases.upload_media(
+                    self.rfile,
+                    self.headers.get("Content-Length"),
+                    self.headers.get("Content-Type"),
+                    (q.get("kind") or [""])[0],
+                )
+                try:
+                    _admin_audit(
+                        user.get("username") or "admin", "inspiration.media.upload", result["key"],
+                        {"media_type": result["media_type"], "size": result["size"]},
+                    )
+                except Exception as audit_error:
+                    print("inspiration upload audit failed:", type(audit_error).__name__)
+                return self._send(200, result)
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except RuntimeError as exc:
+                return self._send(503, {"detail": str(exc)})
+            except Exception:
+                return self._send(500, {"detail": "素材上传失败，请重试"})
+        if path in {"/api/admin/inspirations/save", "/api/admin/inspirations/status"}:
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if path.endswith("/save"):
+                    item = inspiration_cases.save_case(ADMIN_DB, body, actor, bool(body.get("publish")))
+                    action = "publish" if body.get("publish") else "save"
+                else:
+                    status = str(body.get("status") or "")
+                    item = inspiration_cases.set_status(ADMIN_DB, body.get("id"), status, actor)
+                    action = status
+                try:
+                    _admin_audit(actor, "inspiration.%s" % action, item["id"], {
+                        "title": item["title"], "status": item["status"], "public_id": item["public_id"],
+                    })
+                except Exception as audit_error:
+                    print("inspiration audit failed:", type(audit_error).__name__)
+                return self._send(200, {"ok": True, "item": item})
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180] or "保存失败"})
+        if path == "/api/admin/server-keys/reveal":
+            try:
+                result = reveal_server_key(
+                    user.get("username") or "admin", self._body()
+                )
+                return self._send(200, result)
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"detail": str(exc)[:180] or "操作失败"})
+        if path in {
+            "/api/admin/provider-keys/add",
+            "/api/admin/provider-keys/test",
+            "/api/admin/provider-keys/delete",
+            "/api/admin/provider-keys/reveal",
+        }:
+            actor = user.get("username") or "admin"
+            try:
+                body = self._body()
+                if path.endswith("/add"):
+                    result = add_provider_key(actor, body)
+                elif path.endswith("/test"):
+                    result = test_provider_key(actor, body)
+                elif path.endswith("/reveal"):
+                    result = reveal_provider_key(actor, body)
+                else:
+                    result = delete_provider_key(actor, body)
+                return self._send(200, result)
+            except ValueError as exc:
+                return self._send(400, {"detail": str(exc)})
+            except Exception as exc:
+                if provider_keys is not None and isinstance(
+                    exc, provider_keys.KeyStoreUnavailable
+                ):
+                    return self._send(503, {"detail": str(exc)})
+                return self._send(500, {"detail": str(exc)[:180] or "操作失败"})
         if path == "/api/admin/channel":
             try:
                 item = save_channel(user.get("username") or "admin", self._body())
@@ -1553,19 +2536,145 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "feature": item})
         if path == "/api/admin/pricing":
             try:
-                item = pricing_config.save(user.get("username") or "admin", self._body())
-            except pricing_config.PricingConflict as e:
-                return self._send(409, {"detail": str(e)})
-            except ValueError as e:
+                item = save_pricing(user.get("username") or "admin", self._body())
+            except (ValueError, KeyError) as e:
                 return self._send(400, {"detail": str(e)})
             except Exception as e:
-                return self._send(500, {"detail": "保存收费标准失败: " + str(e)[:120]})
+                return self._send(500, {"detail": str(e)[:160] or "保存失败"})
             return self._send(200, {"ok": True, "pricing": item})
         if path == "/api/admin/points/adjust":
             try:
                 return self._send(
                     200,
                     auth_admin_request("/api/auth/admin/points/adjust", self._token(), method="POST", payload=self._body()),
+                )
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/users/password/reset":
+            try:
+                body = self._body()
+                if not isinstance(body, dict):
+                    return self._send(400, {"detail": "请求体不是合法 JSON"})
+                result = auth_admin_request(
+                    "/api/auth/admin/password/reset", self._token(), method="POST", payload=body,
+                )
+                _admin_audit(
+                    user.get("username") or "admin", "user_password_reset",
+                    str(body.get("username") or ""), {"sessions_revoked": True, "must_change": True},
+                )
+                return self._send(200, result)
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/announcements/preview":
+            try:
+                return self._send(200, auth_admin_request(
+                    "/api/auth/admin/announcements/preview", self._token(),
+                    method="POST", payload=self._body(),
+                ))
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/announcements":
+            try:
+                body = self._body()
+                result = auth_admin_request(
+                    "/api/auth/admin/announcements", self._token(), method="POST", payload=body,
+                )
+                campaign = result.get("campaign") or {}
+                if not result.get("duplicate"):
+                    try:
+                        _admin_audit(
+                            user.get("username") or "admin", "announcement_publish", campaign.get("id"),
+                            {
+                                "request_id": campaign.get("request_id"),
+                                "audience": campaign.get("audience"),
+                                "recipient_count": campaign.get("recipient_count", 0),
+                                "wechat_push_requested": campaign.get("wechat_push_requested", False),
+                                "wechat_recipient_count": campaign.get("wechat_recipient_count", 0),
+                            },
+                        )
+                    except Exception as audit_error:
+                        print("announcement publish audit failed:", type(audit_error).__name__)
+                return self._send(200, result)
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path.startswith("/api/admin/announcements/") and path.endswith("/recall"):
+            suffix = path.replace("/api/admin/", "/api/auth/admin/", 1)
+            try:
+                result = auth_admin_request(
+                    suffix, self._token(), method="POST", payload={},
+                )
+                campaign = result.get("campaign") or {}
+                if not result.get("already_recalled"):
+                    try:
+                        _admin_audit(
+                            user.get("username") or "admin", "announcement_recall", campaign.get("id"),
+                            {"recipient_count": campaign.get("recipient_count", 0)},
+                        )
+                    except Exception as audit_error:
+                        print("announcement recall audit failed:", type(audit_error).__name__)
+                return self._send(200, result)
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/users/notification":
+            try:
+                body = self._body()
+                result = auth_admin_request(
+                    "/api/auth/admin/notifications", self._token(), method="POST", payload=body,
+                )
+                try:
+                    _admin_audit(
+                        user.get("username") or "admin", "user_notification",
+                        str(body.get("username") or ""), {
+                            "title": str(body.get("title") or "")[:80],
+                            "detail_chars": len(str(body.get("detail") or "")),
+                        },
+                    )
+                except Exception as audit_error:
+                    print("admin notification audit failed:", type(audit_error).__name__)
+                return self._send(200, result)
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/membership/set":
+            try:
+                return self._send(
+                    200,
+                    auth_admin_request(
+                        "/api/auth/admin/membership/set", self._token(), method="POST", payload=self._body(),
+                    ),
+                )
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/membership/recharge":
+            try:
+                return self._send(
+                    200,
+                    auth_admin_request(
+                        "/api/auth/admin/membership/recharge", self._token(), method="POST", payload=self._body(),
+                    ),
+                )
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path == "/api/admin/membership/recharge/preview":
+            try:
+                return self._send(
+                    200,
+                    auth_admin_request(
+                        "/api/auth/admin/membership/recharge/preview", self._token(), method="POST", payload=self._body(),
+                    ),
                 )
             except ValueError as e:
                 return self._send(400, {"detail": str(e)})
@@ -1581,7 +2690,43 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"detail": str(e)})
             except Exception as e:
                 return auth_error_response(self, e)
+        if path.startswith("/api/admin/invite/relations/"):
+            suffix = path.replace("/api/admin/", "/api/auth/admin/", 1)
+            try:
+                return self._send(200, auth_admin_request(
+                    suffix, self._token(), method="POST", payload=self._body(),
+                ))
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
+        if path.startswith("/api/admin/invite/reward-points/"):
+            suffix = path.replace("/api/admin/", "/api/auth/admin/", 1)
+            try:
+                return self._send(200, auth_admin_request(
+                    suffix, self._token(), method="POST", payload=self._body(),
+                ))
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)})
+            except Exception as e:
+                return auth_error_response(self, e)
         return self._send(404, {"detail": "not found"})
+
+    def do_PUT(self):
+        path = self.path.split("?", 1)[0]
+        if path != "/api/admin/invite/config":
+            return self._send(404, {"detail": "not found"})
+        user = self._admin()
+        if not user:
+            return
+        try:
+            return self._send(200, auth_admin_request(
+                "/api/auth/admin/invite/config", self._token(), method="PUT", payload=self._body(),
+            ))
+        except ValueError as e:
+            return self._send(400, {"detail": str(e)})
+        except Exception as e:
+            return auth_error_response(self, e)
 
     def do_OPTIONS(self):
         self.send_response(204)

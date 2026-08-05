@@ -61,6 +61,16 @@ test('compact labels are bound to a floating hover and focus tooltip', () => {
   assert.match(shell, /bindNavTooltips\(aside\)/);
 });
 
+test('shared navigation animates from pointer position with reduced-motion fallback', () => {
+  assert.match(shell, /function bindNavMotion\(aside\)/);
+  assert.match(shell, /--hq-nav-x/);
+  assert.match(shell, /pointermove/);
+  assert.match(shell, /hq-nav-draw/);
+  assert.match(shell, /hq-nav-seed-a/);
+  assert.match(shell, /bindNavMotion\(aside\)/);
+  assert.match(shell, /prefers-reduced-motion:reduce/);
+});
+
 test('compact mode hides the logout overlay but keeps expanded logout', () => {
   const navDisplayMode = readNavDisplayMode();
   assert.match(shell, /class="hq-user-logout" data-logout="1"/);
@@ -69,6 +79,20 @@ test('compact mode hides the logout overlay but keeps expanded logout', () => {
   assert.match(shell, /\.hq-aside-compact \.hq-user-copy,\.hq-aside-compact \.hq-user-logout\{display:none!important/);
   assert.doesNotMatch(shell, /['"]\.hq-user-logout\{display:none!important/);
   assert.doesNotMatch(shell, /\.hq-aside-compact button\.hq-user-logout\{display:flex!important/);
+});
+
+test('signed-in users display their concrete membership tier', () => {
+  assert.match(shell, /function membershipRoleName\(user\)/);
+  assert.match(shell, /experience:'体验官',partner:'合伙人',initiator:'发起人'/);
+  assert.match(shell, /var role=membershipRoleName\(u\)/);
+  assert.doesNotMatch(shell, /\?'管理员':'会员'/);
+});
+
+test('point prices are visible and refresh on open pages', () => {
+  assert.match(shell, /\{k:'pricing',l:'点数价格'/);
+  assert.match(shell, /fetch\('\/api\/gen\/pricing'/);
+  assert.match(shell, /pricingListeners\.forEach/);
+  assert.match(shell, /,30000\)/);
 });
 
 test('generation routes alone use the flush workspace shell', () => {

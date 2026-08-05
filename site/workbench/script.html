@@ -91,7 +91,6 @@
   <div id="scModeTabs" style="display:flex; gap:6px; margin-bottom:18px;">
     <button class="sc-mode-tab on" data-mode="write" type="button">✍️ AI写脚本</button>
     <button class="sc-mode-tab" data-mode="breakdown" type="button">🔍 拆解视频</button>
-    <button class="sc-mode-tab" data-mode="reverse_prompt" type="button">✨ 提示词反推</button>
   </div>
 
   <div class="gScript">
@@ -146,7 +145,7 @@
 
         <button id="scGen" class="hv-lift" style="width:100%; height:54px; margin-top:24px; font-size:16px; font-weight:700; color:#1a1206; background:linear-gradient(135deg,#f4cd72,#e7b24c); border:none; border-radius:14px; cursor:pointer; box-shadow:0 14px 34px -12px rgba(231,178,76,.7); transition:.2s; font-family:inherit; display:flex; align-items:center; justify-content:center; gap:9px;">
           <span class="sc-ico" style="width:19px;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 14l.7 1.9L22 17l-2.3.6L19 20l-.7-2.4L16 17l2.3-.5z"/></svg></span>
-          生成脚本（3 点）
+          <span id="scGenText">生成脚本（3 点）</span>
         </button>
         <div style="text-align:center; margin-top:11px;"><span class="sc-hint">每次生成 1 套 3 分镜脚本 · 失败自动退点</span></div>
       </div>
@@ -154,6 +153,11 @@
       <div id="panelBreakdown" style="display:none;">
         <div style="display:flex; align-items:flex-start; justify-content:space-between;">
           <div><h1 style="margin:0; font-size:21px; font-weight:700; display:flex; align-items:center; gap:10px;"><span style="font-size:26px;">🔍</span>爆款拆解</h1><p id="bdIntroText" style="margin:7px 0 0; font-size:13px; color:#94a4bb;">粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频</p></div>
+        </div>
+
+        <div id="bdToolTabs" style="display:flex; gap:10px; margin-top:18px; flex-wrap:wrap;">
+          <button id="bdToolScenes" class="sc-btn" data-bd-tool="scenes" type="button" style="padding:10px 14px; border-radius:12px; font-weight:700; color:#0f172a; background:linear-gradient(135deg,#93c5fd,#60a5fa); border-color:rgba(96,165,250,.35);">🎞 分解拆解</button>
+          <button id="bdToolReverse" class="sc-btn" data-bd-tool="reverse_prompt" type="button" style="padding:10px 14px; border-radius:12px; font-weight:700;">✨ 提示词反推</button>
         </div>
 
         <div id="bdSourceGrid" class="bd-source-grid">
@@ -172,7 +176,7 @@
         </div>
         <div id="bdLocalCard" class="bd-source-card" style="display:none;">
           <div style="font-size:13.5px;font-weight:700;color:#c4b5fd;margin-bottom:5px;">本地图片 / 视频反推</div>
-          <div id="bdLocalPriceHint" class="sc-hint" style="margin-bottom:12px;">正在加载本地素材收费标准…</div>
+          <div id="bdLocalCostHint" class="sc-hint" style="margin-bottom:12px;">单独上传，不经过链接下载；每个文件固定 20 点</div>
           <input id="bdLocalImage" type="file" accept="image/jpeg,image/png,image/webp" style="display:none;">
           <input id="bdLocalVideo" type="file" accept="video/mp4,video/quicktime,video/webm" style="display:none;">
           <div class="bd-local-row">
@@ -338,8 +342,7 @@
 </div></div>
 
 <script src="../assets/cloud.js?v=8"></script>
-<script src="cloud-shell.js?v=642453c4"></script>
-<script src="pricing-gate.js?v=20260804"></script>
+<script src="cloud-shell.js?v=49fe47f6"></script>
 <script>
 /* 编导页接 /api/gen/copy（format=script）+ /api/gen/breakdown → 脚本/拆解双模式 */
 (function(){
@@ -371,49 +374,30 @@
       bdImagePick=document.getElementById('bdImagePick'), bdVideoPick=document.getElementById('bdVideoPick'),
       bdImageReverse=document.getElementById('bdImageReverse'), bdVideoReverse=document.getElementById('bdVideoReverse'),
       bdLocalImageName=document.getElementById('bdLocalImageName'), bdLocalVideoName=document.getElementById('bdLocalVideoName'),
-      bdLocalStatus=document.getElementById('bdLocalStatus'), bdLocalPriceHint=document.getElementById('bdLocalPriceHint');
+      bdLocalStatus=document.getElementById('bdLocalStatus');
   var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, lastBreakdownReverse=null, currentMode='write', currentBreakdownTool='scenes', refImageData=null, bdEditing=false;
   var initialMeta=meta?meta.innerHTML:'', initialScenes=scenes?scenes.innerHTML:'',
       initialPreviewTitle=previewTitle?previewTitle.textContent:'脚本 · 分镜预览',
       initialBatchHint=batchHint?batchHint.textContent:'';
   var BREAKDOWN_HISTORY_KEY='hq_script_breakdown_history';
+  var COPY_POINTS=3, BREAKDOWN_POINTS=20, GROK_DRAMA_RATE=12;
   var BD_SCENES_LABEL='开始拆解（20 点）';
   var BD_REVERSE_LABEL='开始反推（20 点）';
-  var BREAKDOWN_PRICING_VALUES={};
-  function _breakdownPrice(key){
-    var value=Number(BREAKDOWN_PRICING_VALUES[key]);
-    return Number.isInteger(value)&&value>0?value:null;
-  }
-  function _localUploadPrice(){return _breakdownPrice('breakdown.local_upload');}
-  function _linkBreakdownPrice(){return _breakdownPrice('breakdown.per_link');}
-  function _renderBreakdownPricing(state){
-    if(state&&state.status==='ready') BREAKDOWN_PRICING_VALUES=state.values||{};
-    else BREAKDOWN_PRICING_VALUES={};
-    var localPrice=_localUploadPrice(), linkPrice=_linkBreakdownPrice();
-    if(localPrice){
-      if(bdLocalPriceHint) bdLocalPriceHint.textContent='单独上传，不经过链接下载；每个文件 '+localPrice+' 点';
-      if(bdImageReverse) bdImageReverse.textContent='反推图片（'+localPrice+' 点）';
-      if(bdVideoReverse) bdVideoReverse.textContent='反推视频（'+localPrice+' 点）';
-    }else{
-      var unavailable=state&&state.status==='loading'?'正在加载本地素材收费标准…':'收费标准加载失败，暂不能提交付费反推';
-      if(bdLocalPriceHint) bdLocalPriceHint.textContent=unavailable;
-    }
-    if(linkPrice){
-      BD_SCENES_LABEL='开始拆解（'+linkPrice+' 点）';
-      BD_REVERSE_LABEL='开始反推（'+linkPrice+' 点）';
-      if(bdGenText) bdGenText.textContent=isBreakdownReverseTool()?BD_REVERSE_LABEL:BD_SCENES_LABEL;
-    }
-    if(bdUrlHint){
-      var shown=linkPrice||'--';
-      bdUrlHint.textContent=isBreakdownReverseTool()
-        ?'支持抖音、小红书公开视频链接，链接视频最大 200MB；提示词反推暂仅支持单条链接（'+shown+' 点）'
-        :'支持抖音、小红书公开视频链接，链接视频最大 200MB；最多 5 条（每行一个，每个链接 '+shown+' 点）';
-    }
-  }
-  var breakdownPricingGate=window.HQPricingGate?window.HQPricingGate.create({
-    url:'/api/gen/pricing',requiredKeys:['breakdown.per_link','breakdown.local_upload'],
-    onState:_renderBreakdownPricing
-  }):null;
+  if(window.HQ&&HQ.onPricing) HQ.onPricing(function(p){
+    COPY_POINTS=p['text.copy']||3;
+    BREAKDOWN_POINTS=p['breakdown.item']||20;
+    GROK_DRAMA_RATE=p['video.grok.v1.720p']||12;
+    BD_SCENES_LABEL='开始拆解（'+BREAKDOWN_POINTS+' 点）';
+    BD_REVERSE_LABEL='开始反推（'+BREAKDOWN_POINTS+' 点）';
+    var copyLabel=document.getElementById('scGenText');
+    if(copyLabel) copyLabel.textContent='生成脚本（'+COPY_POINTS+' 点）';
+    var localHint=document.getElementById('bdLocalCostHint');
+    if(localHint) localHint.textContent='单独上传，不经过链接下载；每个文件固定 '+BREAKDOWN_POINTS+' 点';
+    if(bdImageReverse) bdImageReverse.textContent='反推图片（'+BREAKDOWN_POINTS+' 点）';
+    if(bdVideoReverse) bdVideoReverse.textContent='反推视频（'+BREAKDOWN_POINTS+' 点）';
+    orig=gen.innerHTML;
+    syncModeUi();
+  });
 
   function tok(){ return '__cookie__'; }
   function _readApiResponse(response){
@@ -669,11 +653,10 @@
   }
   function syncModeUi(){
     var reverseMode=isBreakdownReverseTool();
-    var activeMode=currentMode==='breakdown'?(reverseMode?'reverse_prompt':'breakdown'):'write';
     var breakdownScenes=breakdownSceneList();
     var hasBreakdownScenes=breakdownScenes.length>0;
     var hasReversePrompt=!!reversePromptText();
-    document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.classList.toggle('on', tab.getAttribute('data-mode')===activeMode); });
+    document.querySelectorAll('.sc-mode-tab').forEach(function(tab){ tab.classList.toggle('on', tab.getAttribute('data-mode')===currentMode); });
     document.querySelectorAll('[data-bd-tool]').forEach(function(tab){
       var on=tab.getAttribute('data-bd-tool')===currentBreakdownTool;
       tab.classList.toggle('on', on);
@@ -690,10 +673,7 @@
     if(panelWrite) panelWrite.style.display=currentMode==='write'?'':'none';
     if(panelBreakdown) panelBreakdown.style.display=currentMode==='breakdown'?'':'none';
     if(bdIntroText) bdIntroText.textContent=reverseMode?'粘贴竞品视频链接，AI 读取关键画面与口播语境，直接反推出可复用的中文提示词':'粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频';
-    if(bdUrlHint){
-      var linkPrice=_linkBreakdownPrice()||'--';
-      bdUrlHint.textContent=reverseMode?'支持抖音、小红书公开视频链接，链接视频最大 200MB；提示词反推暂仅支持单条链接（'+linkPrice+' 点）':'支持抖音、小红书公开视频链接，链接视频最大 200MB；最多 5 条（每行一个，每个链接 '+linkPrice+' 点）';
-    }
+    if(bdUrlHint) bdUrlHint.textContent=reverseMode?'支持抖音、小红书公开视频链接，链接视频最大 200MB；提示词反推暂仅支持单条链接（'+BREAKDOWN_POINTS+' 点）':'支持抖音、小红书公开视频链接，链接视频最大 200MB；最多 5 条（每行一个，每个链接 '+BREAKDOWN_POINTS+' 点）';
     if(bdGenText) bdGenText.textContent=reverseMode?BD_REVERSE_LABEL:BD_SCENES_LABEL;
     if(bdActionHint) bdActionHint.textContent=reverseMode?'下载 → 抽帧 → 转写 → AI反推 · 约 40-90 秒':'下载 → 抽帧 → 转写 → AI分析 · 约 40-90 秒';
     if(previewTitle) previewTitle.textContent=currentMode==='breakdown' ? (reverseMode?'拆解结果 · 提示词反推':'拆解结果 · 分镜预览') : initialPreviewTitle;
@@ -724,15 +704,7 @@
     }
   }
   function switchMode(mode){
-    if(mode==='reverse_prompt'){
-      currentMode='breakdown';
-      currentBreakdownTool='reverse_prompt';
-    }else if(mode==='breakdown'){
-      currentMode='breakdown';
-      currentBreakdownTool='scenes';
-    }else{
-      currentMode='write';
-    }
+    currentMode=mode==='breakdown'?'breakdown':'write';
     syncModeUi();
     if(currentMode==='breakdown'){
       if(isBreakdownReverseTool()){
@@ -796,6 +768,25 @@
     return (bd.reverse_audit&&typeof bd.reverse_audit==='object'&&!Array.isArray(bd.reverse_audit))
       ?bd.reverse_audit
       :((sectionAudit&&typeof sectionAudit==='object'&&!Array.isArray(sectionAudit))?sectionAudit:{});
+  }
+  function reverseReferenceThumbnailIndices(bd){
+    bd=bd||{};
+    var audit=reverseAuditData(bd);
+    var indices=Array.isArray(bd.reference_thumbnail_indices)&&bd.reference_thumbnail_indices.length
+      ?bd.reference_thumbnail_indices
+      :(Array.isArray(audit.reference_thumbnail_indices)?audit.reference_thumbnail_indices:[]);
+    return indices.map(function(value){return Number(value);}).filter(function(value){
+      return Number.isInteger(value)&&value>=1;
+    });
+  }
+  function reverseReferenceImages(bd){
+    bd=bd||{};
+    var thumbs=Array.isArray(bd.frame_thumbnails)?bd.frame_thumbnails:[];
+    var indices=reverseReferenceThumbnailIndices(bd);
+    if(!indices.length) return thumbs.slice(0,4);
+    return indices.slice(0,4).map(function(index){
+      return thumbs[index-1]||null;
+    }).filter(Boolean);
   }
   function reverseFixedSecond(value){
     var number=Number(value);
@@ -877,34 +868,12 @@
     setBreakdownStoryboard((bd&&bd.frame_thumbnails)||[]);
     syncModeUi();
   }
-  function reverseReferenceThumbnailIndices(bd){
-    bd=bd||{};
-    var audit=reverseAuditData(bd);
-    var indices=Array.isArray(bd.reference_thumbnail_indices)&&bd.reference_thumbnail_indices.length
-      ?bd.reference_thumbnail_indices
-      :(Array.isArray(audit.reference_thumbnail_indices)?audit.reference_thumbnail_indices:[]);
-    return indices.map(function(value){return Number(value);}).filter(function(value){
-      return Number.isInteger(value)&&value>=1;
-    });
-  }
-  function reverseReferenceImages(bd){
-    bd=bd||{};
-    var thumbs=Array.isArray(bd.frame_thumbnails)?bd.frame_thumbnails:[];
-    var indices=reverseReferenceThumbnailIndices(bd);
-    if(!indices.length) return thumbs.slice(0,4);
-    return indices.slice(0,4).map(function(index){
-      return thumbs[index-1]||null;
-    }).filter(Boolean);
-  }
   function breakdownMetaFromResult(bd){
     bd=bd||{};
     var isReverse=(bd.type==='breakdown_reverse');
-    var hasBatchIndex=bd._batch_index!==undefined&&bd._batch_index!==null&&bd._batch_index!=='';
-    var batchIndex=hasBatchIndex?Number(bd._batch_index):null;
     return {
       type:bd.type||'breakdown',
       job_id:bd.job_id||bd._history_job_id||null,
-      _batch_index:hasBatchIndex&&Number.isInteger(batchIndex)&&batchIndex>=0?batchIndex:null,
       source_url:bd.source_url||'',
       source_title:bd.source_title||'',
       source_platform:bd.source_platform||'',
@@ -926,7 +895,7 @@
   function compactBreakdownHistoryMeta(bd){
     var meta=breakdownMetaFromResult(bd);
     return {
-      type:meta.type,job_id:meta.job_id,_batch_index:meta._batch_index,source_url:meta.source_url,
+      type:meta.type,job_id:meta.job_id,source_url:meta.source_url,
       source_title:meta.source_title,source_platform:meta.source_platform,
       duration:meta.duration,analysis:meta.analysis,scenes:meta.scenes,
       prompt:meta.prompt,source_type:meta.source_type
@@ -963,12 +932,6 @@
       return false;
     }
   }
-  function breakdownHistoryResult(bd,jobId,batchIndex){
-    var result=Object.assign({},bd||{});
-    if(jobId!==undefined&&jobId!==null&&String(jobId).trim()) result._history_job_id=jobId;
-    if(Number.isInteger(batchIndex)&&batchIndex>=0) result._batch_index=batchIndex;
-    return result;
-  }
   function readBreakdownHistory(){
     try{
       var list=JSON.parse(localStorage.getItem(BREAKDOWN_HISTORY_KEY)||'[]');
@@ -981,13 +944,14 @@
       return (meta.results||[]).map(function(bd, idx){
         return {
           kind:'breakdown',
+          job_id:item&&item.job_id,
           title:bd.source_title||((item&&item.title)||('批量拆解 '+(idx+1))),
           created_at:item&&item.created_at,
-          meta:breakdownMetaFromResult(bd)
+          meta:Object.assign(breakdownMetaFromResult(bd),{job_id:item&&item.job_id,_batch_index:idx})
         };
       }).filter(function(x){ return isBreakdownHistoryMeta(x.meta); });
     }
-    return isBreakdownHistoryMeta(meta) ? [{kind:'breakdown',title:item&&item.title,created_at:item&&item.created_at,meta:meta}] : [];
+    return isBreakdownHistoryMeta(meta) ? [{kind:'breakdown',job_id:item&&item.job_id,title:item&&item.title,created_at:item&&item.created_at,meta:Object.assign({},meta,{job_id:item&&item.job_id})}] : [];
   }
   function prepareBreakdownRemakePayload(bd, style){
     return {scenes:normalizeBreakdownScenes((bd&&bd.scenes)||[]),style:style||'剧情'};
@@ -1256,18 +1220,11 @@
     if(bdLocalStatus){ bdLocalStatus.textContent=message; bdLocalStatus.style.color='#f4708a'; }
     scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">'+esc(message)+'</div>';
   }
-  function _localRefundStatus(job){
-    return job&&job.refunded===true?'已退点':'退款处理中';
-  }
   function _localPointsCheck(){
-    var need=_localUploadPrice();
-    if(!breakdownPricingGate||!breakdownPricingGate.guard()||!need){
-      return Promise.reject({message:'收费标准尚未就绪，暂不能提交付费反推，请稍后重试'});
-    }
     return fetch('/api/auth/me',{credentials:'same-origin',cache:'no-store'}).then(function(r){
       if(r.status===401) throw {login:true,message:'请先登录'};
       return r.json().then(function(d){ if(!r.ok) throw {message:d.detail||'点数检查失败'}; return d; });
-    }).then(function(d){ if(Number(d&&d.user&&d.user.points||0)<need) throw {points:true,message:'点数不足（需要 '+need+' 点）'}; });
+    }).then(function(d){ if(Number(d&&d.user&&d.user.points||0)<BREAKDOWN_POINTS) throw {points:true,message:'点数不足（需要 '+BREAKDOWN_POINTS+' 点）'}; });
   }
   function _videoDuration(file){
     return new Promise(function(resolve,reject){
@@ -1287,13 +1244,13 @@
         if(d.phase&&d.phase!==lastPhase){ lastPhase=d.phase; setBdPhase(d.phase,'active'); }
         if(d.status==='done'){
           clearInterval(iv); _localBusy(btn,false); markAllBdPhasesDone();
-          var localResult=breakdownHistoryResult(d.result||{},jobId);
+          var localResult=d.result||{}; localResult._history_job_id=jobId;
           switchBreakdownTool('reverse_prompt'); renderBreakdownReverse(localResult);
           saveBreakdownHistory(localResult); loadHistory();
           if(bdLocalStatus){bdLocalStatus.textContent='反推完成，已保存到生成记录';bdLocalStatus.style.color='#4ade80';}
           if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
         }else if(d.status==='error'||d.status==='failed'){
-          clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · '+_localRefundStatus(d));
+          clearInterval(iv); _localBusy(btn,false); _localFail('反推失败：'+(d.error||'未知错误')+' · 已退点');
         }else if(d.phase){
           var msg={extracting_frames:'正在读取关键画面…',transcribing:'正在读取音频语义（仅辅助）…',analyzing:'AI 正在按七个栏目反推视频画面…'}[d.phase]||'处理中…';
           scenes.innerHTML='<div style="padding:34px;text-align:center;color:#a78bfa;font-size:13px;">'+msg+'</div>';
@@ -1309,37 +1266,18 @@
     var durationCheck=isImage?Promise.resolve():_videoDuration(file).then(function(d){if(d>120.05)throw new Error('视频最长支持 2 分钟');});
     var ext=(file.name.split('.').pop()||'').toLowerCase();
     var mime=file.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm'})[ext]||'';
-    var localPending=null;
     _localBusy(btn,true);
     durationCheck.then(_localPointsCheck).then(function(){
-      localPending=_pendingSubmission('local-breakdown-'+mediaType,{
-        media_type:mediaType,name:file.name,size:file.size,
-        last_modified:file.lastModified||0,type:mime
-      });
       if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
       if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
       return fetch('/api/gen/breakdown/local-upload?media_type='+mediaType,{
         method:'POST',credentials:'same-origin',
-        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name),'Idempotency-Key':localPending.key},body:file
+        headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name)},body:file
       });
     }).then(function(r){return r.json().then(function(d){return {s:r.status,d:d};});}).then(function(x){
-      if(x.s===401){_confirmSubmission(localPending);_localBusy(btn,false);if(window.HQ)HQ.login();return;}
-      if(x.s===402){
-        _confirmSubmission(localPending);_localBusy(btn,false);
-        var need=Number(x.d&&x.d.need)||_localUploadPrice();
-        _localFail(need?'点数不足（需要 '+need+' 点）':'点数不足');return;
-      }
-      if(x.s===409&&x.d&&x.d.code==='idempotency_conflict'){
-        _confirmSubmission(localPending);_localBusy(btn,false);_localFail(x.d.detail||'提交参数已变化，请重新点击');return;
-      }
-      if((x.s===202||(x.s===409&&x.d&&x.d.code==='idempotency_in_progress'))&&x.d){
-        _localBusy(btn,false);_localFail((x.d.detail||'任务正在恢复，请使用原文件重试')+(x.d.job_id?'（任务 #'+x.d.job_id+'）':''));return;
-      }
-      if(!x.d.job_id){
-        if(x.s<500)_confirmSubmission(localPending);
-        _localBusy(btn,false);_localFail((x.d&&x.d.detail)||'提交失败');return;
-      }
-      _confirmSubmission(localPending);
+      if(x.s===401){_localBusy(btn,false);if(window.HQ)HQ.login();return;}
+      if(x.s===402){_localBusy(btn,false);_localFail('点数不足（需要 '+BREAKDOWN_POINTS+' 点）');return;}
+      if(!x.d.job_id){_localBusy(btn,false);_localFail((x.d&&x.d.detail)||'提交失败');return;}
       if(bdLocalStatus)bdLocalStatus.textContent='上传完成，正在反推…';
       _pollLocalReverse(x.d.job_id,btn);
     }).catch(function(error){
@@ -1433,6 +1371,7 @@
             if(d.status==='done'){
               clearInterval(iv); resetBdBtn(); markAllBdPhasesDone();
               var result=d.result||{};
+              result._history_job_id=x.d.job_id;
               if(result.type==='breakdown_batch'){
                 switchBreakdownTool('scenes');
                 var first=(result.results||[]).find(function(item){
@@ -1440,19 +1379,15 @@
                 });
                 if(first) renderBreakdown(first);
                 else scenes.innerHTML='<div style="padding:24px;text-align:center;color:#f4708a;">批量拆解没有生成有效分镜，请重试</div>';
-                (result.results||[]).forEach(function(item,index){
-                  saveBreakdownHistory(breakdownHistoryResult(item,x.d.job_id,index));
-                });
+                (result.results||[]).forEach(function(item){ item._history_job_id=x.d.job_id; saveBreakdownHistory(item); });
                 var msg='批量完成：'+result.results.length+'/'+result.total+' 成功';
                 if(result.errors.length) msg+='，'+result.errors.length+' 条失败';
                 if(window.HQ&&window.HQ.toast) HQ.toast(msg);
                 loadHistory();
               } else if(result.type==='breakdown_reverse'){
-                result=breakdownHistoryResult(result,x.d.job_id);
                 switchBreakdownTool('reverse_prompt');
                 renderBreakdownReverse(result); saveBreakdownHistory(result); loadHistory();
               } else {
-                result=breakdownHistoryResult(result,x.d.job_id);
                 switchBreakdownTool('scenes');
                 renderBreakdown(result); saveBreakdownHistory(result); loadHistory();
               }
@@ -1676,31 +1611,38 @@
   function _showReverseVideoPicker(prompt,onConfirm){
     var modal=document.getElementById('reverseVideoPickModal');
     var noAvatar=document.getElementById('reverseVideoNoAvatar');
-    var seedanceStatus=document.getElementById('reverseVideoSeedanceStatus');
+    var channelStatus=document.getElementById('reverseVideoSeedanceStatus');
     var grid=document.getElementById('reverseVideoAvatarGrid');
     var duration=document.getElementById('reverseVideoDuration');
     var cost=document.getElementById('reverseVideoCost');
     var confirm=document.getElementById('reverseVideoConfirm');
     var close=document.getElementById('reverseVideoPickClose');
-    if(!modal||!noAvatar||!seedanceStatus||!grid||!duration||!cost||!confirm||!close) return;
+    if(!modal||!noAvatar||!channelStatus||!grid||!duration||!cost||!confirm||!close) return;
     var invocationId=++reverseVideoPickerRequest;
     var avatarLoadRequest=0;
     var selectedAvatarId=null;
     var selectedDuration=10;
     var submitted=false;
     var noAvatarChannel='';
+    var noAvatarOffer=null;
     function updateConfirm(){
       var blocked=selectedAvatarId===null&&!noAvatarChannel;
       confirm.disabled=blocked;
       confirm.style.opacity=blocked?'.55':'1';
     }
     function updateCost(){
-      var rate=selectedAvatarId===null?30:10;
-      cost.textContent='预计消耗 '+(selectedDuration*rate)+' 点';
+      var quoted=selectedAvatarId===null
+        ?Number(noAvatarOffer&&noAvatarOffer.duration_costs&&noAvatarOffer.duration_costs[String(selectedDuration)])
+        :selectedDuration*10;
+      var costText=Number.isInteger(quoted)&&quoted>0?String(quoted):'--';
+      cost.textContent='预计消耗 '+costText+' 点';
       duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
         var seconds=Number(btn.getAttribute('data-reverse-duration'));
         var on=seconds===selectedDuration;
-        btn.textContent=seconds+' 秒 · '+(seconds*rate)+' 点';
+        var buttonCost=selectedAvatarId===null
+          ?Number(noAvatarOffer&&noAvatarOffer.duration_costs&&noAvatarOffer.duration_costs[String(seconds)])
+          :seconds*10;
+        btn.textContent=seconds+' 秒 · '+(Number.isInteger(buttonCost)&&buttonCost>0?buttonCost:'--')+' 点';
         btn.classList.toggle('on',on);
         btn.setAttribute('aria-pressed',on?'true':'false');
       });
@@ -1718,11 +1660,21 @@
       updateCost();
       updateConfirm();
     }
-    function setNoAvatarAvailability(channel,detail){
-      noAvatarChannel=channel==='micro'||channel==='grok'?channel:'';
+    function setNoAvatarAvailability(offer,detail){
+      var channel=offer&&offer.channel;
+      var costs=offer&&offer.duration_costs;
+      var validCosts=[5,10,15].every(function(seconds){
+        var value=Number(costs&&costs[String(seconds)]);
+        return Number.isInteger(value)&&value>0;
+      });
+      var validOffer=(channel==='micro'||channel==='grok')
+        &&typeof offer.model==='string'&&offer.model.length>0
+        &&offer.resolution==='720p'&&validCosts;
+      noAvatarOffer=validOffer?offer:null;
+      noAvatarChannel=validOffer?channel:'';
       noAvatar.disabled=!noAvatarChannel;
-      seedanceStatus.textContent=detail;
-      seedanceStatus.setAttribute('data-state',noAvatarChannel?'ready':'blocked');
+      channelStatus.textContent=detail;
+      channelStatus.setAttribute('data-state',noAvatarChannel?'ready':'blocked');
       if(noAvatarChannel&&selectedAvatarId===null){
         selectAvatar(null);
         return;
@@ -1731,6 +1683,7 @@
         noAvatar.classList.toggle('on',false);
         noAvatar.setAttribute('aria-pressed','false');
       }
+      updateCost();
       updateConfirm();
     }
     function dismiss(){ modal.style.display='none'; }
@@ -1738,8 +1691,8 @@
     noAvatar.disabled=true;
     noAvatar.classList.toggle('on',false);
     noAvatar.setAttribute('aria-pressed','false');
-    seedanceStatus.textContent='正在检查 Seedance 官方通道…';
-    seedanceStatus.setAttribute('data-state','checking');
+    channelStatus.textContent='正在检查开放式视频通道…';
+    channelStatus.setAttribute('data-state','checking');
     updateCost();
     updateConfirm();
     duration.querySelectorAll('[data-reverse-duration]').forEach(function(btn){
@@ -1754,7 +1707,12 @@
       confirm.disabled=true;
       confirm.style.opacity='.6';
       dismiss();
-      onConfirm({avatarId:selectedAvatarId,duration:selectedDuration,channel:selectedAvatarId===null?noAvatarChannel:''});
+      onConfirm({
+        avatarId:selectedAvatarId,duration:selectedDuration,
+        channel:selectedAvatarId===null?noAvatarChannel:'',
+        model:selectedAvatarId===null&&noAvatarOffer?noAvatarOffer.model:'',
+        resolution:selectedAvatarId===null&&noAvatarOffer?noAvatarOffer.resolution:''
+      });
     };
     function loadAvatars(){
       var avatarRequestId=++avatarLoadRequest;
@@ -1795,29 +1753,41 @@
           grid.appendChild(retry);
         });
     }
-    function loadSeedanceAvailability(){
+    function loadNoAvatarAvailability(){
       fetch('/api/gen/health',{cache:'no-store'})
         .then(function(r){ return r.ok?r.json():Promise.reject(); })
         .then(function(d){
           if(invocationId!==reverseVideoPickerRequest) return;
-          var channel=(d&&d.reverse_remake_video_channel)||(d&&d.seedance_video_enabled===true?'micro':'');
+          var offer=d&&d.reverse_remake_video_offer;
+          var channel=offer&&offer.channel;
+          var quoted=offer&&offer.duration_costs;
+          var quoteReady=(channel==='micro'||channel==='grok')
+            &&typeof offer.model==='string'&&offer.model.length>0
+            &&offer.resolution==='720p'
+            &&[5,10,15].every(function(seconds){
+              var value=Number(quoted&&quoted[String(seconds)]);
+              return Number.isInteger(value)&&value>0;
+            });
+          if(!quoteReady){
+            setNoAvatarAvailability(null,'开放式视频通道暂未开启或报价不可用；请选择数字人形象生成，或联系管理员。');
+            return;
+          }
           if(channel==='micro'){
-            setNoAvatarAvailability('micro','Seedance 官方通道可用');
+            setNoAvatarAvailability(offer,'Seedance 官方通道可用');
             return;
           }
           if(channel==='grok'){
-            setNoAvatarAvailability('grok','开放式生成通道可用（果肉视频）');
+            setNoAvatarAvailability(offer,'开放式生成通道可用（果肉视频）');
             return;
           }
-          setNoAvatarAvailability('','开放式视频通道暂未开启；请选择数字人形象生成，或联系管理员开启通道。');
         })
         .catch(function(){
           if(invocationId!==reverseVideoPickerRequest) return;
-          setNoAvatarAvailability('','暂时无法确认开放式视频通道状态；请选择数字人形象，或稍后重试。');
+          setNoAvatarAvailability(null,'暂时无法确认开放式视频通道状态及价格；请选择数字人形象，或稍后重试。');
         });
     }
     loadAvatars();
-    loadSeedanceAvailability();
+    loadNoAvatarAvailability();
   }
   function _setGenerateBusy(btn, busy){
     if(!btn) return;
@@ -1837,7 +1807,7 @@
     return Math.min(15, Math.max(1, sum||30));
   }
   function _confirmDramaVideo(list){
-    var duration=_dramaDuration(list), cost=duration*12;
+    var duration=_dramaDuration(list), cost=duration*GROK_DRAMA_RATE;
     return window.confirm('将生成 '+duration+' 秒剧情视频，预计消耗 '+cost+' 点。\n\n确认提交生成吗？');
   }
   var ACTIVE_VIDEO_JOB_KEY='hq_script_active_video_job';
@@ -2087,7 +2057,7 @@
           return;
         }
         var remakePrompt='严格按照所附参考关键帧的时间顺序生成，保持动作节点、镜头转换、构图和场景布局。'+prompt;
-        _doGenerate({channel:choice.channel,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration,ratio:'9:16',resolution:'720p',reference_mode:choice.channel==='grok'?'ordered_storyboard':undefined},
+        _doGenerate({channel:choice.channel,model:choice.model,prompt:remakePrompt,reference_images:reverseRefs,duration:choice.duration,ratio:'9:16',resolution:choice.resolution,reference_mode:choice.channel==='grok'?'ordered_storyboard':undefined},
                     bdRemakeBtn,{endpoint:'/api/gen/xiaole_video',sceneCount:1});
       });
       return;
@@ -2227,8 +2197,6 @@
     _openMediaLightbox(tag, src);
   });
   applyIP12Handoff();
-  if(breakdownPricingGate) breakdownPricingGate.load();
-  else _renderBreakdownPricing({status:'error'});
   loadHistory();
   _resumeActiveVideoJob();
 })();
@@ -2260,7 +2228,7 @@
   <div style="font-size:12.5px;color:#94a4bb;line-height:1.6;margin-bottom:16px;">形象可选；不选择时生成纯剧情视频</div>
   <div style="font-size:13px;font-weight:600;margin-bottom:8px;">选择形象（可选）</div>
   <button id="reverseVideoNoAvatar" class="sc-opt on" type="button" aria-pressed="true" style="width:100%;font-family:inherit;margin-bottom:10px;">不使用形象</button>
-  <div id="reverseVideoSeedanceStatus" data-state="checking" style="font-size:11.5px;color:#94a4bb;line-height:1.55;margin:-2px 0 12px;">正在检查 Seedance 官方通道…</div>
+  <div id="reverseVideoSeedanceStatus" data-state="checking" style="font-size:11.5px;color:#94a4bb;line-height:1.55;margin:-2px 0 12px;">正在检查开放式视频通道…</div>
   <div id="reverseVideoAvatarGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;min-height:80px;max-height:230px;overflow-y:auto;padding-right:3px;"></div>
   <div style="font-size:13px;font-weight:600;margin:18px 0 8px;">视频时长</div>
   <div id="reverseVideoDuration" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">

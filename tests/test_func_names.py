@@ -13,7 +13,7 @@
   * video motion(198)           → 「视频 · 动作模仿 · 线路一(HeyGen)」。线路概念在去线路化
                                   (#594)时就删了，motion 现在只走 WaveSpeed —— 这不是过时，
                                   是【错的】：它根本不走 HeyGen
-  * xiaole_video(394)           → 果肉/豆姐/欧米三个渠道混成一个「视频 · 小乐」
+  * xiaole_video(394)           → 果肉/Seedance/Omni 三个渠道混成一个「视频 · 小乐」
   * image seedream/xiaole(65)   → 分不出引擎，都叫「作图」
 
 换装的线路一/线路二【是真的还在】（前端还给用户选），那个标签不动。
@@ -78,11 +78,11 @@ class NewKindsAreNamedTests(unittest.TestCase):
     def test_the_three_xiaole_channels_are_told_apart(self):
         """394 条任务混成一个「视频 · 小乐」，运营根本看不出谁在跑哪个渠道。"""
         self.assertEqual(F.func_name("xiaole_video", {"channel": "grok"}), "果肉视频生成")
-        self.assertEqual(F.func_name("xiaole_video", {"channel": "micro"}), "豆姐视频生成")
-        self.assertEqual(F.func_name("xiaole_video", {"channel": "omni"}), "欧米视频生成")
+        self.assertEqual(F.func_name("xiaole_video", {"channel": "micro"}), "Seedance 视频")
+        self.assertEqual(F.func_name("xiaole_video", {"channel": "omni"}), "Omni 视频")
 
     def test_image_engines_are_told_apart(self):
-        self.assertEqual(F.func_name("image", {"provider": "seedream"}), "作图 · Seedream")
+        self.assertEqual(F.func_name("image", {"provider": "seedream"}), "作图 · 黄雀引擎 1 标准")
         self.assertEqual(F.func_name("image", {"provider": "xiaole"}), "作图 · 果肉生图")
 
 
@@ -150,25 +150,25 @@ class NamesMatchTheProductTests(unittest.TestCase):
 
     def test_the_three_third_party_channels_use_the_ui_labels(self):
         for ch, name in F.XIAOLE_CHANNELS.items():
-            self.assertIn('data-function="%s">%s<' % (ch, name), self.VIDEO_HTML,
-                          "「%s」不是前端 data-function=\"%s\" 的标签" % (name, ch))
+            self.assertRegex(self.VIDEO_HTML, r'data-function="%s"[^>]*>%s<' % (ch, name),
+                             "「%s」不是前端 data-function=\"%s\" 的标签" % (name, ch))
 
     def test_the_video_function_names_use_the_ui_labels(self):
-        for tab in ("动作模仿", "电影化身", "换装换背景", "数字人口播"):
+        for tab in ("动作模仿", "电影化身", "换装换背景", "数字化 IP"):
             self.assertIn('>%s<' % tab, self.VIDEO_HTML)
         self.assertEqual(F.func_name("video", {"mode": "motion"}), "动作模仿")
         self.assertTrue(F.func_name("cinematic", {}).startswith("电影化身"))
-        self.assertTrue(F.func_name("video", {"mode": "text"}).startswith("数字人口播"))
+        self.assertTrue(F.func_name("video", {"mode": "text"}).startswith("数字化 IP"))
 
     def test_the_image_engine_names_use_the_ui_labels(self):
-        """UI 上叫 gpt-image-2 / 泽龙2生图，日志里就不能写成「GPT Image」「泽龙」。"""
-        for name in ("gpt-image-2", "Seedream", "果肉生图", "泽龙2生图", "Nano Banana"):
+        """UI 品牌名与日志必须一致，不能泄露上游原模型名。"""
+        for name in ("黄雀引擎 2", "黄雀引擎 1", "果肉生图", "泽龙2生图", "纳米香蕉"):
             self.assertIn(name, self.BANANA_HTML, "「%s」不是 banana.html 里的引擎标签" % name)
-        self.assertEqual(F.func_name("image", {}), "作图 · gpt-image-2")          # gpt 不发 provider
+        self.assertEqual(F.func_name("image", {}), "作图 · 黄雀引擎 2")          # gpt 不发 provider
         self.assertEqual(F.func_name("image", {"provider": "zelong2"}), "作图 · 泽龙2生图")
-        self.assertEqual(F.func_name("image", {"model": "nb2"}), "作图 · Nano Banana 2")
+        self.assertEqual(F.func_name("image", {"model": "nb2"}), "作图 · 纳米香蕉 2")
         self.assertEqual(F.func_name("image", {"provider": "seedream", "variant": "pro"}),
-                         "作图 · Seedream Pro")
+                         "作图 · 黄雀引擎 1 Pro")
 
     def test_the_legacy_zelong_pool_is_not_merged_into_zelong2(self):
         """zelong（不带 2）是老号池，界面上已经没入口了，但库里还有 66 条存量任务。

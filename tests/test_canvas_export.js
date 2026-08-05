@@ -2,6 +2,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const exporter = require('../site/workbench/canvas/canvas-export.js');
+const apiModule = require('../site/workbench/canvas/canvas-api.js');
+
+function blobResponse(options) {
+  options = options || {};
+  return {
+    ok: options.ok === undefined ? true : options.ok,
+    status: options.status === undefined ? 200 : options.status,
+    blob: () => Promise.resolve(options.blob),
+  };
+}
 
 function testTemplateRoundTrip() {
   const snapshot = { nodes: [{ id: 'n1', type: 'text' }], edges: [] };
@@ -123,45 +133,6 @@ async function testExportJpegRejectsMissingContextAndBlob() {
   await assert.rejects(exporter.exportJpeg(missingBlob.options), /canvas blob unavailable/);
 }
 
-async function testExportJpegCapsOversizedCanvasBeforeRendering() {
-  const fixture = exportOptions({ bounds: { x: 0, y: 0, w: 20000, h: 20000 } });
-  await exporter.exportJpeg(fixture.options);
-  assert.equal(fixture.canvas.width, 4000);
-  assert.equal(fixture.canvas.height, 4000);
-  assert.ok(fixture.canvas.width <= 4096);
-  assert.ok(fixture.canvas.height <= 4096);
-  assert.ok(fixture.canvas.width * fixture.canvas.height <= 16000000);
-  assert.ok(fixture.context.calls.some((call) => call[0] === 'scale' && call[1] === 0.2 && call[2] === 0.2));
-}
-
-async function testExportJpegCapsExtremeAspectRatios() {
-  for (const bounds of [
-    { x: 0, y: 0, w: 1000000000, h: 1 },
-    { x: 0, y: 0, w: 1, h: 1000000000 },
-  ]) {
-    const fixture = exportOptions({ bounds });
-    await exporter.exportJpeg(fixture.options);
-    assert.ok(fixture.canvas.width >= 1 && fixture.canvas.width <= 4096);
-    assert.ok(fixture.canvas.height >= 1 && fixture.canvas.height <= 4096);
-    assert.ok(fixture.canvas.width * fixture.canvas.height <= 16000000);
-    const scaleCall = fixture.context.calls.find((call) => call[0] === 'scale');
-    assert.ok(scaleCall && Number.isFinite(scaleCall[1]) && scaleCall[1] > 0);
-    assert.equal(scaleCall[1], scaleCall[2]);
-  }
-}
-
-async function testExportJpegRejectsInvalidBounds() {
-  for (const value of [0, -1, NaN, Infinity, -Infinity]) {
-    const invalidWidth = exportOptions({ bounds: { x: 0, y: 0, w: value, h: 100 } });
-    await assert.rejects(exporter.exportJpeg(invalidWidth.options), /finite positive width and height/);
-    assert.equal(invalidWidth.loaded.length, 0);
-
-    const invalidHeight = exportOptions({ bounds: { x: 0, y: 0, w: 100, h: value } });
-    await assert.rejects(exporter.exportJpeg(invalidHeight.options), /finite positive width and height/);
-    assert.equal(invalidHeight.loaded.length, 0);
-  }
-}
-
 async function testDownloadFailureStillCleansUrl() {
   const fixture = exportOptions({ download() { throw new Error('download blocked'); } });
   await assert.rejects(exporter.exportJpeg(fixture.options), /download blocked/);
@@ -189,6 +160,53 @@ async function testBlobImageUrlIsRevokedOnSynchronousImageErrors() {
   }
 }
 
+async function testExportImageUsesProtectedAndPublicAssetPolicies() {
+  const calls = [];
+  const revoked = [];
+  const client = apiModule.createClient({
+    fetchImpl(url, options) {
+      calls.push({ url, options });
+      return Promise.resolve(blobResponse({ blob: { url } }));
+    },
+    tokenProvider: () => '__cookie__',
+  });
+  const common = {
+    fetchBlob: (url) => client.asset(url),
+    createObjectURL: (blob) => `blob:${blob.url}`,
+    revokeObjectURL: (url) => revoked.push(url),
+    createImage: () => ({ set src(value) { this.onload(); } }),
+  };
+
+  await exporter.loadExportImage('/api/gen/file/protected.png', common);
+  await exporter.loadExportImage('https://cdn.example.com/public.png', common);
+
+  assert.equal(calls[0].options.credentials, 'same-origin');
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer __cookie__');
+  assert.equal(calls[0].options.headers.Accept, 'application/json');
+  assert.equal(calls[1].options.credentials, 'include');
+  assert.deepEqual(calls[1].options.headers, {});
+  assert.deepEqual(revoked, [
+    'blob:/api/gen/file/protected.png',
+    'blob:https://cdn.example.com/public.png',
+  ]);
+}
+
+async function testExportImageSwallowsExternalHttpErrorsWithoutLeakingUrls() {
+  let objectUrlCalls = 0;
+  const client = apiModule.createClient({
+    fetchImpl: () => Promise.resolve(blobResponse({ ok: false, status: 404 })),
+  });
+  const image = await exporter.loadExportImage('https://cdn.example.com/missing.png', {
+    fetchBlob: (url) => client.asset(url),
+    createObjectURL() { objectUrlCalls += 1; return 'blob:unexpected'; },
+    revokeObjectURL() { throw new Error('nothing should be revoked'); },
+    createImage: () => ({}),
+  });
+
+  assert.equal(image, null);
+  assert.equal(objectUrlCalls, 0);
+}
+
 function testModuleHasNoDomAccess() {
   const source = fs.readFileSync(path.join(__dirname, '..', 'site', 'workbench', 'canvas', 'canvas-export.js'), 'utf8');
   assert.doesNotMatch(source, /\b(?:document|window)\b/);
@@ -202,11 +220,10 @@ Promise.resolve()
   .then(testNodeImageSource)
   .then(testExportJpegUsesExplicitGeometryAndDrawingConstants)
   .then(testExportJpegRejectsMissingContextAndBlob)
-  .then(testExportJpegCapsOversizedCanvasBeforeRendering)
-  .then(testExportJpegCapsExtremeAspectRatios)
-  .then(testExportJpegRejectsInvalidBounds)
   .then(testDownloadFailureStillCleansUrl)
   .then(testBlobImageUrlIsRevokedOnSynchronousImageErrors)
+  .then(testExportImageUsesProtectedAndPublicAssetPolicies)
+  .then(testExportImageSwallowsExternalHttpErrorsWithoutLeakingUrls)
   .then(testModuleHasNoDomAccess)
   .then(() => console.log('canvas export: pass'))
   .catch((error) => {

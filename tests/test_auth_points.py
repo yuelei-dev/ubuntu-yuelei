@@ -1,12 +1,20 @@
 import os
 import json
 import sqlite3
+import sys
 import tempfile
 import threading
 import urllib.error
 import urllib.request
 import unittest
 from http.server import ThreadingHTTPServer
+from unittest.mock import patch
+from pathlib import Path
+
+
+SERVER = str(Path(__file__).resolve().parents[1] / "server")
+if SERVER not in sys.path:
+    sys.path.insert(0, SERVER)
 
 
 class AuthPointsTests(unittest.TestCase):
@@ -27,6 +35,10 @@ class AuthPointsTests(unittest.TestCase):
             c.execute(
                 "INSERT INTO users(username,pw_hash,pw_salt,display_name,points,role,must_change) "
                 "VALUES('fang','h','s','fang',10,'member',0)"
+            )
+            c.execute(
+                "UPDATE users SET membership_tier='experience',membership_started_at=1,membership_expires_at=4102444800 "
+                "WHERE username='fang'"
             )
             c.commit()
         finally:
@@ -53,6 +65,139 @@ class AuthPointsTests(unittest.TestCase):
         points, err = self.auth.refund_points("fang", 5)
         self.assertIsNone(err)
         self.assertEqual(points["points"], 15)
+
+    def test_public_points_error_preserves_membership_contract(self):
+        from content_domains import points
+
+        error = points.AuthPointsError(403, "请先开通会员", {
+            "code": "membership_required",
+            "membership_url": "/workbench/recharge",
+            "membership_enforcement_enabled": True,
+        })
+        self.assertEqual(points.public_error_body(error, 60), {
+            "detail": "请先开通会员",
+            "code": "membership_required",
+            "membership_url": "/workbench/recharge",
+            "membership_enforcement_enabled": True,
+        })
+
+        insufficient = points.AuthPointsError(402, "点数不足", {"need": 99})
+        self.assertEqual(
+            points.public_error_body(insufficient, 60),
+            {"detail": "点数不足", "need": 60},
+        )
+
+    def test_refund_transaction_key_is_idempotent(self):
+        first, first_err = self.auth.refund_points("fang", 5, "job#42", "job-refund:42")
+        replay, replay_err = self.auth.refund_points("fang", 5, "job#42", "job-refund:42")
+
+        self.assertIsNone(first_err)
+        self.assertIsNone(replay_err)
+        self.assertEqual(first["points"], 15)
+        self.assertEqual(replay["points"], 15)
+        c = sqlite3.connect(self.auth.DB)
+        try:
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM points_audit WHERE transaction_key='job-refund:42'"
+            ).fetchone()[0], 1)
+        finally:
+            c.close()
+
+    def test_deduct_transaction_key_is_idempotent(self):
+        first, first_err = self.auth.deduct_points("fang", 5, "job:image submit:x", "job-charge:x")
+        replay, replay_err = self.auth.deduct_points("fang", 5, "job:image submit:x", "job-charge:x")
+        self.assertIsNone(first_err)
+        self.assertIsNone(replay_err)
+        self.assertEqual(first["points"], 5)
+        self.assertEqual(replay["points"], 5)
+        c = self.auth.db()
+        try:
+            self.assertEqual(c.execute(
+                "SELECT COUNT(*) FROM points_audit WHERE transaction_key='job-charge:x'"
+            ).fetchone()[0], 1)
+        finally:
+            c.close()
+
+    def test_deduct_transaction_key_rejects_different_amount(self):
+        self.auth.deduct_points("fang", 5, "job:image submit:x", "job-charge:x")
+        points, err = self.auth.deduct_points("fang", 4, "job:image submit:y", "job-charge:x")
+        self.assertIsNone(points)
+        self.assertEqual(err, "transaction_conflict")
+
+    def test_content_points_transaction_lookup_is_read_only_and_encoded(self):
+        from content_domains import points
+
+        with patch.object(points, "_auth_points_request", return_value={
+            "transaction": {"username": "fang", "delta": -5},
+        }) as request:
+            row = points.get_points_transaction("job-charge:/fang")
+        self.assertEqual(row["delta"], -5)
+        request.assert_called_once_with(
+            "/api/auth/points/transaction?transaction_key=job-charge%3A%2Ffang",
+            method="GET",
+        )
+
+    def test_refund_transaction_key_rejects_different_amount(self):
+        self.auth.refund_points("fang", 5, "job#42", "job-refund:42")
+        points, err = self.auth.refund_points("fang", 6, "job#43", "job-refund:42")
+
+        self.assertIsNone(points)
+        self.assertEqual(err, "transaction_conflict")
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 15)
+
+    def test_wechat_transaction_can_only_approve_one_recharge_order(self):
+        first, first_err = self.auth.create_recharge_order("fang", 99, 1000, "微信扫码充值")
+        second, second_err = self.auth.create_recharge_order("fang", 99, 1000, "微信扫码充值")
+        self.assertIsNone(first_err)
+        self.assertIsNone(second_err)
+
+        _, approve_err = self.auth.review_recharge_order(
+            "wxpay", first["order_id"], "approve", "paid",
+            transaction_id="wx-transaction-1", pay_channel="wxpay",
+        )
+        duplicate, duplicate_err = self.auth.review_recharge_order(
+            "wxpay", second["order_id"], "approve", "paid",
+            transaction_id="wx-transaction-1", pay_channel="wxpay",
+        )
+
+        self.assertIsNone(approve_err)
+        self.assertIsNone(duplicate)
+        self.assertEqual(duplicate_err, "transaction_in_use")
+        self.assertEqual(self.auth.get_points_row("fang")["points"], 1010)
+        c = sqlite3.connect(self.auth.DB)
+        try:
+            row = c.execute(
+                "SELECT transaction_id,pay_channel FROM recharge_orders WHERE order_id=?",
+                (first["order_id"],),
+            ).fetchone()
+            self.assertEqual(row, ("wx-transaction-1", "wxpay"))
+        finally:
+            c.close()
+
+    def test_wechat_callback_identity_must_match_merchant_and_app(self):
+        import server.wxpay as wxpay
+
+        expected = {"appid": "wx-huangque", "mchid": "merchant-huangque"}
+        with patch.object(wxpay, "_config", return_value=expected):
+            self.assertTrue(wxpay.payment_identity_matches(expected))
+            self.assertFalse(wxpay.payment_identity_matches({
+                "appid": "wx-other", "mchid": "merchant-huangque",
+            }))
+            self.assertFalse(wxpay.payment_identity_matches({
+                "appid": "wx-huangque", "mchid": "merchant-other",
+            }))
+
+    def test_wechat_query_uses_out_trade_no_and_merchant(self):
+        import server.wxpay as wxpay
+
+        payment = {"trade_state": "SUCCESS", "out_trade_no": "R/499"}
+        with patch.object(wxpay, "_config", return_value={"mchid": "merchant-huangque"}), \
+                patch.object(wxpay, "_request", return_value=(200, payment)) as request:
+            self.assertEqual(wxpay.query_transaction("R/499"), payment)
+        request.assert_called_once_with(
+            "GET",
+            "/v3/pay/transactions/out-trade-no/R%2F499?mchid=merchant-huangque",
+        )
 
     def test_concurrent_deduct_never_overdraws(self):
         results = []
@@ -97,6 +242,24 @@ class AuthPointsTests(unittest.TestCase):
             with urllib.request.urlopen(req, timeout=3) as r:
                 data = json.loads(r.read())
             self.assertEqual(data["points"], 6)
+
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(
+                    base + "/api/auth/points/transaction?transaction_key=job-charge:http",
+                    timeout=3,
+                )
+            self.assertEqual(ctx.exception.code, 403)
+            self.auth.deduct_points(
+                "fang", 1, "job:http", "job-charge:http")
+            lookup = urllib.request.Request(
+                base + "/api/auth/points/transaction?transaction_key=job-charge%3Ahttp",
+                headers={"X-HQ-Internal-Token": "test-internal-token"},
+            )
+            with urllib.request.urlopen(lookup, timeout=3) as r:
+                transaction = json.loads(r.read())["transaction"]
+            self.assertEqual(transaction["username"], "fang")
+            self.assertEqual(transaction["delta"], -1)
+            self.assertEqual(transaction["after_points"], 5)
         finally:
             server.shutdown()
             server.server_close()

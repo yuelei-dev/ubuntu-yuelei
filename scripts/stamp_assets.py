@@ -21,6 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKBENCH_DIR = ROOT / "site" / "workbench"
+STANDALONE_PAGES = {"device.html"}  # 设备授权页不能注入工作台外壳、登录弹窗或任务脚本。
 
 
 class Asset:
@@ -63,11 +64,50 @@ ASSETS = (
     Asset("cloud-shell.js", required=True),
     Asset("theme.css", required=False),
     Asset("theme-init.js", required=False),
+    Asset("short-drama-center.css", required=False),
+    Asset("short-drama-center.js", required=False),
+    Asset("short-drama-workspace.css", required=False),
+    Asset("short-drama-workspace.js", required=False),
+    Asset("canvas/canvas.css", required=False),
+    Asset("canvas/canvas-graph.js", required=False),
+    Asset("canvas/canvas-state.js", required=False),
+    Asset("canvas/canvas-storage.js", required=False),
+    Asset("canvas/canvas-api.js", required=False),
+    Asset("canvas/canvas-agent.js", required=False),
+    Asset("canvas/canvas-export.js", required=False),
+    Asset("canvas-collab-sync.js", required=False),
+    Asset("canvas/canvas-app.js", required=False),
+    Asset("canvas/canvas-short-drama.js", required=False),
+    Asset("canvas/canvas-short-drama.css", required=False),
+    Asset("canvas/canvas-short-drama-production.js", required=False),
+    Asset("canvas/canvas-short-drama-production.css", required=False),
+    Asset("canvas/canvas-short-drama-voice.js", required=False),
+    Asset("canvas/canvas-short-drama-voice.css", required=False),
+    Asset("canvas/canvas-short-drama-timeline.js", required=False),
+    Asset("canvas/canvas-short-drama-timeline.css", required=False),
+    Asset("canvas/canvas-short-drama-lipsync.js", required=False),
+    Asset("canvas/canvas-short-drama-lipsync.css", required=False),
+    Asset("canvas/canvas-short-drama-video.js", required=False),
+    Asset("canvas/canvas-short-drama-video.css", required=False),
+    Asset("canvas/canvas-short-drama-assembly.js", required=False),
+    Asset("canvas/canvas-short-drama-assembly.css", required=False),
+    Asset("canvas/canvas-short-drama-store.js", required=False),
+    Asset("canvas/canvas-short-drama-api.js", required=False),
+    Asset("canvas/canvas-short-drama-poller.js", required=False),
+    Asset("canvas/canvas-short-drama-player.js", required=False),
+    Asset("canvas/canvas-short-drama-versions.js", required=False),
+    Asset("canvas/canvas-short-drama-locks.js", required=False),
+    Asset("canvas/canvas-short-drama-forms.js", required=False),
+    Asset("canvas/canvas-short-drama-completion.js", required=False),
+    Asset("canvas/canvas-short-drama-workspace.js", required=False),
+    Asset("canvas/canvas-short-drama-workspace.css", required=False),
+    Asset("canvas/canvas-digital-presenter.js", required=False),
+    Asset("canvas/canvas-digital-presenter.css", required=False),
 )
 
 
 def html_files() -> list[Path]:
-    return sorted(WORKBENCH_DIR.glob("*.html"))
+    return sorted(path for path in WORKBENCH_DIR.glob("*.html") if path.name not in STANDALONE_PAGES)
 
 
 def main() -> int:

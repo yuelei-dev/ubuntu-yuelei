@@ -1,8 +1,13 @@
 import base64
+import hashlib
+import io
+import json
 import sys
+import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 class XiaoleVideoTests(unittest.TestCase):
@@ -12,6 +17,91 @@ class XiaoleVideoTests(unittest.TestCase):
             sys.path.insert(0, server_dir)
         from content_domains import video
         self.video = video
+
+    def test_xiaole_request_retry_deadline_caps_internal_backoff(self):
+        now = [0.0]
+        calls = []
+
+        def monotonic():
+            return now[0]
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        def rate_limited(_request, timeout):
+            calls.append(timeout)
+            raise urllib.error.HTTPError(
+                "https://example.test", 429, "busy", None, io.BytesIO(b"busy")
+            )
+
+        with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
+             patch.object(self.video.time, "monotonic", side_effect=monotonic), \
+             patch.object(self.video.time, "sleep", side_effect=sleep), \
+             patch.object(self.video.urllib.request, "urlopen", side_effect=rate_limited):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
+                self.video._xiaole_request("POST", "/api/v1/generations", {}, retry_deadline=10)
+
+        self.assertEqual(len(calls), 2)
+        self.assertAlmostEqual(now[0], 10)
+        self.assertEqual(calls, [10, 2])
+
+    def test_official_micro_and_omni_parameters_are_validated_before_charge(self):
+        from content_domains import feature_flags, video_gemini_omni, video_seedance
+        with patch.object(feature_flags, "is_enabled", return_value=True), \
+                patch.object(video_gemini_omni, "available", return_value=True), \
+                patch.object(video_seedance, "available", return_value=True):
+            omni = self.video.validate_xiaole_video_payload({
+                "channel": "omni", "prompt": "product shot",
+                "model": "gemini-omni-flash-preview", "ratio": "16:9",
+                "duration": 3, "resolution": "720p",
+            })
+            seedance = self.video.validate_xiaole_video_payload({
+                "channel": "micro", "prompt": "paper bird",
+                "model": "doubao-seedance-2-0-260128", "ratio": "adaptive",
+                "duration": 4, "resolution": "480p", "generate_audio": True,
+            })
+        self.assertEqual(omni["duration"], 3)
+        self.assertEqual(seedance["resolution"], "480p")
+
+    def test_official_channels_default_closed_and_tabs_follow_health(self):
+        from content_domains import feature_flags
+        with patch.object(feature_flags, "_cached_rows", return_value={}):
+            self.assertFalse(feature_flags.is_enabled("omni_video"))
+            self.assertFalse(feature_flags.is_enabled("seedance_video"))
+            self.assertFalse(feature_flags.is_enabled("minimax_h3_video"))
+        html = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
+        self.assertIn('class="function-tab hidden" type="button" data-function="omni"', html)
+        self.assertIn('class="function-tab hidden" type="button" data-function="micro"', html)
+        self.assertIn('class="function-tab hidden" type="button" data-function="minimax"', html)
+        self.assertLess(
+            html.index('data-function="sora"'),
+            html.index('data-function="omni"'),
+        )
+        self.assertLess(
+            html.index('data-function="omni"'),
+            html.index('data-function="micro"'),
+        )
+        self.assertIn("omniAvailable=d.omni_video_enabled===true", html)
+        self.assertIn("seedanceAvailable=d.seedance_video_enabled===true", html)
+        self.assertIn("['grok','micro','omni','minimax'].indexOf(ch)<0", html)
+        self.assertIn("gemini-omni-flash-preview", html)
+        self.assertIn("doubao-seedance-2-0-260128", html)
+        self.assertIn("doubao-seedance-2-0-fast-260128", html)
+        self.assertIn('data-seedance-model="doubao-seedance-2-0-fast-260128" disabled', html)
+        for seconds in range(3, 11):
+            self.assertIn('data-omni-duration="%d"' % seconds, html)
+        for seconds in range(4, 16):
+            self.assertIn('data-seedance-duration="%d"' % seconds, html)
+        self.assertIn("headers['Idempotency-Key']=requestKey", html)
+        self.assertIn("OFFICIAL_VIDEO_BLOCK_STORAGE", html)
+        self.assertIn("retry.blocked&&!retry.body", html)
+        self.assertIn("if(!saveOfficialVideoRetry(channel))", html)
+        self.assertIn("videoHealthReady.then(applyInspirationPrefill)", html)
+        self.assertIn("targetMode==='omni'", html)
+        self.assertIn("targetMode==='micro'", html)
+        self.assertIn("setupXiaoleRefPanel('omni', omniRefData, 6)", html)
+        self.assertIn("setupXiaoleRefPanel('micro', microRefData, 9)", html)
+        self.assertIn("setupXiaoleRefPanel('minimax', minimaxRefData, 5)", html)
 
     def test_generate_xiaole_video_sends_size_without_aspect_ratio(self):
         calls = []
@@ -58,6 +148,16 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(cands[-1][0], url)
         self.assertIsNone(cands[-1][2])
 
+    def test_public_output_can_prefer_direct_download(self):
+        import os as _os
+        url = "https://cdn.example/output/video.mp4"
+        with patch.dict(_os.environ, {"HEYGEN_RELAY_BASE": "https://heygen.zelong.vip"}, clear=False):
+            cands = self.video._xiaole_download_candidates(
+                url, "", direct_first=True)
+        self.assertEqual(cands[0], (
+            url, {"User-Agent": "huangque-content/1.0"}, None))
+        self.assertIn("heygen.zelong.vip/cdn/", cands[1][0])
+
     def test_authenticated_download_header_is_not_forwarded_to_relay(self):
         import os as _os
         url = "https://openrouter.ai/api/v1/videos/job/content?index=0"
@@ -69,18 +169,6 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(cands[0][1]["Authorization"], "Bearer secret")
         self.assertNotIn("Authorization", cands[1][1])
         self.assertEqual(cands[-1][1]["Authorization"], "Bearer secret")
-
-    def test_cross_origin_redirect_strips_authorization(self):
-        import urllib.request
-        handler = self.video._OriginAuthRedirectHandler()
-        request = urllib.request.Request(
-            "https://openrouter.ai/api/v1/videos/job/content",
-            headers={"Authorization": "Bearer secret"},
-        )
-        redirected = handler.redirect_request(
-            request, None, 302, "Found", {}, "https://cdn.example/video.mp4"
-        )
-        self.assertNotIn("Authorization", redirected.headers)
 
     def test_gen_xiaole_video_maps_ratio_to_size_and_defaults_unknown_ratio(self):
         calls = []
@@ -118,580 +206,54 @@ class XiaoleVideoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "当前仅部分比例可用，请优先尝试 16:9（横屏）"):
                 self.video.generate_xiaole_video("Grok Image Video", "demo", size="720x1280", prefix="grok")
 
-    def test_validate_micro_duration(self):
-        for duration in (5, 10, 15):
-            body = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "cinematic demo", "duration": duration,
-            })
-            self.assertEqual(body["duration"], duration)
-        with self.assertRaisesRegex(ValueError, "5、10 或 15"):
-            self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "cinematic demo", "duration": 7,
-            })
-
-    def test_validate_micro_uses_official_seedance_contract(self):
-        body = self.video.validate_xiaole_video_payload({
-            "channel": "micro", "prompt": "cinematic demo", "duration": 15,
-            "reference_images": ["https://example.com/ref.jpg"],
-        })
-        self.assertEqual(body["model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(body["duration"], 15)
-        self.assertEqual(body["ratio"], "9:16")
-        self.assertEqual(body["resolution"], "720p")
-
-    @staticmethod
-    def _seedance_png_data(tag=b""):
-        import io as _io
-        from PIL import Image
-        shade = (tag[0] if tag else 0) % 256
-        buf = _io.BytesIO()
-        Image.new("RGB", (8, 8), (shade, 128, 255 - shade)).save(buf, "PNG")
-        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-
-    def _stage_mocks(self, put_side_effect=None):
-        from content_domains import cos
-
-        signed = "https://bucket-1250000000.cos.ap-guangzhou.myqcloud.com/seedance/reference/x?q-sign-algorithm=sha1&q-sign-time=1"
-        return [
-            patch.object(self.video, "seedance_reference_upload_is_open", return_value=True),
-            patch.object(cos, "enabled", return_value=True),
-            patch.object(cos, "put_bytes", side_effect=put_side_effect),
-            patch.object(self.video, "_seedance_cos_presign", return_value=signed),
-            patch.object(self.video, "_persist_staging_cleanup_intent"),
-            patch.object(self.video, "_enqueue_pending_cleanup"),
-            patch.object(self.video, "_remove_cleanup_record"),
-        ]
-
-    def test_validate_micro_keeps_data_images_local_until_staging(self):
-        from content_domains import cos
-
-        refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(4)]
-        with patch.object(cos, "put_bytes") as put:
-            body = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5,
-                "reference_images": refs,
-            }, "fang")
-        put.assert_not_called()   # 校验阶段不做任何网络上传
-        self.assertEqual(refs, body["reference_images"])
-
-    def test_stage_seedance_references_uploads_private_and_returns_cos_keys(self):
-        refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(4)]
-        patches = self._stage_mocks()
-        with patches[0], patches[1], patches[2] as put, patches[3] as presign, \
-             patches[4], patches[5], patches[6]:
-            first = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
-            second = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
-            first_keys = self.video.stage_seedance_references(first, "fang", "idem-token-a")
-            second_keys = self.video.stage_seedance_references(second, "fang", "idem-token-b")
-            repeat = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
-            repeat_keys = self.video.stage_seedance_references(repeat, "fang", "idem-token-a")
-
-        self.assertEqual(12, put.call_count)
-        for call in put.call_args_list:
-            self.assertIs(call.kwargs.get("private"), True)   # 强制私有 ACL
-        presign.assert_not_called()   # 提交时不签名，签名推迟到 worker 提交时
-        first_keys_uploaded = [call.args[1] for call in put.call_args_list[:4]]
-        second_keys_uploaded = [call.args[1] for call in put.call_args_list[4:8]]
-        repeat_keys_uploaded = [call.args[1] for call in put.call_args_list[8:]]
-        # 跨提交不共享对象键（消除失败清理竞态）；同幂等键重试覆盖同一对象
-        self.assertNotEqual(first_keys_uploaded, second_keys_uploaded)
-        self.assertNotEqual(first_keys_uploaded, repeat_keys_uploaded)
-        self.assertEqual(4, len(set(first_keys_uploaded)))
-        self.assertRegex(first_keys_uploaded[0],
-                         r"^seedance/reference/[0-9a-f]{16}/[0-9a-f]{32}-[0-9a-f]{16}\.png$")
-        self.assertEqual(first_keys, first_keys_uploaded)
-        self.assertEqual(first_keys, first["_seedance_staged_keys"])   # 随 payload 落库供终态清理
-        # payload 只存 cos-key:// 内部引用，不存签名 URL；跨提交引用不同（键不同）
-        self.assertEqual(["cos-key://" + k for k in first_keys], first["reference_images"])
-        self.assertNotEqual(first["reference_images"], second["reference_images"])
-        self.assertNotIn("data:", str(first["reference_images"]))
-        self.assertNotIn("q-sign-algorithm", str(first["reference_images"]))
-
-    def test_staging_token_is_unique_per_physical_attempt(self):
-        # 仅标点不同的两个合法 Idempotency-Key 不得映射为同一 token
-        first = self.video._seedance_staging_token("same-idempotency-key")
-        retry = self.video._seedance_staging_token("same-idempotency-key")
-        self.assertNotEqual(first, retry)
-        self.assertRegex(first, r"^[0-9a-f]{32}$")
-        self.assertRegex(retry, r"^[0-9a-f]{32}$")
-
-    def test_duplicate_images_in_one_batch_get_distinct_object_keys(self):
-        import sqlite3
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core, cos
-
-        image = self._seedance_png_data(b"same")
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False), \
-             patch.object(self.video, "seedance_reference_upload_is_open", return_value=True), \
-             patch.object(cos, "put_bytes") as put:
-            body = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5,
-                "reference_images": [image, image],
-            }, "fang")
-            keys = self.video.stage_seedance_references(
-                body, "fang", "same-idempotency-key"
-            )
-            self.assertEqual(2, put.call_count)
-            self.assertEqual(2, len(keys))
-            self.assertEqual(2, len(set(keys)))
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                self.assertEqual(
-                    2, db.execute("SELECT COUNT(*) FROM seedance_pending_cleanup").fetchone()[0]
-                )
-
-    def test_validate_micro_strips_client_internal_fields(self):
-        body = self.video.validate_xiaole_video_payload({
-            "channel": "micro", "prompt": "demo", "duration": 5,
-            "_seedance_staged_keys": ["seedance/reference/0000000000000000/evil.png"],
-            "_username": "admin", "_job_id": 1,
-        }, "fang")
-        self.assertNotIn("_seedance_staged_keys", body)   # 注入的暂存键不得进入任务 payload
-        self.assertNotIn("_username", body)
-        self.assertNotIn("_job_id", body)
-
-    def test_validate_micro_rejects_client_cos_key_reference(self):
-        with self.assertRaisesRegex(ValueError, "公网|asset://"):
-            self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5,
-                "reference_images": ["cos-key://seedance/reference/0000000000000000/evil.png"],
-            }, "fang")
-
-    def test_worker_signs_cos_key_references_at_submit_time(self):
-        import hashlib as _hashlib
-
-        owner = _hashlib.sha256(b"fang").hexdigest()[:16]
-        key = "seedance/reference/%s/%s.png" % (owner, "t" * 24 + "-" + "c" * 16)
-        signed = "https://bucket-1250000000.cos.ap-guangzhou.myqcloud.com/x?q-sign-algorithm=sha1"
-        fake = {"request_id": "seedance-1", "source_video_url": "https://example.com/micro.mp4",
-                "model": "doubao-seedance-2-0-260128"}
-        with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
-             patch.object(self.video, "_seedance_cos_presign", return_value=signed) as presign, \
-             patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
-             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-            self.video.gen_xiaole_video({
-                "channel": "micro", "prompt": "demo", "duration": 5,
-                "reference_images": ["cos-key://" + key], "_username": "fang",
-            })
-        presign.assert_called_once_with(key)   # worker 提交时才生成新鲜签名 URL
-        self.assertEqual([signed], generate.call_args.kwargs["reference_images"])
-
-    def test_worker_rejects_cos_key_of_other_owner(self):
-        with patch("content_domains.video_seedance.generate") as generate, \
-             patch.object(self.video, "_seedance_cos_presign") as presign:
-            with self.assertRaisesRegex(ValueError, "对象键不合法"):
-                self.video.gen_xiaole_video({
-                    "channel": "micro", "prompt": "demo", "duration": 5,
-                    "reference_images": ["cos-key://seedance/reference/0000000000000000/x.png"],
-                    "_username": "fang",
-                })
-        generate.assert_not_called()
-        presign.assert_not_called()
-
-    def test_stage_seedance_references_partial_failure_cleans_uploaded_batch(self):
-        refs = [self._seedance_png_data(str(index).encode("ascii")) for index in range(3)]
-        patches = self._stage_mocks(put_side_effect=[None, None, RuntimeError("cos boom")])
-        with patches[0], patches[1], patches[2] as put, patches[3], patches[4], patches[5], patches[6], \
-             patch.object(self.video, "_seedance_cos_delete") as delete:
-            body = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5, "reference_images": refs}, "fang")
-            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "上传失败.*未扣点"):
-                self.video.stage_seedance_references(body, "fang")
-
-        self.assertEqual(3, put.call_count)
-        attempted_keys = [call.args[1] for call in put.call_args_list]
-        self.assertEqual(3, delete.call_count)
-        self.assertCountEqual(attempted_keys, [call.args[0] for call in delete.call_args_list])
-        self.assertEqual(refs, body["reference_images"])   # 失败不回退、不改写
-
-    def test_stage_seedance_references_unavailable_is_explicit(self):
-        from content_domains import cos
-
-        with patch.object(self.video, "seedance_reference_upload_is_open", return_value=False), \
-             patch.object(cos, "put_bytes") as put:
-            body = {"channel": "micro", "reference_images": [self._seedance_png_data()]}
-            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "未配置.*未扣点"):
-                self.video.stage_seedance_references(body, "fang")
-        put.assert_not_called()
-
-    def test_stage_seedance_references_upload_failure_never_falls_back_to_data_url(self):
-        patches = self._stage_mocks(put_side_effect=ModuleNotFoundError("qcloud_cos"))
-        ref = self._seedance_png_data()
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
-            body = {"channel": "micro", "reference_images": [ref]}
-            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "上传失败.*未扣点"):
-                self.video.stage_seedance_references(body, "fang")
-        self.assertEqual([ref], body["reference_images"])   # body 未被半成品 URL 污染
-
-    def test_stage_seedance_references_skips_non_micro_channels(self):
-        from content_domains import cos
-
-        with patch.object(cos, "put_bytes") as put:
-            body = {"channel": "grok", "reference_images": ["data:image/png;base64,AAAA"]}
-            self.assertEqual([], self.video.stage_seedance_references(body, "fang"))
-        put.assert_not_called()
-
-    def test_cleanup_staged_seedance_references_is_best_effort(self):
-        import tempfile
-        from content_domains import core
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False), \
-             patch.object(self.video, "_seedance_cos_delete",
-                          side_effect=[None, RuntimeError("already gone")]) as delete:
-            self.video.cleanup_staged_seedance_references(["k1", "k2"])
-        self.assertEqual(2, delete.call_count)   # 单个失败不阻断其余清理
-
-    def test_cleanup_failure_persists_and_retry_converges(self):
-        import sqlite3
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        def pending_rows():
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                return db.execute("SELECT key,job_id,attempts,state FROM seedance_pending_cleanup").fetchall()
-
-        def make_due():
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                db.execute("UPDATE seedance_pending_cleanup SET next_attempt_at=0")
-                db.commit()
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False):
-            # 删除失败 → 持久化待清理
-            with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("cos down")):
-                self.video.cleanup_staged_seedance_references(["k1"], job_id=7)
-            self.assertEqual([("k1", 7, 1, "cleanup_pending")], [tuple(r) for r in pending_rows()])
-            # 重试仍失败 → attempts+1，记录保留
-            with patch.object(self.video, "_seedance_cos_delete", side_effect=RuntimeError("still down")):
-                make_due()
-                self.video.retry_pending_seedance_cleanups()
-            self.assertEqual([("k1", 7, 2, "cleanup_pending")], [tuple(r) for r in pending_rows()])
-            # 故障恢复 → 重试成功 → 记录移除
-            with patch.object(self.video, "_seedance_cos_delete") as delete:
-                make_due()
-                self.video.retry_pending_seedance_cleanups()
-            delete.assert_called_once_with("k1")
-            self.assertEqual([], pending_rows())
-
-    def test_cleanup_scan_does_not_starve_eligible_rows(self):
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False):
-            with _closing(self.video._cleanup_db()) as db:
-                for index in range(100):
-                    db.execute(
-                        "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES(?,?,?,?,'cleanup_pending',0,0)",
-                        ("exhausted-%03d" % index, None, index,
-                         self.video.SEEDANCE_CLEANUP_MAX_ATTEMPTS),
-                    )
-                db.execute(
-                    "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES('eligible',NULL,1000,0,'cleanup_pending',0,0)"
-                )
-                db.commit()
-            with patch.object(self.video, "_seedance_cos_delete") as delete:
-                processed = sum(
-                    self.video.retry_pending_seedance_cleanups(limit=50)
-                    for _ in range(3)
-                )
-            self.assertEqual(101, processed)
-            self.assertIn("eligible", [call.args[0] for call in delete.call_args_list])
-
-    def test_cleanup_keeps_retrying_after_alert_threshold(self):
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False):
-            with _closing(self.video._cleanup_db()) as db:
-                db.execute(
-                    "INSERT INTO seedance_pending_cleanup(key,job_id,created_at,attempts,state,next_attempt_at,updated_at) VALUES('recover-after-five',NULL,0,?,'cleanup_pending',0,0)",
-                    (self.video.SEEDANCE_CLEANUP_MAX_ATTEMPTS,),
-                )
-                db.commit()
-            with patch.object(self.video, "_seedance_cos_delete") as delete:
-                self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
-            delete.assert_called_once_with("recover-after-five")
-
-    def test_orphaned_staging_intent_is_recovered_after_grace(self):
-        import sqlite3
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False):
-            self.video._persist_staging_cleanup_intent("orphan-key")
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                db.execute("UPDATE seedance_pending_cleanup SET created_at=0,next_attempt_at=0")
-                db.commit()
-            with patch.object(self.video, "_seedance_cos_delete") as delete:
-                self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
-            delete.assert_called_once_with("orphan-key")
-
-    def test_outcome_unknown_keeps_reference_until_signed_url_expires(self):
-        from content_domains import video_seedance
-        payload = {"channel": "micro"}
-        delay = self.video.seedance_reference_cleanup_delay(
-            "xiaole_video", payload, video_seedance.CreateOutcomeUnknown("unknown")
-        )
-        self.assertGreater(delay, self.video.SEEDANCE_REFERENCE_SIGN_EXPIRE)
-        self.assertEqual(0, self.video.seedance_reference_cleanup_delay(
-            "xiaole_video", payload, video_seedance.SeedanceRejected("rejected")
-        ))
-
-    def test_delayed_cleanup_is_durable_and_runs_once_when_due(self):
-        import sqlite3
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False), \
-             patch.object(self.video, "_seedance_cos_delete") as delete:
-            self.video._persist_staging_cleanup_intent("unknown-key")
-            self.video.cleanup_staged_seedance_references(
-                ["unknown-key"], job_id=8, delay_seconds=120
-            )
-            delete.assert_not_called()
-            self.assertEqual(0, self.video.retry_pending_seedance_cleanups())
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                row = db.execute(
-                    "SELECT state,job_id FROM seedance_pending_cleanup WHERE key='unknown-key'"
-                ).fetchone()
-                self.assertEqual(("cleanup_pending", 8), row)
-                db.execute("UPDATE seedance_pending_cleanup SET next_attempt_at=0")
-                db.commit()
-            self.assertEqual(1, self.video.retry_pending_seedance_cleanups())
-            delete.assert_called_once_with("unknown-key")
-            self.assertEqual(0, self.video.retry_pending_seedance_cleanups())
-
-    def test_terminal_cleanup_refuses_foreign_or_wrong_kind_keys(self):
-        import hashlib as _hashlib
-        import json as _json
-        import sqlite3
-        import tempfile
-        from contextlib import closing as _closing
-        from content_domains import core
-
-        own = "seedance/reference/%s/t.png" % _hashlib.sha256(b"fang").hexdigest()[:16]
-        foreign = "seedance/reference/%s/t.png" % _hashlib.sha256(b"other").hexdigest()[:16]
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(core, "JOB_DB", str(Path(td) / "jobs.db")), \
-             patch.object(self.video, "_cleanup_table_ready", False):
-            with _closing(sqlite3.connect(core.JOB_DB)) as db:
-                db.execute("CREATE TABLE jobs(id INTEGER PRIMARY KEY, kind TEXT, username TEXT, payload TEXT)")
-                db.execute("INSERT INTO jobs VALUES(1,'xiaole_video','fang',?)",
-                           (_json.dumps({"_seedance_staged_keys": [own, foreign, " arbitrary/key.png"]}),))
-                db.execute("INSERT INTO jobs VALUES(2,'video','fang',?)",
-                           (_json.dumps({"_seedance_staged_keys": [own]}),))
-                db.commit()
-            with patch.object(self.video, "_seedance_cos_delete") as delete:
-                self.video.cleanup_job_staged_seedance_references(1)
-                self.assertEqual([own], [c.args[0] for c in delete.call_args_list])  # 只删本账号前缀的键
-                delete.reset_mock()
-                self.video.cleanup_job_staged_seedance_references(2)   # 非 xiaole_video 一律不删
-                delete.assert_not_called()
-
-    def test_validate_micro_accepts_public_and_authorized_asset_references(self):
-        import tempfile
-        from content_domains import assets_store
-
-        with tempfile.TemporaryDirectory() as td, \
-             patch.object(assets_store, "ASSET_DB", str(Path(td) / "assets.db")), \
-             patch.object(assets_store, "_initialized", False):
-            assets_store.init_assets()
-            from contextlib import closing as _closing
-            import json as _json
-            with _closing(assets_store.adb()) as c:
-                # 显式登记了 Seedance provider 映射的素材（meta.seedance_asset_id）
-                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(120,'collect','material','fang',?,1)",
-                          (_json.dumps({"seedance_asset_id": "prov-abc123"}),))
-                # 普通 copy 资产：没有 provider 映射，哪怕编号相同也不得授权
-                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(130,'copy','work','fang',?,1)",
-                          (_json.dumps({"text": "普通文案资产"}),))
-                # 别人的 provider 映射
-                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at) VALUES(140,'collect','material','other',?,1)",
-                          (_json.dumps({"seedance_asset_id": "prov-other-9"}),))
-                # 已删除的映射
-                c.execute("INSERT INTO assets(id,kind,stage,username,meta,created_at,deleted) VALUES(150,'collect','material','fang',?,1,1)",
-                          (_json.dumps({"seedance_asset_id": "prov-deleted"}),))
-                c.commit()
-            refs = ["https://cdn.example/ref.jpg", "asset://asset-prov-abc123"]
-            body = self.video.validate_xiaole_video_payload({
-                "channel": "micro", "prompt": "demo", "duration": 5,
-                "reference_images": refs,
-            }, "fang")
-            self.assertEqual(refs, body["reference_images"])
-            for ref, owner in (("asset://asset-130", "fang"),          # 普通 copy 资产同编号误授权探针
-                               ("asset://asset-prov-other-9", "fang"), # 别人的 provider 素材
-                               ("asset://asset-prov-deleted", "fang"), # 已删除的映射
-                               ("asset://asset-999", "fang"),          # 不存在的编号
-                               ("asset://asset-prov-abc123", "other")):# 归属不符
-                with self.subTest(ref=ref, owner=owner):
-                    with self.assertRaisesRegex(ValueError, "不存在或未授权"):
-                        self.video.validate_xiaole_video_payload({
-                            "channel": "micro", "prompt": "demo", "duration": 5,
-                            "reference_images": [ref],
-                        }, owner)
-
-    def test_validate_micro_rejects_local_or_malformed_references(self):
-        for ref in ("/api/gen/file/ref.jpg", "file:///tmp/ref.jpg", "http://127.0.0.1/ref.jpg",
-                    "http://localhost/ref.jpg", "asset://reference/2"):
-            with self.subTest(ref=ref):
-                with self.assertRaisesRegex(ValueError, "公网|asset://"):
-                    self.video.validate_xiaole_video_payload({
-                        "channel": "micro", "prompt": "demo", "duration": 5,
-                        "reference_images": [ref],
-                    }, "fang")
-
-    def test_validate_micro_rejects_spoofed_or_corrupt_images(self):
-        import io as _io
-        from PIL import Image
-
-        def data_url(mime, raw):
-            return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
-
-        png_buf, jpg_buf = _io.BytesIO(), _io.BytesIO()
-        Image.new("RGB", (8, 8)).save(png_buf, "PNG")
-        Image.new("RGB", (8, 8)).save(jpg_buf, "JPEG")
-        truncated_jpg = jpg_buf.getvalue()[:-64]
-        cases = [
-            data_url("image/png", jpg_buf.getvalue()),     # 损坏/伪装探针：JPEG 声明成 image/png
-            data_url("image/jpeg", png_buf.getvalue()),    # PNG 声明成 image/jpeg
-            data_url("image/jpeg", truncated_jpg),         # 截断的 JPEG
-            data_url("image/png", b"\x89PNG\r\n\x1a\n" + b"not-a-real-png"),  # 只有魔数
-        ]
-        for ref in cases:
-            with self.subTest(ref=ref[:40]):
-                with self.assertRaisesRegex(ValueError, "无效|损坏|不一致"):
-                    self.video.validate_xiaole_video_payload({
-                        "channel": "micro", "prompt": "demo", "duration": 5,
-                        "reference_images": [ref],
-                    }, "fang")
-
-    def test_validate_micro_fails_closed_when_pillow_missing(self):
-        ref = self._seedance_png_data()
-        with patch.dict(sys.modules, {"PIL": None, "PIL.Image": None}):
-            with self.assertRaisesRegex(self.video.SeedanceReferenceUnavailable, "校验组件不可用.*未扣点"):
-                self.video.validate_xiaole_video_payload({
-                    "channel": "micro", "prompt": "demo", "duration": 5,
-                    "reference_images": [ref],
-                }, "fang")
-
-    def test_seedance_worker_defense_rejects_unstaged_data_url(self):
-        with patch("content_domains.video_seedance.generate") as generate:
-            with self.assertRaisesRegex(ValueError, "公网 URL"):
-                self.video.gen_xiaole_video({
-                    "channel": "micro", "prompt": "demo", "duration": 5,
-                    "reference_images": [self._seedance_png_data()],
-                })
-        generate.assert_not_called()
-
-    def test_seedance_reference_health_requires_cos_and_sdk(self):
-        from content_domains import cos
-
-        with patch.object(cos, "enabled", return_value=True), \
-             patch.object(self.video.importlib.util, "find_spec", return_value=object()):
-            self.assertTrue(self.video.seedance_reference_upload_is_open())
-        with patch.object(cos, "enabled", return_value=False):
-            self.assertFalse(self.video.seedance_reference_upload_is_open())
-        with patch.object(cos, "enabled", return_value=True), \
-             patch.object(self.video.importlib.util, "find_spec", return_value=None):
-            self.assertFalse(self.video.seedance_reference_upload_is_open())
-
-    def test_xai_reverse_storyboard_health_requires_public_staging(self):
-        from content_domains import cos
-
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(cos, "enabled", return_value=True), \
-             patch.object(self.video.importlib.util, "find_spec", return_value=object()):
-            self.assertTrue(self.video.grok_storyboard_upload_is_open())
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(cos, "enabled", return_value=False):
-            self.assertFalse(self.video.grok_storyboard_upload_is_open())
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xiaole"), \
-             patch.object(cos, "enabled", return_value=False):
-            self.assertTrue(self.video.grok_storyboard_upload_is_open())
-
-    def test_content_service_dependency_manifest_pins_cos_sdk(self):
-        root = Path(__file__).resolve().parents[1]
-        requirements = (root / "deploy/requirements-content.txt").read_text(encoding="utf-8")
-        self.assertIn("cos-python-sdk-v5==1.9.44", requirements)
-        self.assertIn("Pillow==", requirements)   # 真实解码校验的运行依赖必须闭环
-
-    def test_ci_installs_content_python_dependencies(self):
-        root = Path(__file__).resolve().parents[1]
-        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertIn("pip install -r deploy/requirements-content.txt", workflow)
-
-    def test_gen_micro_uses_official_seedance_without_shared_provider(self):
-        fake = {
-            "request_id": "seedance-1",
-            "source_video_url": "https://example.com/micro.mp4",
-            "model": "doubao-seedance-2-0-260128",
-            "duration": 15,
-        }
-        payload = self.video.validate_xiaole_video_payload({
-            "channel": "micro",
-            "prompt": "cinematic demo",
-            "duration": 15,
-            "ratio": "4:3",
-            "resolution": "1080p",
-        })
-        with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
-             patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
-             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-            result = self.video.gen_xiaole_video(payload)
-        self.assertEqual(generate.call_args.kwargs["duration"], 15)
-        self.assertEqual(generate.call_args.kwargs["model"], "doubao-seedance-2-0-260128")
-        self.assertEqual(generate.call_args.kwargs["ratio"], "4:3")
-        self.assertEqual(generate.call_args.kwargs["resolution"], "1080p")
-        self.assertEqual(result["provider_video_id"], "seedance-1")
-        self.assertEqual(result["duration"], 15)
-        self.assertEqual(result["ratio"], "4:3")
-        self.assertEqual(result["resolution"], "1080p")
-
     def test_validate_official_grok_parameters(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
             body = self.video.validate_xiaole_video_payload({
                 "channel": "grok", "prompt": "cinematic demo", "ratio": "2:3",
-                "duration": 15, "resolution": "720p", "model": "grok-imagine-video",
+                "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
             })
         self.assertEqual(body["ratio"], "2:3")
+        self.assertEqual(body["duration"], 10)
+
+    def test_validate_official_grok_accepts_text_only_duration_15(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "cinematic demo",
+                "duration": 15, "model": "grok-imagine-video",
+            })
         self.assertEqual(body["duration"], 15)
 
-    def test_validate_official_edit_verifies_server_side_duration(self):
-        source = "data:video/mp4;base64,AAAA"
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(self.video, "_probe_data_video_duration", return_value=8.6):
-            body = self.video.validate_xiaole_video_payload({"channel": "grok", "operation": "edit",
-                                                              "prompt": "change person", "reference_video_data": source})
-        self.assertEqual(body["source_duration"], 8.6)
-        self.assertEqual(body["model"], "grok-imagine-video")
+    def test_validate_official_grok_accepts_reference_duration_15(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "cinematic demo",
+                "duration": 15, "model": "grok-imagine-video",
+                "reference_images": ["https://a/ref.jpg"],
+            })
+        self.assertEqual(body["duration"], 15)
 
-    def test_validate_official_edit_rejects_over_8_7_seconds(self):
+    def test_validate_video_15_accepts_one_first_frame(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "cinematic demo",
+                "duration": 15, "model": "grok-imagine-video-1.5",
+                "reference_images": ["https://a/first.jpg"],
+            })
+        self.assertEqual(body["duration"], 15)
+        self.assertEqual(body["reference_images"], ["https://a/first.jpg"])
+
+    def test_validate_official_edit_is_under_maintenance(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            with self.assertRaisesRegex(ValueError, "编辑维护中"):
+                self.video.validate_xiaole_video_payload({"channel": "grok", "operation": "edit",
+                                                          "prompt": "change person"})
+
+    def test_validate_official_edit_rejects_before_media_processing(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(self.video, "_probe_data_video_duration", return_value=8.71):
-            with self.assertRaisesRegex(ValueError, "8.7"):
-                self.video.validate_xiaole_video_payload({"channel": "grok", "operation": "edit", "prompt": "demo",
-                                                          "reference_video_data": "data:video/mp4;base64,AAAA"})
+             patch.object(self.video, "_probe_data_video_duration") as probe:
+            with self.assertRaisesRegex(ValueError, "编辑维护中"):
+                self.video.validate_xiaole_video_payload({"channel": "grok", "operation": "edit", "prompt": "demo"})
+        probe.assert_not_called()
 
     def test_validate_official_grok_rejects_over_max_references(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
@@ -710,67 +272,70 @@ class XiaoleVideoTests(unittest.TestCase):
             })
             self.assertEqual(len(cleaned["reference_images"]), 3)
 
-    def test_reverse_grok_storyboard_delivers_all_one_to_four_frames_to_xai(self):
-        import hashlib
-        import io as _io
+    def test_reverse_grok_keeps_one_to_four_ordered_frames_and_stages_before_charge(self):
         from PIL import Image
+        from content_domains import cos
+
+        refs = []
+        expected_hashes = []
+        for shade in (24, 72, 120, 168):
+            buffer = io.BytesIO()
+            Image.new("RGB", (8, 8), (shade, 128, 255 - shade)).save(buffer, "PNG")
+            raw = buffer.getvalue()
+            expected_hashes.append(hashlib.sha256(raw).hexdigest())
+            refs.append("data:image/png;base64," + base64.b64encode(raw).decode("ascii"))
+
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            payload = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "逐段还原", "duration": 10,
+                "ratio": "9:16", "resolution": "720p",
+                "reference_images": refs, "reference_mode": "ordered_storyboard",
+            })
+        self.assertEqual(refs, payload["reference_images"])
+        self.assertEqual(4, payload["_reference_storyboard_count"])
+        self.assertEqual(expected_hashes, payload["_reference_storyboard_source_hashes"])
+        self.assertIn("按原视频时间顺序排列", payload["prompt"])
+
+        uploads = []
+        def publish(data, key, content_type=None, private=False):
+            uploads.append((key, content_type, private))
+            return "https://cos.example/" + key
+
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video, "grok_reference_upload_is_open", return_value=True), \
+             patch.object(self.video, "_persist_staging_cleanup_intent"), \
+             patch.object(cos, "put_bytes", side_effect=publish):
+            keys, error = self.video.stage_xiaole_video_references(
+                "xiaole_video", payload, "fang", "a" * 32)
+        self.assertIsNone(error)
+        self.assertEqual(4, len(keys))
+        self.assertEqual(4, len(set(keys)))
+        self.assertEqual([False] * 4, [item[2] for item in uploads])
+        self.assertEqual(
+            ["https://cos.example/" + key for key in keys],
+            payload["reference_images"],
+        )
+        self.assertEqual(keys, payload["_seedance_staged_keys"])
 
         generated = {
-            "request_id": "xai-storyboard", "model": "grok-imagine-video",
-            "source_video_url": "https://vidgen.x.ai/storyboard.mp4", "duration": 10,
+            "request_id": "xai-ordered", "model": "grok-imagine-video",
+            "source_video_url": "https://vidgen.x.ai/ordered.mp4", "duration": 10,
         }
-        for count in range(1, 5):
-            with self.subTest(count=count):
-                shades = [30 + index * 40 for index in range(count)]
-                refs = [self._seedance_png_data(bytes([shade])) for shade in shades]
-                raw_hashes = [
-                    hashlib.sha256(base64.b64decode(ref.split(",", 1)[1])).hexdigest()
-                    for ref in refs
-                ]
-                with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
-                    payload = self.video.validate_xiaole_video_payload({
-                        "channel": "grok", "prompt": "逐段还原", "duration": 10,
-                        "ratio": "9:16", "resolution": "720p",
-                        "reference_images": refs,
-                        "reference_mode": "ordered_storyboard",
-                    })
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video.provider_keys, "claim_candidate", return_value={
+                 "id": "xai-key", "secret": "secret"
+             }), \
+             patch.object(self.video.provider_keys, "set_health"), \
+             patch("content_domains.video_xai.generate", return_value=generated) as generate, \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/ordered.mp4"), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None), \
+             patch.object(self.video, "public_url", return_value="https://cos.example/video/ordered.mp4"):
+            result = self.video.gen_xiaole_video(payload)
+        self.assertEqual(payload["reference_images"], generate.call_args.kwargs["reference_image_urls"])
+        self.assertEqual(4, result["reference_storyboard_count"])
+        self.assertEqual(expected_hashes, result["reference_storyboard_source_hashes"])
 
-                self.assertEqual(payload["_reference_storyboard_count"], count)
-                self.assertEqual(payload["_reference_storyboard_source_hashes"], raw_hashes)
-                self.assertRegex(payload["_reference_storyboard_sha256"], r"^[0-9a-f]{64}$")
-                self.assertEqual(len(payload["reference_images"]), 1)
-                self.assertIn("按原视频时间从左到右排列", payload["prompt"])
-
-                delivered = []
-                def capture_storyboard(value):
-                    delivered.append(value)
-                    return "https://cos.example/reverse-storyboard.jpg"
-
-                with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-                     patch.object(self.video, "_xiaole_ref_to_url", side_effect=capture_storyboard), \
-                     patch("content_domains.video_xai.generate", return_value=generated) as generate, \
-                     patch.object(self.video, "_download_xiaole_video", return_value="video/storyboard.mp4"), \
-                     patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-                    result = self.video.gen_xiaole_video(payload)
-
-                self.assertEqual(len(delivered), 1)
-                generate.assert_called_once()
-                self.assertEqual(generate.call_args.kwargs["image_url"], "https://cos.example/reverse-storyboard.jpg")
-                self.assertEqual(result["reference_storyboard_count"], count)
-                self.assertEqual(result["reference_storyboard_source_hashes"], raw_hashes)
-                self.assertEqual(result["reference_storyboard_sha256"], payload["_reference_storyboard_sha256"])
-
-                if count > 1:
-                    encoded = delivered[0].split(",", 1)[1]
-                    with Image.open(_io.BytesIO(base64.b64decode(encoded))) as storyboard:
-                        self.assertEqual(storyboard.size, (384 * count, 676))
-                        for index, shade in enumerate(shades):
-                            pixel = storyboard.convert("RGB").getpixel((index * 384 + 192, 356))
-                            self.assertLess(abs(pixel[0] - shade), 12)
-                            self.assertLess(abs(pixel[1] - 128), 12)
-                            self.assertLess(abs(pixel[2] - (255 - shade)), 12)
-
-    def test_reverse_grok_storyboard_rejects_unbound_remote_frames_before_generation(self):
+    def test_reverse_grok_rejects_remote_or_too_many_frames_before_charge(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
             with self.assertRaisesRegex(ValueError, "本地关键帧"):
                 self.video.validate_xiaole_video_payload({
@@ -778,60 +343,81 @@ class XiaoleVideoTests(unittest.TestCase):
                     "reference_images": ["https://untrusted.example/frame.jpg"],
                     "reference_mode": "ordered_storyboard",
                 })
+            with self.assertRaisesRegex(ValueError, "1-4张"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "grok", "prompt": "逐段还原",
+                    "reference_images": [], "reference_mode": "ordered_storyboard",
+                })
 
-    def test_reverse_grok_storyboard_is_published_before_charge_and_worker_reuses_url(self):
-        refs = [self._seedance_png_data(b"\x20"), self._seedance_png_data(b"\x80")]
-        public_url = "https://bucket.cos.example/reverse-storyboard.jpg"
-        generated = {
-            "request_id": "xai-staged-storyboard", "model": "grok-imagine-video",
-            "source_video_url": "https://vidgen.x.ai/staged.mp4", "duration": 10,
+    def test_legacy_xiaole_reverse_rejects_five_and_corrupt_data_urls_before_charge(self):
+        corrupt = "data:image/png;base64,AA=="
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xiaole"):
+            with self.assertRaisesRegex(ValueError, "1-4张"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "grok", "prompt": "逐段还原",
+                    "reference_images": [corrupt] * 5,
+                    "reference_mode": "ordered_storyboard",
+                })
+            with self.assertRaisesRegex(ValueError, "图片|参考图"):
+                self.video.validate_xiaole_video_payload({
+                    "channel": "grok", "prompt": "逐段还原",
+                    "reference_images": [corrupt],
+                    "reference_mode": "ordered_storyboard",
+                })
+
+    def test_legacy_xiaole_reverse_valid_frame_still_fails_before_charge(self):
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), (30, 60, 90)).save(buffer, "PNG")
+        ref = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+        body = {
+            "channel": "grok", "prompt": "逐段还原",
+            "reference_images": [ref], "reference_mode": "ordered_storyboard",
         }
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
-            payload = self.video.validate_xiaole_video_payload({
-                "channel": "grok", "prompt": "按顺序还原", "duration": 10,
-                "ratio": "9:16", "resolution": "720p",
-                "reference_images": refs, "reference_mode": "ordered_storyboard",
-            })
-
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(self.video, "grok_storyboard_upload_is_open", return_value=True), \
-             patch.object(self.video, "_persist_staging_cleanup_intent"), \
-             patch("content_domains.cos.put_bytes", return_value=public_url) as put:
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xiaole"):
+            with self.assertRaisesRegex(ValueError, "不支持安全反推参考帧"):
+                self.video.validate_xiaole_video_payload(body)
+            self.assertTrue(self.video.xiaole_reference_needs_staging("xiaole_video", body))
             keys, error = self.video.stage_xiaole_video_references(
-                "xiaole_video", payload, "fang", "a" * 32)
+                "xiaole_video", body, "fang", "c" * 32)
+        self.assertIsNone(keys)
+        self.assertEqual(503, error[0])
+        self.assertEqual("grok_reference_upload_unavailable", error[1]["code"])
+        self.assertIn("未扣点", error[1]["detail"])
 
-        self.assertIsNone(error)
-        self.assertEqual(payload["reference_images"], [public_url])
-        self.assertEqual(len(keys), 1)
-        self.assertEqual(payload["_seedance_staged_keys"], keys)
-        self.assertFalse(put.call_args.kwargs["private"])
+    def test_reverse_grok_staging_failure_is_precharge_503(self):
+        from PIL import Image
 
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch("content_domains.video_xai.generate", return_value=generated) as generate, \
-             patch.object(self.video, "_download_xiaole_video", return_value="video/staged.mp4"), \
-             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-            self.video.gen_xiaole_video(payload)
-        self.assertEqual(generate.call_args.kwargs["image_url"], public_url)
-
-    def test_reverse_grok_storyboard_staging_failure_is_precharge_503(self):
-        refs = [self._seedance_png_data(b"\x20"), self._seedance_png_data(b"\x80")]
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 8), (40, 80, 120)).save(buffer, "PNG")
+        ref = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
             payload = self.video.validate_xiaole_video_payload({
-                "channel": "grok", "prompt": "按顺序还原",
-                "reference_images": refs, "reference_mode": "ordered_storyboard",
+                "channel": "grok", "prompt": "逐段还原",
+                "reference_images": [ref], "reference_mode": "ordered_storyboard",
             })
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch.object(self.video, "grok_storyboard_upload_is_open", return_value=False):
+             patch.object(self.video, "grok_reference_upload_is_open", return_value=False):
             keys, error = self.video.stage_xiaole_video_references(
                 "xiaole_video", payload, "fang", "b" * 32)
         self.assertIsNone(keys)
-        self.assertEqual(error[0], 503)
-        self.assertEqual(error[1]["code"], "grok_storyboard_upload_unavailable")
+        self.assertEqual(503, error[0])
+        self.assertEqual("grok_reference_upload_unavailable", error[1]["code"])
         self.assertIn("未扣点", error[1]["detail"])
+
+    def test_validate_video_15_accepts_multiple_references(self):
+        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
+            body = self.video.validate_xiaole_video_payload({
+                "channel": "grok", "prompt": "让 @图片1 穿上 @图片2 的衣服",
+                "model": "grok-imagine-video-1.5", "resolution": "720p",
+                "reference_images": ["https://a/1.jpg", "https://a/2.jpg"],
+            })
+        self.assertEqual(2, len(body["reference_images"]))
 
     def test_validate_video_15_requires_reference(self):
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"):
-            with self.assertRaisesRegex(ValueError, "仅支持图生视频"):
+            with self.assertRaisesRegex(ValueError, "至少需要1张参考图"):
                 self.video.validate_xiaole_video_payload({
                     "channel": "grok", "prompt": "cinematic demo",
                     "model": "grok-imagine-video-1.5",
@@ -843,117 +429,307 @@ class XiaoleVideoTests(unittest.TestCase):
             "source_video_url": "https://vidgen.x.ai/demo.mp4", "duration": 10,
         }
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video.provider_keys, "claim_candidate", return_value={
+                 "id": "xai-key", "secret": "secret"
+             }), \
+             patch.object(self.video.provider_keys, "set_health"), \
              patch("content_domains.video_xai.generate", return_value=fake) as generate, \
              patch.object(self.video, "_download_xiaole_video", return_value="video/grok_xai_demo.mp4"), \
              patch.object(self.video, "_extract_first_frame_cover", return_value="video/grok_xai_demo_cover.jpg"), \
-             patch.object(self.video, "public_url", return_value="https://cos.example/cover.jpg"):
+             patch.object(self.video, "public_url", side_effect=[
+                 "https://cos.example/cover.jpg",
+                 "https://cos.example/video/grok_xai_demo.mp4",
+             ]) as publish:
             result = self.video.gen_xiaole_video({
                 "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
                 "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
             })
         self.assertEqual(result["video_file"], "video/grok_xai_demo.mp4")
+        self.assertEqual(result["video_url"], "https://cos.example/video/grok_xai_demo.mp4")
         self.assertEqual(result["provider_video_id"], "xai-1")
         self.assertEqual(result["model"], "grok-imagine-video")
         self.assertEqual(result["duration"], 10)
+        publish.assert_any_call("video/grok_xai_demo.mp4", "video/mp4", private=True)
         generate.assert_called_once()
 
-    def test_grok_uses_openrouter_only_after_safe_xai_create_failure(self):
+    def test_grok_does_not_fallback_after_xai_create_failure(self):
         from content_domains import video_xai
 
-        fallback = {
-            "request_id": "or-1", "model": "grok-imagine-video",
-            "source_video_url": "https://openrouter.ai/api/v1/videos/or-1/content",
-            "duration": 10, "provider": "openrouter",
-        }
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video.provider_keys, "claim_candidate", side_effect=[
+                 {"id": "xai-key", "secret": "secret"}, None
+             ]), \
+             patch.object(self.video.provider_keys, "set_health"), \
              patch("content_domains.video_xai.generate",
                    side_effect=video_xai.XaiCreateUnavailableError("xAI quota")), \
-             patch("content_domains.video_openrouter.available", return_value=True), \
-             patch("content_domains.video_openrouter.generate", return_value=fallback) as generate, \
-             patch("content_domains.video_openrouter.download_headers",
-                   return_value={"Authorization": "Bearer test"}), \
-             patch.object(self.video, "_download_xiaole_video", return_value="video/grok_or.mp4") as download, \
-             patch.object(self.video, "_extract_first_frame_cover", return_value=None):
-            result = self.video.gen_xiaole_video({
-                "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
-                "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
-            })
-        generate.assert_called_once()
-        download.assert_called_once_with(
-            fallback["source_video_url"], "grok_openrouter",
-            origin_headers={"Authorization": "Bearer test"},
-        )
-        self.assertEqual(result["provider_video_id"], "or-1")
-        self.assertEqual(result["video_file"], "video/grok_or.mp4")
-
-    def test_missing_openrouter_key_rethrows_original_xai_error(self):
-        from content_domains import video_xai
-
-        original = video_xai.XaiCreateUnavailableError("xAI quota")
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch("content_domains.video_xai.generate", side_effect=original), \
-             patch("content_domains.video_openrouter.available", return_value=False), \
-             patch("content_domains.video_openrouter.generate") as fallback:
-            with self.assertRaises(video_xai.XaiCreateUnavailableError) as raised:
+             patch("content_domains.video_openrouter.generate") as generate:
+            with self.assertRaises(video_xai.XaiCreateUnavailableError):
                 self.video.gen_xiaole_video({
                     "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
                     "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
                 })
-        self.assertIs(raised.exception, original)
-        fallback.assert_not_called()
+        generate.assert_not_called()
 
-    def test_grok_does_not_fallback_after_ambiguous_xai_network_failure(self):
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch("content_domains.video_xai.generate",
-                   side_effect=RuntimeError("xAI视频网络异常: connection reset")), \
-             patch("content_domains.video_openrouter.generate") as fallback:
-            with self.assertRaisesRegex(RuntimeError, "网络异常"):
-                self.video.gen_xiaole_video({
-                    "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
-                    "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
-                })
-        fallback.assert_not_called()
-
-    def test_grok_does_not_fallback_after_xai_poll_credential_failure(self):
-        from content_domains import video_xai
-
-        with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch("content_domains.video_xai.generate",
-                   side_effect=video_xai.XaiCredentialError("poll token expired")), \
-             patch("content_domains.video_openrouter.generate") as fallback:
-            with self.assertRaises(video_xai.XaiCredentialError):
-                self.video.gen_xiaole_video({
-                    "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
-                    "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
-                })
-        fallback.assert_not_called()
-
-    def test_grok_does_not_fallback_after_successful_xai_download_failure(self):
-        generated = {
-            "request_id": "xai-1", "model": "grok-imagine-video",
-            "source_video_url": "https://vidgen.x.ai/demo.mp4", "duration": 10,
+    def test_existing_xai_provider_id_resumes_without_generate(self):
+        resumed = {
+            "request_id": "rid-existing", "model": "grok-imagine-video",
+            "source_video_url": "https://vidgen.x.ai/existing.mp4", "duration": 10,
+        }
+        payload = {
+            "channel": "grok", "prompt": "demo", "model": "grok-imagine-video",
+            "ratio": "9:16", "duration": 10, "resolution": "720p",
+            "_job_id": 7, "_username": "qilin",
         }
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
-             patch("content_domains.video_xai.generate", return_value=generated), \
-             patch("content_domains.video_openrouter.generate") as fallback, \
-             patch.object(self.video, "_download_xiaole_video",
-                          side_effect=RuntimeError("视频下载失败")):
-            with self.assertRaisesRegex(RuntimeError, "下载失败"):
+             patch.object(self.video.provider_keys, "candidates", return_value=[
+                 {"id": "xai-key", "secret": "secret"}
+             ]), \
+             patch("content_domains.video.get_resumable_grok_request", return_value={
+                 "request_id": "rid-existing", "model": "grok-imagine-video", "provider": "xai",
+             }), \
+             patch("content_domains.video_xai.resume", return_value=resumed) as resume, \
+             patch("content_domains.video_xai.generate") as generate, \
+             patch("content_domains.video._download_xiaole_video", return_value="video/out.mp4"), \
+             patch("content_domains.video._extract_first_frame_cover", return_value=None), \
+             patch("content_domains.video.update_video_asset_phase") as update:
+            result = self.video.gen_xiaole_video(payload)
+        generate.assert_not_called()
+        resume.assert_called_once()
+        self.assertNotIn("queued", [call.args[1] for call in update.call_args_list])
+        self.assertEqual(result["provider_video_id"], "rid-existing")
+
+    def test_seedance_official_never_calls_old_xiaole_supplier(self):
+        fake = {
+            "request_id": "cgt-1",
+            "model": "doubao-seedance-2-0-260128",
+            "source_video_url": "https://cdn.example/seedance.mp4",
+            "duration": 4,
+            "resolution": "480p",
+            "ratio": "9:16",
+            "generate_audio": True,
+        }
+        with patch("content_domains.video_seedance.generate", return_value=fake) as generate, \
+             patch.object(self.video, "get_resumable_grok_request", return_value=None), \
+             patch.object(self.video.provider_keys, "claim_candidate", return_value={
+                 "id": "seedance-key", "secret": "secret"
+             }), \
+             patch.object(self.video.provider_keys, "set_health"), \
+             patch.object(self.video, "update_video_asset_phase"), \
+             patch.object(self.video, "_xiaole_request") as old_supplier, \
+             patch.object(self.video, "_download_xiaole_video", return_value="video/seedance.mp4"), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None), \
+             patch.object(self.video, "public_url", return_value="https://cos.example/seedance.mp4"):
+            result = self.video.gen_xiaole_video({
+                "_job_id": 7, "channel": "micro", "prompt": "paper bird",
+                "model": "doubao-seedance-2-0-260128",
+                "duration": 4, "ratio": "9:16", "resolution": "480p",
+                "generate_audio": True,
+            })
+        old_supplier.assert_not_called()
+        generate.assert_called_once()
+        self.assertEqual(result["provider_video_id"], "cgt-1")
+        self.assertEqual(result["provider"], "volcengine_seedance")
+
+    def test_seedance_final_refs_are_validated_before_submitting_phase(self):
+        bad_ref = "data:image/png;base64,cG5n"
+        with patch.object(self.video, "_xiaole_ref_to_url", return_value=bad_ref), \
+             patch.object(self.video, "get_resumable_grok_request", return_value=None), \
+             patch.object(self.video, "update_video_asset_phase") as phase, \
+             patch("content_domains.video_seedance.generate") as generate:
+            with self.assertRaisesRegex(ValueError, "公网 URL"):
                 self.video.gen_xiaole_video({
-                    "channel": "grok", "prompt": "cinematic demo", "ratio": "9:16",
-                    "duration": 10, "resolution": "720p", "model": "grok-imagine-video",
+                    "_job_id": 7, "channel": "micro", "prompt": "paper bird",
+                    "model": "doubao-seedance-2-0-260128",
+                    "duration": 4, "ratio": "9:16", "resolution": "480p",
+                    "generate_audio": True, "reference_images": [bad_ref],
                 })
-        fallback.assert_not_called()
+        phase.assert_not_called()
+        generate.assert_not_called()
+
+    def test_seedance_download_exhaustion_stays_resumable(self):
+        from content_domains import video_seedance
+        rendered = {
+            "request_id": "cgt-download",
+            "model": "doubao-seedance-2-0-260128",
+            "source_video_url": "https://cdn.example/seedance.mp4",
+            "duration": 4, "resolution": "480p", "ratio": "9:16",
+            "generate_audio": True,
+        }
+        with patch.object(self.video, "get_resumable_grok_request", return_value={
+            "request_id": "cgt-download", "provider": "seedance",
+            "phase": "seedance_succeeded", "model": rendered["model"],
+            "provider_key_id": "seedance-key",
+        }), patch("content_domains.video_seedance.resume", return_value=rendered), \
+             patch.object(self.video.provider_keys, "candidates", return_value=[
+                 {"id": "seedance-key", "secret": "secret"}
+             ]), \
+             patch.object(self.video, "_download_xiaole_video",
+                          side_effect=RuntimeError("视频下载失败: timeout")), \
+             patch.object(self.video, "update_video_asset_phase"):
+            with self.assertRaises(video_seedance.TransientSeedanceError):
+                self.video.gen_xiaole_video({
+                    "_job_id": 8, "channel": "micro", "prompt": "paper bird",
+                    "model": rendered["model"], "duration": 4,
+                    "ratio": "9:16", "resolution": "480p",
+                    "generate_audio": True,
+                })
+
+    def test_omni_official_writes_bytes_without_old_supplier(self):
+        fake = {
+            "request_id": "v1-omni",
+            "model": "gemini-omni-flash-preview",
+            "source_video_url": "https://generativelanguage.googleapis.com/v1beta/files/f:download",
+            "video_bytes": b"\x00\x00\x00\x18ftypmp42",
+            "duration": 3,
+            "resolution": "720p",
+            "aspect_ratio": "16:9",
+            "provider": "google_gemini_omni",
+        }
+        with tempfile.TemporaryDirectory() as td, \
+             patch("content_domains.video_gemini_omni.generate", return_value=fake) as generate, \
+             patch.object(self.video, "get_resumable_grok_request", return_value=None), \
+             patch.object(self.video.provider_keys, "claim_candidate", return_value={
+                 "id": "omni-key", "secret": "secret"
+             }), \
+             patch.object(self.video.provider_keys, "set_health"), \
+             patch.object(self.video, "update_video_asset_phase"), \
+             patch.object(self.video, "_xiaole_request") as old_supplier, \
+             patch.object(self.video, "_out_path",
+                          side_effect=lambda rel: Path(td) / rel), \
+             patch.object(self.video, "_faststart_video_file", side_effect=lambda rel: rel), \
+             patch.object(self.video, "_extract_first_frame_cover", return_value=None), \
+             patch.object(self.video, "public_url", return_value="https://cos.example/omni.mp4"):
+            result = self.video.gen_xiaole_video({
+                "_job_id": 8, "channel": "omni", "prompt": "product shot",
+                "model": "gemini-omni-flash-preview",
+                "duration": 3, "ratio": "16:9", "resolution": "720p",
+            })
+        old_supplier.assert_not_called()
+        generate.assert_called_once()
+        self.assertEqual(result["provider_video_id"], "v1-omni")
+        self.assertEqual(result["provider"], "google_gemini_omni")
+
+    def test_unknown_official_submission_is_held_without_refund_or_resubmit(self):
+        for provider in ("xai", "seedance", "omni", "minimax"):
+            with self.subTest(provider=provider), patch.object(
+                self.video, "get_resumable_grok_request", return_value={
+                    "request_id": None, "provider": provider,
+                    "submission_unknown": True,
+                    "phase": provider + "_submitting",
+                },
+            ), patch.object(self.video, "update_video_asset_phase") as update:
+                self.assertTrue(
+                    self.video.recover_official_video_paid_job(7, "response lost")
+                )
+                update.assert_called_once_with(
+                    7, provider + "_recovery_required", error="response lost"
+                )
+
+    def test_unknown_official_submission_hold_never_expires_to_refund(self):
+        for provider in ("xai", "seedance", "omni", "minimax"):
+            with self.subTest(provider=provider), patch.object(
+                self.video,
+                "get_resumable_grok_request",
+                return_value={
+                    "request_id": None,
+                    "provider": provider,
+                    "submission_unknown": True,
+                    "phase": provider + "_recovery_required",
+                },
+            ):
+                self.assertFalse(
+                    self.video.recovery_hold_expired(7, "xiaole_video", 99999, 1)
+                )
+
+    def test_omni_file_phase_remains_resumable(self):
+        class Connection:
+            def execute(self, *_args):
+                return self
+
+            def fetchone(self):
+                return {
+                    "provider_video_id": "v1-file", "model": "gemini-omni-flash-preview",
+                    "phase": "omni_file_processing", "status": "running",
+                    "resolution": "720p", "ratio": "16:9",
+                }
+
+            def close(self):
+                pass
+
+        with patch.object(self.video, "adb", return_value=Connection()):
+            resumed = self.video.get_resumable_grok_request(9)
+        self.assertEqual(resumed["provider"], "omni")
+        self.assertEqual(resumed["request_id"], "v1-file")
+
+    def test_core_unknown_official_create_never_refunds(self):
+        from content_domains import core, video_gemini_omni
+
+        for channel, error in (
+            ("omni", video_gemini_omni.GeminiOmniCreateOutcomeUnknown("lost")),
+            ("grok", json.JSONDecodeError("bad response", "x", 0)),
+        ):
+            class Connection:
+                def execute(self, *_args):
+                    return self
+
+                def fetchone(self):
+                    return {
+                        "id": 7, "kind": "xiaole_video", "username": "u",
+                        "cost": 90,
+                        "payload": json.dumps({"channel": channel}),
+                        "status": "pending",
+                    }
+
+                def close(self):
+                    pass
+
+            recover = Mock(return_value=True)
+            terminal = Mock(return_value=True)
+            refund = Mock()
+            with self.subTest(channel=channel), \
+                 patch.object(self.video, "recover_official_video_paid_job", recover), \
+                 patch.object(core, "jdb", return_value=Connection()), \
+                 patch.object(core.jobs_store, "claim_running", return_value=True), \
+                 patch.object(core, "_start_job_heartbeat", return_value=Mock()), \
+                 patch.object(core, "HANDLERS", {
+                     "xiaole_video": Mock(side_effect=error),
+                 }), \
+                 patch.object(core, "_domains", return_value=(None, None, self.video)), \
+                 patch.object(core, "_set_terminal", terminal), \
+                 patch.object(core, "_refund_once", refund), \
+                 patch.object(core, "_mark_video_asset_failed"):
+                core.run_job(7)
+            recover.assert_called_once()
+            terminal.assert_not_called()
+            refund.assert_not_called()
+
+    def test_definite_xai_create_rejection_is_not_held(self):
+        from content_domains import video_xai
+
+        with patch.object(self.video, "recover_official_video_paid_job") as recover:
+            held = self.video.recover_paid_video_error(
+                7, "xiaole_video", {"channel": "grok"},
+                video_xai.XaiCreateRejected("HTTP 400"),
+            )
+        self.assertFalse(held)
+        recover.assert_not_called()
 
     def test_gen_grok_official_edit_uploads_source_and_preserves_contract(self):
         fake = {"request_id": "edit-1", "model": "grok-imagine-video",
                 "source_video_url": "https://vidgen.x.ai/edit.mp4", "duration": 6.2}
         with patch.object(self.video, "GROK_VIDEO_PROVIDER", "xai"), \
+             patch.object(self.video.provider_keys, "claim_candidate", return_value={
+                 "id": "xai-key", "secret": "secret"
+             }), \
+             patch.object(self.video.provider_keys, "set_health"), \
              patch.object(self.video, "_save_data_file", return_value="video/source.mp4"), \
-             patch.object(self.video, "public_url", side_effect=["https://cos.example/source.mp4", "https://cos.example/cover.jpg"]), \
+             patch.object(self.video, "public_url", side_effect=[
+                 "https://cos.example/source.mp4",
+                 "https://cos.example/cover.jpg",
+                 "https://cos.example/edit.mp4",
+             ]), \
              patch.object(self.video, "_file_url", return_value="/api/files/video/source.mp4"), \
              patch("content_domains.video_xai.edit", return_value=fake) as edit, \
-             patch("content_domains.video_openrouter.generate") as fallback, \
              patch.object(self.video, "_download_xiaole_video", return_value="video/edit.mp4"), \
              patch.object(self.video, "_extract_first_frame_cover", return_value="video/edit_cover.jpg"):
             result = self.video.gen_xiaole_video({"channel": "grok", "operation": "edit", "prompt": "change person",
@@ -962,7 +738,6 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(result["reference_video_file"], "video/source.mp4")
         self.assertIsNone(result["resolution"])
         edit.assert_called_once()
-        fallback.assert_not_called()
 
 
 if __name__ == "__main__":

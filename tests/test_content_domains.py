@@ -1,12 +1,18 @@
 import importlib
 import base64
+import io
+import json
+import os
 import queue
 import sqlite3
 import sys
 import tempfile
 import unittest
+import urllib.error
 from contextlib import closing
 from pathlib import Path
+from unittest import mock
+from unittest.mock import patch
 
 
 class ContentDomainTests(unittest.TestCase):
@@ -21,15 +27,164 @@ class ContentDomainTests(unittest.TestCase):
         # （avatar/cinematic 是把动作模仿拆成「建形象 / 生成剧情视频」两步时加的）
         self.assertEqual(
             sorted(content_api.HANDLERS),
-            ["audio", "avatar", "breakdown", "cinematic", "collect", "copy", "image", "leads", "script_to_video", "tryon", "video", "xiaole_video"],
+            ["audio", "avatar", "breakdown", "canvas_agent", "cinematic", "collect", "copy", "image", "leads", "script_to_video", "short_drama_final", "short_drama_preview", "short_drama_remux", "short_drama_sound_effect", "sora_video", "tryon", "video", "xiaole_video"],
         )
         self.assertIs(content_api.HANDLERS, content_api.registry.HANDLERS)
 
     def test_domains_export_expected_handlers(self):
         registry = importlib.import_module("content_domains.registry")
-        for name in ("image", "copy", "collect", "leads", "audio", "video", "xiaole_video", "breakdown"):
+        for name in ("image", "copy", "canvas_agent", "collect", "leads", "audio", "video", "xiaole_video", "sora_video", "breakdown", "short_drama_final", "short_drama_preview", "short_drama_remux", "short_drama_sound_effect"):
             self.assertIn(name, registry.HANDLERS)
             self.assertTrue(callable(registry.HANDLERS[name]))
+
+    def test_copy_provider_uses_dedicated_config_and_normalizes_v1_url(self):
+        text = importlib.import_module("content_domains.text")
+        self.assertTrue(hasattr(text, "COPY_API_BASE"), "copy provider needs an independent base URL")
+        self.assertTrue(hasattr(text, "COPY_API_KEY"), "copy provider needs an independent API key")
+        requests = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()
+
+        def open_request(request, timeout=0):
+            requests.append((request, timeout))
+            return Response()
+
+        for base in ("https://copy.example", "https://copy.example/v1", "https://copy.example/v1/"):
+            with self.subTest(base=base), \
+                    patch.object(text, "COPY_API_BASE", base), \
+                    patch.object(text, "COPY_API_KEY", "copy-secret"), \
+                    patch.object(text, "COPY_MODEL", "copy-model"), \
+                    patch.object(text.urllib.request, "urlopen", side_effect=open_request):
+                self.assertEqual("OK", text._chat("system", "user", 0))
+                request, timeout = requests.pop()
+                self.assertEqual("https://copy.example/v1/chat/completions", request.full_url)
+                self.assertEqual("Bearer copy-secret", request.get_header("Authorization"))
+                self.assertEqual(300, timeout)
+                body = json.loads(request.data)
+                self.assertEqual("copy-model", body["model"])
+
+    def test_copy_provider_requires_atomic_dedicated_config(self):
+        core = importlib.import_module("content_domains.core")
+        text = importlib.import_module("content_domains.text")
+        names = ("COPY_API_BASE", "COPY_API_KEY")
+        saved_env = {name: os.environ.get(name) for name in names}
+        saved_openai = (core.OPENAI_BASE, core.OPENAI_KEY)
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"OK"}}]}'
+
+        def configure(base, key):
+            for name, value in zip(names, (base, key)):
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            return importlib.reload(text)
+
+        try:
+            core.OPENAI_BASE = "https://openai.example/v1"
+            core.OPENAI_KEY = "openai-secret"
+
+            configure(None, None)
+            with patch.object(text.urllib.request, "urlopen", return_value=Response()) as open_request:
+                self.assertEqual("OK", text._chat("system", "user", 0))
+                request = open_request.call_args.args[0]
+                self.assertEqual("https://openai.example/v1/chat/completions", request.full_url)
+                self.assertEqual("Bearer openai-secret", request.get_header("Authorization"))
+
+            configure("https://copy.example", "copy-secret")
+            with patch.object(text.urllib.request, "urlopen", return_value=Response()) as open_request:
+                self.assertEqual("OK", text._chat("system", "user", 0))
+                request = open_request.call_args.args[0]
+                self.assertEqual("https://copy.example/v1/chat/completions", request.full_url)
+                self.assertEqual("Bearer copy-secret", request.get_header("Authorization"))
+
+            for base, key in (("https://copy.example", None), (None, "copy-secret")):
+                with self.subTest(base=base, key=bool(key)):
+                    configure(base, key)
+                    with patch.object(text.urllib.request, "urlopen", return_value=Response()) as open_request:
+                        with self.assertRaisesRegex(RuntimeError, "必须同时配置"):
+                            text._chat("system", "user", 0)
+                        open_request.assert_not_called()
+
+            configure("   ", "\t")
+            with patch.object(text.urllib.request, "urlopen", return_value=Response()) as open_request:
+                try:
+                    result = text._chat("system", "user", 0)
+                except Exception as error:
+                    self.fail("blank dedicated settings must fall back together: %s" % error)
+                self.assertEqual("OK", result)
+                request = open_request.call_args.args[0]
+                self.assertEqual("https://openai.example/v1/chat/completions", request.full_url)
+                self.assertEqual("Bearer openai-secret", request.get_header("Authorization"))
+        finally:
+            core.OPENAI_BASE, core.OPENAI_KEY = saved_openai
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            importlib.reload(text)
+
+    def test_copy_provider_translates_actionable_http_errors(self):
+        text = importlib.import_module("content_domains.text")
+        self.assertTrue(hasattr(text, "COPY_API_BASE"), "copy provider needs independent error handling")
+        cases = (
+            (401, "文案模型鉴权失败，请检查 COPY_API_KEY"),
+            (404, "文案模型接口或模型不存在，请检查 COPY_API_BASE 和 COPY_MODEL"),
+            (429, "文案模型请求过于频繁，请稍后重试"),
+            (500, "文案模型服务暂时不可用，请稍后重试"),
+        )
+        for status, message in cases:
+            error = urllib.error.HTTPError(
+                "https://copy.example/v1/chat/completions", status, "provider error", {},
+                io.BytesIO(b'{"error":{"message":"provider detail"}}'),
+            )
+            with self.subTest(status=status), \
+                    patch.object(text, "COPY_API_BASE", "https://copy.example"), \
+                    patch.object(text, "COPY_API_KEY", "copy-secret"), \
+                    patch.object(text.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    text._chat("system", "user", 0)
+
+    def test_copy_provider_fallback_errors_name_openai_configuration(self):
+        text = importlib.import_module("content_domains.text")
+        cases = (
+            (401, "文案模型鉴权失败，请检查 OPENAI_API_KEY"),
+            (404, "文案模型接口或模型不存在，请检查 OPENAI_BASE 和 COPY_MODEL"),
+        )
+        for status, message in cases:
+            error = urllib.error.HTTPError(
+                "https://openai.example/v1/chat/completions", status, "provider error", {},
+                io.BytesIO(b'{"error":{"message":"provider detail"}}'),
+            )
+            with self.subTest(status=status), \
+                    patch.object(text, "COPY_API_BASE", ""), \
+                    patch.object(text, "COPY_API_KEY", ""), \
+                    patch.object(text, "OPENAI_BASE", "https://openai.example"), \
+                    patch.object(text, "OPENAI_KEY", "openai-secret"), \
+                    patch.object(text.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, message) as raised:
+                    text._chat("system", "user", 0)
+                self.assertNotIn("COPY_API_BASE", str(raised.exception))
+                self.assertNotIn("COPY_API_KEY", str(raised.exception))
 
     def test_core_does_not_own_domain_handlers(self):
         core = importlib.import_module("content_domains.core")
@@ -52,15 +207,48 @@ class ContentDomainTests(unittest.TestCase):
         #   下载+ffmpeg+ASR+多模态 domain 逻辑全在 breakdown.py，故门禁上调到 1665。
         # 口播按秒结算：run_job 抢到 done 后按成片真实时长结算多退（thin 计费生命周期胶水，
         #   真实点数计算 talking_actual_cost 在 video.py），门禁上调到 1675。
-        # 一键成片对齐(#P0)：队列路由（口播池）+ 运行闸计数同属 core 队列/限流基础设施；
-        #   批量拆解退点结算逻辑在 points.settle_breakdown_batch，core 只留 2 行接线，门禁上调到 1680。
-        # Seedance 参考图预审(#169)：转存触发 + 后续失败清理属扣点/入队生命周期胶水，
-        #   资格预检/转存/清理逻辑全在 video.stage_xiaole_video_references 等，core 只留 5 行薄接线，门禁上调到 1690。
-        # Seedance 参考图复审(#169)：COS 网络上传移出全局提交锁（拆两段锁 + 扣点前重查上限）、
-        #   _set_terminal 挂终态清理钩子，均属提交/任务生命周期胶水，门禁上调到 1715。
-        # 任务-代码版本绑定：init_db 加 service_sha 列 + health 带 deploy_sha + 两处建任务
-        #   INSERT 带守卫/写列，均属任务生命周期薄接线（版本读取/加列实现在 jobs_store），门禁上调到 1725。
-        self.assertLess(len(core_path.read_text(encoding="utf-8").splitlines()), 1725)
+        # Sora 限时 Beta 只在 core 增加 kind 路由/并发/资产/健康薄接线；API 协议仍在 video_openai.py。
+        # jobs 库 WAL+timeout30（堵 50 齐点压测暴露的 INSERT 超时孤儿扣款路径）：jdb() 是 core
+        #   任务库基础设施，+5 行，门禁上调到 1715。
+        # 短剧关键帧的跨 Auth/content 崩溃恢复仍只在 core 保留提交锁、入队与 HTTP
+        # 编排；持久状态机、quote/关联/补偿细节都在 short_drama_production.py。
+        # attempt-backed 与通用 job 的失败分流也只保留一个薄编排 helper；原子状态迁移和
+        # still-refund 所有权仍全部位于 short_drama_production.py。
+        core_source = core_path.read_text(encoding="utf-8")
+        self.assertNotRegex(
+            core_source,
+            r"(?m)^def (?:gen_image|gen_copy|gen_collect|gen_leads|gen_audio|"
+            r"gen_video|gen_breakdown)\(",
+        )
+        # Digital IP Structured Outputs 在 core 只保留鉴权与 HTTP 状态薄接线；
+        # 诊断与引导逻辑必须继续独立在 digital_ip.py。
+        self.assertNotRegex(core_source, r"(?m)^def (?:diagnose|guide)\(")
+    def test_openai_base_with_v1_is_not_duplicated(self):
+        core = importlib.import_module("content_domains.core")
+        urls = []
+        self.assertEqual(
+            core._api_url("https://api.openai.com", "/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions",
+        )
+
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_): pass
+            def read(self): return b"{}"
+
+        def open_url(request, **_):
+            urls.append(request.full_url)
+            return Response()
+
+        with mock.patch.object(core, "OPENAI_BASE", "https://sg.example/openai/v1/"), \
+             mock.patch.object(core.urllib.request, "urlopen", side_effect=open_url):
+            core._post("/v1/chat/completions", b"{}", "application/json")
+            core._post_bytes("/v1/audio/speech", b"{}", "application/json")
+
+        self.assertEqual(urls, [
+            "https://sg.example/openai/v1/chat/completions",
+            "https://sg.example/openai/v1/audio/speech",
+        ])
 
     def test_content_api_reclaims_orphans_on_startup(self):
         # 防回归：孤儿回收必须挂在真入口 content_api.main（服务走 content_api.py，
@@ -214,7 +402,8 @@ class ContentDomainTests(unittest.TestCase):
                 return 0
 
             def refund_points(self, username, cost, reason="", transaction_key=""):
-                return self.safe_refund_points(username, cost, reason)
+                self.refunds.append((username, cost, reason))
+                return 0
 
         fake_points = FakePoints()
         with tempfile.TemporaryDirectory() as td:
@@ -252,41 +441,81 @@ class ContentDomainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             core.JOB_DB = str(Path(td) / "jobs.db")
             called = []
-            core.HANDLERS = {"video": lambda p: called.append(p) or {"ok": 1},
-                             "script_to_video": lambda p: called.append(p) or {"ok": 1}}
+            core.HANDLERS = {"video": lambda p: called.append(p) or {"ok": 1}}
             try:
                 with closing(core.jdb()) as c:
                     c.execute("""CREATE TABLE jobs(
                         id INTEGER PRIMARY KEY, kind TEXT, username TEXT, cost INTEGER,
                         status TEXT, payload TEXT, result TEXT, error TEXT,
                         created_at INTEGER, updated_at INTEGER, refunded INTEGER DEFAULT 0)""")
-                    # fang: 1 条口播 + 1 条一键成片 running —— 两个 kind 都占口播运行槽
+                    # fang: 2 条口播 running(kind=video 现在只有口播 text/audio)
                     c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(1,'video','fang',20,'running','{\"mode\":\"text\"}',1,1)")
-                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(2,'script_to_video','fang',20,'running','{\"style\":\"口播\"}',1,1)")
+                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(2,'video','fang',20,'running','{\"mode\":\"audio\"}',1,1)")
                     # 第4条 pending 口播 —— 应被运行闸 defer，留 pending、不调 handler
                     c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(4,'video','fang',20,'pending','{\"mode\":\"text\"}',1,1)")
-                    # 第5条 pending 一键成片 —— 同样应被运行闸 defer
-                    c.execute("INSERT INTO jobs(id,kind,username,cost,status,payload,created_at,updated_at) VALUES(5,'script_to_video','fang',20,'pending','{\"style\":\"口播\"}',1,1)")
                     c.commit()
-                # count = kind IN (video, script_to_video) 的 running = 2
+                # count = 全部 kind=video running = 2
                 self.assertEqual(core._user_running_talking_count("fang"), 2)
                 core.run_job(4)
-                core.run_job(5)
                 self.assertEqual(called, [])  # 超运行闸→handler 不该被调
                 with closing(core.jdb()) as c:
                     self.assertEqual(c.execute("SELECT status FROM jobs WHERE id=4").fetchone()["status"], "pending")
-                    self.assertEqual(c.execute("SELECT status FROM jobs WHERE id=5").fetchone()["status"], "pending")
             finally:
                 core.JOB_DB = original_job_db
                 core.HANDLERS = original_handlers
 
-    def test_script_to_video_routes_to_talking_queue(self):
-        """一键成片是 HeyGen 分钟级长任务：必须进口播专用池 —— 落快池 3 条就堵死 copy/audio 等秒级任务"""
-        core = importlib.import_module("content_domains.core")
-        self.assertIs(core._pick_job_queue("script_to_video"), core._talking_job_queue)
-        self.assertIsNot(core._pick_job_queue("script_to_video"), core._fast_job_queue)
-
     def test_clone_vip_validation_rejects_before_mutation(self):
+        audio = importlib.import_module("content_domains.audio")
+        original_adb = audio.adb
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "audio.db"
+
+            def rejecting_case_db():
+                c = sqlite3.connect(db_path)
+                c.row_factory = sqlite3.Row
+                return c
+
+            audio.adb = rejecting_case_db
+            try:
+                with closing(rejecting_case_db()) as c:
+                    c.execute("""CREATE TABLE audio_voice_slots(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT, slot_id TEXT, status TEXT, voice_id INTEGER,
+                        reclone_count INTEGER, updated_at INTEGER, clone_upload_at INTEGER
+                    )""")
+                    c.execute("""INSERT INTO audio_voice_slots
+                        (username, slot_id, status, voice_id, reclone_count, updated_at, clone_upload_at)
+                        VALUES('fang','S_demo','ready',7,9,100,100)""")
+                    c.commit()
+
+                before = self._slot_snapshot(rejecting_case_db, "fang", "S_demo")
+                cases = [
+                    ({"slot_id": "S_demo", "audio_format": "wav"}, 400, "请先上传样音"),
+                    ({"slot_id": "S_demo", "audio": "YQ==", "audio_format": "exe"}, 400, "audio_format 仅支持"),
+                    ({"slot_id": "S_missing", "audio": "YQ==", "audio_format": "wav"}, 404, "音色槽位不存在"),
+                ]
+                for payload, status, msg in cases:
+                    with self.subTest(payload=payload):
+                        with self.assertRaises(audio.CloneVipValidationError) as cm:
+                            audio.validate_clone_vip_payload("fang", payload)
+                        self.assertEqual(cm.exception.status, status)
+                        self.assertIn(msg, cm.exception.detail)
+                        self.assertEqual(before, self._slot_snapshot(rejecting_case_db, "fang", "S_demo"))
+
+                with closing(rejecting_case_db()) as c:
+                    c.execute("UPDATE audio_voice_slots SET reclone_count=25 WHERE username='fang' AND slot_id='S_demo'")
+                    c.commit()
+                before_unlimited = self._slot_snapshot(rejecting_case_db, "fang", "S_demo")
+                checked = audio.validate_clone_vip_payload(
+                    "fang",
+                    {"slot_id": "S_demo", "audio": base64.b64encode(b'audio').decode(), "audio_format": "wav"},
+                )
+                self.assertEqual("S_demo", checked["slot_id"])
+                self.assertEqual(before_unlimited, self._slot_snapshot(rejecting_case_db, "fang", "S_demo"))
+            finally:
+                audio.adb = original_adb
+
+    def test_mark_clone_training_allows_unlimited_reclones(self):
         audio = importlib.import_module("content_domains.audio")
         original_adb = audio.adb
         with tempfile.TemporaryDirectory() as td:
@@ -303,36 +532,29 @@ class ContentDomainTests(unittest.TestCase):
                     c.execute("""CREATE TABLE audio_voice_slots(
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT, slot_id TEXT, status TEXT, voice_id INTEGER,
-                        reclone_count INTEGER, updated_at INTEGER, clone_upload_at INTEGER
+                        reclone_count INTEGER, clone_started_at INTEGER,
+                        updated_at INTEGER, clone_upload_at INTEGER, clone_error TEXT
+                    )""")
+                    c.execute("""CREATE TABLE audio_voices(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT, scope TEXT, voice_key TEXT, display_name TEXT,
+                        provider_voice TEXT, slot_id TEXT, created_at INTEGER, updated_at INTEGER,
+                        UNIQUE(username, scope, voice_key)
                     )""")
                     c.execute("""INSERT INTO audio_voice_slots
                         (username, slot_id, status, voice_id, reclone_count, updated_at, clone_upload_at)
-                        VALUES('fang','S_demo','ready',7,9,100,100)""")
+                        VALUES('fang','S_demo','ready',7,25,100,100)""")
                     c.commit()
 
-                before = self._slot_snapshot(test_adb, "fang", "S_demo")
-                cases = [
-                    ({"slot_id": "S_demo", "audio_format": "wav"}, 400, "请先上传样音"),
-                    ({"slot_id": "S_demo", "audio": "YQ==", "audio_format": "exe"}, 400, "audio_format 仅支持"),
-                    ({"slot_id": "S_missing", "audio": "YQ==", "audio_format": "wav"}, 404, "音色槽位不存在"),
-                ]
-                for payload, status, msg in cases:
-                    with self.subTest(payload=payload):
-                        with self.assertRaises(audio.CloneVipValidationError) as cm:
-                            audio.validate_clone_vip_payload("fang", payload)
-                        self.assertEqual(cm.exception.status, status)
-                        self.assertIn(msg, cm.exception.detail)
-                        self.assertEqual(before, self._slot_snapshot(test_adb, "fang", "S_demo"))
+                with mock.patch.object(audio, "clear_voice_preview", return_value=0):
+                    result = audio.mark_clone_training("fang", "S_demo", "不限次数")
 
+                self.assertEqual(26, result["reclone_count"])
+                self.assertNotIn("reclone_remaining", result)
                 with closing(test_adb()) as c:
-                    c.execute("UPDATE audio_voice_slots SET reclone_count=10 WHERE username='fang' AND slot_id='S_demo'")
-                    c.commit()
-                before_limit = self._slot_snapshot(test_adb, "fang", "S_demo")
-                with self.assertRaises(audio.CloneVipValidationError) as cm:
-                    audio.validate_clone_vip_payload("fang", {"slot_id": "S_demo", "audio": base64.b64encode(b'audio').decode(), "audio_format": "wav"})
-                self.assertEqual(cm.exception.status, 409)
-                self.assertIn("复刻上限", cm.exception.detail)
-                self.assertEqual(before_limit, self._slot_snapshot(test_adb, "fang", "S_demo"))
+                    row = c.execute("""SELECT status, reclone_count
+                        FROM audio_voice_slots WHERE username='fang' AND slot_id='S_demo'""").fetchone()
+                self.assertEqual(("training", 26), tuple(row))
             finally:
                 audio.adb = original_adb
 
@@ -342,14 +564,14 @@ class ContentDomainTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "audio.db"
 
-            def test_adb():
+            def valid_case_db():
                 c = sqlite3.connect(db_path)
                 c.row_factory = sqlite3.Row
                 return c
 
-            audio.adb = test_adb
+            audio.adb = valid_case_db
             try:
-                with closing(test_adb()) as c:
+                with closing(valid_case_db()) as c:
                     c.execute("""CREATE TABLE audio_voice_slots(
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         username TEXT, slot_id TEXT, status TEXT, voice_id INTEGER,

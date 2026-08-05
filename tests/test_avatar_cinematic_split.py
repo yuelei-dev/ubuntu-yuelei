@@ -56,11 +56,11 @@ class PipelineWiringTests(unittest.TestCase):
 
     def test_costs_are_registered(self):
         """⚠️ cost_of() 回落到 COST.get(kind, 0) —— 新 kind 忘了登记就是【免费】。"""
-        self.assertEqual(points.cost_of("avatar", {}), 5)
-        # 获客固定 30 点/次（采集量前端固定 20 视频），与 leads.html 成本徽章一致；
-        # count/pages 传什么都是 30，防"消耗点数对不上"。
-        self.assertEqual(points.cost_of("leads", {}), 30)
-        self.assertEqual(points.cost_of("leads", {"count": 100, "pages": 3}), 30)
+        self.assertEqual(points.cost_of("avatar", {}), 2)
+        # 获客按 6 + floor(数量×页数÷4) 计费；前端固定 20 条、1 页时是 11 点。
+        self.assertEqual(points.cost_of("leads", {}), 9)
+        self.assertEqual(points.cost_of("leads", {"count": 20, "pages": 1}), 11)
+        self.assertEqual(points.cost_of("leads", {"count": 100, "pages": 3}), 28)
         # cinematic 改成按成片秒数计费了（见 test_cinematic_billing），这里只守住底线：
         # 无论 payload 多空、玩法认不认得出来，都不能算出 0 点 —— 那是白送一条 $7 的视频。
         for kind in ("avatar", "cinematic"):
@@ -69,7 +69,7 @@ class PipelineWiringTests(unittest.TestCase):
     def test_reaper_grace_is_long_enough(self):
         # cinematic 现在跟全站的 15 分钟死线走（见 test_video_gen_deadline）：
         # reaper 的宽限必须【后】于引擎自己的死线触发，否则白扣一次上游的钱。
-        # 电影化身有【自己的】死线(20 分钟)和宽限(25 分钟)，不再跟口播那条 VIDEO_REAPER_GRACE 走。
+        # 电影化身有【自己的】死线(30 分钟)和宽限(35 分钟)，不再跟口播那条 VIDEO_REAPER_GRACE 走。
         self.assertEqual(core.KIND_GRACE["cinematic"], core.CINEMATIC_REAPER_GRACE)
         self.assertGreater(core.KIND_GRACE["cinematic"], core.CINEMATIC_GEN_DEADLINE)
         self.assertGreater(core.VIDEO_REAPER_GRACE, core.VIDEO_GEN_DEADLINE)
@@ -106,7 +106,7 @@ class PipelineWiringTests(unittest.TestCase):
 
     def test_building_an_avatar_does_not_take_a_video_slot(self):
         """闸是给【视频提交】削峰的。建形象不是 video job —— 它不吃 HeyGen 的视频并发额度，
-        让它去抢那 21 个槽，只会把视频 worker 饿着。
+        让它去抢那 31 个槽，只会把视频 worker 饿着。
 
         而且它本来也不需要：10 路并发建形象实测 0×429（瓶颈是我们自己的出境隧道，不是 HeyGen）。
         真撞上突发限流，_heygen_retry_429 已经包在建形象的提交上了。
@@ -117,6 +117,17 @@ class PipelineWiringTests(unittest.TestCase):
     def test_cinematic_gets_a_real_pool_now_that_20_way_is_proven(self):
         # 20 路并发实测通过 → 剧情视频不再需要「份额上限」，给满 10 个
         self.assertEqual(core.CINEMATIC_JOB_WORKERS, 10)
+
+    def test_talking_pool_and_backlog_match_capacity_config(self):
+        self.assertEqual(core.TALKING_JOB_WORKERS, 20)
+        self.assertEqual(video.HEYGEN_MAX_CONCURRENCY, 31)
+        self.assertEqual(core.JOB_QUEUE_MAX, 64)
+        self.assertEqual(core.TALKING_JOB_QUEUE_MAX, 192)
+        self.assertEqual(core._talking_job_queue.maxsize, 192)
+        for q in (core._job_queue, core._fast_job_queue, core._image_job_queue,
+                  core._cinematic_job_queue, core._avatar_job_queue):
+            self.assertEqual(q.maxsize, 64)
+        self.assertEqual(core._PENDING_RECOVERY_LIMIT, 192)
 
     def test_every_heygen_generation_path_takes_a_slot(self):
         """漏掉任何一条路径，那条就绕过了闸 —— 包括中转（泽龙转发的是同一个账号）。"""
@@ -137,7 +148,7 @@ class PipelineWiringTests(unittest.TestCase):
     def test_cinematic_results_reach_the_video_asset_library(self):
         # 剧情视频是视频，必须进视频资产库，否则用户在资产库里看不到它
         src = Path(core.__file__).read_text(encoding="utf-8")
-        self.assertIn('{"video", "tryon", "xiaole_video", "cinematic"}', src)
+        self.assertIn('{"video", "tryon", "xiaole_video", "sora_video", "cinematic"}', src)
 
     def test_both_features_are_toggleable_from_admin(self):
         self.assertIn("avatar", feature_flags.CATALOG_MAP)
@@ -208,9 +219,9 @@ class CinematicValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             video.validate_cinematic_payload(self._body(prompt="   "))
 
-    def test_both_resolutions_are_allowed(self):
+    def test_legacy_resolutions_are_accepted_but_forced_to_720p(self):
         for r in ("720p", "1080p"):
-            self.assertEqual(video.validate_cinematic_payload(self._body(resolution=r))["resolution"], r)
+            self.assertEqual(video.validate_cinematic_payload(self._body(resolution=r))["resolution"], "720p")
 
     def test_rejects_unsupported_resolution(self):
         with self.assertRaises(ValueError):
@@ -251,7 +262,7 @@ class CinematicRequestBodyTests(unittest.TestCase):
         body = self._capture(avatar_item_id=["look1", "look2", "look3"], reference_asset_id="ref1",
                              ratio="9:16", resolution="1080p", duration=10, prompt="海边跳舞")
         self.assertEqual(body["avatar_id"], ["look1", "look2", "look3"])
-        self.assertEqual(body["resolution"], "1080p")
+        self.assertEqual(body["resolution"], "720p")
 
     def test_single_avatar_still_works(self):
         # 动作模仿那条老路径传的是单个 id（不是列表），不能因为改成数组就坏掉

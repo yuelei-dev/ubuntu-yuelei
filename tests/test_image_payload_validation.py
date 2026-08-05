@@ -158,5 +158,34 @@ class PromptAndCountTests(unittest.TestCase):
             image.validate_image_payload("not a dict")
 
 
+class XiaoleMultiReferenceTests(unittest.TestCase):
+    def test_xiaole_accepts_multiple_valid_references(self):
+        out = image.validate_image_payload({
+            "provider": "xiaole", "prompt": "护肤产品海报",
+            "reference_images": [_b64(PNG), "data:image/png;base64," + _b64(PNG)],
+        })
+        self.assertEqual(2, len(out["reference_images"]))
+        self.assertEqual(PNG, base64.b64decode(out["reference_images"][1], validate=True))
+
+    def test_openai_accepts_multiple_references_up_to_official_limit(self):
+        out = image.validate_image_payload({
+            "prompt": "让 @图片1 穿上 @图片2 的衣服",
+            "reference_images": [_b64(PNG), _b64(PNG)],
+        })
+        self.assertEqual(2, len(out["reference_images"]))
+
+    def test_missing_prompt_reference_is_rejected_before_charge(self):
+        with self.assertRaisesRegex(ValueError, "@图片2"):
+            image.validate_image_payload({
+                "prompt": "参考 @图片2", "reference_images": [_b64(PNG)]
+            })
+
+    def test_openai_rejects_over_official_limit(self):
+        with self.assertRaisesRegex(ValueError, "16 张"):
+            image.validate_image_payload({
+                "prompt": "p", "reference_images": [_b64(PNG)] * 17
+            })
+
+
 if __name__ == "__main__":
     unittest.main()

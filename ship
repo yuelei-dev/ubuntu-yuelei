@@ -1,20 +1,12 @@
 #!/usr/bin/env bash
-# ship — 黄雀一键上线：pull → commit → push → 部署 → 版本标记 → 重启 → 验证
+# ship — 黄雀一键上线：校验 clean main → 部署 → 重启 → 验证
 #
-# 用法：  ./ship [--exact-files] [--pr <号>] "提交说明" 文件1 [文件2 ...]
+# 用法：  ./ship [--exact-content-domains] "提交说明" 文件1 [文件2 ...]
 #   后端：./ship "修获客超时" server/leadgen_api.py
 #   前端：./ship "改采集页文案" site/workbench/collect.html
 #   多个：./ship "联调获客" server/leadgen_api.py site/workbench/collect.html
 #
-# --exact-files（精确清单模式）：只部署命令行列出的文件，不触发 content_domains
-#   整目录 --delete 同步；content_domains 文件只允许覆盖远端已存在的文件。
-#   凡参数涉及 server/content_domains/ 必须显式加此标志 —— 整目录同步会清掉
-#   测试服手工登记的兼容层/例外文件（治理盘点 PR #173）。
-#
-# --pr <号>（可选）：本次部署关联的 PR，透传给远端 drift_sentinel --bless-deploy
-#   落账 deploy_bless.jsonl（部署登记闭环）。也可用 env HQ_SHIP_PR；显式 --pr 优先。
-#
-# 全程在 git 里：自动备份 + 完整历史 + 一条命令回滚。绝不在服务器上直接改。
+# 只发布已经合并到实时 origin/main 的干净提交。绝不在服务器上直接改。
 
 # 密钥与主机可用环境变量覆盖：原来写死了某台开发机的路径和 ssh 别名，
 # 换一台机器（如 Windows/Git Bash）就跑不起来，只能手工 scp —— 那正是 ship 要杜绝的。
@@ -33,25 +25,13 @@ case "$SERVICE_WAIT_SECONDS" in
   0) echo "❌ HQ_SERVICE_WAIT_SECONDS 必须大于 0"; exit 1 ;;
 esac
 
-EXACT_FILES=0
-if [ "${1:-}" = "--exact-files" ]; then
-  EXACT_FILES=1
+EXACT_CONTENT_DOMAINS=0
+if [ "${1:-}" = "--exact-content-domains" ]; then
+  EXACT_CONTENT_DOMAINS=1
   shift
 fi
 
-# --pr <号>：本次部署关联的 PR 号，远端 bless 落账 deploy_bless.jsonl。
-# env HQ_SHIP_PR 可兜底（CI/看板场景），显式 --pr 优先；必须是纯数字。
-PR_NO="${HQ_SHIP_PR:-}"
-if [ "${1:-}" = "--pr" ]; then
-  PR_NO="${2:-}"
-  shift 2
-fi
-case "$PR_NO" in
-  '') ;;
-  *[!0-9]*) echo "❌ --pr 必须是纯数字（收到 '$PR_NO'）"; exit 1 ;;
-esac
-
-[ $# -lt 2 ] && { echo "用法: ./ship [--exact-files] [--pr <号>] \"提交说明\" 文件1 [文件2 ...]"; exit 1; }
+[ $# -lt 2 ] && { echo "用法: ./ship [--exact-content-domains] \"提交说明\" 文件1 [文件2 ...]"; exit 1; }
 
 # 传文件：有 rsync 就用 rsync；没有（Windows/Git Bash 自带 ssh 但没 rsync）就
 # scp 到 /tmp 再 sudo 安装到位。必须保留原属主 —— 直接 sudo install 会把
@@ -86,78 +66,44 @@ push_dir(){
 }
 MSG="$1"; shift
 
-# 测试服运行时 overlay 是一个不可拆分的精确清单：它把测试服已登记功能作为
-# preimage，前向移植已合并功能。必须整单部署、逐目标预哈希，不能挑其中几项。
-OVERLAY_MANIFEST=""
-for target in "$@"; do
-  case "$target" in
-    deploy/test-runtime/*/runtime/*)
-      candidate="${target%%/runtime/*}/manifest.json"
-      if [ -n "$OVERLAY_MANIFEST" ] && [ "$OVERLAY_MANIFEST" != "$candidate" ]; then
-        echo "❌ 一次部署不能混用两个 test-runtime manifest"; exit 1
-      fi
-      OVERLAY_MANIFEST="$candidate"
-      ;;
-  esac
-done
-if [ -n "$OVERLAY_MANIFEST" ]; then
-  [ "$EXACT_FILES" = "1" ] || { echo "❌ test-runtime overlay 必须显式用 --exact-files"; exit 1; }
-  [ -n "$PR_NO" ] || { echo "❌ test-runtime overlay 必须显式传 --pr <号> 落账"; exit 1; }
-  [ "${HQ_SHIP_TARGET:-}" = "test" ] || { echo "❌ test-runtime overlay 只允许 HQ_SHIP_TARGET=test"; exit 1; }
-  case "$REMOTE" in
-    8.148.158.106|*@8.148.158.106) ;;
-    *) echo "❌ test-runtime overlay 的 HQ_REMOTE 必须明确指向测试服 8.148.158.106（收到 '$REMOTE'）"; exit 1 ;;
-  esac
+# 1. 发布源必须是已合并、无本地改动的实时 main。ship 不再代替 PR 流程提交或推送。
+echo "==> 1/5 校验发布源（clean main == 实时 origin/main）"
+BRANCH="$(git branch --show-current 2>/dev/null)" || { echo "❌ 无法读取当前分支"; exit 1; }
+[ "$BRANCH" = "main" ] || { echo "❌ 只允许从本地 main 发布（当前: ${BRANCH:-detached}）"; exit 1; }
+WORKTREE_STATUS="$(git status --porcelain --untracked-files=all)" || { echo "❌ 无法检查工作区"; exit 1; }
+[ -z "$WORKTREE_STATUS" ] || { echo "❌ 工作区有改动，拒绝发布；请先通过 PR 合并到 main"; exit 1; }
+HEAD_SHA="$(git rev-parse HEAD 2>/dev/null)" || { echo "❌ 无法读取本地 HEAD"; exit 1; }
+REMOTE_MAIN="$(git ls-remote --exit-code origin refs/heads/main 2>/dev/null)" \
+  || { echo "❌ 无法读取实时 origin/main"; exit 1; }
+REMOTE_MAIN="${REMOTE_MAIN%%[[:space:]]*}"
+[ -n "$REMOTE_MAIN" ] && [ "$HEAD_SHA" = "$REMOTE_MAIN" ] \
+  || { echo "❌ 本地 main 不是实时 origin/main，拒绝发布"; exit 1; }
+git ls-files --error-unmatch -- "$@" >/dev/null 2>&1 \
+  || { echo "❌ 仅允许发布当前 main 中 Git 跟踪的文件"; exit 1; }
+if [ "$EXACT_CONTENT_DOMAINS" = "1" ]; then
+  for target in "$@"; do
+    [ "$target" != "server/content_api.py" ] \
+      || { echo "❌ file-only 模式不能发布 server/content_api.py（会触发 content_domains 整目录同步）"; exit 1; }
+  done
 fi
 
 $SSHC -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE" true 2>/dev/null || {
   echo "❌ 连不上 $REMOTE。设 HQ_REMOTE=user@host（和 HQ_SSH_KEY=私钥路径）再试。"; exit 1; }
 
-# 登记例外保护：content_domains 走整目录 --delete 同步会清掉测试服手工登记的
-# 兼容层/例外文件（PR #173 盘点）。凡涉及 server/content_domains/ 必须显式
-# --exact-files：只部署列出的文件，且只允许覆盖远端已存在的文件。
-if [ "$EXACT_FILES" = "0" ]; then
-  for target in "$@"; do
-    case "$target" in
-      server/content_domains/*)
-        echo "❌ 部署 content_domains 文件必须显式用 --exact-files（整目录 --delete 同步会覆盖测试服登记例外）"; exit 1 ;;
-    esac
-  done
-fi
-
-# 1. 先拉最新（治"覆盖别人的活"）
-echo "==> 1/5 git pull --rebase（先同步对方的改动）"
-git pull --rebase || { echo "❌ pull 有冲突，先解决再 ship"; exit 1; }
-
-# 2. commit + push（进 git = 自动有备份）
-echo "==> 2/5 commit + push"
-if [ -n "$OVERLAY_MANIFEST" ]; then
-  python3 scripts/test_runtime_overlay.py validate "$OVERLAY_MANIFEST" "$@" \
-    || { echo "❌ test-runtime 精确清单本地校验失败"; exit 1; }
-  for target in "$@"; do git ls-files --error-unmatch "$target" >/dev/null 2>&1 \
-    || { echo "❌ overlay 部署文件未提交到 Git：$target"; exit 1; }; done
-  git diff --quiet -- "$@" && git diff --cached --quiet -- "$@" \
-    || { echo "❌ overlay 只能从已合并的干净文件部署，检测到未提交改动"; exit 1; }
-  [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] \
-    || { echo "❌ overlay 只能部署 origin/main 的精确已合并提交"; exit 1; }
-  echo "  ✓ 精确文件均已提交，HEAD == origin/main；不在部署命令中创建提交"
-else
-  git add "$@" || { echo "❌ 文件路径有误"; exit 1; }
-  if git diff --cached --quiet; then
-    echo "  （这些文件没改动，跳过提交）"
-  else
-    git commit -m "$MSG" || exit 1
-  fi
-  git push || { echo "❌ push 失败（先 pull？）"; exit 1; }
-fi
+echo "==> 2/5 发布源已锁定（不提交、不推送）"
+printf "  ✓ main@%.7s | %s\n" "$HEAD_SHA" "$MSG"
 
 # 3. 部署每个文件到对应位置 + 记下要重启的服务
 echo "==> 3/5 部署到服务器"
 RESTART=""
+TIMERS=""
 DEPLOYED=""
 NEED_RELOAD=0   # 部署过 systemd 单元/drop-in 时置 1，重启前必须 daemon-reload，否则改动不生效
 CONTENT_DOMAINS_SYNCED=0
+PROVIDERS_SYNCED=0
 add_svc(){ for s in $1; do case " $RESTART " in *" $s "*) ;; *) RESTART="$RESTART $s";; esac; done; }
+add_timer(){ for t in $1; do case " $TIMERS " in *" $t "*) ;; *) TIMERS="$TIMERS $t";; esac; done; }
+add_deployed(){ case " $DEPLOYED " in *" $1 "*) ;; *) DEPLOYED="$DEPLOYED $1";; esac; }
 
 show_service_diagnostics(){
   local services="${1:-${RESTART:-huangque-content}}" s
@@ -199,6 +145,22 @@ else
   printf '%s\n' "$out" | tail -8 | sed 's/^/       /'
   exit 1
 fi
+if [ "$svc" = "huangque-content" ]; then
+  if out=$(cd "$wd" && PYTHONDONTWRITEBYTECODE=1 "$py_bin" -c "from content_domains import text; assert text.validate_copy_payload({'prompt':'ship-contract'})['prompt'] == 'ship-contract'" 2>&1); then
+    echo "    ✓ $svc: 文案跨模块契约通过"
+  else
+    echo "    ❌ $svc: 文案跨模块契约失败 —— 中止，不重启"
+    printf '%s\n' "$out" | tail -8 | sed 's/^/       /'
+    exit 1
+  fi
+  if out=$(cd "$wd" && PYTHONDONTWRITEBYTECODE=1 "$py_bin" -c "import inspect; from content_domains import jobs_store, video; assert 'before_charge' in inspect.signature(jobs_store.create_paid_job).parameters; assert 'username' in inspect.signature(video.validate_xiaole_video_payload).parameters; assert callable(video.prepare_xiaole_reference_submission)" 2>&1); then
+    echo "    ✓ $svc: Seedance 参考图跨模块契约通过"
+  else
+    echo "    ❌ $svc: Seedance 参考图跨模块契约失败 —— 中止，不重启"
+    printf '%s\n' "$out" | tail -8 | sed 's/^/       /'
+    exit 1
+  fi
+fi
 RS
 }
 
@@ -231,174 +193,117 @@ fi
 echo "    ✓ $svc 重启生效、配置已加载"
 RS
 }
-
-resolve_overlay(){
-  python3 scripts/test_runtime_overlay.py resolve "$OVERLAY_MANIFEST" "$1"
-}
-
-# 所有目标先验完再写第一个文件；任一 preimage 漂移都整单 fail-closed。
-OVERLAY_BACKUP_DIR=""
-if [ -n "$OVERLAY_MANIFEST" ]; then
-  echo "==> 2.5/5 test-runtime 全量预哈希（写入前）"
-  for f in "$@"; do
-    line="$(resolve_overlay "$f")" || exit 1
-    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
-    [ "$svc" = "-" ] && svc=""
-    add_svc "$svc"
-    case "$expected_state" in
-      sha256)
-        actual_sha="$($SSHC "$REMOTE" "sudo sha256sum '$remote_file' 2>/dev/null | cut -d ' ' -f1")" \
-          || { echo "  ❌ 无法读取目标：$remote_file"; exit 1; }
-        [ "$actual_sha" = "$expected_sha" ] \
-          || { echo "  ❌ preimage 漂移：$remote_file（整单未写入）"; exit 1; }
-        ;;
-      absent)
-        $SSHC "$REMOTE" "sudo test ! -e '$remote_file'" \
-          || { echo "  ❌ 预期不存在但目标已出现：$remote_file（整单未写入）"; exit 1; }
-        ;;
-      *) echo "  ❌ manifest 目标状态非法：$f"; exit 1 ;;
-    esac
-    echo "  ✓ $remote_file preimage=$expected_state"
-  done
-
-  stamp="$($SSHC "$REMOTE" "date -u +%Y%m%dT%H%M%SZ")" || exit 1
-  OVERLAY_BACKUP_DIR="/opt/huangque-deploy-backups/pr${PR_NO}-$(git rev-parse --short=8 HEAD)-${stamp}"
-  $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR'" \
-    || { echo "❌ 无法创建备份目录，整单未写入"; exit 1; }
-  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' \
-    | $SSHC "$REMOTE" "sudo tee '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" \
-    || { echo "❌ 无法创建回滚脚本，整单未写入"; exit 1; }
-  for f in "$@"; do
-    line="$(resolve_overlay "$f")" || exit 1
-    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
-    [ "$svc" = "-" ] && svc=""
-    if [ "$expected_state" = "sha256" ]; then
-      rel="${remote_file#/}"
-      parent="${rel%/*}"
-      $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/$parent' && sudo cp -a '$remote_file' '$OVERLAY_BACKUP_DIR/$rel'" \
-        || { echo "❌ 备份失败：$remote_file（整单未写入）"; exit 1; }
-      printf '%s\n' "sudo cp -a '$OVERLAY_BACKUP_DIR/$rel' '$remote_file'" \
-        "test \"\$(sudo sha256sum '$remote_file' | cut -d ' ' -f1)\" = '$expected_sha'" \
-        | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
-    else
-      $SSHC "$REMOTE" "printf '%s\n' '$remote_file' | sudo tee -a '$OVERLAY_BACKUP_DIR/expected-absent.txt' >/dev/null" \
-        || { echo "❌ 备份清单写入失败（整单未写入）"; exit 1; }
-      printf '%s\n' "sudo rm -f '$remote_file'" \
-        "sudo test ! -e '$remote_file'" \
-        | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null" || exit 1
-    fi
-  done
-  # 部署会在重启前改版本标记，快照与回滚必须把它一起恢复。
-  version_rel="home/ubuntu/content-api/.deploy-version"
-  if $SSHC "$REMOTE" "sudo test -f '/$version_rel'"; then
-    $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/content-api' && sudo cp -a '/$version_rel' '$OVERLAY_BACKUP_DIR/$version_rel'" || exit 1
-    version_restore="sudo cp -a '$OVERLAY_BACKUP_DIR/$version_rel' '/$version_rel'"
-  else
-    version_restore="sudo rm -f '/$version_rel'"
-  fi
-  active_rel="home/ubuntu/hq-drift/active_overlays.json"
-  if $SSHC "$REMOTE" "sudo test -f '/$active_rel'"; then
-    $SSHC "$REMOTE" "sudo mkdir -p '$OVERLAY_BACKUP_DIR/home/ubuntu/hq-drift' && sudo cp -a '/$active_rel' '$OVERLAY_BACKUP_DIR/$active_rel'" || exit 1
-    active_restore="sudo cp -a '$OVERLAY_BACKUP_DIR/$active_rel' '/$active_rel'"
-  else
-    active_restore="sudo rm -f '/$active_rel'"
-  fi
-  restore_restart="sudo systemctl"
-  restore_restart="$restore_restart restart $RESTART"
-  printf '%s\n' "$version_restore" \
-    "$active_restore" \
-    "$restore_restart" \
-    "for service in $RESTART; do sudo systemctl is-active --quiet \"\$service\"; done" \
-    | $SSHC "$REMOTE" "sudo tee -a '$OVERLAY_BACKUP_DIR/restore.sh' >/dev/null && sudo chmod 700 '$OVERLAY_BACKUP_DIR/restore.sh'" || exit 1
-  echo "  ✓ 部署前快照：$OVERLAY_BACKUP_DIR"
-
-  # 从首次运行文件写入起，任一 push/import/restart/verify/health/pricing 失败都自动恢复。
-  OVERLAY_ROLLBACK_ARMED=1
-  rollback_overlay_on_exit(){
-    status=$?
-    [ "$status" -ne 0 ] && [ "${OVERLAY_ROLLBACK_ARMED:-0}" = "1" ] || return "$status"
-    trap - EXIT
-    echo "  ⚠ 部署未完成，自动执行精确恢复：$OVERLAY_BACKUP_DIR/restore.sh"
-    if $SSHC "$REMOTE" "sudo '$OVERLAY_BACKUP_DIR/restore.sh'"; then
-      echo "  ✓ 自动恢复通过：preimage/absent 与服务 active 均已复核"
-    else
-      echo "  ❌ 自动恢复失败，请立即人工执行：ssh $REMOTE sudo '$OVERLAY_BACKUP_DIR/restore.sh'" >&2
-    fi
-    exit "$status"
-  }
-  trap rollback_overlay_on_exit EXIT
-fi
-
 for f in "$@"; do
-  if [ -n "$OVERLAY_MANIFEST" ]; then
-    line="$(resolve_overlay "$f")" || exit 1
-    IFS=$'\t' read -r remote_file svc expected_state expected_sha <<<"$line"
-    [ "$svc" = "-" ] && svc=""
-    dest="${remote_file%/*}/"
-  else
-    case "$f" in
-    server/auth_server.py) dest=/home/ubuntu/auth-service/; svc=huangque-auth ;;
+  timer=""
+  case "$f" in
+    server/auth_server.py|server/hq_cli_api.py|server/invites.py|server/invite_network.py|server/business_cards.py|server/wxpay.py|server/wechat_subscribe.py) dest=/home/ubuntu/auth-service/; svc=huangque-auth ;;
+    server/content_domains/__init__.py|server/content_domains/cos.py|server/content_domains/miniprogram_security.py|server/content_domains/pricing.py)
+             dest=/home/ubuntu/auth-service/content_domains/; svc=huangque-auth ;;
+    server/wechat_virtual_pay.py|server/sync_virtual_pay_goods.py)
+             dest=/home/ubuntu/auth-service/; svc=huangque-auth ;;
     server/content_api.py) dest=/home/ubuntu/content-api/;  svc=huangque-content ;;
+    server/func_names.py)  dest=/home/ubuntu/content-api/;  svc="huangque-content huangque-admin" ;;
     server/content_domains/*) dest=/home/ubuntu/content-api/content_domains/;  svc=huangque-content ;;
+    server/providers/*)
+             rel="${f#server/providers/}"
+             case "$rel" in */*) dest="/home/ubuntu/content-api/providers/${rel%/*}/" ;; *) dest=/home/ubuntu/content-api/providers/ ;; esac
+             svc=huangque-content ;;
     server/admin_api.py)   dest=/home/ubuntu/content-api/;  svc=huangque-admin ;;
     server/leadgen_api.py) dest=/home/ubuntu/content-api/;  svc=huangque-leadgen-api ;;
     server/imggen_api.py)  dest=/home/ubuntu/content-api/;  svc=huangque-imggen-api ;;
     server/dl_service.py)  dest=/home/ubuntu/dl-service/;   svc=huangque-dl ;;
     server/tikhub.py)      dest=/home/ubuntu/content-api/;  svc="huangque-leadgen-api huangque-content huangque-imggen-api" ;;
+    scripts/hq_bitable_sync_server.py) dest=/home/ubuntu/; svc="" ;;
+    scripts/process_invite_reward_claims.py) dest=/home/ubuntu/auth-service/; svc="" ;;
     scripts/drift_sentinel.py) dest=/home/ubuntu/hq-drift/; svc="" ;;
     # systemd 单元与 drop-in。原来不在映射表里，只能手工 scp + daemon-reload —— 漏一步就出事：
     # leadgen 曾因单元没加载 auth.env 而拿不到 HQ_INTERNAL_TOKEN，退点全部静默回退直写。
     deploy/systemd/*.service.d/*.conf)
-             unit="${f#deploy/systemd/}"; unit="${unit%%/*}"          # huangque-xxx.service
+             unit="${f#deploy/systemd/}"; unit="${unit%%.d/*}"        # huangque-xxx.service
              dest="/etc/systemd/system/${unit}.d/"
              svc="${unit%.service}"; NEED_RELOAD=1 ;;
     deploy/systemd/*.service)
              unit="$(basename "$f")"
              dest=/etc/systemd/system/
-             svc="${unit%.service}"; NEED_RELOAD=1 ;;
+             case "$unit" in
+               huangque-invite-reward-claims.service) svc="" ;;
+               *) svc="${unit%.service}" ;;
+             esac
+             NEED_RELOAD=1 ;;
+    deploy/systemd/*.timer)
+             unit="$(basename "$f")"
+             dest=/etc/systemd/system/
+             svc=""; timer="$unit"; NEED_RELOAD=1 ;;
     deploy/systemd/*.example) echo "  ⏭ $f 只是示例，不部署"; continue ;;
-    site/admin/*)          dest="$WWW/admin/"; svc="" ;;
-    site/workbench/*)      dest="$WWW/workbench/"; svc="" ;;
     site/*)  rel="${f#site/}"
              case "$rel" in */*) dest="$WWW/${rel%/*}/" ;; *) dest="$WWW/" ;; esac
              svc="" ;;
-      *) echo "  ⚠ 不认识 $f —— 不知道部署到哪，跳过（需要的话告诉我加进映射）"; continue ;;
-    esac
-  fi
+    *) echo "  ⚠ 不认识 $f —— 不知道部署到哪，跳过（需要的话告诉我加进映射）"; continue ;;
+  esac
   case "$dest" in /etc/systemd/system/*)
+    $SSHC "$REMOTE" "sudo mkdir -p $dest" || { echo "  ❌ $dest 创建失败"; exit 1; } ;;
+    /home/ubuntu/content-api/providers/*)
     $SSHC "$REMOTE" "sudo mkdir -p $dest" || { echo "  ❌ $dest 创建失败"; exit 1; } ;;
   esac
   if [ "$f" = "scripts/drift_sentinel.py" ]; then
     $SSHC "$REMOTE" "mkdir -p /home/ubuntu/hq-drift" || { echo "  ❌ hq-drift 目录创建失败"; exit 1; }
   fi
-  if [ "$EXACT_FILES" = "1" ]; then
+  if [ "$EXACT_CONTENT_DOMAINS" = "1" ]; then
     case "$f" in
       server/content_domains/*)
-        # 精确模式只允许覆盖远端已存在的文件：新建/改名文件必须走登记流程，
-        # 防止把未登记的兼容层文件随手推上测试服。
         remote_file="${dest%/}/$(basename "$f")"
         $SSHC "$REMOTE" "test -f '$remote_file'" \
-          || { echo "  ❌ 精确模式只允许覆盖远端已存在的 content_domains 文件：$f（新文件请先走登记流程）"; exit 1; }
+          || { echo "  ❌ file-only 模式只允许覆盖已存在的 content domain：$f"; exit 1; }
         ;;
     esac
   fi
   push_file "$f" "$dest" \
     && echo "  ✓ $f → $dest" || { echo "  ❌ $f 部署失败"; exit 1; }
-  DEPLOYED="$DEPLOYED $f"
+  if [ "$f" = "server/content_domains/pricing.py" ]; then
+    push_file "$f" /home/ubuntu/content-api/content_domains/ \
+      && echo "  ✓ $f → /home/ubuntu/content-api/content_domains/" \
+      || { echo "  ❌ $f 部署到 content 失败"; exit 1; }
+    add_svc huangque-content
+  fi
+  add_deployed "$f"
   case "$f" in
     server/content_api.py|server/content_domains/*)
-      if [ "$EXACT_FILES" = "1" ]; then
-        echo "  ✓ 精确模式：$f 不触发 content_domains 整目录同步"
+      if [ "$f" = "server/content_domains/pricing.py" ]; then
+        echo "  ✓ 共享价格模块已分别部署到 auth 与 content"
+      elif [ "$EXACT_CONTENT_DOMAINS" = "1" ] && [ "$f" != "server/content_api.py" ]; then
+        echo "  ✓ file-only 模式：$f 不触发 content_domains 整目录同步"
       elif [ "$CONTENT_DOMAINS_SYNCED" = "0" ] && [ -d server/content_domains ]; then
+        CONTENT_DOMAIN_FILES="$(git ls-files server/content_domains)" \
+          || { echo "  ❌ 无法读取 content_domains Git 文件清单"; exit 1; }
+        [ -n "$CONTENT_DOMAIN_FILES" ] \
+          || { echo "  ❌ content_domains Git 文件清单为空"; exit 1; }
         $SSHC "$REMOTE" "sudo mkdir -p /home/ubuntu/content-api/content_domains" || { echo "  ❌ content_domains 目录创建失败"; exit 1; }
         push_dir server/content_domains/ /home/ubuntu/content-api/content_domains/ \
           && echo "  ✓ server/content_domains/ → /home/ubuntu/content-api/content_domains/（整目录同步）" \
           || { echo "  ❌ content_domains 整目录部署失败"; exit 1; }
+        for tracked in $CONTENT_DOMAIN_FILES; do add_deployed "$tracked"; done
         CONTENT_DOMAINS_SYNCED=1
       fi
       ;;
   esac
+  case "$f" in
+    server/providers/*|server/content_api.py|server/content_domains/*)
+      if [ "$PROVIDERS_SYNCED" = "0" ] && { [ "$EXACT_CONTENT_DOMAINS" = "0" ] || [ "${f#server/providers/}" != "$f" ]; }; then
+        PROVIDER_FILES="$(git ls-files server/providers)" \
+          || { echo "❌ 无法读取 providers Git 文件清单"; exit 1; }
+        [ -n "$PROVIDER_FILES" ] \
+          || { echo "❌ providers Git 文件清单为空"; exit 1; }
+        $SSHC "$REMOTE" "sudo mkdir -p /home/ubuntu/content-api/providers" || { echo "  ❌ providers 目录创建失败"; exit 1; }
+        push_dir server/providers/ /home/ubuntu/content-api/providers/ \
+          && echo "  ✓ server/providers/ → /home/ubuntu/content-api/providers/（依赖闭包同步）" \
+          || { echo "  ❌ providers 依赖闭包部署失败"; exit 1; }
+        for tracked in $PROVIDER_FILES; do add_deployed "$tracked"; done
+        PROVIDERS_SYNCED=1
+      fi
+      ;;
+  esac
   add_svc "$svc"
+  add_timer "$timer"
 done
 
 # 代码已同步但旧进程仍在运行。先对每个待重启服务做纯 import 冒烟，
@@ -407,37 +312,6 @@ done
 if [ -n "$RESTART" ]; then
   echo "==> 3.5/5 import 冒烟（每个待重启服务）"
   for s in $RESTART; do smoke_import "$s" || exit 1; done
-
-  # ==> 3.6 任务-代码版本绑定：重启「前」原子写入本次部署的精确 SHA。
-  # 顺序合同：jobs_store.SERVICE_SHA 只在进程启动（模块导入）时读一次，
-  # 而 /api/gen/health 的 deploy_sha 每次实时读文件 —— 版本文件必须先于
-  # restart 落盘，否则新进程记录的仍是上一次部署的 SHA，health 却已显示新
-  # SHA，任务-代码绑定断裂。纯前端部署（无重启）不写：进程没变，标记不变。
-  #
-  # 原子写：先写临时文件并回读校验内容等于精确 SHA，再 mv 覆盖正式文件。
-  # mv 是原子的 —— 旧标记要么完整保留、要么完整替换，不存在半改状态；
-  # 任一步失败直接中止发布（此时旧标记未被触碰，无需回滚动作）。
-  echo "==> 3.6/5 写入部署版本标记（原子，重启前）"
-  HEAD_SHA="$(git rev-parse HEAD)" || { echo "  ❌ 取本地 HEAD SHA 失败"; exit 1; }
-  VERSION_FILE="/home/ubuntu/content-api/.deploy-version"
-  VERSION_TMP="${VERSION_FILE}.tmp.$$"
-  if ! $SSHC "$REMOTE" "printf '%s\n' '$HEAD_SHA' | sudo tee '$VERSION_TMP' >/dev/null"; then
-    echo "  ❌ 版本标记临时文件写入失败 —— 中止发布（旧标记未被触碰）"
-    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
-    exit 1
-  fi
-  WRITTEN_SHA="$($SSHC "$REMOTE" "sudo cat '$VERSION_TMP'" 2>/dev/null | tr -d '[:space:]')"
-  if [ "$WRITTEN_SHA" != "$HEAD_SHA" ]; then
-    echo "  ❌ 版本标记校验失败（回读 '$WRITTEN_SHA' != 期望 '$HEAD_SHA'）—— 中止发布（旧标记未被触碰）"
-    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
-    exit 1
-  fi
-  if ! $SSHC "$REMOTE" "sudo mv '$VERSION_TMP' '$VERSION_FILE'"; then
-    echo "  ❌ 版本标记原子替换失败 —— 中止发布（旧标记未被触碰）"
-    $SSHC "$REMOTE" "sudo rm -f '$VERSION_TMP'" >/dev/null 2>&1
-    exit 1
-  fi
-  echo "  ✓ 版本标记已原子写入（${HEAD_SHA:0:7}）：重启后 SERVICE_SHA == health.deploy_sha == 本次精确 SHA"
 fi
 
 # 4. 重启受影响的后端服务（纯前端则跳过）
@@ -454,31 +328,25 @@ if [ -n "$RESTART" ]; then
   echo "  校验重启真的生效、配置已加载"
   for s in $RESTART; do check_restart_effective "$s" "$T0" || exit 1; done
 else
-  echo "==> 4/5 纯前端，无需重启"
+  [ -n "$TIMERS" ] || echo "==> 4/5 纯前端，无需重启"
+fi
+if [ -n "$TIMERS" ]; then
+  echo "==> 4/5 启用并刷新定时器:$TIMERS"
+  $SSHC "$REMOTE" "sudo systemctl enable --now $TIMERS && sudo systemctl restart $TIMERS" \
+    || { echo "  ❌ 定时器启用失败"; show_service_diagnostics "$TIMERS"; exit 1; }
+  for t in $TIMERS; do
+    $SSHC "$REMOTE" "systemctl is-enabled --quiet '$t' && systemctl is-active --quiet '$t'" \
+      || { echo "  ❌ $t 未进入 enabled/active"; show_service_diagnostics "$t"; exit 1; }
+    echo "  ✓ $t enabled/active"
+  done
 fi
 
 # 部署后校验：只校验本次 ship 实际推送的文件线上 == git origin/main。
 if [ -n "$DEPLOYED" ]; then
-  VERIFY_REF="${HEAD_SHA:-$(git rev-parse HEAD)}"
-  VERIFY_REPO_ENV=""
-  OVERLAY_GIT_SAFE_ENV=""
-  [ -n "$OVERLAY_MANIFEST" ] && VERIFY_REPO_ENV="HQ_REPO=/opt/huangque-repository"
-  # /opt checkout 属于 root；哨兵固定以 ubuntu 运行后，只为本进程白名单该精确仓库。
-  [ -n "$OVERLAY_MANIFEST" ] && OVERLAY_GIT_SAFE_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/opt/huangque-repository"
-  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && sudo -u ubuntu -H env $VERIFY_REPO_ENV $OVERLAY_GIT_SAFE_ENV HQ_DRIFT_REF='$VERIFY_REF' python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
+  $SSHC "$REMOTE" "test -f /home/ubuntu/hq-drift/drift_sentinel.py && python3 /home/ubuntu/hq-drift/drift_sentinel.py --verify-deploy $DEPLOYED" \
     && echo "  ✓ 部署后漂移校验通过" || { echo "  ❌ 部署后漂移校验失败"; exit 1; }
-  # 普通部署保持既有时序。test-runtime overlay 必须等 health/pricing/activate/patrol
-  # 全部成功后才落成功记录，否则自动恢复了运行文件却留下“已部署”假账。
-  if [ -z "$OVERLAY_MANIFEST" ]; then
-    # --pr 必须在 --bless-deploy 前（后者 nargs='*'）。显式 PR 的登记失败必须中止。
-    if [ -n "$PR_NO" ]; then
-      $SSHC "$REMOTE" "sudo -u ubuntu -H env python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr $PR_NO --bless-deploy $DEPLOYED" \
-        && echo "  ✓ 本次部署文件已记录（PR #$PR_NO）" || { echo "  ❌ 部署登记失败（--pr $PR_NO）——远端哨兵报错"; exit 1; }
-    else
-      $SSHC "$REMOTE" "sudo -u ubuntu -H env python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
-        && echo "  ✓ 本次部署文件已记录" || echo "  （跳过部署记录：哨兵未安装）"
-    fi
-  fi
+  $SSHC "$REMOTE" "python3 /home/ubuntu/hq-drift/drift_sentinel.py --bless-deploy $DEPLOYED" >/dev/null 2>&1 \
+    && echo "  ✓ 本次部署文件已记录" || echo "  （跳过部署记录：哨兵未安装）"
 fi
 
 # 服务器 checkout 只作为 git 镜像，不允许在服务器上直接提交热改。
@@ -496,77 +364,19 @@ fi' >/dev/null 2>&1 && echo "  ✓ 服务器 checkout 提交保护已安装" || 
 
 # 5. 验证 + 给回滚命令
 echo "==> 5/5 验证"
-if [ -n "$OVERLAY_MANIFEST" ]; then
-  HEALTH_TARGET="测试服本机 HTTPS/SNI nginx /api/gen/health"
-  HEALTH_DEADLINE=$(( $(date +%s) + SERVICE_WAIT_SECONDS ))
-  while true; do
-    HEALTH_CODE="$($SSHC "$REMOTE" "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 --noproxy '*' --resolve 'huangquechuanmei.com:443:127.0.0.1' https://huangquechuanmei.com/api/gen/health")" || HEALTH_CODE=000
-    case "$HEALTH_CODE" in 2??) break ;; esac
-    [ "$(date +%s)" -ge "$HEALTH_DEADLINE" ] && break
-    echo "  等待健康接口就绪（当前 HTTP $HEALTH_CODE）"
-    sleep 1
-  done
-else
-  HEALTH_TARGET="$HEALTH_URL"
-  HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10) || HEALTH_CODE=000
-fi
-if [ "$HEALTH_CODE" = "000" ]; then
-  echo "  ❌ 健康检查请求失败: ${HEALTH_TARGET} (HTTP 000)"
+if ! HEALTH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" "$HEALTH_URL" --max-time 10); then
+  echo "  ❌ 健康检查请求失败: ${HEALTH_URL} (HTTP ${HEALTH_CODE:-000})"
   show_service_diagnostics
   exit 1
 fi
 case "$HEALTH_CODE" in
-  2??) echo "  ✓ 健康检查: HTTP $HEALTH_CODE（$HEALTH_TARGET）" ;;
+  2??) echo "  ✓ 健康检查: HTTP $HEALTH_CODE" ;;
   *)
-    echo "  ❌ 健康检查未通过: HTTP $HEALTH_CODE ($HEALTH_TARGET)"
+    echo "  ❌ 健康检查未通过: HTTP $HEALTH_CODE ($HEALTH_URL)"
     show_service_diagnostics
     exit 1
     ;;
 esac
-if [ -n "$OVERLAY_MANIFEST" ]; then
-  $SSHC "$REMOTE" python3 - <<'PY' || { echo "  ❌ 测试服权威价格接口校验失败"; exit 1; }
-import json
-import urllib.request
-
-required = {
-    'avatar', 'talking.per_sec', 'cinematic.motion.per_sec', 'cinematic.duo.per_sec',
-    'cinematic.open.per_sec', 'tryon.single', 'tryon.combo', 'xiaole_video.per_sec',
-    'grok_video.v1.480p.per_sec', 'grok_video.v1.720p.per_sec',
-    'grok_video.v1_5.480p.per_sec', 'grok_video.v1_5.720p.per_sec',
-    'grok_video.v1_5.1080p.per_sec',
-}
-# 显式禁用环境代理并直连测试服 content 进程，避免 HTTP(S)_PROXY 把本机探针带离测试机。
-req = urllib.request.Request('http://127.0.0.1:8096/api/gen/pricing')
-opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-with opener.open(req, timeout=10) as response:
-    data = json.load(response)
-values = data.get('values') if isinstance(data, dict) else None
-if not isinstance(values, dict) or not required.issubset(values):
-    raise SystemExit('pricing key set mismatch')
-if any(not isinstance(values[key], int) or isinstance(values[key], bool) or values[key] <= 0 for key in required):
-    raise SystemExit('pricing value invalid')
-print('  ✓ 权威价格接口返回完整 13 key 正整数目录')
-PY
-  DEPLOY_SHA="${HEAD_SHA:-$(git rev-parse HEAD)}"
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --deploy-sha '$DEPLOY_SHA' --activate-overlay '$OVERLAY_MANIFEST'" \
-    || { echo "  ❌ 活动 overlay 不可变 postimage 启用失败"; exit 1; }
-  # 立刻走一次常规巡检：旧 exception 必须被 postimage 原子取代，不能上线即 stale。
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF=origin/baseline/test-server python3 /home/ubuntu/hq-drift/drift_sentinel.py --print" \
-    || { echo "  ❌ 部署后常规漂移巡检未收敛"; exit 1; }
-  echo "  ✓ 活动 overlay 已锁定 $DEPLOY_SHA，常规巡检无 stale"
-  # deploy_bless.jsonl 是实际成功部署的权威账本，只能在全部后置条件通过后追加。
-  # 此时 trap 仍武装：登记失败同样自动恢复运行文件/版本/活动 overlay/服务。
-  $SSHC "$REMOTE" "sudo -u ubuntu -H env $OVERLAY_GIT_SAFE_ENV HQ_REPO=/opt/huangque-repository HQ_DRIFT_REF='$DEPLOY_SHA' python3 /home/ubuntu/hq-drift/drift_sentinel.py --pr '$PR_NO' --bless-deploy $DEPLOYED" \
-    && echo "  ✓ 本次完整 overlay 已记录（PR #$PR_NO，SHA ${DEPLOY_SHA:0:7}）" \
-    || { echo "  ❌ overlay 部署登记失败（自动恢复仍已武装）"; exit 1; }
-  OVERLAY_ROLLBACK_ARMED=0
-  trap - EXIT
-fi
 SHA=$(git rev-parse --short HEAD)
 echo "✅ 上线完成 | 本次提交 $SHA"
-if [ -n "$OVERLAY_BACKUP_DIR" ]; then
-  echo "   备份快照：$OVERLAY_BACKUP_DIR"
-  echo "   ↩ 精确回滚：ssh $REMOTE sudo '$OVERLAY_BACKUP_DIR/restore.sh'"
-else
-  echo "   ↩ 要回滚这次：  git revert $SHA --no-edit && ./ship \"回滚 $SHA\" $*"
-fi
+echo "   ↩ 要回滚这次：为 $SHA 创建 revert PR，合并到 main 后再用 ship 发布同一文件清单"

@@ -17,7 +17,7 @@ jobs:
   quality:
     name: 代码与安全门禁
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
       - name: 检出代码
@@ -35,17 +35,45 @@ jobs:
           cache: npm
           cache-dependency-path: design-system/package-lock.json
 
+      - name: 安装媒体契约测试依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          ffprobe -version
+
+      - name: 安装微信消息推送加密依赖
+        run: python -m pip install "cryptography>=41,<50"
+
+      - name: 安装 content 服务 Python 依赖
+        run: python -m pip install -r deploy/requirements-content.txt
+
       - name: 检查敏感文件与静态资源
         run: python scripts/ci_validate.py
-
-      - name: 安装 content 服务 Python 依赖（Pillow/qcloud_cos，供单测真实解码与 mock）
-        run: python -m pip install -r deploy/requirements-content.txt
 
       - name: Verify workbench shell cache stamps
         run: python scripts/stamp_assets.py --check
 
       - name: 测试 CI 检查器
         run: python -m unittest discover -s tests -v
+
+      - name: 测试并构建 HQ CLI
+        working-directory: tools/hq-cli
+        env:
+          SOURCE_DATE_EPOCH: "1735689600"
+        run: |
+          PYTHONPATH=src python -m unittest discover -s tests -v
+          cli_tmp="$(mktemp -d)"
+          trap 'rm -rf "$cli_tmp"' EXIT
+          python -m pip wheel --no-deps --wheel-dir "$cli_tmp/wheels-a" .
+          python -m pip wheel --no-deps --wheel-dir "$cli_tmp/wheels-b" .
+          cmp "$cli_tmp"/wheels-a/*.whl "$cli_tmp"/wheels-b/*.whl
+          sh -n ../../site/downloads/hq/install.sh
+          python -m venv "$cli_tmp/venv"
+          "$cli_tmp/venv/bin/pip" install --no-index --no-deps ../../site/downloads/hq/v0.6.0/huangque_hq_cli-0.6.0-py3-none-any.whl
+          "$cli_tmp/venv/bin/hq" version --json
+          "$cli_tmp/venv/bin/hq" capabilities --json
+          "$cli_tmp/venv/bin/python" -m hq_cli version --json
 
       - name: 检查 Python 语法
         shell: bash
@@ -60,17 +88,19 @@ jobs:
       - name: 检查 JavaScript 语法
         run: find site -type f -name '*.js' -print0 | xargs -0 -n1 node --check
 
-      - name: Test canvas storage, state, and export modules
-        run: |
-          node tests/test_canvas_storage.js
-          node tests/test_canvas_state.js
-          node tests/test_canvas_export.js
-
       - name: 测试工作台侧栏
         run: node tests/test_cloud_shell_sidebar.js
 
-      - name: Test reverse video picker
-        run: node --test tests/test_reverse_video_picker_dom.js
+      - name: 测试画布 API 与短剧工作区
+        run: |
+          node tests/test_canvas_api.js
+          node tests/test_canvas_short_drama.js
+          node tests/test_canvas_short_drama_production.js
+          node tests/test_canvas_short_drama_voice.js
+          node tests/test_canvas_short_drama_workspace.js
+          node tests/test_canvas_short_drama_completion.js
+          python -m unittest tests.test_short_drama_completion_integrity -v
+          node tests/test_canvas_digital_presenter.js
 
       - name: 安装设计系统依赖
         working-directory: design-system

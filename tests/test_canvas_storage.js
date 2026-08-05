@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const storageModule = require('../site/workbench/canvas/canvas-storage.js');
 
 function createFakeStorage() {
@@ -141,6 +143,9 @@ assert.deepEqual(storageModule.DEFAULT_KEYS, {
   assert.equal(loaded.error.code, 'storage_unavailable');
   assert.equal(loaded.error.message, 'blocked by browser policy');
 
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'site', 'workbench', 'canvas', 'canvas-app.js'), 'utf8');
+  assert.match(appSource, /createStorage\(\{storage:function\(\)\{return window\.localStorage;\}\}\)/);
+  assert.doesNotMatch(appSource, /createStorage\(\{storage:window\.localStorage\}\)/);
 }
 
 {

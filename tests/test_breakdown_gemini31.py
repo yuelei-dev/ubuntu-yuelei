@@ -1,270 +1,274 @@
-import importlib
+# -*- coding: utf-8 -*-
 import io
 import json
-import os
+import pathlib
+import sqlite3
 import sys
 import tempfile
 import unittest
 import urllib.error
-from contextlib import redirect_stdout
-from pathlib import Path
+from contextlib import closing
 from unittest import mock
 
 
-class _Response:
-    def __init__(self, body=b"{}", headers=None):
-        self.body = body
-        self.headers = headers or {}
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return False
-
-    def read(self):
-        return self.body
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "server"))
+from content_domains import breakdown, gemini_reverse
 
 
-class GeminiReverseTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        server_dir = str(Path(__file__).resolve().parents[1] / "server")
-        if server_dir not in sys.path:
-            sys.path.insert(0, server_dir)
-        cls.breakdown = importlib.import_module("content_domains.breakdown")
-
-    def _shot(self, start, end, cut=False):
-        labels = ("A" * 24, "B" * 24, "C" * 24, "D" * 24)
-        label = labels[int(start) % len(labels)]
-        facts = {}
-        evidence = {}
-        for key in self.breakdown._GEMINI_FACT_FIELDS:
-            if key in self.breakdown._GEMINI_OPTIONAL_FACT_FIELDS:
-                facts[key] = "not_applicable"
-                evidence[key] = []
-            else:
-                facts[key] = "%s observed %s" % (label, key.replace("_", " "))
-                evidence[key] = [round(start + 0.1, 1)]
-        evidence["action_end"] = [round(end - 0.1, 1)]
-        return {
-            "segment_id": int(round(start)) + 1,
-            "transition_from_previous": {
-                "type": "hard_cut" if cut else "none",
-                "description": "直接硬切" if cut else "not_applicable",
-                "evidence_seconds": [start] if cut else [],
-            },
-            "facts": facts,
+def _shot(index, window, suffix=""):
+    start, end, _label = window
+    middle = round((start + end) / 2.0, 3)
+    visible = (
+        "白色矩形位于蓝色背景中央并保持静止",
+        "红色圆形从画面左侧匀速移动到右侧",
+        "蓝色三角形由近景向后景逐渐缩小",
+        "绿色竖线从低机位画面底部向上延伸",
+    )[(index - 1) % 4]
+    rows = []
+    for key in gemini_reverse.FACT_FIELDS:
+        if key in gemini_reverse.OPTIONAL_FACT_FIELDS:
+            value = gemini_reverse.NOT_APPLICABLE
+            evidence = []
+        else:
+            value = "%s：%s；%s" % (key, visible, suffix or "证据清晰")
+            evidence = [middle]
+        if key == "action_start":
+            evidence = [start]
+        elif key == "action_end":
+            evidence = [end]
+        rows.append({
+            "key": key,
+            "value": value,
             "evidence_seconds": evidence,
-            "generation_advice": {
-                "aspect_ratio": "16:9",
-                "fps": "24",
-                "camera_control": "preserve observed camera motion",
-                "negative_prompt": "no extra subjects",
-            },
-        }
+        })
+    return {
+        "segment_id": index,
+        "transition_from_previous": (
+            {
+                "type": "none",
+                "description": gemini_reverse.NOT_APPLICABLE,
+                "evidence_seconds": [],
+            }
+            if index == 1 else {
+                "type": "hard_cut",
+                "description": "画面在服务器边界处直接切换",
+                "evidence_seconds": [start],
+            }
+        ),
+        "facts": rows,
+        "generation_advice": {
+            "aspect_ratio": "保持原片竖屏画幅",
+            "fps": "二十四帧每秒",
+            "camera_control": "按可见机位稳定执行第%d段" % index,
+            "negative_prompt": "禁止新增人物道具文字和无证据动作",
+        },
+    }
 
-    def _provider_response(self, count=1):
-        shots = []
-        for i in range(count):
-            shot = self._shot(float(i), float(i + 1), i > 0)
-            facts = [
-                {
-                    "key": key,
-                    "value": shot["facts"][key],
-                    "evidence_seconds": shot["evidence_seconds"][key],
-                }
-                for key in self.breakdown._GEMINI_FACT_FIELDS
-            ]
-            shots.append({
-                "segment_id": shot["segment_id"],
-                "transition_from_previous": shot[
-                    "transition_from_previous"
-                ],
-                "facts": facts,
-                "generation_advice": shot["generation_advice"],
-            })
-        text = json.dumps({"shots": shots})
-        return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
 
-    def test_model_endpoint_video_mime_json_mode_and_no_fallback(self):
-        captured = {}
+def _payload(windows, suffix=""):
+    return {
+        "shots": [
+            _shot(index, window, suffix=suffix)
+            for index, window in enumerate(windows, 1)
+        ],
+    }
 
-        def fake_request(url, body, api_key, **_kwargs):
-            captured.update(url=url, body=body, api_key=api_key)
-            return self._provider_response()
 
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
-                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=fake_request), \
-                mock.patch.object(self.breakdown, "_chat_multimodal", side_effect=AssertionError("GLM forbidden")):
-            media_path = Path(temp_dir) / "sample.mp4"
-            media_path.write_bytes(b"not-a-real-video")
-            result = self.breakdown._gemini_reverse_prompt_from_media(
-                str(media_path), "video/mp4", "sample", 1.0, "local", ""
-            )
+def _response(payload, finish_reason="STOP"):
+    return {
+        "candidates": [{
+            "finishReason": finish_reason,
+            "content": {"parts": [{
+                "text": json.dumps(payload, ensure_ascii=False),
+            }]},
+        }],
+    }
 
-        self.assertEqual(result["model"], "gemini-3.1-pro-preview")
-        self.assertEqual(result["provider"], "google")
-        self.assertEqual(result["attempts"], 1)
-        self.assertEqual(result["attempt_audit"][0]["validation"], "passed")
-        self.assertEqual(
-            result["timeline_audit"]["source"],
-            "single_full_media_segment",
-        )
-        self.assertIn("/v1beta/models/gemini-3.1-pro-preview:generateContent", captured["url"])
-        self.assertEqual(captured["api_key"], "mock-key")
-        part = captured["body"]["contents"][0]["parts"][0]
-        self.assertEqual(part["inline_data"]["mime_type"], "video/mp4")
-        config = captured["body"]["generationConfig"]
-        self.assertEqual(config["responseMimeType"], "application/json")
-        self.assertEqual(config["maxOutputTokens"], 32768)
-        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "medium"})
-        self.assertNotIn("responseFormat", config)
-        self.assertNotIn("responseSchema", config)
-        self.assertEqual(
-            config["responseJsonSchema"],
-            self.breakdown._gemini_reverse_provider_schema(),
-        )
-        request_text = captured["body"]["contents"][0]["parts"][1]["text"]
-        self.assertIn("Authoritative segments:", request_text)
-        self.assertIn('"segment_id":1', request_text)
-        self.assertIn('"display_range":"0-1秒"', request_text)
 
-    def test_gemini31_request_uses_compatible_rest_json_schema(self):
-        body = self.breakdown._gemini_request_body(
-            {"file_data": {
-                "mime_type": "video/mp4",
-                "file_uri": "https://generativelanguage.googleapis.com/v1beta/files/mock",
-            }},
-            "sample", 15.0, "local", "",
+class GeminiReverseSchemaTests(unittest.TestCase):
+    def test_model_and_live_request_contract_are_fixed(self):
+        windows = gemini_reverse.fixed_windows(12.0)
+        body = gemini_reverse._request_body(
+            {"inline_data": {"mime_type": "video/mp4", "data": "AA=="}},
+            "title",
+            12.0,
+            "local",
+            "",
+            windows,
         )
         config = body["generationConfig"]
+        self.assertEqual(gemini_reverse.MODEL, "gemini-3.1-pro-preview")
         self.assertEqual(config["responseMimeType"], "application/json")
-        self.assertEqual(config["maxOutputTokens"], 32768)
         self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "medium"})
-        self.assertNotIn("responseFormat", config)
+        self.assertEqual(config["maxOutputTokens"], 32768)
+        self.assertIn("responseJsonSchema", config)
         self.assertNotIn("responseSchema", config)
-        self.assertEqual(
-            config["responseJsonSchema"],
-            self.breakdown._gemini_reverse_provider_schema(),
-        )
+        self.assertNotIn("start_seconds", json.dumps(config))
 
-    def test_instruction_carries_the_complete_strict_output_contract(self):
-        instruction = self.breakdown._gemini_reverse_instruction(
-            "sample", 4.0, "local", "",
-        )
-        self.assertIn('exactly the root key "shots"', instruction)
-        self.assertIn("no markdown or wrapper", instruction)
-        self.assertIn("complete minified JSON object", instruction)
-        self.assertIn("no indentation or line breaks", instruction)
-        self.assertIn("do not repeat the same description", instruction)
-        self.assertIn(
-            "segment_id, transition_from_previous, facts, and generation_advice",
-            instruction,
-        )
-        self.assertIn("Never return start_seconds or end_seconds", instruction)
-        self.assertIn("The server owns all timeline boundaries", instruction)
-        self.assertIn(
-            "key, value, and evidence_seconds",
-            instruction,
-        )
-        self.assertIn(
-            "1-3 timestamps inside the current shot",
-            instruction,
-        )
-        self.assertIn(
-            "[] for unknown/not_applicable",
-            instruction,
-        )
-        self.assertIn("wardrobe for a non-person/no visible clothing", instruction)
-        self.assertIn("sound when Verified ASR is (none)", instruction)
-        self.assertIn("subtitles when no text is visibly readable", instruction)
-        self.assertIn("continuity for the first shot", instruction)
-        self.assertIn("Their evidence_seconds must then be []", instruction)
-        self.assertIn("visible non-person object or geometric shape is the subject", instruction)
-        self.assertIn("unchanged subject at action start", instruction)
-        self.assertIn("shot-specific visible object, color, position, or empty image region", instruction)
-        self.assertIn("instead of a generic 'no distinct layer' template", instruction)
-        self.assertIn("Never invent a person, wardrobe, object, depth layer, or motion", instruction)
-        self.assertIn("compare every shot pair", instruction)
-        self.assertIn("every non-sentinel value must contain shot-specific visible evidence", instruction)
-        self.assertIn("never invent differences merely to avoid duplication", instruction)
-        self.assertIn(
-            "aspect_ratio, fps, camera_control, and negative_prompt",
-            instruction,
-        )
-        self.assertIn(
-            ", ".join(self.breakdown._GEMINI_FACT_FIELDS),
-            instruction,
-        )
+    def test_provider_schema_only_drops_live_incompatible_array_bounds(self):
+        full = gemini_reverse._schema()
+        provider = gemini_reverse.provider_schema()
+        self.assertIn("minItems", full["properties"]["shots"])
+        encoded = json.dumps(provider)
+        self.assertNotIn("minItems", encoded)
+        self.assertNotIn("maxItems", encoded)
+        self.assertIn("additionalProperties", encoded)
+        self.assertIn("evidence_seconds", encoded)
 
-    def test_provider_schema_uses_compact_fact_rows_without_duplicate_evidence_tree(self):
-        schema = self.breakdown._gemini_reverse_schema()
-        shot_schema = schema["properties"]["shots"]["items"]
-        self.assertEqual(
-            shot_schema["required"],
-            [
-                "segment_id", "transition_from_previous", "facts",
-                "generation_advice",
-            ],
-        )
-        self.assertNotIn("evidence_seconds", shot_schema["properties"])
-        facts_schema = shot_schema["properties"]["facts"]
-        self.assertEqual(facts_schema["minItems"], len(self.breakdown._GEMINI_FACT_FIELDS))
-        self.assertEqual(facts_schema["maxItems"], len(self.breakdown._GEMINI_FACT_FIELDS))
-        self.assertEqual(
-            facts_schema["items"]["properties"]["key"]["enum"],
-            list(self.breakdown._GEMINI_FACT_FIELDS),
-        )
-        self.assertLess(len(json.dumps(schema).encode("utf-8")), 4000)
+    def test_one_to_four_server_windows_parse_without_model_timeline_fields(self):
+        for duration in (0.4, 4.0, 9.0, 16.0):
+            windows = gemini_reverse.fixed_windows(duration)
+            parsed = gemini_reverse.parse_result(
+                json.dumps(_payload(windows), ensure_ascii=False),
+                windows,
+            )
+            self.assertEqual(len(parsed), len(windows))
+            self.assertEqual(parsed[0]["start_seconds"], 0.0)
+            self.assertAlmostEqual(parsed[-1]["end_seconds"], duration, places=3)
 
-    def test_provider_schema_omits_only_live_incompatible_array_bounds(self):
-        schema = self.breakdown._gemini_reverse_provider_schema()
-        encoded = json.dumps(schema)
-        self.assertNotIn('"minItems"', encoded)
-        self.assertNotIn('"maxItems"', encoded)
-        self.assertIn('"additionalProperties": false', encoded)
-        self.assertIn('"enum"', encoded)
-        self.assertIn('"minimum"', encoded)
-        self.assertEqual(
-            schema["properties"]["shots"]["items"]["required"],
-            [
-                "segment_id", "transition_from_previous", "facts",
-                "generation_advice",
-            ],
-        )
-        self.assertLess(len(encoded.encode("utf-8")), 1800)
+    def test_truncated_or_wrapped_json_is_rejected_without_salvage(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        valid = json.dumps(_payload(windows), ensure_ascii=False)
+        for raw in (valid[:-1], "```json\n" + valid + "\n```", "prefix " + valid):
+            with self.assertRaisesRegex(ValueError, "not complete JSON"):
+                gemini_reverse.parse_result(raw, windows)
 
-    def test_authoritative_timeline_is_deterministic_and_integer_displayed(self):
+    def test_missing_duplicate_and_empty_fact_rows_are_rejected(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        for mutate, expected in (
+            (lambda rows: rows.pop(), "恰好包含"),
+            (lambda rows: rows.__setitem__(1, dict(rows[0])), "缺失、重复"),
+            (lambda rows: rows[0].__setitem__("value", ""), "为空"),
+        ):
+            payload = _payload(windows)
+            mutate(payload["shots"][0]["facts"])
+            with self.assertRaisesRegex(ValueError, expected):
+                gemini_reverse.parse_result(
+                    json.dumps(payload, ensure_ascii=False),
+                    windows,
+                )
+
+    def test_subjective_visual_claim_is_rejected_with_segment_and_word(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        payload = _payload(windows)
+        payload["shots"][0]["facts"][0]["value"] = "画面里似乎是一名演员"
+        with self.assertRaisesRegex(ValueError, "第1段.*似乎"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False),
+                windows,
+            )
+
+    def test_evidence_must_be_inside_window_and_bind_action_endpoints(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        payload = _payload(windows)
+        payload["shots"][0]["facts"][0]["evidence_seconds"] = [99]
+        with self.assertRaisesRegex(ValueError, "超出服务器区间"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows
+            )
+
+        payload = _payload(windows)
+        action_start = gemini_reverse.FACT_FIELDS.index("action_start")
+        payload["shots"][0]["facts"][action_start]["evidence_seconds"] = [
+            windows[0][1],
+        ]
+        with self.assertRaisesRegex(ValueError, "action_start缺少起点证据"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows
+            )
+
+    def test_unknown_slots_cannot_pass_readiness_by_padding(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        payload = _payload(windows)
+        for row in payload["shots"][0]["facts"][:4]:
+            row["value"] = gemini_reverse.UNKNOWN
+            row["evidence_seconds"] = []
+        with self.assertRaisesRegex(ValueError, "生成就绪度不足90%"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows
+            )
+
+    def test_repeated_segments_are_rejected_without_annotation_or_expansion(self):
+        windows = gemini_reverse.fixed_windows(16.0)
+        payload = _payload(windows)
+        payload["shots"][1]["facts"] = json.loads(json.dumps(
+            payload["shots"][0]["facts"], ensure_ascii=False
+        ))
+        for row in payload["shots"][1]["facts"]:
+            if row["evidence_seconds"]:
+                row["evidence_seconds"] = [
+                    windows[1][0]
+                    if row["key"] == "action_start"
+                    else windows[1][1]
+                    if row["key"] == "action_end"
+                    else round(sum(windows[1][:2]) / 2.0, 3)
+                ]
+        with self.assertRaisesRegex(ValueError, "第2段与第1段内容重复"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows
+            )
+
+    def test_shared_subject_and_scene_are_allowed_when_action_is_distinct(self):
+        windows = gemini_reverse.fixed_windows(16.0)
+        payload = _payload(windows)
+        first = payload["shots"][0]["facts"]
+        second = payload["shots"][1]["facts"]
+        action_keys = {
+            "action_start", "action_process", "action_end", "direction_speed",
+        }
+        for index, row in enumerate(second):
+            if row["key"] in action_keys:
+                continue
+            row["value"] = first[index]["value"]
+        parsed = gemini_reverse.parse_result(
+            json.dumps(payload, ensure_ascii=False), windows
+        )
+        self.assertEqual(len(parsed), len(windows))
+
+    def test_prompt_contains_all_generation_sections_and_server_ranges(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        entries = gemini_reverse.parse_result(
+            json.dumps(_payload(windows), ensure_ascii=False), windows
+        )
+        prompt = gemini_reverse.assemble_prompt(entries)
+        for label in (
+            "主体：", "动作：", "场景：", "构图：", "光影：", "风格：",
+            "节奏：", "生成建议：",
+        ):
+            self.assertIn(label, prompt)
+        self.assertTrue(prompt.startswith(windows[0][2]))
+        self.assertNotIn("unknown", prompt)
+        self.assertNotIn("not_applicable", prompt)
+
+    def test_authoritative_timeline_is_deterministic_gap_free_and_tenth_precision(self):
         candidates = [
             {"at_seconds": 8.24, "score": 0.91},
             {"at_seconds": 15.58, "score": 0.88},
         ]
-        expected = self.breakdown._build_authoritative_reverse_timeline(
+        expected = breakdown._build_authoritative_reverse_timeline(
             21.534, candidates,
         )
         for _index in range(100):
             self.assertEqual(
-                self.breakdown._build_authoritative_reverse_timeline(
+                breakdown._build_authoritative_reverse_timeline(
                     21.534, candidates,
                 ),
                 expected,
             )
+        self.assertEqual(expected["precision_seconds"], 0.1)
         self.assertEqual(
             expected["windows"],
             [
-                (0.0, 8.2, "0-8秒"),
-                (8.2, 15.6, "8-16秒"),
-                (15.6, 21.5, "16-22秒"),
+                (0.0, 8.2, "[00:00.0-00:08.2]"),
+                (8.2, 15.6, "[00:08.2-00:15.6]"),
+                (15.6, 21.5, "[00:15.6-00:21.5]"),
             ],
         )
-        self.assertEqual(expected["display_duration_seconds"], 22)
-        self.assertEqual(expected["transitions"][0]["display_at_second"], 8)
+        self.assertEqual(expected["windows"][0][0], 0.0)
+        self.assertEqual(expected["windows"][-1][1], 21.5)
 
-    def test_authoritative_timeline_keeps_only_strong_spaced_candidates(self):
-        timeline = self.breakdown._build_authoritative_reverse_timeline(
+    def test_authoritative_timeline_uses_only_strong_spaced_candidates(self):
+        timeline = breakdown._build_authoritative_reverse_timeline(
             10.0,
             [
                 {"at_seconds": 0.4, "score": 0.99},
@@ -280,100 +284,12 @@ class GeminiReverseTests(unittest.TestCase):
             [2.4, 5.0, 8.0],
         )
         self.assertEqual(len(timeline["windows"]), 4)
-        previous_end = 0.0
-        for start, end, _label in timeline["windows"]:
-            self.assertEqual(start, previous_end)
-            self.assertGreater(end, start)
-            previous_end = end
-        self.assertEqual(previous_end, 10.0)
-
-    def test_unequal_authoritative_windows_own_frames_by_source_time(self):
-        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
-        windows = [
-            (0.0, 1.0, "0-1秒"),
-            (1.0, 9.0, "1-9秒"),
-            (9.0, 10.0, "9-10秒"),
-        ]
-        self.assertEqual(
-            self.breakdown._group_reverse_frame_indices(8, windows),
-            [[1], [2, 3, 4, 5, 6, 7], [8]],
-        )
-        self.assertEqual(
-            self.breakdown._reverse_model_frame_groups(frames, windows),
-            [
-                ["frame-1.jpg"],
-                ["frame-2.jpg", "frame-7.jpg"],
-                ["frame-8.jpg"],
-            ],
-        )
-        bundle = self.breakdown._reverse_frame_bundle(frames, windows)
-        self.assertEqual(
-            bundle["segment_source_indices"],
-            [[1], [2, 3, 4, 5, 6, 7], [8]],
-        )
-        self.assertEqual(
-            bundle["segment_model_source_indices"],
-            [[1], [2, 7], [8]],
-        )
-        self.assertEqual(
-            [
-                item["source_frame_index"]
-                for item in bundle["manifest"]
-                if item["downstream_reference"]
-            ],
-            [1, 7, 8],
-        )
-        self.assertEqual(
-            [
-                item["segment_index"]
-                for item in bundle["manifest"]
-                if item["source_frame_index"] in {1, 7, 8}
-            ],
-            [1, 2, 3],
-        )
-        prompt_result = {
-            "windows": windows,
-            "entries": [
-                {
-                    "fields": {},
-                    "evidence_frames": {"action": [1, 2]},
-                }
-                for _window in windows
-            ],
-        }
-        captured_groups = []
-
-        def capture_group(
-            _entry, _accepted, frame_group, _index, **_kwargs
+        for previous, current in zip(
+            timeline["windows"], timeline["windows"][1:],
         ):
-            captured_groups.append(list(frame_group))
+            self.assertEqual(previous[1], current[0])
 
-        with mock.patch.object(
-            self.breakdown,
-            "_validate_reverse_segment_evidence",
-            side_effect=capture_group,
-        ):
-            self.breakdown._validate_gemini_reverse_entries(
-                prompt_result, frames, "",
-            )
-        self.assertEqual(
-            captured_groups,
-            [
-                ["frame-1.jpg"],
-                ["frame-2.jpg", "frame-7.jpg"],
-                ["frame-8.jpg"],
-            ],
-        )
-        self.assertEqual(
-            prompt_result["entries"][0]["evidence_frames"]["action"],
-            [1],
-        )
-        self.assertEqual(
-            prompt_result["entries"][2]["evidence_frames"]["action"],
-            [1],
-        )
-
-    def test_ffmpeg_transition_candidates_are_evidence_only_and_sanitized(self):
+    def test_ffmpeg_candidates_are_evidence_only_and_path_is_not_audited(self):
         output = (
             "[Parsed_metadata_1] frame:0 pts:824 pts_time:8.24\n"
             "[Parsed_metadata_1] lavfi.scene_score=0.812345\n"
@@ -382,844 +298,681 @@ class GeminiReverseTests(unittest.TestCase):
         )
         completed = mock.Mock(returncode=0, stdout="", stderr=output)
         with mock.patch.object(
-            self.breakdown.subprocess, "run", return_value=completed,
+            breakdown.subprocess, "run", return_value=completed,
         ):
-            candidates, audit = (
-                self.breakdown._detect_reverse_transition_candidates(
-                    "private-video.mp4", 21.534,
-                )
+            candidates, audit = breakdown._detect_reverse_transition_candidates(
+                "private-video.mp4", 21.534,
             )
         self.assertEqual(
-            [item["at_seconds"] for item in candidates],
-            [8.2, 15.6],
+            [item["at_seconds"] for item in candidates], [8.2, 15.6],
         )
         self.assertEqual(audit["candidate_count"], 2)
         self.assertNotIn("private-video.mp4", json.dumps(audit))
 
     def test_detector_failure_falls_back_to_one_server_owned_segment(self):
         with mock.patch.object(
-            self.breakdown.subprocess,
-            "run",
-            side_effect=FileNotFoundError("ffmpeg"),
+            breakdown.subprocess, "run", side_effect=FileNotFoundError("ffmpeg"),
         ):
-            candidates, audit = (
-                self.breakdown._detect_reverse_transition_candidates(
-                    "private-video.mp4", 21.534,
-                )
+            timeline = breakdown._authoritative_reverse_timeline(
+                "private-video.mp4", 21.534,
             )
-        timeline = self.breakdown._build_authoritative_reverse_timeline(
-            21.534, candidates,
-        )
-        self.assertEqual(candidates, [])
-        self.assertEqual(audit["status"], "unavailable")
         self.assertEqual(
-            timeline["windows"], [(0.0, 21.5, "0-22秒")]
+            timeline["windows"], [(0.0, 21.5, "[00:00.0-00:21.5]")],
+        )
+        self.assertEqual(timeline["detector_audit"]["status"], "unavailable")
+
+    def test_real_pts_own_unequal_windows_and_reference_indices_are_explicit(self):
+        frames = ["frame-%d.jpg" % index for index in range(1, 9)]
+        windows = [
+            (0.0, 1.0, "[00:00.0-00:01.0]"),
+            (1.0, 9.0, "[00:01.0-00:09.0]"),
+            (9.0, 10.0, "[00:09.0-00:10.0]"),
+        ]
+        points = [0.0, 1.25, 2.5, 3.75, 5.0, 6.25, 8.75, 9.5]
+        bundle = breakdown._reverse_frame_bundle(
+            frames, windows, frame_pts=points,
+        )
+        self.assertEqual(
+            bundle["segment_source_indices"],
+            [[1], [2, 3, 4, 5, 6, 7], [8]],
+        )
+        self.assertEqual(
+            bundle["segment_model_source_indices"], [[1], [2, 7], [8]],
+        )
+        self.assertEqual(bundle["reference_thumbnail_indices"], [1, 2, 3])
+        self.assertEqual(
+            [item["source_frame_index"] for item in bundle["manifest"][:3]],
+            [1, 7, 8],
         )
 
-    def test_model_cannot_return_or_change_server_timestamps(self):
-        shot = self._shot(0.0, 1.0)
-        shot["start_seconds"] = 0.0
-        with self.assertRaisesRegex(ValueError, "does not match schema"):
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}), 1.0,
+    def test_model_cannot_return_timestamps_or_unbound_transition(self):
+        windows = [(0.0, 1.0, "[00:00.0-00:01.0]")]
+        payload = _payload(windows)
+        payload["shots"][0]["start_seconds"] = 0.0
+        with self.assertRaisesRegex(ValueError, "结构字段不完整"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows,
             )
 
-    def test_segment_id_mismatch_reports_exact_server_range(self):
-        shot = self._shot(0.0, 1.0)
-        shot["segment_id"] = 2
-        with self.assertRaises(ValueError) as raised:
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}),
-                [(0.0, 1.0, "0-1秒")],
+        windows = [
+            (0.0, 1.0, "[00:00.0-00:01.0]"),
+            (1.0, 2.0, "[00:01.0-00:02.0]"),
+        ]
+        payload = _payload(windows)
+        payload["shots"][1]["transition_from_previous"]["evidence_seconds"] = [3.0]
+        with self.assertRaisesRegex(ValueError, "超出服务器边界"):
+            gemini_reverse.parse_result(
+                json.dumps(payload, ensure_ascii=False), windows,
             )
-        message = str(raised.exception)
-        self.assertIn("expected segment_id 1, received 2", message)
-        self.assertIn("valid server range is 0-1秒", message)
 
-    def test_transition_is_bound_to_server_boundary_and_rendered_in_prompt(self):
-        raw = json.dumps({
-            "shots": [
-                self._shot(0.0, 1.0),
-                self._shot(1.0, 2.0, True),
-            ],
-        }, ensure_ascii=False)
-        parsed = self.breakdown._parse_gemini_reverse_result(
-            raw,
-            [(0.0, 1.0, "0-1秒"), (1.0, 2.0, "1-2秒")],
+    def test_transition_is_bound_to_server_boundary_and_rendered(self):
+        windows = [
+            (0.0, 1.0, "[00:00.0-00:01.0]"),
+            (1.0, 2.0, "[00:01.0-00:02.0]"),
+        ]
+        entries = gemini_reverse.parse_result(
+            json.dumps(_payload(windows), ensure_ascii=False), windows,
         )
-        transition = parsed["entries"][1]["transition_from_previous"]
+        transition = entries[1]["transition_from_previous"]
         self.assertEqual(transition["boundary_id"], 1)
         self.assertEqual(transition["at_seconds"], 1.0)
         self.assertEqual(transition["time_source"], "server_ffmpeg")
         self.assertEqual(transition["type_source"], "gemini")
-        prompt = self.breakdown._assemble_reverse_prompt(
-            parsed["entries"], parsed["windows"],
-            enforce_length_limits=False,
-        )
-        self.assertIn("1秒转场: 直接硬切", prompt)
-        self.assertIn("0-1秒", prompt)
-        self.assertIn("1-2秒", prompt)
+        prompt = gemini_reverse.assemble_prompt(entries)
+        self.assertIn("转场：直接硬切", prompt)
+        self.assertIn("[00:00.0-00:01.0]", prompt)
+        self.assertIn("[00:01.0-00:02.0]", prompt)
 
-    def test_structured_gemini_score_never_reports_legacy_hundred_zero(self):
-        parsed = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [self._shot(0.0, 1.0)]}),
-            [(0.0, 1.0, "0-1秒")],
+    def test_quality_total_is_minimum_and_never_legacy_hundred_zero(self):
+        windows = [(0.0, 1.0, "[00:00.0-00:01.0]")]
+        entries = gemini_reverse.parse_result(
+            json.dumps(_payload(windows), ensure_ascii=False), windows,
         )
-        score = self.breakdown._score_reverse_generation_coverage(
-            parsed["entries"], {}, parsed["windows"],
-        )
+        score = gemini_reverse.quality_score(entries)
         self.assertFalse(score["legacy_unstructured"])
-        self.assertGreaterEqual(score["components"]["generation_readiness"], 80)
-        self.assertEqual(score["components"]["factual_consistency"], 100)
+        self.assertGreaterEqual(score["components"]["generation_readiness"], 90)
+        self.assertEqual(score["components"]["factual_consistency"], 100.0)
         self.assertEqual(score["total"], min(score["components"].values()))
 
-    def test_compact_fact_rows_expand_deterministically_and_reject_duplicates(self):
-        response = self._provider_response()
-        raw = response["candidates"][0]["content"]["parts"][0]["text"]
-        parsed = self.breakdown._parse_gemini_reverse_result(raw, 1.0)
-        self.assertEqual(parsed["entries"][0]["readiness"]["ready"], 17)
 
-        payload = json.loads(raw)
-        payload["shots"][0]["facts"][-1]["key"] = payload["shots"][0]["facts"][0]["key"]
-        with self.assertRaisesRegex(ValueError, "unique and complete"):
-            self.breakdown._parse_gemini_reverse_result(json.dumps(payload), 1.0)
+class GeminiReverseRequestTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        temp.write(b"video")
+        temp.close()
+        self.path = temp.name
 
-    def test_one_to_four_shots_are_gap_free_and_directly_assembled(self):
-        for count in range(1, 5):
-            raw = json.dumps({"shots": [
-                self._shot(float(i), float(i + 1), i > 0) for i in range(count)
-            ]})
-            result = self.breakdown._parse_gemini_reverse_result(raw, float(count))
-            prompt = self.breakdown._assemble_reverse_prompt(
-                result["entries"],
-                result["windows"],
-                enforce_length_limits=False,
+    def tearDown(self):
+        pathlib.Path(self.path).unlink(missing_ok=True)
+
+    def _analyze(self, side_effect):
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_media_part",
+                 return_value=({
+                     "inline_data": {"mime_type": "video/mp4", "data": "dm"},
+                 }, None),
+             ), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_json_request",
+                 side_effect=side_effect,
+             ) as request:
+            result = gemini_reverse.analyze_video(
+                self.path,
+                "video/mp4",
+                "title",
+                4.0,
+                "local",
+                "",
             )
-            self.assertEqual(len(result["entries"]), count)
-            self.assertIn("subject:", prompt)
-            self.assertIn("action:", prompt)
-            self.assertIn("generation advice:", prompt)
-            self.assertEqual(result["entries"][0]["readiness"]["ready"], 17)
-            quality = self.breakdown._gemini_quality_dimensions(result)
-            self.assertGreaterEqual(quality["generation_readiness"]["percent"], 80)
-            self.assertFalse(quality["end_to_end_similarity_claimed"])
+        return result, request
 
-    def test_truncated_or_non_schema_json_is_rejected_without_guessing(self):
-        with self.assertRaisesRegex(ValueError, "complete JSON"):
-            self.breakdown._parse_gemini_reverse_result('{"shots":[', 1.0)
-        with self.assertRaisesRegex(ValueError, "root does not match schema"):
-            self.breakdown._parse_gemini_reverse_result('{"shots":[],"draft":"x"}', 1.0)
-
-    def test_more_than_three_evidence_timestamps_is_rejected_with_field_name(self):
-        shot = self._shot(0.0, 1.0)
-        shot["evidence_seconds"]["subject_identity"] = [0.1, 0.2, 0.3, 0.4]
-        with self.assertRaisesRegex(
-            ValueError,
-            "shot 1 subject_identity evidence must contain at most 3 timestamps",
-        ):
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}), 1.0
-            )
-
-    def test_action_requires_evidence_at_both_shot_endpoints(self):
-        shot = self._shot(0.0, 1.0)
-        shot["evidence_seconds"]["action_end"] = [0.2]
-        with self.assertRaisesRegex(ValueError, "both shot endpoints"):
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}), 1.0
-            )
-
-    def test_readiness_error_names_unresolved_slots_without_authorizing_guessing(self):
-        shot = self._shot(0.0, 1.0)
-        for key in (
-            "direction_speed",
-            "camera_movement",
-            "lighting_color",
-            "style_texture",
-        ):
-            shot["facts"][key] = "unknown"
-            shot["evidence_seconds"][key] = []
-        with self.assertRaises(ValueError) as raised:
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}), 1.0
-            )
-        message = str(raised.exception)
-        self.assertIn("shot 1 generation readiness is below 80 percent", message)
-        self.assertIn("direction_speed", message)
-        self.assertIn("camera_movement", message)
-        retry = self.breakdown._gemini_reverse_instruction(
-            "sample", 1.0, "local", "", retry_error=message,
-        )
-        self.assertIn("only when visible evidence supports them", retry)
-        self.assertIn("otherwise keep unknown and allow strict failure", retry)
-
-    def test_eighty_percent_readiness_accepts_unknown_noncritical_details(self):
-        shot = self._shot(0.0, 1.0)
-        for key in ("direction_speed", "camera_movement", "lighting_color"):
-            shot["facts"][key] = "unknown"
-            shot["evidence_seconds"][key] = []
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}), 1.0
-        )
-        quality = self.breakdown._gemini_quality_dimensions(result)
-        self.assertGreaterEqual(
-            quality["generation_readiness"]["percent"], 80
-        )
-        self.assertLess(
-            quality["generation_readiness"]["percent"], 90
-        )
-
-    def test_lightweight_correction_rewrites_visual_prose_without_rejecting_shot(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["lighting_color"] = "阳光明媚，整体暖色"
-        shot["facts"]["background"] = "绿草如茵，远处低矮山坡"
-        shot["facts"]["camera_movement"] = "固定机位；似乎在感受风"
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        self.breakdown._validate_gemini_reverse_entries(
-            result,
-            ["frame-%d.jpg" % index for index in range(8)],
-            "",
-        )
-        entry = result["entries"][0]
-        self.assertIn("明亮日间自然光", entry["fields"]["lighting"])
-        self.assertIn("绿色草地", entry["fields"]["scene"])
-        self.assertIn("固定机位", entry["fields"]["camera"])
-        self.assertNotIn("阳光明媚", entry["text"])
-        self.assertNotIn("绿草如茵", entry["text"])
-        self.assertNotIn("似乎", entry["text"])
-        self.assertEqual(
-            {
-                (item["field"], item["marker"], item["action"])
-                for item in entry["lightweight_corrections"]
-            },
-            {
-                (
-                    "lighting_color",
-                    "阳光明媚",
-                    "rewritten_to_observable",
-                ),
-                (
-                    "background",
-                    "绿草如茵",
-                    "rewritten_to_observable",
-                ),
-                (
-                    "camera_movement",
-                    "似乎",
-                    "dropped_subjective_clause",
-                ),
-            },
-        )
-
-    def test_subjective_only_clause_becomes_unknown_and_still_counts_against_readiness(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["camera_movement"] = "似乎在感受风"
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        entry = result["entries"][0]
-        self.assertIn("camera: ", entry["text"])
-        self.assertNotIn("似乎", entry["text"])
-        self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
-
-    def test_verified_sound_and_visible_subtitles_are_never_rewritten(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "人物说“阳光明媚”"
-        shot["evidence_seconds"]["sound"] = [0.4]
-        shot["facts"]["subtitles"] = "字幕写着“绿草如茵，生活仿佛一场旅行”"
-        shot["evidence_seconds"]["subtitles"] = [0.4]
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        self.breakdown._validate_gemini_reverse_entries(
-            result,
-            ["frame-%d.jpg" % index for index in range(8)],
-            "[0.0-1.0] 阳光明媚",
-        )
-        entry = result["entries"][0]
-        self.assertEqual(
-            entry["fields"]["sound"], "人物说“阳光明媚”"
-        )
-        self.assertEqual(
-            entry["fields"]["subtitles"],
-            "字幕写着“绿草如茵，生活仿佛一场旅行”",
-        )
-        self.assertIn("阳光明媚", entry["text"])
-        self.assertIn("绿草如茵", entry["text"])
-        self.assertIn("仿佛", entry["text"])
-        self.assertNotIn("lightweight_corrections", entry)
-
-    def test_decimal_point_is_not_split_into_a_false_evidence_value(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["camera_movement"] = "镜头距离1.5米似乎偏远"
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        entry = result["entries"][0]
-        self.assertNotIn("镜头距离1", entry["text"])
-        self.assertEqual(entry["readiness"], {"applicable": 17, "ready": 16})
+    def test_validation_failure_retries_once_with_original_media_only(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        invalid = _payload(windows)
+        invalid["shots"][0]["facts"][0]["value"] = "似乎是一名演员"
+        result, request = self._analyze([
+            _response(invalid),
+            _response(_payload(windows, suffix="重试")),
+        ])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(result["attempts"], 2)
+        self.assertFalse(result["cross_provider_fallback"])
         self.assertIn(
-            {
-                "field": "camera_movement",
-                "marker": "似乎",
-                "action": "dropped_subjective_clause",
-            },
-            entry["lightweight_corrections"],
+            "/v1beta/models/gemini-3.1-pro-preview:generateContent",
+            request.call_args.args[0],
         )
+        first_media = request.call_args_list[0].args[1]["contents"][0]["parts"][0]
+        second_media = request.call_args_list[1].args[1]["contents"][0]["parts"][0]
+        self.assertEqual(first_media, second_media)
+        second_instruction = request.call_args_list[1].args[1]["contents"][0]["parts"][1]["text"]
+        self.assertIn("failed strict validation", second_instruction)
+        self.assertNotIn("似乎是一名演员", second_instruction)
 
-    def test_missing_entire_critical_group_still_fails_at_eighty_percent(self):
-        shot = self._shot(0.0, 1.0)
-        for key in ("subject_identity", "subject_appearance", "position_scale"):
-            shot["facts"][key] = "unknown"
-            shot["evidence_seconds"][key] = []
-        with self.assertRaisesRegex(ValueError, "critical subject"):
-            self.breakdown._parse_gemini_reverse_result(
-                json.dumps({"shots": [shot]}), 1.0
-            )
+    def test_two_invalid_outputs_fail_without_salvage_or_provider_fallback(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        invalid = _payload(windows)
+        invalid["shots"][0]["facts"][0]["value"] = ""
+        with self.assertRaisesRegex(ValueError, "校验失败.*为空"):
+            self._analyze([_response(invalid), _response(invalid)])
 
-    def test_generation_advice_is_strictly_typed_formatted_and_bounded(self):
-        invalid_values = (
-            ("aspect_ratio", 169),
-            ("aspect_ratio", "wide"),
-            ("fps", None),
-            ("fps", "29.97"),
-            ("camera_control", ""),
-            ("negative_prompt", ""),
-        )
-        for key, value in invalid_values:
-            with self.subTest(key=key, value_type=type(value).__name__):
-                shot = self._shot(0.0, 1.0)
-                shot["generation_advice"][key] = value
-                with self.assertRaisesRegex(ValueError, "generation advice"):
-                    self.breakdown._parse_gemini_reverse_result(json.dumps({"shots": [shot]}), 1.0)
+    def test_max_tokens_finish_reason_is_validation_failure(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        with self.assertRaisesRegex(ValueError, "MAX_TOKENS"):
+            self._analyze([
+                _response(_payload(windows), finish_reason="MAX_TOKENS"),
+                _response(_payload(windows), finish_reason="MAX_TOKENS"),
+            ])
 
-    def test_gemini_field_length_limits_stay_removed_through_final_prompt_assembly(self):
-        schema_text = json.dumps(self.breakdown._gemini_reverse_schema())
-        self.assertNotIn("maxLength", schema_text)
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["subject_appearance"] = "x" * 1600
-        shot["generation_advice"]["camera_control"] = "y" * 300
-        shot["generation_advice"]["negative_prompt"] = "z" * 300
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}), 1.0,
-        )
-        self.assertGreater(
-            len(result["entries"][0]["text"]),
-            self.breakdown._REVERSE_MAX_SEGMENT_CHARS,
-        )
-        prompt = self.breakdown._assemble_reverse_prompt(
-            result["entries"],
-            result["windows"],
-            enforce_length_limits=False,
-        )
-        self.assertIn("x" * 1600, prompt)
-        with self.assertRaises(ValueError):
-            self.breakdown._assemble_reverse_prompt(
-                result["entries"],
-                result["windows"],
-            )
+    def test_missing_key_fails_before_provider_or_file_read(self):
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch.object(gemini_reverse, "_media_part") as media:
+            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
+                gemini_reverse.analyze_video(
+                    self.path, "video/mp4", "", 4.0, "local", ""
+                )
+        media.assert_not_called()
 
-    def test_gemini_final_prompt_total_length_is_bounded_for_downstream_models(self):
-        entry = {
-            "text": "x" * (self.breakdown._REVERSE_MAX_TOTAL_CHARS + 1),
-            "fields": {},
+    def test_audit_never_logs_raw_prompt_url_or_credential(self):
+        windows = gemini_reverse.fixed_windows(4.0)
+        invalid = _payload(windows)
+        invalid["shots"][0]["facts"][0]["value"] = "似乎包含 https://private.example/x"
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            result, _request = self._analyze([
+                _response(invalid),
+                _response(_payload(windows, suffix="安全")),
+            ])
+        logged = output.getvalue()
+        self.assertNotIn("private.example", logged)
+        self.assertNotIn("test-key", logged)
+        self.assertIn("response_sha256", logged)
+        self.assertEqual(result["attempts"], 2)
+
+    def test_request_failure_audit_is_redacted_and_does_not_validation_retry(self):
+        output = io.StringIO()
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_media_part",
+                 return_value=({
+                     "inline_data": {"mime_type": "video/mp4", "data": "dm"},
+                 }, None),
+             ), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_json_request",
+                 side_effect=RuntimeError(
+                     "Gemini HTTP 400: INVALID_ARGUMENT: "
+                     "token=secret-value https://private.example/x"
+                 ),
+             ) as request, \
+             mock.patch("sys.stdout", output):
+            with self.assertRaisesRegex(RuntimeError, "INVALID_ARGUMENT"):
+                gemini_reverse.analyze_video(
+                    self.path, "video/mp4", "", 4.0, "local", ""
+                )
+        self.assertEqual(request.call_count, 1)
+        logged = output.getvalue()
+        self.assertIn('"http_status": 400', logged)
+        self.assertNotIn("secret-value", logged)
+        self.assertNotIn("private.example", logged)
+
+    def test_uploaded_media_is_deleted_when_processing_poll_fails(self):
+        uploaded = {
+            "name": "files/test-media",
+            "uri": "https://generativelanguage.googleapis.com/file/test-media",
+            "mime_type": "video/mp4",
         }
-        with self.assertRaisesRegex(ValueError, "总长度"):
-            self.breakdown._assemble_reverse_prompt(
-                [entry],
-                [(0.0, 1.0, "0.0-1.0s")],
-                enforce_length_limits=False,
-            )
-
-    def test_gemini_total_response_has_only_a_transport_safety_bound(self):
-        oversized = {"candidates": [{"content": {"parts": [{
-            "text": "x" * (self.breakdown._GEMINI_MAX_RESPONSE_BYTES + 1),
-        }]}}]}
-        with self.assertRaisesRegex(ValueError, "total output limit"):
-            self.breakdown._gemini_candidate_text(oversized)
-
-    def test_gemini_max_tokens_finish_reason_is_rejected_without_salvage(self):
-        truncated = {"candidates": [{
-            "finishReason": "MAX_TOKENS",
-            "content": {"parts": [{"text": '{"shots":['}]},
-        }]}
-        with self.assertRaisesRegex(ValueError, "truncated at the output token limit"):
-            self.breakdown._gemini_candidate_text(truncated)
-
-    def test_projected_inline_payload_over_safety_limit_uses_files_api(self):
-        source_bytes = 14_172_348
-        with mock.patch.object(self.breakdown.os.path, "getsize", return_value=source_bytes):
-            projected = self.breakdown._gemini_inline_payload_bytes(
-                "unused", "video/mp4", "sample", 15.0, "local", "",
-            )
-        self.assertGreater(projected, self.breakdown._GEMINI_INLINE_MAX_REQUEST_BYTES)
-        uploaded = {"name": "files/test", "uri": "https://files.example/test"}
-        with mock.patch.object(self.breakdown.os.path, "getsize", return_value=source_bytes), \
-                mock.patch.object(self.breakdown, "_gemini_upload_file", return_value=uploaded) as upload:
-            part, result = self.breakdown._gemini_media_part(
-                "unused", "video/mp4", 15.0, "mock-key", inline_payload_bytes=projected,
-            )
-        upload.assert_called_once()
-        self.assertEqual(result, uploaded)
-        self.assertIn("file_data", part)
-
-
-    def test_visible_subtitles_do_not_masquerade_as_asr_sound(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["subtitles"] = "\u753b\u9762\u6587\u5b57\u201c\u65b0\u54c1\u53d1\u5e03\u201d"
-        shot["evidence_seconds"]["subtitles"] = [0.4]
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        self.assertEqual(result["entries"][0]["fields"]["sound"], "")
-        self.assertIn("visible subtitles/text", result["entries"][0]["text"])
-
-    def test_unrelated_sound_is_omitted_against_current_shot_asr(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "\u6fc0\u6602\u6447\u6eda\u4e50"
-        shot["evidence_seconds"]["sound"] = [0.4]
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0
-        )
-        before = dict(result["entries"][0]["readiness"])
-        self.breakdown._bind_gemini_sound_evidence(
-            result, "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
-        )
-        entry = result["entries"][0]
-        self.assertEqual(entry["fields"]["sound"], "")
-        self.assertEqual(entry["evidence_seconds"]["sound"], [])
-        self.assertNotIn("\u6fc0\u6602\u6447\u6eda\u4e50", entry["text"])
-        self.assertEqual(entry["readiness"]["applicable"], before["applicable"] - 1)
-        self.assertEqual(entry["readiness"]["ready"], before["ready"] - 1)
-        self.assertIn(
-            {"field": "sound", "reason": "segment_asr_mismatch"},
-            entry["omitted_unsupported_fields"],
-        )
-        self.breakdown._validate_gemini_reverse_entries(
-            result,
-            ["frame-%d.jpg" % index for index in range(8)],
-            "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
+        with mock.patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_media_part",
+                 return_value=({
+                     "file_data": {
+                         "mime_type": "video/mp4",
+                         "file_uri": uploaded["uri"],
+                     },
+                 }, uploaded),
+             ), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_wait_for_file",
+                 side_effect=TimeoutError("poll timeout"),
+             ), \
+             mock.patch.object(gemini_reverse, "_delete_file") as deleted:
+            with self.assertRaisesRegex(TimeoutError, "poll timeout"):
+                gemini_reverse.analyze_video(
+                    self.path, "video/mp4", "", 16.0, "local", ""
+                )
+        deleted.assert_called_once_with(
+            uploaded,
+            "test-key",
+            cleanup_jdb=None,
         )
 
-    def test_sound_without_segment_asr_is_omitted_without_claiming_silence(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "\u8212\u7f13\u80cc\u666f\u97f3\u4e50"
-        shot["evidence_seconds"]["sound"] = [0.4]
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
-        )
-        self.breakdown._bind_gemini_sound_evidence(result, "")
-        entry = result["entries"][0]
-        self.assertEqual(entry["fields"]["sound"], "")
-        self.assertEqual(entry["evidence_seconds"]["sound"], [])
-        self.assertNotIn("verified sound/ASR", entry["text"])
-        self.assertNotIn("\u672a\u68c0\u6d4b\u5230\u58f0\u97f3", entry["text"])
-        self.assertIn(
-            {"field": "sound", "reason": "no_segment_asr"},
-            entry["omitted_unsupported_fields"],
-        )
-        self.breakdown._validate_gemini_reverse_entries(
-            result,
-            ["frame-%d.jpg" % index for index in range(8)],
-            "",
-        )
-
-    def test_unknown_sound_omission_does_not_decrement_ready_twice(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "unknown"
-        shot["evidence_seconds"]["sound"] = []
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
-        )
-        entry = result["entries"][0]
-        self.assertEqual(
-            entry["readiness"],
-            {"applicable": 18, "ready": 17},
-        )
-
-        self.breakdown._bind_gemini_sound_evidence(result, "")
-
-        self.assertEqual(entry["fields"]["sound"], "")
-        self.assertEqual(
-            entry["readiness"],
-            {"applicable": 17, "ready": 17},
-        )
-        self.assertIn(
-            {"field": "sound", "reason": "no_segment_asr"},
-            entry["omitted_unsupported_fields"],
-        )
-        quality = self.breakdown._gemini_quality_dimensions(result)
-        self.assertEqual(
-            quality["generation_readiness"],
-            {"ready": 17, "applicable": 17, "percent": 100.0},
-        )
-
-    def test_sound_matching_current_segment_asr_is_retained(self):
-        shot = self._shot(0.0, 1.0)
-        shot["facts"]["sound"] = "\u4eba\u7269\u8bf4\u51fa\u201c\u6b22\u8fce\u5149\u4e34\u201d"
-        shot["evidence_seconds"]["sound"] = [0.4]
-        result = self.breakdown._parse_gemini_reverse_result(
-            json.dumps({"shots": [shot]}, ensure_ascii=False), 1.0,
-        )
-        before = dict(result["entries"][0]["readiness"])
-        self.breakdown._bind_gemini_sound_evidence(
-            result, "[0.0-1.0] \u6b22\u8fce\u5149\u4e34",
-        )
-        entry = result["entries"][0]
-        self.assertEqual(
-            entry["fields"]["sound"],
-            "\u4eba\u7269\u8bf4\u51fa\u201c\u6b22\u8fce\u5149\u4e34\u201d",
-        )
-        self.assertIn("verified sound/ASR", entry["text"])
-        self.assertEqual(entry["readiness"], before)
-        self.assertNotIn("omitted_unsupported_fields", entry)
-
-    def test_4xx_has_no_retry_and_429_retries_same_provider_once(self):
-        request = self.breakdown.urllib.request.Request("https://example.invalid")
-        bad_request = urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO())
-        with mock.patch.object(self.breakdown.urllib.request, "urlopen", side_effect=bad_request) as opened:
-            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
-                self.breakdown._gemini_open(request)
-        self.assertEqual(opened.call_count, 1)
-
-        limited = urllib.error.HTTPError(request.full_url, 429, "limited", {}, io.BytesIO())
+    def test_runtime_integration_uses_gemini_and_exposes_only_audit_summary(self):
+        gemini_result = {
+            "provider": "google",
+            "model": gemini_reverse.MODEL,
+            "attempts": 1,
+            "prompt": "[00:00-00:04] 主体：白色矩形",
+            "attempt_audit": [{"attempt": 1, "validation": "passed"}],
+            "timeline_audit": {
+                "windows": [(0.0, 4.0, "[00:00.0-00:04.0]")],
+                "source": "single_full_media_segment",
+            },
+            "quality_score": {
+                "total": 100.0,
+                "components": {
+                    "source_evidence_coverage": 100.0,
+                    "generation_readiness": 100.0,
+                    "factual_consistency": 100.0,
+                },
+                "legacy_unstructured": False,
+            },
+            "entries": [{
+                "segment_id": 1,
+                "start_seconds": 0.0,
+                "end_seconds": 4.0,
+                "readiness": {"ready": 17, "applicable": 17, "percent": 100.0},
+                "transition_from_previous": {
+                    "boundary_id": None,
+                    "at_seconds": None,
+                    "type": "none",
+                    "description": gemini_reverse.NOT_APPLICABLE,
+                    "evidence_seconds": [],
+                    "time_source": "server_ffmpeg",
+                    "type_source": "gemini",
+                },
+                "facts": {
+                    key: {"value": "fact", "evidence_seconds": [0.0]}
+                    for key in gemini_reverse.FACT_FIELDS
+                },
+            }],
+        }
         with mock.patch.object(
-            self.breakdown.urllib.request, "urlopen", side_effect=[limited, _Response()]
+            gemini_reverse, "analyze_video", return_value=gemini_result
+        ) as analyze, mock.patch.object(
+            breakdown, "_frame_thumbnails", return_value=["thumb"]
+        ), mock.patch.object(
+            breakdown,
+            "_authoritative_reverse_timeline",
+            return_value=gemini_result["timeline_audit"],
+        ):
+            result = breakdown._reverse_from_frames(
+                {"_job_id": 7},
+                ["frame.jpg"],
+                duration=4.0,
+                media_path=self.path,
+            )
+        analyze.assert_called_once()
+        self.assertEqual(result["model_provider"], "google")
+        self.assertEqual(result["model_id"], gemini_reverse.MODEL)
+        self.assertEqual(result["prompt"], gemini_result["prompt"])
+        self.assertNotIn("sections", result)
+        self.assertFalse(
+            result["reverse_audit"]["cross_provider_fallback"]
+        )
+
+
+class GeminiReverseHttpTests(unittest.TestCase):
+    def _response_context(self, payload=b"", headers=None):
+        response = mock.MagicMock()
+        response.headers = headers or {}
+        response.read.return_value = payload
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        return response
+
+    def _http_error(self, code, payload=None):
+        return urllib.error.HTTPError(
+            "https://generativelanguage.googleapis.com/test",
+            code,
+            "error",
+            {},
+            io.BytesIO(json.dumps(payload or {}).encode("utf-8")),
+        )
+
+    def test_non_retryable_400_is_not_reissued(self):
+        request = urllib.request.Request("https://example.invalid")
+        error = self._http_error(400, {
+            "error": {
+                "code": 400,
+                "status": "INVALID_ARGUMENT",
+                "message": "bad key=AIzaSECRET123 https://private.example/x",
+            },
+        })
+        with mock.patch.object(
+            urllib.request, "urlopen", side_effect=error
         ) as opened:
-            response = self.breakdown._gemini_open(request)
-        self.assertIsInstance(response, _Response)
+            with self.assertRaisesRegex(RuntimeError, "INVALID_ARGUMENT") as raised:
+                gemini_reverse._open(request)
+        self.assertEqual(opened.call_count, 1)
+        self.assertNotIn("AIzaSECRET", str(raised.exception))
+        self.assertNotIn("private.example", str(raised.exception))
+
+    def test_429_retries_same_request_once(self):
+        request = urllib.request.Request("https://example.invalid")
+        response = mock.MagicMock()
+        with mock.patch.object(
+            urllib.request,
+            "urlopen",
+            side_effect=[self._http_error(429), response],
+        ) as opened:
+            got = gemini_reverse._open(request)
+        self.assertIs(got, response)
         self.assertEqual(opened.call_count, 2)
 
-    def test_transient_error_matrix_retries_once_without_provider_fallback(self):
-        request = self.breakdown.urllib.request.Request("https://example.invalid")
-        transient = (
-            urllib.error.HTTPError(request.full_url, 429, "limited", {}, io.BytesIO()),
-            urllib.error.HTTPError(request.full_url, 500, "server", {}, io.BytesIO()),
-            urllib.error.URLError("network"),
-            TimeoutError("timeout"),
-        )
-        for error in transient:
-            with self.subTest(error=type(error).__name__):
-                with mock.patch.object(
-                    self.breakdown.urllib.request, "urlopen", side_effect=[error, _Response()],
-                ) as opened, mock.patch.object(
-                    self.breakdown, "_chat_multimodal",
-                    side_effect=AssertionError("GLM/OpenAI fallback forbidden"),
-                ):
-                    self.assertIsInstance(self.breakdown._gemini_open(request), _Response)
-                self.assertEqual(opened.call_count, 2)
+    def test_processing_longer_than_thirty_seconds_can_become_active(self):
+        clock = [0.0]
 
-    def test_non_retryable_4xx_never_calls_other_provider(self):
-        request = self.breakdown.urllib.request.Request("https://example.invalid")
-        error = urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO())
-        with mock.patch.object(
-            self.breakdown.urllib.request, "urlopen", side_effect=error,
-        ) as opened, mock.patch.object(
-            self.breakdown, "_chat_multimodal",
-            side_effect=AssertionError("GLM/OpenAI fallback forbidden"),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
-                self.breakdown._gemini_open(request)
-        self.assertEqual(opened.call_count, 1)
+        def monotonic():
+            return clock[0]
 
-    def test_http_error_summary_keeps_safe_google_fields_and_redacts_secrets(self):
-        request = self.breakdown.urllib.request.Request("https://example.invalid/private")
-        body = json.dumps({"error": {
-            "code": 400,
-            "status": "INVALID_ARGUMENT",
-            "message": (
-                "bad schema at https://secret.example/path "
-                "api_key=AQ.secret-value-123456789 "
-                "Authorization: Bearer TOPSECRET123456 "
-                "token=SECONDSECRET987 access_token=THIRDSECRET654 "
-                "secret=FOURTHSECRET321"
-            ),
-        }}).encode()
-        error = urllib.error.HTTPError(request.full_url, 400, "bad", {}, io.BytesIO(body))
-        with mock.patch.object(self.breakdown.urllib.request, "urlopen", side_effect=error):
-            with self.assertRaises(RuntimeError) as raised:
-                self.breakdown._gemini_open(request)
-        message = str(raised.exception)
-        self.assertIn("Gemini HTTP 400", message)
-        self.assertIn("INVALID_ARGUMENT", message)
-        self.assertIn("[redacted-url]", message)
-        self.assertIn("[redacted-credential]", message)
-        self.assertNotIn("secret.example", message)
-        self.assertNotIn("AQ.secret", message)
-        self.assertNotIn("TOPSECRET123456", message)
-        self.assertNotIn("SECONDSECRET987", message)
-        self.assertNotIn("THIRDSECRET654", message)
-        self.assertNotIn("FOURTHSECRET321", message)
-        self.assertGreaterEqual(message.count("[redacted-credential]"), 5)
+        def sleep(seconds):
+            clock[0] += seconds
 
-
-    def test_validation_retry_reuses_original_media_not_rejected_draft(self):
-        captured = []
-        invalid = {"candidates": [{"content": {"parts": [{"text": "REJECTED-DRAFT"}]}}]}
-        responses = iter([invalid, self._provider_response()])
-
-        def fake_request(_url, body, _api_key, **_kwargs):
-            captured.append(body)
-            return next(responses)
-
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
-                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=fake_request):
-            media_path = Path(temp_dir) / "sample.mp4"
-            media_path.write_bytes(b"not-a-real-video")
-            result = self.breakdown._gemini_reverse_prompt_from_media(
-                str(media_path), "video/mp4", "sample", 1.0, "local", ""
-            )
-        self.assertEqual(result["attempts"], 2)
-        self.assertEqual(captured[0]["contents"][0]["parts"][0], captured[1]["contents"][0]["parts"][0])
-        retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
-        self.assertIn("failed validation", retry_prompt)
-        self.assertNotIn("REJECTED-DRAFT", retry_prompt)
-
-    def test_duplicate_prompt_is_rejected_inside_the_single_validation_retry(self):
-        first = self._provider_response(count=2)
-        payload = json.loads(first["candidates"][0]["content"]["parts"][0]["text"])
-        for index, row in enumerate(payload["shots"][1]["facts"]):
-            row["value"] = payload["shots"][0]["facts"][index]["value"]
-        first["candidates"][0]["content"]["parts"][0]["text"] = json.dumps(payload)
-        responses = iter([first, self._provider_response(count=2)])
-        captured = []
-
-        def fake_request(_url, body, _api_key, **_kwargs):
-            captured.append(body)
-            return next(responses)
-
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
-                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=fake_request):
-            media_path = Path(temp_dir) / "sample.mp4"
-            media_path.write_bytes(b"not-a-real-video")
-            result = self.breakdown._gemini_reverse_prompt_from_media(
-                str(media_path), "video/mp4", "sample", 2.0, "local", "",
-                timeline=self.breakdown._build_authoritative_reverse_timeline(
-                    2.0,
-                    [{"at_seconds": 1.0, "score": 0.9}],
-                ),
-            )
-        self.assertEqual(result["attempts"], 2)
-        retry_prompt = captured[1]["contents"][0]["parts"][1]["text"]
-        self.assertIn("内容重复", retry_prompt)
-        self.assertIn("shot 1 (0.0-1.0s)", retry_prompt)
-        self.assertIn("shot 2 (1.0-2.0s)", retry_prompt)
-        self.assertIn(
-            "Keep both server-owned segment IDs and intervals unchanged",
-            retry_prompt,
-        )
-        self.assertIn("never merge, delete, split, move, or renumber", retry_prompt)
-        self.assertNotIn("merge the intervals into one shot", retry_prompt)
-        self.assertIn("Never invent a difference", retry_prompt)
-        self.assertNotIn(first["candidates"][0]["content"]["parts"][0]["text"], retry_prompt)
-
-    def test_duplicate_guard_compares_structured_facts_not_shared_scaffolding(self):
-        response = self._provider_response(count=2)
-        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
-        first_rows = payload["shots"][0]["facts"]
-        second_rows = payload["shots"][1]["facts"]
-        for index, row in enumerate(second_rows):
-            row["value"] = first_rows[index]["value"]
-        identical = self.breakdown._parse_gemini_reverse_result(
-            json.dumps(payload), 2.0,
-        )["entries"]
-        self.assertTrue(self.breakdown._reverse_segments_are_duplicate(
-            identical[1], identical[0],
-        ))
-
-        distinct = {
-            "subject_identity": "粉色连帽裙人物",
-            "subject_appearance": "粉色几何人物轮廓位于画面中央",
-            "foreground": "下方深灰色地面横带",
-            "midground": "粉色人物占据中央区域",
-            "background": "深蓝夜空与四盏橙色灯笼",
+        processing = json.dumps({"state": "PROCESSING"}).encode("utf-8")
+        active = json.dumps({
+            "state": "ACTIVE",
+            "uri": "https://generativelanguage.googleapis.com/file/active",
+        }).encode("utf-8")
+        responses = [self._response_context(processing) for _ in range(6)]
+        responses.append(self._response_context(active))
+        file_info = {
+            "name": "files/test-media",
+            "uri": "https://generativelanguage.googleapis.com/file/pending",
+            "mime_type": "video/mp4",
         }
-        for row in second_rows:
-            if row["key"] in distinct:
-                row["value"] = distinct[row["key"]]
-        entries = self.breakdown._parse_gemini_reverse_result(
-            json.dumps(payload), 2.0,
-        )["entries"]
+        with mock.patch.object(gemini_reverse.time, "monotonic", side_effect=monotonic), \
+             mock.patch.object(gemini_reverse.time, "sleep", side_effect=sleep), \
+             mock.patch.object(gemini_reverse, "_open", side_effect=responses) as opened:
+            result = gemini_reverse._wait_for_file(
+                file_info,
+                "test-key",
+                deadline=100.0,
+            )
+        self.assertGreater(clock[0], 30.0)
+        self.assertEqual(result["uri"], "https://generativelanguage.googleapis.com/file/active")
+        self.assertEqual(opened.call_count, 7)
+
+    def test_large_file_upload_is_chunked_with_offsets_and_finalization(self):
+        start = self._response_context(headers={
+            "X-Goog-Upload-URL": (
+                "https://generativelanguage.googleapis.com/upload/session"
+            ),
+        })
+        middle_one = self._response_context()
+        middle_two = self._response_context()
+        final = self._response_context(json.dumps({
+            "file": {
+                "name": "files/test-media",
+                "uri": "https://generativelanguage.googleapis.com/file/test-media",
+            },
+        }).encode("utf-8"))
+        with tempfile.NamedTemporaryFile(delete=False) as media:
+            media.write(b"0123456789")
+            path = media.name
+        self.addCleanup(lambda: pathlib.Path(path).unlink(missing_ok=True))
+        with mock.patch.object(gemini_reverse, "UPLOAD_CHUNK_BYTES", 4), \
+             mock.patch.object(
+                 gemini_reverse,
+                 "_open",
+                 side_effect=[start, middle_one, middle_two, final],
+             ) as opened:
+            result = gemini_reverse._upload_file(
+                path,
+                "video/mp4",
+                "test-key",
+                deadline=100.0,
+            )
+        requests = [call.args[0] for call in opened.call_args_list[1:]]
+        self.assertEqual([len(request.data) for request in requests], [4, 4, 2])
         self.assertEqual(
-            self.breakdown._reverse_text_similarity(
-                entries[1]["fields"]["action"],
-                entries[0]["fields"]["action"],
-            ),
-            1.0,
+            [request.get_header("X-goog-upload-offset") for request in requests],
+            ["0", "4", "8"],
         )
-        self.assertFalse(self.breakdown._reverse_segments_are_duplicate(
-            entries[1], entries[0],
+        self.assertEqual(
+            [request.get_header("X-goog-upload-command") for request in requests],
+            ["upload", "upload", "upload, finalize"],
+        )
+        self.assertEqual(result["name"], "files/test-media")
+        self.assertTrue(all(
+            call.kwargs.get("retry_transient") is False
+            for call in opened.call_args_list[1:]
         ))
 
-    def test_full_segment_validation_accepts_distinct_shots_with_shared_scaffolding(self):
-        response = self._provider_response(count=2)
-        payload = json.loads(response["candidates"][0]["content"]["parts"][0]["text"])
-        first_rows = payload["shots"][0]["facts"]
-        second_rows = payload["shots"][1]["facts"]
-        for index, row in enumerate(second_rows):
-            row["value"] = first_rows[index]["value"]
-
-        distinct = {
-            "subject_identity": "粉色连帽裙人物",
-            "subject_appearance": "粉色几何人物轮廓位于画面中央",
-            "foreground": "下方深灰色地面横带",
-            "midground": "粉色人物占据中央区域",
-            "background": "深蓝夜空与四盏橙色灯笼",
-        }
-        for row in second_rows:
-            if row["key"] in distinct:
-                row["value"] = distinct[row["key"]]
-        entries = self.breakdown._parse_gemini_reverse_result(
-            json.dumps(payload, ensure_ascii=False), 2.0,
-        )["entries"]
-
-        # The deterministic labels, advice, camera, lighting, and action remain
-        # shared, reproducing the high rendered-text similarity seen in the
-        # isolated run. Observable subject and scene facts still distinguish
-        # the shots and must control the duplicate decision.
-        self.assertGreaterEqual(
-            self.breakdown._reverse_text_similarity(
-                entries[1]["text"], entries[0]["text"],
-            ),
-            self.breakdown._REVERSE_DUPLICATE_SEQUENCE_THRESHOLD,
-        )
-        self.breakdown._validate_reverse_segment_evidence(
-            entries[0], [], [], 1, enforce_length_limit=False,
-        )
-        self.breakdown._validate_reverse_segment_evidence(
-            entries[1], [entries[0]], [], 2, enforce_length_limit=False,
-        )
-
-        for index, row in enumerate(second_rows):
-            row["value"] = first_rows[index]["value"]
-        identical = self.breakdown._parse_gemini_reverse_result(
-            json.dumps(payload), 2.0,
-        )["entries"]
-        with self.assertRaisesRegex(ValueError, "内容重复"):
-            self.breakdown._validate_reverse_segment_evidence(
-                identical[1], [identical[0]], [], 2,
-                enforce_length_limit=False,
-            )
-
-    def test_media_size_limit_fails_before_upload_or_generation(self):
-        with mock.patch.object(self.breakdown.os.path, "getsize", return_value=self.breakdown._GEMINI_MAX_MEDIA_BYTES + 1), \
-                mock.patch.object(self.breakdown, "_gemini_upload_file") as upload:
-            with self.assertRaisesRegex(ValueError, "size"):
-                self.breakdown._gemini_media_part("unused", "video/mp4", 30, "mock-key")
-        upload.assert_not_called()
-
-    def test_uploaded_file_is_cleaned_when_generation_fails(self):
-        uploaded = {"name": "files/test", "uri": "https://example.invalid/test", "mime_type": "video/mp4"}
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
-                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
-                mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", return_value=uploaded), \
-                mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=RuntimeError("provider failed")), \
-                mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
-            media_path = Path(temp_dir) / "sample.mp4"
-            media_path.write_bytes(b"x")
-            with self.assertRaisesRegex(RuntimeError, "provider failed"):
-                self.breakdown._gemini_reverse_prompt_from_media(
-                    str(media_path), "video/mp4", "sample", 20.0, "local", ""
-                )
-        cleanup.assert_called_once()
-        self.assertEqual(cleanup.call_args.args, (uploaded, "mock-key"))
-        self.assertIsNone(cleanup.call_args.kwargs["heartbeat"])
-
-    def test_uploaded_file_cleanup_covers_poll_and_deadline_failures(self):
-        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
-        failures = (
-            RuntimeError("Gemini Files API media processing did not complete"),
-            RuntimeError("Gemini Files API could not process the media"),
-            TimeoutError("analysis deadline exhausted"),
-        )
-        for failure in failures:
-            with self.subTest(failure=type(failure).__name__ + str(failure)):
-                with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                        mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
-                        mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", side_effect=failure), \
-                        mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
-                    with self.assertRaises(type(failure)):
-                        self.breakdown._gemini_reverse_prompt_from_media(
-                            "unused.mp4", "video/mp4", "sample", 20.0, "local", ""
-                        )
-                cleanup.assert_called_once()
-                self.assertEqual(cleanup.call_args.args, (uploaded, "mock-key"))
-
-    def test_uploaded_file_cleanup_covers_schema_failure_and_success(self):
-        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
-        invalid = {"candidates": [{"content": {"parts": [{"text": "not-json"}]}}]}
-        cases = (([invalid, invalid], ValueError), ([self._provider_response()], None))
-        for responses, expected_error in cases:
-            with self.subTest(expected_error=expected_error):
-                with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                        mock.patch.object(self.breakdown, "_gemini_media_part", return_value=({"file_data": {}}, uploaded)), \
-                        mock.patch.object(self.breakdown, "_gemini_wait_for_file_active", return_value=uploaded), \
-                        mock.patch.object(self.breakdown, "_gemini_json_request", side_effect=responses), \
-                        mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
-                    if expected_error:
-                        with self.assertRaises(expected_error):
-                            self.breakdown._gemini_reverse_prompt_from_media(
-                                "unused.mp4", "video/mp4", "sample", 1.0, "local", ""
-                            )
-                    else:
-                        result = self.breakdown._gemini_reverse_prompt_from_media(
-                            "unused.mp4", "video/mp4", "sample", 1.0, "local", ""
-                        )
-                        self.assertEqual(result["model"], "gemini-3.1-pro-preview")
-                cleanup.assert_called_once()
-
-    def test_upload_failure_has_no_delete(self):
-        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "mock-key"}), \
-                mock.patch.object(self.breakdown, "_gemini_media_part", side_effect=RuntimeError("upload failed")), \
-                mock.patch.object(self.breakdown, "_gemini_delete_file") as cleanup:
-            with self.assertRaisesRegex(RuntimeError, "upload failed"):
-                self.breakdown._gemini_reverse_prompt_from_media(
-                    "unused.mp4", "video/mp4", "sample", 20.0, "local", ""
-                )
-        cleanup.assert_not_called()
-
-    def test_delete_failure_is_sanitized_and_does_not_raise(self):
-        uploaded = {"name": "files/test", "uri": "https://sensitive.example/full", "mime_type": "video/mp4"}
+    def test_delete_failure_is_retried_and_left_in_traceable_pending_state(self):
         output = io.StringIO()
-        with mock.patch.object(self.breakdown, "_gemini_open", side_effect=RuntimeError("secret-url-and-key")), \
-                redirect_stdout(output):
-            self.breakdown._gemini_delete_file(uploaded, "mock-secret-key")
+        file_info = {
+            "name": "files/test-media",
+            "uri": "https://generativelanguage.googleapis.com/file/test-media",
+        }
+        with mock.patch.object(
+                 gemini_reverse,
+                 "_open",
+                 side_effect=RuntimeError("secret cleanup detail"),
+             ) as opened, \
+             mock.patch.object(gemini_reverse.time, "sleep") as sleep, \
+             mock.patch("sys.stdout", output):
+            result = gemini_reverse._delete_file(file_info, "test-key")
+        self.assertEqual(result, {
+            "status": "pending_provider_cleanup",
+            "attempts": 3,
+            "persisted": False,
+        })
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            list(gemini_reverse.CLEANUP_RETRY_DELAYS_SECONDS),
+        )
         logged = output.getvalue()
-        self.assertIn("cleanup failed", logged)
-        self.assertNotIn("mock-secret-key", logged)
-        self.assertNotIn(uploaded["uri"], logged)
+        self.assertIn('"cleanup_pending": true', logged)
+        self.assertIn('"status": "pending_provider_cleanup"', logged)
+        self.assertIn("resource_sha256", logged)
+        self.assertNotIn("files/test-media", logged)
+        self.assertNotIn("test-key", logged)
+        self.assertNotIn("secret cleanup detail", logged)
 
-    def test_files_api_waits_until_active(self):
-        pending = _Response(json.dumps({"state": "PROCESSING"}).encode())
-        active = _Response(json.dumps({"state": "ACTIVE", "uri": "https://files.example/ready"}).encode())
-        with mock.patch.object(self.breakdown, "_gemini_open", side_effect=[pending, active]), \
-                mock.patch.object(self.breakdown.time, "sleep"):
-            result = self.breakdown._gemini_wait_for_file_active(
-                {"name": "files/test", "uri": "https://files.example/pending", "mime_type": "video/mp4"},
-                "mock-key",
+    def _cleanup_db(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = pathlib.Path(directory.name) / "content_jobs.db"
+
+        def connect():
+            connection = sqlite3.connect(str(path))
+            connection.row_factory = sqlite3.Row
+            return connection
+
+        return connect
+
+    def test_cleanup_exhaustion_persists_and_worker_recovery_removes_record(self):
+        jdb = self._cleanup_db()
+        file_info = {
+            "name": "files/test-media",
+            "uri": "https://generativelanguage.googleapis.com/file/test-media",
+        }
+        with mock.patch.object(
+                 gemini_reverse,
+                 "_delete_resource",
+                 side_effect=RuntimeError("provider unavailable"),
+             ) as immediate_delete, \
+             mock.patch.object(gemini_reverse.time, "sleep"):
+            result = gemini_reverse._delete_file(
+                file_info,
+                "test-key",
+                cleanup_jdb=jdb,
             )
-        self.assertEqual(result["uri"], "https://files.example/ready")
+        self.assertEqual(immediate_delete.call_count, 3)
+        self.assertTrue(result["persisted"])
+        with closing(jdb()) as connection:
+            row = connection.execute(
+                "SELECT resource_name,created_at,attempts,next_retry_at," \
+                "expires_at,status FROM gemini_file_cleanup_outbox"
+            ).fetchone()
+        self.assertEqual(row["resource_name"], "files/test-media")
+        self.assertGreater(row["created_at"], 0)
+        self.assertEqual(row["attempts"], 3)
+        self.assertGreater(row["next_retry_at"], row["created_at"])
+        self.assertEqual(row["status"], "pending")
+        self.assertLessEqual(
+            row["expires_at"] - row["created_at"],
+            gemini_reverse.CLEANUP_QUEUE_RETENTION_SECONDS,
+        )
 
-    def test_missing_key_fails_before_any_provider_call(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        with tempfile.TemporaryDirectory(dir=repo_root) as temp_dir, \
-                mock.patch.dict(os.environ, {}, clear=True), \
-                mock.patch.object(self.breakdown, "_gemini_json_request") as request:
-            media_path = Path(temp_dir) / "sample.mp4"
-            media_path.write_bytes(b"x")
-            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
-                self.breakdown._gemini_reverse_prompt_from_media(
-                    str(media_path), "video/mp4", "sample", 1.0, "local", ""
-                )
-        request.assert_not_called()
+        # Simulate a later worker/process recovery after the durable retry time.
+        with mock.patch.object(gemini_reverse, "_delete_resource") as recovered:
+            drained = gemini_reverse.drain_cleanup_once(
+                jdb,
+                api_key="test-key",
+                now=row["next_retry_at"],
+            )
+        self.assertTrue(drained)
+        recovered.assert_called_once_with("files/test-media", "test-key")
+        with closing(jdb()) as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM gemini_file_cleanup_outbox"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+
+    def test_cleanup_retry_boundary_removes_record_and_logs_final_state(self):
+        jdb = self._cleanup_db()
+        gemini_reverse._persist_cleanup(
+            jdb,
+            "files/test-media",
+            gemini_reverse.CLEANUP_QUEUE_MAX_ATTEMPTS,
+            now=100,
+        )
+        output = io.StringIO()
+        with mock.patch("sys.stdout", output):
+            claimed = gemini_reverse._claim_cleanup(jdb, now=131)
+        self.assertIsNone(claimed)
+        with closing(jdb()) as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM gemini_file_cleanup_outbox"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+        self.assertIn("retry_window_exhausted", output.getvalue())
+        self.assertNotIn("files/test-media", output.getvalue())
+
+    def test_cleanup_worker_is_registered_as_daemon_startup_recovery(self):
+        jdb = self._cleanup_db()
+        previous = gemini_reverse._cleanup_worker_started
+        self.addCleanup(
+            setattr,
+            gemini_reverse,
+            "_cleanup_worker_started",
+            previous,
+        )
+        gemini_reverse._cleanup_worker_started = False
+        thread = mock.MagicMock()
+        with mock.patch.object(
+                 gemini_reverse.threading,
+                 "Thread",
+                 return_value=thread,
+             ) as thread_factory:
+            self.assertTrue(gemini_reverse.start_cleanup_worker(jdb))
+            self.assertFalse(gemini_reverse.start_cleanup_worker(jdb))
+        thread.start.assert_called_once_with()
+        call = thread_factory.call_args
+        self.assertIs(call.kwargs["target"], gemini_reverse.cleanup_scanner)
+        self.assertEqual(call.kwargs["args"], (jdb,))
+        self.assertEqual(call.kwargs["name"], "gemini-file-cleanup-recover")
+        self.assertTrue(call.kwargs["daemon"])
+        core_source = pathlib.Path(
+            breakdown.__file__
+        ).with_name("core.py").read_text(encoding="utf-8")
+        self.assertIn("gemini_reverse.start_cleanup_worker(jdb)", core_source)
+
+    def test_lost_delete_response_then_recovery_404_completes_cleanup(self):
+        jdb = self._cleanup_db()
+        file_info = {
+            "name": "files/test-media",
+            "uri": "https://generativelanguage.googleapis.com/file/test-media",
+        }
+        with mock.patch.object(
+                 gemini_reverse,
+                 "_delete_resource",
+                 side_effect=RuntimeError("response lost"),
+             ), \
+             mock.patch.object(gemini_reverse.time, "sleep"):
+            result = gemini_reverse._delete_file(
+                file_info,
+                "test-key",
+                cleanup_jdb=jdb,
+            )
+        self.assertTrue(result["persisted"])
+        with closing(jdb()) as connection:
+            retry_at = connection.execute(
+                "SELECT next_retry_at FROM gemini_file_cleanup_outbox"
+            ).fetchone()[0]
+
+        not_found = self._http_error(404, {
+            "error": {
+                "code": 404,
+                "status": "NOT_FOUND",
+                "message": "file no longer exists",
+            },
+        })
+        output = io.StringIO()
+        with mock.patch.object(
+                 urllib.request,
+                 "urlopen",
+                 side_effect=not_found,
+             ) as opened, \
+             mock.patch("sys.stdout", output):
+            drained = gemini_reverse.drain_cleanup_once(
+                jdb,
+                api_key="test-key",
+                now=retry_at,
+            )
+        self.assertTrue(drained)
+        self.assertEqual(opened.call_count, 1)
+        with closing(jdb()) as connection:
+            remaining = connection.execute(
+                "SELECT COUNT(*) FROM gemini_file_cleanup_outbox"
+            ).fetchone()[0]
+        self.assertEqual(remaining, 0)
+        self.assertIn("already_absent_by_recovery", output.getvalue())
+        self.assertIn('"cleanup_pending": false', output.getvalue())
+        self.assertNotIn("files/test-media", output.getvalue())
+
+    def test_recovery_403_keeps_cleanup_pending(self):
+        jdb = self._cleanup_db()
+        gemini_reverse._persist_cleanup(
+            jdb,
+            "files/test-media",
+            attempts=3,
+            now=100,
+        )
+        forbidden = self._http_error(403, {
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "message": "forbidden",
+            },
+        })
+        with mock.patch.object(
+            urllib.request,
+            "urlopen",
+            side_effect=forbidden,
+        ):
+            self.assertTrue(gemini_reverse.drain_cleanup_once(
+                jdb,
+                api_key="test-key",
+                now=130,
+            ))
+        with closing(jdb()) as connection:
+            row = connection.execute(
+                "SELECT status,attempts,next_retry_at " \
+                "FROM gemini_file_cleanup_outbox"
+            ).fetchone()
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["attempts"], 4)
+        self.assertGreater(row["next_retry_at"], 130)
 
 
 if __name__ == "__main__":

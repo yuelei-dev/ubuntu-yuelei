@@ -198,6 +198,23 @@
         </div>
       </section>
 
+      <section class="settings-card">
+        <div class="settings-card-body">
+          <div class="settings-card-head">
+            <div>
+              <div class="settings-card-title">邀请关系</div>
+              <div class="settings-card-note">查看推荐你加入黄雀 AI 的用户。</div>
+            </div>
+            <span id="referrerStatus" class="badge muted">读取中</span>
+          </div>
+          <div class="info-grid">
+            <div class="info-cell"><div class="info-label">推荐人昵称</div><div id="referrerName" class="info-value">--</div></div>
+            <div class="info-cell"><div class="info-label">推荐人账号 ID</div><div id="referrerAccountId" class="info-value mono">--</div></div>
+          </div>
+          <div class="action-row" style="margin-top:14px"><a class="btn primary" href="invite.html">进入邀请中心</a></div>
+        </div>
+      </section>
+
       <section id="friendsPanelCard" class="settings-card" aria-hidden="true">
         <div class="settings-card-body">
           <div class="settings-card-head">
@@ -210,7 +227,7 @@
           <div id="friendListView" class="friend-view">
             <div class="friend-list-toolbar">
               <button id="toggleIncomingRequestsBtn" class="btn" type="button" aria-expanded="false" aria-controls="incomingRequestsPanel">收到的申请 <span id="incomingRequestsCount" class="friend-request-count">0</span></button>
-              <input id="friendSearchInput" class="friend-search" type="search" autocomplete="off" placeholder="搜索昵称 / 账号 ID" aria-label="搜索已有好友">
+              <input id="friendSearchInput" class="friend-search" type="search" name="hq_friend_search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" placeholder="搜索昵称 / 账号 ID" aria-label="搜索已有好友">
               <button id="openAddFriendViewBtn" class="btn primary" type="button">添加好友</button>
             </div>
             <div class="friend-section">
@@ -344,6 +361,23 @@
         </div>
       </section>
 
+      <section id="inviteShareCard" class="settings-card">
+        <div class="settings-card-body">
+          <div class="settings-card-head">
+            <div>
+              <div class="settings-card-title">邀请好友</div>
+              <div class="settings-card-note">获取你的邀请码和专属邀请链接。</div>
+            </div>
+            <button id="loadInviteBtn" class="btn primary" type="button">获取邀请链接</button>
+          </div>
+          <div id="inviteShareDetails" class="info-grid" hidden>
+            <div class="info-cell"><div class="info-label">邀请码</div><div id="inviteCode" class="info-value mono">--</div></div>
+            <div class="info-cell"><div class="info-label">邀请链接</div><div class="info-value-row"><div id="inviteLink" class="info-value" style="font-size:12px">--</div><button id="copyInviteLinkBtn" class="btn info-copy-btn" type="button" disabled>复制</button></div></div>
+          </div>
+          <div id="inviteShareStatus" class="settings-card-note" aria-live="polite"></div>
+        </div>
+      </section>
+
       </div>
     </div>
   </main>
@@ -360,9 +394,9 @@
     </div>
     <div class="settings-modal-body">
       <form id="passwordForm" class="settings-form">
-        <label class="field"><span>当前密码</span><input id="oldPassword" type="password" autocomplete="current-password" minlength="6" placeholder="输入当前登录密码"></label>
-        <label class="field"><span>新密码</span><input id="newPassword" type="password" autocomplete="new-password" minlength="6" placeholder="输入 6 位以上新密码"></label>
-        <label class="field"><span>确认新密码</span><input id="confirmPassword" type="password" autocomplete="new-password" minlength="6" placeholder="再次输入新密码"></label>
+        <label class="field"><span>当前密码</span><input id="oldPassword" type="password" autocomplete="current-password" minlength="6" maxlength="128" placeholder="输入当前登录密码"></label>
+        <label class="field"><span>新密码</span><input id="newPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="输入 6–128 位新密码"></label>
+        <label class="field"><span>确认新密码</span><input id="confirmPassword" type="password" autocomplete="new-password" minlength="6" maxlength="128" placeholder="再次输入新密码"></label>
         <div id="passwordNote" class="settings-card-note" aria-live="polite">改密成功会退出当前登录状态，请用新密码重新登录。</div>
         <div class="action-row"><button id="passwordSubmit" class="btn primary" type="submit">保存新密码</button></div>
       </form>
@@ -388,7 +422,7 @@
   </section>
 </div>
 <script src="../assets/cloud.js?v=8"></script>
-<script src="cloud-shell.js?v=642453c4"></script>
+<script src="cloud-shell.js?v=49fe47f6"></script>
 <script>
 (function(){
   var $ = function(id){return document.getElementById(id);};
@@ -541,6 +575,25 @@
     loadPreferences();
   }
 
+  function loadReferrer(){
+    apiFetch('/api/invite/referrer').then(function(res){
+      if(!res) return;
+      if(!res.ok) throw new Error(res.data && res.data.detail || '推荐人读取失败');
+      var referrer=res.data && res.data.referrer;
+      if(!referrer){
+        $('referrerStatus').textContent='无';
+        $('referrerName').textContent='无';
+        $('referrerAccountId').textContent='--';
+        return;
+      }
+      $('referrerStatus').textContent=referrer.status==='bound'?'已绑定':'已处理';
+      $('referrerName').textContent=referrer.name||'黄雀用户';
+      $('referrerAccountId').textContent=referrer.account_id||'--';
+    }).catch(function(){
+      $('referrerStatus').textContent='读取失败';
+    });
+  }
+
   function setNicknameEditor(open){
     var form=$('nicknameForm'), input=$('nicknameInput');
     form.hidden=!open;
@@ -642,6 +695,35 @@
     if(!id || id==='--'){ toast('账号 ID 暂未生成'); return; }
     copyText(id).then(function(){ toast('账号 ID 已复制'); })
       .catch(function(){ toast('复制失败，请手动选择账号 ID'); });
+  });
+
+  function loadInviteShare(){
+    var btn=$('loadInviteBtn'), status=$('inviteShareStatus');
+    setBusy(btn,true,'获取中');
+    status.textContent='';
+    apiFetch('/api/auth/invite/code').then(function(res){
+      if(!res) return;
+      var code=typeof res.data.code==='string'?res.data.code.trim().toUpperCase():'';
+      var link=typeof res.data.invite_link==='string'?res.data.invite_link.trim():'';
+      if(!res.ok||!code||code.length>32||!link||link.length>2048) throw new Error(res.data.detail||'邀请链接获取失败');
+      $('inviteCode').textContent=code;
+      $('inviteLink').textContent=link;
+      $('inviteShareDetails').hidden=false;
+      $('copyInviteLinkBtn').disabled=false;
+      btn.textContent='刷新';
+    }).catch(function(err){
+      status.textContent=err.message||'邀请链接获取失败';
+    }).finally(function(){
+      setBusy(btn,false,btn.textContent==='刷新'?'刷新':'获取邀请链接');
+    });
+  }
+
+  $('loadInviteBtn').addEventListener('click',loadInviteShare);
+  $('copyInviteLinkBtn').addEventListener('click',function(){
+    var link=$('inviteLink').textContent.trim();
+    if(!link||link==='--') return;
+    copyText(link).then(function(){toast('邀请链接已复制');})
+      .catch(function(){toast('复制失败，请手动选择邀请链接');});
   });
 
   function friendPanel(){
@@ -1143,6 +1225,7 @@
         throw new Error(res.data && res.data.detail || '账号读取失败');
       }
       renderUser(res.data.user);
+      loadReferrer();
       loadFriendState();
       if(window.HQ && typeof window.HQ.refreshPoints === 'function') window.HQ.refreshPoints();
     }).catch(function(e){

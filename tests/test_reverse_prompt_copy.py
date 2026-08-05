@@ -48,7 +48,6 @@ class ReversePromptCopyTests(unittest.TestCase):
             for name in (
                 "isReversePromptErrorText",
                 "validReversePromptText",
-                "reverseResultPrompt",
                 "reversePromptText",
                 "copyText",
                 "copyReversePrompt",
@@ -56,7 +55,7 @@ class ReversePromptCopyTests(unittest.TestCase):
             )
         )
 
-    def _run(self, *, dom_text, state_prompt, clipboard="success", card_present=True):
+    def _run(self, *, dom_text, clipboard="success", card_present=True):
         clipboard_body = {
             "success": "writes.push(text); return Promise.resolve();",
             "failure": "return Promise.reject(new Error('denied'));",
@@ -69,10 +68,7 @@ var document={{
   getElementById:function(id){{return id==='bdReversePromptText'?card:null;}},
   createElement:function(){{throw new Error('fallback not expected');}}
 }};
-var lastBreakdownReverse={{
-  prompt:{json.dumps(state_prompt, ensure_ascii=False)},
-  source_url:'https://example.invalid/video'
-}};
+var lastBreakdownReverse={{source_url:'https://example.invalid/video'}};
 Object.defineProperty(globalThis,'navigator',{{
   value:{{clipboard:{{writeText:function(text){{{clipboard_body}}}}}}},
   configurable:true
@@ -81,15 +77,11 @@ var bdReverseCopyBtn={{textContent:'📋 复制提示词',innerHTML:'📋 复制
 var reverseCopyOrig=bdReverseCopyBtn.innerHTML;
 var window={{HQ:{{toast:function(message){{toasts.push(message);}}}}}};
 var HQ=window.HQ;
-function reverseLegacyPrompt(){{return '';}}
 function setTimeout(callback){{callback();}}
 {self.functions}
 copyReversePrompt().then(function(copied){{
   process.stdout.write(JSON.stringify({{
-    copied:copied,
-    writes:writes,
-    toasts:toasts,
-    button:bdReverseCopyBtn.innerHTML
+    copied:copied,writes:writes,toasts:toasts,button:bdReverseCopyBtn.innerHTML
   }}));
 }});
 """
@@ -103,41 +95,25 @@ copyReversePrompt().then(function(copied){{
         return json.loads(result.stdout)
 
     def test_copies_exact_visible_prompt(self):
-        result = self._run(
-            dom_text="页面实际显示的反推提示词",
-            state_prompt="旧状态里的其他文本",
-        )
+        result = self._run(dom_text="页面实际显示的反推提示词")
         self.assertTrue(result["copied"])
         self.assertEqual(result["writes"], ["页面实际显示的反推提示词"])
         self.assertEqual(result["toasts"], [])
 
-    def test_failure_message_is_never_copied_or_reported_as_success(self):
-        result = self._run(
-            dom_text="反推失败：模型响应异常 · 已退点",
-            state_prompt="旧状态里的有效提示词",
-        )
+    def test_missing_current_card_never_copies_stale_content(self):
+        result = self._run(dom_text="", card_present=False)
         self.assertFalse(result["copied"])
         self.assertEqual(result["writes"], [])
         self.assertEqual(result["toasts"], ["没有可复制的有效提示词"])
-        self.assertEqual(result["button"], "📋 复制提示词")
 
-    def test_missing_current_card_never_falls_back_to_stale_prompt(self):
-        result = self._run(
-            dom_text="",
-            state_prompt="上一条成功任务的旧提示词",
-            card_present=False,
-        )
+    def test_failure_message_is_never_copied(self):
+        result = self._run(dom_text="反推失败：模型响应异常 · 已退点")
         self.assertFalse(result["copied"])
         self.assertEqual(result["writes"], [])
         self.assertEqual(result["toasts"], ["没有可复制的有效提示词"])
-        self.assertEqual(result["button"], "📋 复制提示词")
 
     def test_clipboard_rejection_does_not_report_success(self):
-        result = self._run(
-            dom_text="页面实际显示的反推提示词",
-            state_prompt="",
-            clipboard="failure",
-        )
+        result = self._run(dom_text="页面实际显示的反推提示词", clipboard="failure")
         self.assertFalse(result["copied"])
         self.assertEqual(result["writes"], [])
         self.assertEqual(result["toasts"], ["复制失败，请检查浏览器剪贴板权限"])
