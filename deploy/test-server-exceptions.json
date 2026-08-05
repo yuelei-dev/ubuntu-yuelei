@@ -165,10 +165,10 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "924e7ed32a794b74018fc5726b2a5e2344908c854b8623ced681a365e0398900"
+        "value": "327d0d641c2af9aceb2e0472d2a4ac797cbcb74064981259ea26a2f9ff1ac2bb"
       },
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
+      "reason": "pr180 overlay 部署（PR #184，deploy_sha f1c69005），2026-08-05 重新登记",
+      "registered": "2026-08-05"
     },
     {
       "path": "site/downloads/hq/install.sh",
@@ -566,10 +566,10 @@
       "drift_kind": "changed",
       "expected": {
         "type": "sha256",
-        "value": "d9922a2361adc6707f33f646289566daa1482d864286df6d4b645b7c1f3dbce0"
+        "value": "fc41b37ce8896d4ffd3ed83d0fe1b7919a86315d104bf27bd480f14adac67127"
       },
-      "reason": "滞留 tang 7-29 旧版（登记 §2.4）",
-      "registered": "2026-08-03"
+      "reason": "pr180 overlay 部署（PR #184，deploy_sha f1c69005），2026-08-05 重新登记",
+      "registered": "2026-08-05"
     },
     {
       "path": "server/content_domains/gemini_cleanup.py",
