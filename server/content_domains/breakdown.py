@@ -10,7 +10,7 @@ from contextlib import closing
 from difflib import SequenceMatcher
 
 from .core import OPENAI_BASE, OPENAI_KEY, jdb
-from . import egress
+from . import egress, gemini_cleanup
 
 # 不支持的平台（视频号加密流需要 Isaac64 解密，暂不支持）
 _UNSUPPORTED_PLATFORMS = {"channels", "weixin", "wechat"}
@@ -4039,18 +4039,48 @@ def _gemini_wait_for_file_active(file_info, api_key, deadline=None, heartbeat=No
     raise RuntimeError("Gemini Files API media processing did not complete")
 
 
-def _gemini_delete_file(file_info, api_key, deadline=None, heartbeat=None):
-    if not file_info:
-        return
+def _gemini_delete_resource(name, api_key=None):
+    api_key = str(api_key or os.environ.get("GEMINI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not configured")
     request = urllib.request.Request(
-        _GEMINI_API_BASE + "/v1beta/" + file_info["name"],
+        _GEMINI_API_BASE + "/v1beta/" + gemini_cleanup._resource_name(name),
         headers={"x-goog-api-key": api_key}, method="DELETE",
     )
     try:
-        with _gemini_open(request, deadline=deadline, heartbeat=heartbeat, retry_transient=False) as response:
+        with _gemini_open(
+            request,
+            deadline=time.monotonic() + 15,
+            heartbeat=None,
+            retry_transient=False,
+        ) as response:
             response.read()
-    except Exception:
-        print("[breakdown] Gemini temporary file cleanup failed", flush=True)
+    except RuntimeError as error:
+        message = str(error or "")
+        if re.match(r"^Gemini HTTP 404(?:$|:)", message) or re.match(
+            r"^Gemini HTTP \d{3}: NOT_FOUND(?:$|:)", message
+        ):
+            return "already_absent"
+        raise
+    return "deleted"
+
+
+def _gemini_delete_file(file_info, api_key, deadline=None, heartbeat=None):
+    if not file_info:
+        return {"status": "not_needed", "attempts": 0}
+    result = gemini_cleanup.delete_file(
+        jdb,
+        file_info.get("name"),
+        lambda name: _gemini_delete_resource(name, api_key),
+    )
+    if result.get("status") == "pending_provider_cleanup":
+        # Preserve the existing sanitized operator signal while the durable
+        # outbox carries the actual retry state.
+        print(
+            "[breakdown] Gemini temporary file cleanup failed; recovery queued",
+            flush=True,
+        )
+    return result
 
 
 def _gemini_media_part(path, mime_type, duration, api_key, deadline=None, heartbeat=None,

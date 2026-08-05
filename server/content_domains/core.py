@@ -880,7 +880,7 @@ def start_job_workers():
         for i in range(count):
             threading.Thread(target=_job_worker_loop, args=(q,), name="%s-%d" % (prefix, i + 1), daemon=True).start()
     threading.Thread(target=_pending_job_scanner, name="content-job-recover", daemon=True).start()
-    payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX)
+    payment_recovery.reconcile_local_uploads(JOB_QUEUE_MAX); _recover_pending_jobs(JOB_QUEUE_MAX); from . import breakdown, gemini_cleanup; gemini_cleanup.start_worker(jdb, breakdown._gemini_delete_resource)
 
 def drain_and_exit(signum=None, frame=None):
     """SIGTERM → 停止收新任务 → 等在飞的跑完 → 退出。
