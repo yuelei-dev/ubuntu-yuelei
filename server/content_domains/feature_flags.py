@@ -1,8 +1,9 @@
 """Shared platform feature flags.
 
 The admin service writes these flags; content/imggen read them before accepting
-new generation work. Missing rows intentionally mean enabled so existing
-deployments keep their current behavior until an operator disables a feature.
+new generation work. Missing rows use each catalog entry's default: legacy
+entries remain enabled, while new features may opt into fail-closed behavior
+with ``default_enabled=False``.
 """
 
 from contextlib import closing
@@ -19,13 +20,29 @@ _CACHE = {"loaded_at": 0, "items": {}}
 _TTL = 5
 
 CATALOG = [
+    {
+        "key": "short_drama_lipsync_multi_v1",
+        "name": "短剧多人对白口型",
+        "desc": "项目内人物跟踪、人工确认与多人轮流对白口型",
+        "service": "content",
+        "default_enabled": False,
+    },
+    {
+        "key": "short_drama_lipsync_v1",
+        "name": "短剧真实口型",
+        "desc": "短剧真实口型灰度、付费任务与合成交付",
+        "service": "content",
+        "default_enabled": False,
+    },
     {"key": "image", "name": "图片生成", "desc": "黄雀引擎 1 / 2 图片生成入口", "service": "content"},
     {"key": "banana", "name": "纳米香蕉作图", "desc": "纳米香蕉 2 / Pro 图片生成入口", "service": "imggen"},
     {"key": "audio", "name": "配音生成", "desc": "文案配音与音色复刻", "service": "content"},
     {"key": "video", "name": "视频口播", "desc": "数字化 IP 视频生成", "service": "content"},
+    {"key": "digital_presenter", "name": "数字人口播", "desc": "画布数字人口播项目", "service": "content", "default_enabled": False},
     {"key": "sora_video", "name": "Sora 2 限时测试", "desc": "OpenAI Sora 2 / Pro 非真人通用视频（2026-09-24 下线）", "service": "content", "default_enabled": False},
     {"key": "omni_video", "name": "Omni 视频", "desc": "Gemini Omni Flash 官方视频生成", "service": "content", "default_enabled": False},
-    {"key": "seedance_video", "name": "Seedance 视频", "desc": "火山方舟 Seedance 2.0 官方视频生成", "service": "content", "default_enabled": True},
+    {"key": "seedance_video", "name": "Seedance 视频", "desc": "火山方舟 Seedance 2.0 官方视频生成", "service": "content", "default_enabled": False},
+    {"key": "minimax_h3_video", "name": "麦克视频", "desc": "768P 人物参考剧情视频", "service": "content", "default_enabled": False},
     {"key": "avatar", "name": "数字人形象", "desc": "上传照片创建可复用的数字人形象", "service": "content"},
     {"key": "cinematic", "name": "AI 剧情视频", "desc": "选 1~3 个形象 + 提示词生成剧情视频", "service": "content"},
     {"key": "tryon", "name": "换装换背景", "desc": "视频换装与背景生成", "service": "content"},
@@ -34,6 +51,7 @@ CATALOG = [
     {"key": "leads", "name": "获客分析", "desc": "线索抓取与评论分析", "service": "content"},
     {"key": "dl", "name": "下载代理", "desc": "无水印视频下载代理", "service": "dl"},
     {"key": "copy", "name": "文案生成", "desc": "营销文案生成", "service": "content"},
+    {"key": "canvas_agent", "name": "画布 Agent", "desc": "读取画布并生成需确认的操作建议", "service": "content", "default_enabled": False},
 ]
 CATALOG_MAP = {item["key"]: item for item in CATALOG}
 
@@ -129,8 +147,16 @@ def set_enabled(feature, enabled, actor):
     return get_feature(key)
 
 
+def _safe_rows():
+    try:
+        return _load_rows()
+    except Exception as e:
+        print("[feature_flags] read failed, using catalog defaults: %s" % e, flush=True)
+        return {}
+
+
 def get_feature(feature):
-    rows = _load_rows()
+    rows = _safe_rows()
     key = str(feature or "").strip()
     meta = dict(CATALOG_MAP[key])
     row = rows.get(key) or {}
@@ -145,7 +171,7 @@ def get_feature(feature):
 
 
 def list_features(services=None):
-    rows = _load_rows()
+    rows = _safe_rows()
     service_map = {}
     for svc in services or []:
         service_map[svc.get("key")] = svc

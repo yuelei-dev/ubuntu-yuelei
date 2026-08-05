@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
+import fcntl
 import hashlib
 import importlib.util
 import io
 import ipaddress
 import math
+import sqlite3
 import tempfile
 
 from .core import (
@@ -14,14 +16,16 @@ from .core import (
 )
 
 import random   # 429 退避重试的抖动：不加抖动，同一批 worker 退避后又会撞在一起
-import shutil   # wg_red 字幕模板：探测 systemd-run/nice，给 ASR 子进程套资源闸
-import sys      # wg_red 字幕模板：TALKING_ASR_PYTHON 缺省回退 sys.executable
 
 from .audio import gen_audio
-try:
-    import pricing_config
-except ModuleNotFoundError:
-    from .. import pricing_config
+from .image_mentions import resolve_image_mentions, validate_image_mentions
+from . import (
+    pricing,
+    provider_keys,
+    short_drama_media_sanitize,
+    short_drama_visual_gate,
+    submission_idempotency,
+)
 
 VALID_VIDEO_MODES = {"text", "audio"}
 VALID_VIDEO_RATIOS = {"9:16", "16:9", "1:1", "4:5", "5:4"}
@@ -40,7 +44,7 @@ XIAOLE_RATIO_SIZES = {
     "5:4": "1280x1024",
 }
 
-# 统一视频生成 API（xiaolevideo.cn）：果肉=Grok Video、豆姐=Seedance 2.0
+# 历史统一视频入口。Grok 可保留旧供应商开关；Seedance / Omni 只走官方 API。
 XIAOLEVIDEO_API_KEY = os.environ.get("XIAOLEVIDEO_API_KEY", "")
 XIAOLEVIDEO_API_BASE = os.environ.get("XIAOLEVIDEO_API_BASE", "https://api.xiaolevideo.cn").rstrip("/")
 XIAOLE_MAX_WAIT = int(os.environ.get("XIAOLEVIDEO_TIMEOUT", "600"))
@@ -50,28 +54,26 @@ _xiaole_dl_retries = int(os.environ.get("XIAOLEVIDEO_DL_RETRIES", "3"))     # �
 # 页面渠道 → 模型 id（前端传 channel，后端定 model，避免任意模型注入）
 XIAOLE_CHANNEL_MODELS = {
     "grok": "Grok Image Video",   # 果肉视频（Grok Video 1.0：文生/图生视频）
-    "micro": "doubao-seedance-2-0-260128", # 火山方舟 Seedance 官方视频
-    "omni": "omni-fast",          # 欧米视频（Omni Fast：文生/图生视频，~100s快；文生真人会被上游内容审核拦，图生真人不拦）
+    "micro": "doubao-seedance-2-0-260128",
+    "omni": "gemini-omni-flash-preview",
+    "minimax": "MiniMax-H3",
 }
-XIAOLE_IMAGE_CHANNELS = {"grok", "micro", "omni"}  # 支持参考图（图生视频）的渠道
-# 文生视频固定时长的渠道（None=用平台默认）。omni-fast 只支持 10 秒(duration_options=[10])，不传会 400。
-XIAOLE_CHANNEL_DURATION = {"omni": 10}
+# 旧小乐豆姐/欧米仍永久停用；官方实现由各自独立 feature flag 控制。
+DISABLED_XIAOLE_VIDEO_CHANNELS = set()
+XIAOLE_IMAGE_CHANNELS = {"grok", "micro", "omni", "minimax"}  # 支持参考图（图生视频）的渠道
+XIAOLE_CHANNEL_DURATION = {}
 XIAOLE_MAX_REF = int(os.environ.get("XIAOLEVIDEO_MAX_REF", "7"))  # Grok 图生视频最多参考图数(实测上游pydantic硬上限7张,超过422)
 GROK_VIDEO_PROVIDER = os.environ.get("GROK_VIDEO_PROVIDER", "xai").strip().lower()
 XAI_GROK_MODELS = {"grok-imagine-video", "grok-imagine-video-1.5"}
 XAI_GROK_RATIOS = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
 XAI_GROK_RESOLUTIONS = {"480p", "720p"}
 SEEDANCE_REFERENCE_MAX_BYTES = 30 * 1024 * 1024
-# 参考图签名 URL 有效期：覆盖「排队等待 + Seedance 取图」的任务生命周期，同时避免长期可访问。
-# 成片走 cos._SIGN_EXPIRE(默认7天)是给用户慢慢下载的；参考图是中间产物，2 小时足够。
 SEEDANCE_REFERENCE_SIGN_EXPIRE = 2 * 60 * 60
-# 提交后 payload 里只存对象键（cos-key:// 内部形式），worker 真正向 Seedance 提交时才签名，
-# 签名 TTL 只需覆盖「提交 → Seedance 取图」的分钟级窗口，与排队时长彻底解耦。
 SEEDANCE_COS_KEY_SCHEME = "cos-key://"
-SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5   # 告警阈值；达到后仍按封顶退避持续重试
+SEEDANCE_CLEANUP_MAX_ATTEMPTS = 5
 SEEDANCE_STAGING_ORPHAN_GRACE = 10 * 60
 SEEDANCE_UNKNOWN_CLEANUP_DELAY = SEEDANCE_REFERENCE_SIGN_EXPIRE + 60
-_SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{3,240}\Z")
+_SEEDANCE_ASSET_RE = re.compile(r"asset://asset-[A-Za-z0-9._-]{1,240}\Z")
 _SEEDANCE_IMAGE_TYPES = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -84,6 +86,46 @@ _SEEDANCE_IMAGE_FORMATS = {
     "image/png": "PNG",
     "image/webp": "WEBP",
 }
+SEEDANCE_UPSCALE_ENABLED = os.environ.get(
+    "SEEDANCE_UPSCALE_ENABLED", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+# OpenAI Sora 2 限时 Beta。官方已公告 Videos API 与两个模型将在 2026-09-24 下线，
+# 且没有推荐替代，因此默认关闭；只有测试环境显式设 SORA_VIDEO_ENABLED=1 才收单。
+# 这条能力必须保持独立 kind，不能混进 xiaole_video 的统一 30 点/秒：Pro 1024p/1080p
+# 的官方成本分别是 $0.50/$0.70 每秒，混价会直接亏损，也无法在下线日单独关停。
+SORA_VIDEO_ENABLED = os.environ.get("SORA_VIDEO_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+SORA_VIDEO_SUNSET = "2026-09-24"
+SORA_MODELS = {"sora-2", "sora-2-pro"}
+SORA_SECONDS = {4, 8, 12}  # 上游 create 接口实测只接受 4/8/12 秒。
+SORA_RATIOS = {"9:16", "16:9"}
+SORA_MAX_REFERENCE_BYTES = 10 * 1024 * 1024
+SORA_SIZE_MAP = {
+    ("sora-2", "720p", "9:16"): "720x1280",
+    ("sora-2", "720p", "16:9"): "1280x720",
+    ("sora-2-pro", "720p", "9:16"): "720x1280",
+    ("sora-2-pro", "720p", "16:9"): "1280x720",
+    ("sora-2-pro", "1024p", "9:16"): "1024x1792",
+    ("sora-2-pro", "1024p", "16:9"): "1792x1024",
+    ("sora-2-pro", "1080p", "9:16"): "1080x1920",
+    ("sora-2-pro", "1080p", "16:9"): "1920x1080",
+}
+SEEDANCE_1080_SIZE_MAP = {
+    "21:9": (2520, 1080),
+    "16:9": (1920, 1080),
+    "4:3": (1440, 1080),
+    "1:1": (1080, 1080),
+    "3:4": (1080, 1440),
+    "9:16": (1080, 1920),
+}
+
+
+class SoraSubmissionUnknown(RuntimeError):
+    """OpenAI create may have succeeded, but no provider id was confirmed locally."""
+
+
+class OfficialVideoSubmissionUnknown(RuntimeError):
+    """Official Omni/Seedance create may have succeeded without a confirmed id."""
 
 
 class SeedanceReferenceUnavailable(RuntimeError):
@@ -93,22 +135,83 @@ class SeedanceReferenceUnavailable(RuntimeError):
     status = 503
 
 
-class GrokStoryboardUnavailable(RuntimeError):
-    """The reverse storyboard cannot be made reachable before charging."""
+class GrokReferenceUnavailable(RuntimeError):
+    """Reverse reference frames could not be published before charging."""
 
-    code = "grok_storyboard_upload_unavailable"
+    code = "grok_reference_upload_unavailable"
     status = 503
 
-def seedance_video_is_open():
-    """Return whether the dedicated official Seedance adapter is configured."""
+
+def _set_provider_key_health(key_id, ok, error=""):
     try:
-        from . import video_seedance
-        return bool(video_seedance.available())
-    except Exception:
-        return False
+        provider_keys.set_health(key_id, ok, error=error)
+    except Exception as exc:
+        print(
+            "[provider-keys] 健康状态写入失败 id=%s: %s"
+            % (key_id, str(exc)[:120]),
+            flush=True,
+        )
+
+
+def _create_with_provider_key(provider, job_id, phase, credential_error, create):
+    last_error = None
+    while True:
+        candidate = provider_keys.claim_candidate(provider)
+        if not candidate:
+            break
+        if job_id:
+            update_video_asset_phase(
+                job_id,
+                phase,
+                strict=True,
+                provider_key_id=candidate["id"],
+            )
+        try:
+            result = create(candidate)
+        except credential_error as exc:
+            last_error = exc
+            _set_provider_key_health(candidate["id"], False, str(exc)[:180])
+            continue
+        _set_provider_key_health(candidate["id"], True)
+        if isinstance(result, dict):
+            result.setdefault("provider_key_id", candidate["id"])
+        return result, candidate
+    raise last_error or ValueError("%s 视频没有可用的 API 密钥" % provider)
+
+
+def _bound_provider_key(provider, key_id):
+    # 旧任务没有 provider_key_id；必须继续使用原环境变量，不能误切新池。
+    candidates = provider_keys.candidates(provider, preferred_id=key_id or "env")
+    if not candidates:
+        raise provider_keys.KeyStoreUnavailable("任务绑定的 API 密钥不可用")
+    return candidates[0]
+
+
+def sora_video_is_open(today=None):
+    """双保险：按北京时间在官方下线日零点关单，不依赖服务器本地时区。"""
+    if today is None:
+        today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+    today = str(today)
+    return bool(SORA_VIDEO_ENABLED and today < SORA_VIDEO_SUNSET)
+
+
+def omni_video_is_open():
+    from . import video_gemini_omni
+    return video_gemini_omni.available()
+
+
+def seedance_video_is_open():
+    from . import video_seedance
+    return video_seedance.available()
+
+
+def minimax_h3_video_is_open():
+    from . import video_minimax_h3
+    return video_minimax_h3.available()
+
 
 def seedance_video_health_enabled(flags):
-    """Report Seedance availability without falling back to a shared provider key."""
+    """Report the dedicated Seedance path without shared-provider fallback."""
     try:
         return bool(seedance_video_is_open() and flags.is_enabled("seedance_video"))
     except Exception:
@@ -116,7 +219,7 @@ def seedance_video_health_enabled(flags):
 
 
 def grok_video_is_open():
-    """Return whether the configured Grok video path can accept new work."""
+    """Return whether the configured Grok path can accept new work."""
     try:
         if GROK_VIDEO_PROVIDER == "xiaole":
             return bool(XIAOLEVIDEO_API_KEY)
@@ -126,17 +229,10 @@ def grok_video_is_open():
         return False
 
 
-def reverse_remake_video_channel(flags):
-    """Pick an available no-avatar engine without changing avatar generation."""
-    if seedance_video_health_enabled(flags) and seedance_reference_upload_is_open():
-        return "micro"
-    if grok_video_is_open() and grok_storyboard_upload_is_open():
-        return "grok"
-    return ""
-
-
-def seedance_reference_upload_is_open():
-    """Reference-image capability is separate from text-only Seedance health."""
+def grok_reference_upload_is_open():
+    """The xAI path needs public COS URLs for reverse reference frames."""
+    if GROK_VIDEO_PROVIDER == "xiaole":
+        return False
     try:
         from . import cos
         return bool(cos.enabled()
@@ -146,15 +242,52 @@ def seedance_reference_upload_is_open():
         return False
 
 
-def grok_storyboard_upload_is_open():
-    """Whether the configured Grok path can receive the reverse storyboard.
+def reverse_remake_video_channel(flags):
+    """Pick a usable no-avatar engine; avatar generation remains cinematic."""
+    if seedance_video_health_enabled(flags) and seedance_reference_upload_is_open():
+        return "micro"
+    if grok_video_is_open() and grok_reference_upload_is_open():
+        return "grok"
+    return ""
 
-    The legacy Xiaole provider accepts its existing reference contract.  The
-    official xAI adapter accepts one public HTTP(S) image, so reverse remake is
-    available only when the server can build and publish that image.
-    """
-    if GROK_VIDEO_PROVIDER != "xai":
-        return True
+
+def reverse_remake_video_offer(flags, cost_of):
+    """Return one server-priced no-avatar offer, or a fail-closed empty offer."""
+    channel = reverse_remake_video_channel(flags)
+    empty = {"channel": "", "model": "", "resolution": "", "duration_costs": {}}
+    if not channel:
+        return empty
+    try:
+        if channel == "micro":
+            from . import video_seedance
+            model = video_seedance.SEEDANCE_MODEL
+        else:
+            model = "grok-imagine-video"
+        resolution = "720p"
+        costs = {}
+        for duration in (5, 10, 15):
+            quoted = int(cost_of("xiaole_video", {
+                "channel": channel, "model": model,
+                "resolution": resolution, "duration": duration,
+            }))
+            if quoted <= 0:
+                return empty
+            costs[str(duration)] = quoted
+        return {
+            "channel": channel, "model": model, "resolution": resolution,
+            "duration_costs": costs,
+        }
+    except Exception:
+        return empty
+
+
+def seedance_upscale_is_open():
+    from . import cos, wavespeed
+    return SEEDANCE_UPSCALE_ENABLED and wavespeed.available() and cos.enabled()
+
+
+def seedance_reference_upload_is_open():
+    """Reference-image capability is separate from text-only Seedance health."""
     try:
         from . import cos
         return bool(cos.enabled()
@@ -373,51 +506,49 @@ def stage_seedance_references(body, username, token=None):
     return staged_keys
 
 
-def stage_grok_storyboard(body, username, token=None):
-    """Publish the already validated xAI reverse storyboard before charging."""
-    refs = [str(item or "").strip() for item in ((body or {}).get("reference_images") or [])
+def stage_grok_references(body, username, token=None):
+    """Publish ordered reverse frames to public COS before any point charge."""
+    refs = [str(item or "").strip()
+            for item in ((body or {}).get("reference_images") or [])
             if str(item or "").strip()]
-    if (GROK_VIDEO_PROVIDER != "xai"
-            or str((body or {}).get("channel") or "").strip().lower() != "grok"
-            or str((body or {}).get("reference_mode") or "").strip().lower() != "ordered_storyboard"
-            or not any(item.startswith("data:") for item in refs)):
+    if (str((body or {}).get("channel") or "").strip().lower() != "grok"
+            or str((body or {}).get("reference_mode") or "").strip().lower() != "ordered_storyboard"):
         return []
-    if len(refs) != 1 or not refs[0].startswith("data:image/") or "," not in refs[0]:
-        raise GrokStoryboardUnavailable("Grok 反推故事板无效，本次未扣点")
-    if not grok_storyboard_upload_is_open():
-        raise GrokStoryboardUnavailable("Grok 反推故事板公网转存未配置，本次未扣点")
+    if GROK_VIDEO_PROVIDER == "xiaole":
+        raise GrokReferenceUnavailable("当前果肉供应商不支持安全公网转存，本次未扣点")
+    if not 1 <= len(refs) <= 4 or any(not item.startswith("data:") for item in refs):
+        raise GrokReferenceUnavailable("Grok 反推仅接受1-4张本任务关键帧，本次未扣点")
+    if not grok_reference_upload_is_open():
+        raise GrokReferenceUnavailable("Grok 反推参考图公网转存未配置，本次未扣点")
 
-    meta, encoded = refs[0].split(",", 1)
-    mime = meta.split(";", 1)[0].replace("data:", "", 1).lower()
-    if ";base64" not in meta.lower() or mime not in _SEEDANCE_IMAGE_TYPES:
-        raise GrokStoryboardUnavailable("Grok 反推故事板格式不受支持，本次未扣点")
+    owner = str(username or "").strip()
+    if not owner:
+        raise GrokReferenceUnavailable("Grok 反推参考图缺少账号归属，本次未扣点")
+    owner_hash = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+    staged_keys = []
+    staged_refs = []
     try:
-        data = base64.b64decode(encoded, validate=True)
-    except Exception:
-        raise GrokStoryboardUnavailable("Grok 反推故事板内容无效，本次未扣点") from None
-
-    owner_hash = hashlib.sha256(str(username or "").encode("utf-8")).hexdigest()[:16]
-    staging_token = _seedance_staging_token(token)
-    content_hash = hashlib.sha256(data).hexdigest()
-    ext = _SEEDANCE_IMAGE_TYPES[mime]
-    # Reuse the established owner-bound cleanup journal/prefix.  This object is
-    # public because xAI fetches it without our credentials, unlike Seedance's
-    # private, freshly signed references.
-    object_key = "seedance/reference/%s/%s-grok-%s%s" % (
-        owner_hash, staging_token, content_hash[:16], ext)
-    _persist_staging_cleanup_intent(object_key)
-    try:
-        from . import cos
-        public_storyboard = _seedance_reference_uri(
-            cos.put_bytes(data, object_key, mime, private=False))
+        for index, raw in enumerate(refs):
+            mime, ext, data = _seedance_data_image(raw)
+            attempt_token = _seedance_staging_token(token)
+            content_hash = hashlib.sha256(data).hexdigest()
+            object_key = "seedance/reference/%s/%s-grok-%d-%s%s" % (
+                owner_hash, attempt_token, index + 1, content_hash[:16], ext)
+            _persist_staging_cleanup_intent(object_key)
+            staged_keys.append(object_key)
+            from . import cos
+            public_ref = _seedance_reference_uri(
+                cos.put_bytes(data, object_key, mime, private=False))
+            staged_refs.append(public_ref)
     except Exception as exc:
-        cleanup_staged_seedance_references([object_key])
-        print("[grok] reverse storyboard staging failed: %s" % type(exc).__name__, flush=True)
-        raise GrokStoryboardUnavailable("Grok 反推故事板公网转存失败，本次未扣点") from exc
-
-    body["reference_images"] = [public_storyboard]
-    body["_seedance_staged_keys"] = [object_key]
-    return [object_key]
+        cleanup_staged_seedance_references(staged_keys)
+        if isinstance(exc, GrokReferenceUnavailable):
+            raise
+        print("[grok] reverse reference staging failed: %s" % type(exc).__name__, flush=True)
+        raise GrokReferenceUnavailable("Grok 反推参考图公网转存失败，本次未扣点") from exc
+    body["reference_images"] = staged_refs
+    body["_seedance_staged_keys"] = staged_keys
+    return staged_keys
 
 
 def xiaole_reference_needs_staging(kind, body):
@@ -428,7 +559,7 @@ def xiaole_reference_needs_staging(kind, body):
     channel = str((body or {}).get("channel") or "").strip().lower()
     if channel == "micro":
         return True
-    return (channel == "grok" and GROK_VIDEO_PROVIDER == "xai"
+    return (channel == "grok"
             and str((body or {}).get("reference_mode") or "").strip().lower() == "ordered_storyboard")
 
 
@@ -452,10 +583,98 @@ def stage_xiaole_video_references(kind, body, username, token=None):
         return [], None
     try:
         if str((body or {}).get("channel") or "").strip().lower() == "grok":
-            return stage_grok_storyboard(body, username, token), None
+            return stage_grok_references(body, username, token), None
         return stage_seedance_references(body, username, token), None
-    except (SeedanceReferenceUnavailable, GrokStoryboardUnavailable) as e:
+    except (SeedanceReferenceUnavailable, GrokReferenceUnavailable) as e:
         return None, (e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
+
+
+def prepare_xiaole_reference_submission(
+        kind, body, cost, known_points, username, token, endpoint, submission_lock,
+        begin_idempotency, abort_idempotency, check_limit, active_count,
+        max_active_jobs):
+    """Reserve one official submission, then stage its images outside the lock."""
+    if not xiaole_reference_needs_staging(kind, body):
+        return [], False, None
+    with submission_lock:
+        state, response = begin_idempotency()
+        if state == "replay":
+            replay = dict(response or {})
+            return [], False, (int(replay.pop("_http_status", 200)), replay)
+        if state == "conflict":
+            return [], False, (409, {
+                "detail": "同一个 Idempotency-Key 不能用于不同请求",
+                "code": "idempotency_conflict",
+            })
+        if state == "processing":
+            return [], False, (409, {
+                "detail": "相同请求正在受理，请稍后查询",
+                "code": "idempotency_in_progress", "retry_after_ms": 1000,
+            })
+        limit_error = check_limit()
+        if limit_error:
+            abort_idempotency()
+            return [], False, (429, limit_error)
+        active = active_count()
+        if active >= max_active_jobs:
+            abort_idempotency()
+            return [], False, (429, {
+                "detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active,
+                "code": "active_job_cap", "active_jobs": active,
+                "max_active_jobs": max_active_jobs,
+                "retry_after_ms": 4000, "need": cost,
+            })
+        eligibility_error = xiaole_reference_precheck(
+            kind, body, cost, known_points)
+        if eligibility_error:
+            abort_idempotency()
+            return [], False, eligibility_error
+        try:
+            _reserve_seedance_staging_attempt(username, endpoint, token)
+        except SeedanceReferenceUnavailable as exc:
+            abort_idempotency()
+            return [], False, (exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                "retry_after_ms": 60000,
+            })
+    try:
+        keys, staging_error = stage_xiaole_video_references(
+            kind, body, username, token)
+    except Exception:
+        release_seedance_staging_attempt(username, endpoint, token)
+        abort_idempotency()
+        raise
+    if staging_error:
+        release_seedance_staging_attempt(username, endpoint, token)
+        abort_idempotency()
+        return [], False, staging_error
+    try:
+        _mark_seedance_staging_attempt_ready(username, endpoint, token)
+    except SeedanceReferenceUnavailable as exc:
+        cleanup_staged_seedance_references(keys)
+        release_seedance_staging_attempt(username, endpoint, token)
+        abort_idempotency()
+        return [], False, (exc.status, {
+            "detail": str(exc)[:220], "code": exc.code,
+            "retry_after_ms": 60000,
+        })
+    return keys, True, None
+
+
+def after_terminal_seedance_cleanup(claimed, job_id, delay_seconds=0):
+    if claimed:
+        try:
+            cleanup_job_staged_seedance_references(
+                job_id, delay_seconds=delay_seconds)
+        except Exception:
+            pass
+    return claimed
+
+
+def schedule_unknown_seedance_cleanup(kind, payload, error, job_id):
+    delay = seedance_reference_cleanup_delay(kind, payload, error)
+    if delay:
+        cleanup_job_staged_seedance_references(job_id, delay_seconds=delay)
 
 
 _cleanup_table_ready = False
@@ -472,6 +691,14 @@ def _cleanup_db():
             state TEXT NOT NULL DEFAULT 'cleanup_pending',
             next_attempt_at INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL DEFAULT 0)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS seedance_staging_attempts(
+            username TEXT NOT NULL, endpoint TEXT NOT NULL, idem_key TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'uploading', job_id INTEGER,
+            kind TEXT, cost INTEGER, owner TEXT, request_json TEXT,
+            charge_key TEXT, refund_key TEXT, recovery_token TEXT,
+            recovery_started_at INTEGER, last_error TEXT,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+            PRIMARY KEY(username,endpoint,idem_key))""")
         columns = {row[1] for row in c.execute("PRAGMA table_info(seedance_pending_cleanup)").fetchall()}
         if "state" not in columns:
             c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN state TEXT NOT NULL DEFAULT 'cleanup_pending'")
@@ -479,9 +706,116 @@ def _cleanup_db():
             c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0")
         if "updated_at" not in columns:
             c.execute("ALTER TABLE seedance_pending_cleanup ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0")
+        attempt_columns = {
+            row[1] for row in c.execute(
+                "PRAGMA table_info(seedance_staging_attempts)").fetchall()
+        }
+        for name, definition in {
+            "kind": "TEXT", "cost": "INTEGER", "owner": "TEXT",
+            "request_json": "TEXT", "charge_key": "TEXT",
+            "refund_key": "TEXT", "recovery_token": "TEXT",
+            "recovery_started_at": "INTEGER", "last_error": "TEXT",
+        }.items():
+            if name not in attempt_columns:
+                c.execute("ALTER TABLE seedance_staging_attempts ADD COLUMN %s %s" %
+                          (name, definition))
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_seedance_staging_charge_key "
+                  "ON seedance_staging_attempts(charge_key) WHERE charge_key IS NOT NULL")
         c.commit()
         _cleanup_table_ready = True
     return c
+
+
+def _reserve_seedance_staging_attempt(username, endpoint, idem_key):
+    """Persist the pre-charge lease before any COS network operation."""
+    now = int(time.time())
+    try:
+        with closing(_cleanup_db()) as c:
+            c.execute(
+                """INSERT INTO seedance_staging_attempts
+                   (username,endpoint,idem_key,state,job_id,created_at,updated_at)
+                   VALUES(?,?,?,'uploading',NULL,?,?)
+                   ON CONFLICT(username,endpoint,idem_key) DO UPDATE SET
+                     state='uploading',job_id=NULL,created_at=excluded.created_at,
+                     updated_at=excluded.updated_at,kind=NULL,cost=NULL,owner=NULL,
+                     request_json=NULL,charge_key=NULL,refund_key=NULL,
+                     recovery_token=NULL,recovery_started_at=NULL,last_error=NULL""",
+                (str(username), str(endpoint), str(idem_key), now, now),
+            )
+            c.commit()
+    except Exception as exc:
+        print("[seedance] ALARM staging attempt persist failed: %s" % type(exc).__name__, flush=True)
+        raise SeedanceReferenceUnavailable("Seedance 参考图恢复事务不可用，本次未扣点") from exc
+
+
+def _set_seedance_staging_attempt_state(username, endpoint, idem_key, state):
+    now = int(time.time())
+    with closing(_cleanup_db()) as c:
+        changed = c.execute(
+            """UPDATE seedance_staging_attempts SET state=?,updated_at=?
+               WHERE username=? AND endpoint=? AND idem_key=? AND job_id IS NULL""",
+            (str(state), now, str(username), str(endpoint), str(idem_key)),
+        ).rowcount
+        c.commit()
+    if changed != 1:
+        raise SeedanceReferenceUnavailable("Seedance 参考图恢复状态丢失，本次未扣点")
+
+
+def _mark_seedance_staging_attempt_ready(username, endpoint, idem_key):
+    _set_seedance_staging_attempt_state(username, endpoint, idem_key, "staged")
+
+
+def mark_seedance_reference_charging(username, endpoint, idem_key, kind, cost,
+                                     payload, owner, charge_key):
+    """Persist the complete recovery intent before touching Auth points."""
+    charge_key = str(charge_key or "").strip()
+    if not charge_key:
+        raise SeedanceReferenceUnavailable(
+            "Seedance 扣点事务缺少幂等键，本次未扣点")
+    request_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    refund_key = "job-charge-refund:" + hashlib.sha256(
+        charge_key.encode("utf-8")).hexdigest()
+    now = int(time.time())
+    with closing(_cleanup_db()) as c:
+        changed = c.execute(
+            """UPDATE seedance_staging_attempts SET state='charging',kind=?,cost=?,
+               owner=?,request_json=?,charge_key=?,refund_key=?,updated_at=?,
+               recovery_token=NULL,recovery_started_at=NULL,last_error=NULL
+               WHERE username=? AND endpoint=? AND idem_key=? AND state='staged'
+                 AND job_id IS NULL""",
+            (str(kind), int(cost), str(owner), request_json, charge_key,
+             refund_key, now, str(username), str(endpoint), str(idem_key)),
+        ).rowcount
+        c.commit()
+    if changed != 1:
+        raise SeedanceReferenceUnavailable(
+            "Seedance 参考图扣点恢复状态丢失，本次未扣点")
+
+
+def release_seedance_staging_attempt(username, endpoint, idem_key, connection=None):
+    if not (username and endpoint and idem_key):
+        return
+    own = connection is None
+    c = connection or _cleanup_db()
+    try:
+        c.execute(
+            "DELETE FROM seedance_staging_attempts WHERE username=? AND endpoint=? AND idem_key=?",
+            (str(username), str(endpoint), str(idem_key)),
+        )
+        if own:
+            c.commit()
+    finally:
+        if own:
+            c.close()
+
+
+def abort_xiaole_reference_submission(keys, username, endpoint, idem_key, abort_idempotency):
+    """Abort a proven pre-charge attempt and retire both durable reservations."""
+    try:
+        cleanup_staged_seedance_references(keys)
+        release_seedance_staging_attempt(username, endpoint, idem_key)
+    finally:
+        abort_idempotency()
 
 
 def _persist_staging_cleanup_intent(key):
@@ -501,17 +835,29 @@ def _persist_staging_cleanup_intent(key):
         raise SeedanceReferenceUnavailable("Seedance 参考图清理事务不可用，本次未扣点") from exc
 
 
-def link_staged_seedance_references(connection, keys, job_id):
+def link_staged_seedance_references(connection, keys, job_id, username=None,
+                                    endpoint=None, idem_key=None):
     """Atomically link staged objects to the job in the job INSERT transaction."""
     now = int(time.time())
     for key in [str(k) for k in (keys or []) if k]:
         cur = connection.execute(
             """UPDATE seedance_pending_cleanup
-               SET job_id=?,state='linked',updated_at=? WHERE key=? AND state='staged'""",
-            (int(job_id), now, key),
+               SET job_id=?,state='linked',next_attempt_at=?,updated_at=?
+               WHERE key=? AND state='staged'""",
+            (int(job_id), now + SEEDANCE_UNKNOWN_CLEANUP_DELAY, now, key),
         )
         if cur.rowcount != 1:
             raise RuntimeError("Seedance 参考图暂存事务丢失")
+    if keys:
+        changed = connection.execute(
+            """UPDATE seedance_staging_attempts SET state='linked',job_id=?,updated_at=?
+               WHERE username=? AND endpoint=? AND idem_key=? AND state='charging'""",
+            (int(job_id), now, str(username), str(endpoint), str(idem_key)),
+        ).rowcount
+        if changed != 1:
+            raise RuntimeError("Seedance 参考图提交事务丢失")
+        release_seedance_staging_attempt(
+            username, endpoint, idem_key, connection=connection)
 
 
 def _enqueue_pending_cleanup(keys, job_id=None, delay_seconds=0):
@@ -587,9 +933,210 @@ def cleanup_staged_seedance_references(object_keys, job_id=None, delay_seconds=0
         _remove_cleanup_record(key)
 
 
-def retry_pending_seedance_cleanups(limit=50):
+def _recover_orphaned_seedance_attempts(now, limit):
+    """Release only stale attempts proven to be before the charge boundary."""
+    cutoff = int(now) - SEEDANCE_STAGING_ORPHAN_GRACE
+    try:
+        with closing(_cleanup_db()) as c:
+            submission_idempotency.ensure_table(c)
+            c.commit()
+            rows = c.execute(
+                """SELECT username,endpoint,idem_key FROM seedance_staging_attempts
+                   WHERE state IN ('uploading','staged') AND updated_at<=?
+                   ORDER BY updated_at,username,endpoint,idem_key LIMIT ?""",
+                (cutoff, int(limit)),
+            ).fetchall()
+            recovered = 0
+            for row in rows:
+                c.execute("BEGIN IMMEDIATE")
+                attempt = c.execute(
+                    """SELECT state,job_id FROM seedance_staging_attempts
+                       WHERE username=? AND endpoint=? AND idem_key=?""",
+                    (row["username"], row["endpoint"], row["idem_key"]),
+                ).fetchone()
+                if (not attempt or attempt["state"] not in {"uploading", "staged"}
+                        or attempt["job_id"] is not None):
+                    c.commit()
+                    continue
+                # response_json IS NULL proves the key never reached a terminal replay;
+                # the attempt phase proves the external points call was never entered.
+                c.execute(
+                    """DELETE FROM submission_idempotency
+                       WHERE username=? AND endpoint=? AND idem_key=?
+                         AND response_json IS NULL""",
+                    (row["username"], row["endpoint"], row["idem_key"]),
+                )
+                c.execute(
+                    """DELETE FROM seedance_staging_attempts
+                       WHERE username=? AND endpoint=? AND idem_key=?
+                         AND state IN ('uploading','staged') AND job_id IS NULL""",
+                    (row["username"], row["endpoint"], row["idem_key"]),
+                )
+                c.commit()
+                recovered += 1
+            return recovered
+    except Exception:
+        return 0
+
+
+def _seedance_attempt_keys(row):
+    try:
+        payload = json.loads(row["request_json"] or "{}")
+        return [str(key) for key in payload.get("_seedance_staged_keys") or []
+                if str(key)]
+    except Exception:
+        return []
+
+
+def _claim_seedance_charge_recoveries(now, limit):
+    cutoff = int(now) - SEEDANCE_STAGING_ORPHAN_GRACE
+    lease_cutoff = int(now) - SEEDANCE_STAGING_ORPHAN_GRACE
+    claimed = []
+    try:
+        with closing(_cleanup_db()) as c:
+            c.row_factory = sqlite3.Row
+            rows = c.execute(
+                """SELECT username,endpoint,idem_key FROM seedance_staging_attempts
+                   WHERE state IN ('charging','refund_pending') AND job_id IS NULL
+                     AND updated_at<=? AND
+                     (recovery_token IS NULL OR recovery_started_at<=?)
+                   ORDER BY updated_at LIMIT ?""",
+                (cutoff, lease_cutoff, int(limit)),
+            ).fetchall()
+            for candidate in rows:
+                token = "seedance:" + uuid.uuid4().hex
+                changed = c.execute(
+                    """UPDATE seedance_staging_attempts
+                       SET recovery_token=?,recovery_started_at=?,updated_at=?
+                       WHERE username=? AND endpoint=? AND idem_key=?
+                         AND state IN ('charging','refund_pending') AND job_id IS NULL
+                         AND (recovery_token IS NULL OR recovery_started_at<=?)""",
+                    (token, int(now), int(now), candidate["username"],
+                     candidate["endpoint"], candidate["idem_key"], lease_cutoff),
+                ).rowcount
+                if changed == 1:
+                    row = c.execute(
+                        """SELECT * FROM seedance_staging_attempts
+                           WHERE username=? AND endpoint=? AND idem_key=?""",
+                        (candidate["username"], candidate["endpoint"],
+                         candidate["idem_key"]),
+                    ).fetchone()
+                    claimed.append((dict(row), token))
+            c.commit()
+    except Exception:
+        return []
+    return claimed
+
+
+def _release_seedance_charge_recovery(row, token, error=""):
+    with closing(_cleanup_db()) as c:
+        c.execute(
+            """UPDATE seedance_staging_attempts SET recovery_token=NULL,
+               recovery_started_at=NULL,last_error=?,updated_at=?
+               WHERE username=? AND endpoint=? AND idem_key=?
+                 AND recovery_token=? AND job_id IS NULL""",
+            (str(error or "")[:300], int(time.time()), row["username"],
+             row["endpoint"], row["idem_key"], token),
+        )
+        c.commit()
+
+
+def _recover_seedance_charge_attempts(points_domain, now, limit):
+    """Reconcile crash-window charges without replaying a deduction."""
+    if not points_domain or not callable(
+            getattr(points_domain, "get_points_transaction", None)):
+        return 0
+    recovered = 0
+    for row, token in _claim_seedance_charge_recoveries(now, limit):
+        keys = _seedance_attempt_keys(row)
+        if not (row.get("charge_key") and row.get("refund_key") and
+                row.get("request_json") and int(row.get("cost") or 0) > 0):
+            _release_seedance_charge_recovery(
+                row, token, "incomplete_seedance_charge_intent")
+            continue
+        if row["state"] == "charging":
+            try:
+                ledger = points_domain.get_points_transaction(row["charge_key"])
+            except Exception as exc:
+                _release_seedance_charge_recovery(row, token, type(exc).__name__)
+                continue
+            if ledger is None:
+                submission_idempotency.abort(
+                    jdb, row["username"], row["endpoint"], row["idem_key"])
+                release_seedance_staging_attempt(
+                    row["username"], row["endpoint"], row["idem_key"])
+                cleanup_staged_seedance_references(keys)
+                recovered += 1
+                continue
+            try:
+                matches = (str(ledger.get("username") or "") == row["username"]
+                           and int(ledger.get("delta") or 0) == -int(row["cost"]))
+            except (TypeError, ValueError):
+                matches = False
+            if not matches:
+                _release_seedance_charge_recovery(
+                    row, token, "seedance_charge_ledger_inconsistent")
+                continue
+            with closing(_cleanup_db()) as c:
+                changed = c.execute(
+                    """UPDATE seedance_staging_attempts SET state='refund_pending',
+                       updated_at=? WHERE username=? AND endpoint=? AND idem_key=?
+                         AND state='charging' AND recovery_token=?""",
+                    (int(time.time()), row["username"], row["endpoint"],
+                     row["idem_key"], token),
+                ).rowcount
+                c.commit()
+            if changed != 1:
+                continue
+        try:
+            points_domain.refund_points(
+                row["username"], int(row["cost"]),
+                "seedance reference submission:crash recovery",
+                transaction_key=row["refund_key"],
+            )
+        except Exception as exc:
+            _release_seedance_charge_recovery(row, token, type(exc).__name__)
+            continue
+        response = {
+            "detail": "视频任务创建中断，已自动退回点数，请重新提交",
+            "code": "seedance_charge_recovered", "operation_terminal": True,
+            "_http_status": 500,
+        }
+        submission_idempotency.complete(
+            jdb, row["username"], row["endpoint"], row["idem_key"], response)
+        release_seedance_staging_attempt(
+            row["username"], row["endpoint"], row["idem_key"])
+        cleanup_staged_seedance_references(keys)
+        recovered += 1
+    return recovered
+
+
+def _promote_terminal_linked_cleanups(now):
+    """Close the crash window between terminal CAS and its cleanup callback."""
+    try:
+        with closing(_cleanup_db()) as c:
+            changed = c.execute(
+                """UPDATE seedance_pending_cleanup AS cleanup
+                   SET state='cleanup_pending',updated_at=?
+                   WHERE state='linked' AND job_id IS NOT NULL AND (
+                     NOT EXISTS(SELECT 1 FROM jobs WHERE id=cleanup.job_id) OR
+                     EXISTS(SELECT 1 FROM jobs WHERE id=cleanup.job_id
+                            AND status IN ('done','error'))
+                   )""",
+                (int(now),),
+            ).rowcount
+            c.commit()
+            return changed
+    except Exception:
+        return 0
+
+
+def retry_pending_seedance_cleanups(limit=50, points_domain=None):
     """Retry eligible cleanup rows without starving newer objects."""
     now = int(time.time())
+    _recover_orphaned_seedance_attempts(now, limit)
+    _recover_seedance_charge_attempts(points_domain, now, limit)
+    _promote_terminal_linked_cleanups(now)
     try:
         with closing(_cleanup_db()) as c:
             rows = c.execute(
@@ -659,6 +1206,7 @@ def seedance_reference_cleanup_delay(kind, payload, error):
         pass
     return 0
 
+
 def _xiaole_build_refs(reference_images):
     # 前端传 dataURL/URL → API 要的 [{type, value}]，最多 XIAOLE_MAX_REF 张。
     # type 合法枚举(实测 422 暴露)：'url' | 'base64' | 'data_url'。
@@ -681,7 +1229,7 @@ def _xiaole_ref_to_url(data_url):
     """Grok 参考图实测只有公网 HTTPS URL 能稳定出片(data_url/base64 会超时)。
     本地上传的图先落盘转存 COS 换直链；已经是 http(s) 的直接透传；转存失败就回退原始数据。"""
     s = str(data_url or "").strip()
-    if not s or s.startswith("http"):
+    if not s or s.startswith(("http://", "https://", "asset://")):
         return s
     try:
         fn = _save_data_file(s, "grok_ref", [".jpg", ".png", ".webp"])
@@ -693,85 +1241,19 @@ def _xiaole_ref_to_url(data_url):
         print("[video] 参考图转存COS失败，回退原始数据: %s" % e, flush=True)
         return s
 
-
-def _grok_ordered_storyboard(reference_images):
-    """Combine 1-4 local reverse frames into one left-to-right xAI reference.
-
-    xAI's current video create call accepts one image.  Silently selecting the
-    first frame destroys the reverse timeline, so the reverse-only contract
-    makes every source frame visible in one numbered contact sheet before any
-    points are deducted.
-    """
-    refs = [str(item or "").strip() for item in (reference_images or []) if str(item or "").strip()]
-    if not 1 <= len(refs) <= 4:
-        raise ValueError("反推同款需要1-4张按时间排序的关键帧")
-    try:
-        from PIL import Image, ImageDraw
-    except Exception as exc:
-        raise ValueError("反推关键帧故事板组件不可用，本次未扣点") from exc
-
-    frames = []
-    hashes = []
-    for raw in refs:
-        if not raw.startswith("data:image/") or "," not in raw:
-            raise ValueError("果肉反推回退仅接受本次任务的本地关键帧，本次未扣点")
-        meta, encoded = raw.split(",", 1)
-        if ";base64" not in meta.lower():
-            raise ValueError("反推关键帧必须使用base64编码")
-        mime = meta.split(";", 1)[0].replace("data:", "", 1).lower()
-        if mime not in _SEEDANCE_IMAGE_TYPES:
-            raise ValueError("反推关键帧格式不支持（jpg/png/webp）")
-        try:
-            data = base64.b64decode(encoded, validate=True)
-        except Exception:
-            raise ValueError("反推关键帧内容解析失败") from None
-        if len(data) > SEEDANCE_REFERENCE_MAX_BYTES:
-            raise ValueError("反推单张关键帧不能超过30MB")
-        hashes.append(hashlib.sha256(data).hexdigest())
-        try:
-            with Image.open(io.BytesIO(data)) as source:
-                if source.width * source.height > 40_000_000:
-                    raise ValueError("反推关键帧像素尺寸过大")
-                source.load()
-                frame = source.convert("RGB")
-        except ValueError:
-            raise
-        except Exception:
-            raise ValueError("反推关键帧内容无效或已损坏") from None
-        frame.thumbnail((384, 640), Image.Resampling.LANCZOS)
-        frames.append(frame.copy())
-
-    if len(frames) == 1:
-        return refs[0], hashes, hashes[0]
-
-    cell_width, cell_height, label_height = 384, 640, 36
-    canvas = Image.new("RGB", (cell_width * len(frames), cell_height + label_height), (8, 12, 20))
-    draw = ImageDraw.Draw(canvas)
-    for index, frame in enumerate(frames):
-        left = index * cell_width + (cell_width - frame.width) // 2
-        top = label_height + (cell_height - frame.height) // 2
-        canvas.paste(frame, (left, top))
-        draw.text((index * cell_width + 12, 10), str(index + 1), fill=(255, 214, 102))
-        if index:
-            draw.line((index * cell_width, 0, index * cell_width, canvas.height), fill=(255, 255, 255), width=2)
-    output = io.BytesIO()
-    canvas.save(output, format="JPEG", quality=90, optimize=True)
-    storyboard_bytes = output.getvalue()
-    encoded = base64.b64encode(storyboard_bytes).decode("ascii")
-    return "data:image/jpeg;base64," + encoded, hashes, hashlib.sha256(storyboard_bytes).hexdigest()
-
-
 def validate_xiaole_video_payload(payload, username=None):
-    """校验果肉/豆姐/欧米的公共入口；果肉官方线另按 xAI 参数收紧。"""
+    """校验共用任务入口；micro / omni 只允许各自官方适配器。"""
     if not isinstance(payload, dict):
         raise ValueError("请求体不是合法 JSON")
-    # 剥离客户端的一切 "_" 开头内部字段（_seedance_staged_keys/_username/_job_id 等
-    # 只能由服务端在转存/派工时写入）——否则注入的暂存键会随 payload 落库，
-    # 终态清理时变成越权删除任意 COS 对象的入口。
-    cleaned = {k: v for k, v in payload.items() if not str(k).startswith("_")}
+    # Internal fields are server-owned. Accepting client supplied cleanup keys
+    # would turn terminal cleanup into a cross-user COS deletion primitive.
+    cleaned = {key: value for key, value in payload.items()
+               if not str(key).startswith("_")}
     channel = str(cleaned.get("channel") or "grok").strip().lower()
     if channel not in XIAOLE_CHANNEL_MODELS:
         raise ValueError("未知视频渠道：%s" % channel)
+    if channel in DISABLED_XIAOLE_VIDEO_CHANNELS:
+        raise ValueError("该视频渠道维护中，请使用果肉视频生成")
     prompt = str(cleaned.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("请输入视频提示词")
@@ -781,40 +1263,131 @@ def validate_xiaole_video_payload(payload, username=None):
     if reference_mode not in {"", "ordered_storyboard"}:
         raise ValueError("参考图模式不支持")
     if reference_mode and channel != "grok":
-        raise ValueError("保序故事板仅用于果肉反推回退")
-    if channel == "micro":
-        from . import video_seedance
-        try:
-            duration = int(cleaned.get("duration") or 10)
-        except (TypeError, ValueError):
-            raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
-        if duration not in {5, 10, 15}:
-            raise ValueError("豆姐视频时长仅支持 5、10 或 15 秒")
+        raise ValueError("保序参考帧仅用于果肉反推回退")
+    if channel in {"micro", "omni", "minimax"}:
+        from . import feature_flags
+        operation = str(cleaned.get("operation") or "generate").strip().lower()
+        if operation != "generate":
+            raise ValueError("该官方视频通道暂不支持编辑")
         refs = cleaned.get("reference_images") or []
         if not isinstance(refs, list):
             raise ValueError("reference_images 必须是数组")
-        if len([item for item in refs if str(item or "").strip()]) > 9:
-            raise ValueError("Seedance 最多支持 9 张参考图")
+        refs = [str(item or "").strip() for item in refs if str(item or "").strip()]
+        validate_image_mentions(prompt, len(refs))
+
+        if channel == "minimax":
+            from . import video_minimax_h3
+            if not feature_flags.is_enabled("minimax_h3_video"):
+                raise ValueError("麦克视频通道未开启")
+            if not video_minimax_h3.available():
+                raise ValueError("麦克视频服务未配置")
+            model = str(cleaned.get("model") or video_minimax_h3.MODEL).strip()
+            if model != video_minimax_h3.MODEL:
+                raise ValueError("麦克视频模型不支持：%s" % model)
+            ratio = str(cleaned.get("ratio") or "9:16").strip()
+            duration = cleaned.get("duration", 5)
+            resolution = str(cleaned.get("resolution") or "768p").strip()
+            video_minimax_h3.build_request(prompt, refs, ratio, duration, resolution)
+            cleaned.update({
+                "operation": "generate", "model": model, "ratio": ratio,
+                "duration": int(duration), "resolution": "768p",
+                "reference_images": refs,
+            })
+            return cleaned
+
+        if channel == "omni":
+            from . import video_gemini_omni
+            if not feature_flags.is_enabled("omni_video"):
+                raise ValueError("Omni 视频测试通道未开启")
+            if not video_gemini_omni.available():
+                raise ValueError("Omni 视频服务未配置")
+            model = str(cleaned.get("model") or video_gemini_omni.MODEL).strip()
+            if model != video_gemini_omni.MODEL:
+                raise ValueError("Omni 官方模型不支持：%s" % model)
+            ratio = str(cleaned.get("ratio") or "16:9").strip()
+            duration = cleaned.get("duration", 5)
+            resolution = str(cleaned.get("resolution") or "720p").strip().lower()
+            if resolution != "720p":
+                raise ValueError("Gemini Omni 当前固定输出 720p")
+            # build_request 在扣点前同时校验比例、目标时长和图片边界。
+            video_gemini_omni.build_request(
+                prompt, refs, ratio, duration, delivery="uri"
+            )
+            cleaned.update({
+                "operation": "generate",
+                "model": model,
+                "ratio": ratio,
+                "duration": int(duration),
+                "resolution": "720p",
+                "reference_images": refs,
+            })
+            return cleaned
+
+        from . import video_seedance
+        if not feature_flags.is_enabled("seedance_video"):
+            raise ValueError("Seedance 视频测试通道未开启")
+        if not video_seedance.available():
+            raise ValueError("Seedance 视频服务未配置")
+        model = str(cleaned.get("model") or video_seedance.SEEDANCE_MODEL).strip()
         ratio = str(cleaned.get("ratio") or "9:16").strip()
+        duration = cleaned.get("duration", 5)
         resolution = str(cleaned.get("resolution") or "720p").strip().lower()
         generate_audio = cleaned.get("generate_audio", True)
-        if not isinstance(generate_audio, bool):
-            raise ValueError("Seedance 声音选项必须为布尔值")
-        if ratio not in video_seedance.RATIOS:
-            raise ValueError("Seedance 不支持该画面比例")
-        if resolution not in video_seedance.RESOLUTIONS:
-            raise ValueError("Seedance 不支持该分辨率")
-        # 本地校验(含真实解码与 asset:// 归属)在这里完成；COS 转存是网络动作，
-        # 由 core 在幂等/上限/余额资格检查之后、扣点之前调 stage_seedance_references。
+        upscale = cleaned.get("upscale", False)
+        if not isinstance(upscale, bool):
+            raise ValueError("Seedance AI 超清选项必须为布尔值")
+        if upscale:
+            if resolution != "480p":
+                raise ValueError("Seedance AI 超清必须先生成 480p")
+            if not seedance_upscale_is_open():
+                raise ValueError("Seedance AI 超清服务暂未配置")
+        cleaned.pop("upscale_prediction_id", None)
+        if len(refs) > 9:
+            raise ValueError("Seedance 最多支持 9 张参考图")
         refs = _validate_seedance_references(refs, username)
+        video_seedance._build_payload(
+            model, prompt, duration, ratio, resolution, generate_audio, []
+        )
         cleaned.update({
-            "model": video_seedance.SEEDANCE_MODEL,
-            "duration": duration,
+            "operation": "generate",
+            "model": model,
             "ratio": ratio,
+            "duration": int(duration),
             "resolution": resolution,
             "generate_audio": generate_audio,
+            "upscale": upscale,
             "reference_images": refs,
         })
+        return cleaned
+
+    if channel == "grok" and str(cleaned.get("operation") or "generate").strip().lower() == "edit":
+        raise ValueError("果肉视频编辑维护中")
+    if channel == "grok":
+        common_refs = cleaned.get("reference_images") or []
+        if not isinstance(common_refs, list):
+            raise ValueError("reference_images 必须是数组")
+        common_refs = [str(x or "").strip() for x in common_refs if str(x or "").strip()]
+        if len(common_refs) > XIAOLE_MAX_REF:
+            raise ValueError("Grok 视频最多支持%d张参考图" % XIAOLE_MAX_REF)
+        validate_image_mentions(prompt, len(common_refs))
+        cleaned["reference_images"] = common_refs
+        if reference_mode == "ordered_storyboard":
+            if not 1 <= len(common_refs) <= 4:
+                raise ValueError("反推同款需要1-4张按时间排序的关键帧")
+            if any(not item.startswith("data:") for item in common_refs):
+                raise ValueError("果肉反推回退仅接受本次任务的本地关键帧，本次未扣点")
+            hashes = []
+            for item in common_refs:
+                _mime, _ext, data = _seedance_data_image(item)
+                hashes.append(hashlib.sha256(data).hexdigest())
+            cleaned["_reference_storyboard_count"] = len(common_refs)
+            cleaned["_reference_storyboard_source_hashes"] = hashes
+            cleaned["prompt"] = (
+                "参考图按原视频时间顺序排列；必须依次还原每张图的动作节点、"
+                "镜头转换和场景变化。" + prompt
+            )
+            if GROK_VIDEO_PROVIDER == "xiaole":
+                raise ValueError("当前果肉供应商不支持安全反推参考帧，本次未扣点")
     if channel != "grok" or GROK_VIDEO_PROVIDER == "xiaole":
         return cleaned
 
@@ -823,16 +1396,7 @@ def validate_xiaole_video_payload(payload, username=None):
         raise ValueError("果肉视频操作类型不支持：%s" % operation)
     cleaned["operation"] = operation
     if operation == "edit":
-        source = str(cleaned.get("reference_video_data") or "").strip()
-        if not _is_valid_data_url(source, {"video/mp4"}):
-            raise ValueError("请上传有效的 MP4 参考视频")
-        duration = _probe_data_video_duration(source)
-        if duration <= 0 or duration > 8.7:
-            raise ValueError("xAI 官方视频编辑仅支持不超过 8.7 秒的参考视频")
-        cleaned.update({"model": "grok-imagine-video", "resolution": "720p",
-                        "reference_video_data": source, "source_duration": duration,
-                        "reference_images": []})
-        return cleaned
+        raise ValueError("果肉视频编辑维护中")
 
     model = str(cleaned.get("model") or "grok-imagine-video").strip()
     if model not in XAI_GROK_MODELS:
@@ -841,31 +1405,24 @@ def validate_xiaole_video_payload(payload, username=None):
     if not isinstance(refs, list):
         raise ValueError("reference_images 必须是数组")
     refs = [str(x or "").strip() for x in refs if str(x or "").strip()]
+    validate_image_mentions(prompt, len(refs))
+    if model == "grok-imagine-video-1.5" and not refs:
+        raise ValueError("Grok Video 1.5 至少需要1张参考图")
     if len(refs) > XIAOLE_MAX_REF:
         raise ValueError("xAI官方图生视频最多支持%d张参考图" % XIAOLE_MAX_REF)
-    if reference_mode == "ordered_storyboard":
-        storyboard, source_hashes, storyboard_hash = _grok_ordered_storyboard(refs)
-        cleaned["reference_images"] = refs = [storyboard]
-        cleaned["_reference_storyboard_count"] = len(source_hashes)
-        cleaned["_reference_storyboard_source_hashes"] = source_hashes
-        cleaned["_reference_storyboard_sha256"] = storyboard_hash
-        cleaned["prompt"] = (
-            "参考图是按原视频时间从左到右排列并编号的%d格关键帧故事板；"
-            "必须依次还原每格的动作节点、镜头转换和场景变化。" % len(source_hashes)
-        ) + prompt
-    if model == "grok-imagine-video-1.5" and not refs:
-        raise ValueError("Grok Video 1.5 仅支持图生视频，请先上传参考图")
     ratio = str(cleaned.get("ratio") or "16:9").strip()
     if ratio not in XAI_GROK_RATIOS:
         raise ValueError("果肉官方比例仅支持 " + "、".join(sorted(XAI_GROK_RATIOS)))
     try:
         duration = int(cleaned.get("duration") or 10)
     except (TypeError, ValueError):
-        raise ValueError("果肉视频时长必须是1-15秒整数")
+        raise ValueError("果肉视频时长必须是整数")
     if duration < 1 or duration > 15:
         raise ValueError("果肉视频时长必须是1-15秒整数")
     resolution = str(cleaned.get("resolution") or "720p").strip().lower()
     allowed_resolutions = XAI_GROK_RESOLUTIONS | ({"1080p"} if model == "grok-imagine-video-1.5" else set())
+    if refs:
+        allowed_resolutions = {"720p"}
     if resolution not in allowed_resolutions:
         raise ValueError("%s 不支持分辨率 %s" % (model, resolution))
     cleaned.update({
@@ -873,6 +1430,64 @@ def validate_xiaole_video_payload(payload, username=None):
         "resolution": resolution, "reference_images": refs,
     })
     return cleaned
+
+
+def validate_sora_video_payload(payload):
+    """校验 Sora 限时 Beta 契约；参考图只作为首帧且最多一张。"""
+    if not sora_video_is_open():
+        raise ValueError("Sora 限时测试通道未开启")
+    if not isinstance(payload, dict):
+        raise ValueError("请求体不是合法 JSON")
+    from . import video_openai
+    if not video_openai.available():
+        raise ValueError("Sora 视频服务未配置")
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        raise ValueError("请输入视频提示词")
+    if len(prompt) > 2000:
+        raise ValueError("视频提示词不能超过 2000 字")
+    model = str(payload.get("model") or "sora-2").strip().lower()
+    if model not in SORA_MODELS:
+        raise ValueError("Sora 模型不支持：%s" % model)
+    raw_seconds = payload.get("seconds", 4)
+    if isinstance(raw_seconds, bool):
+        raise ValueError("Sora 视频时长仅支持 4、8、12 秒")
+    try:
+        seconds = int(raw_seconds)
+    except (TypeError, ValueError):
+        raise ValueError("Sora 视频时长仅支持 4、8、12 秒")
+    if str(raw_seconds).strip() != str(seconds) or seconds not in SORA_SECONDS:
+        raise ValueError("Sora 视频时长仅支持 4、8、12 秒")
+    ratio = str(payload.get("ratio") or "9:16").strip()
+    if ratio not in SORA_RATIOS:
+        raise ValueError("Sora 画面比例仅支持 9:16、16:9")
+    resolution = str(payload.get("resolution") or "720p").strip().lower()
+    size = SORA_SIZE_MAP.get((model, resolution, ratio))
+    if not size:
+        raise ValueError("%s 不支持分辨率 %s" % (model, resolution))
+    refs = payload.get("reference_images") or []
+    if not isinstance(refs, list):
+        raise ValueError("Sora 参考图格式错误")
+    if len(refs) > 1:
+        raise ValueError("Sora 最多支持1张参考图")
+    if refs:
+        ref = str(refs[0] or "").strip()
+        if not _is_valid_data_url(ref, VALID_IMAGE_MIMES):
+            raise ValueError("Sora 参考图仅支持 JPEG、PNG、WebP")
+        if len(base64.b64decode(ref.split(",", 1)[1], validate=True)) > SORA_MAX_REFERENCE_BYTES:
+            raise ValueError("Sora 参考图不能超过10MB")
+    validate_image_mentions(prompt, len(refs))
+    return {
+        "mode": "sora",
+        "prompt": prompt,
+        "provider_prompt": resolve_image_mentions(prompt, len(refs)),
+        "model": model,
+        "seconds": seconds,
+        "ratio": ratio,
+        "resolution": resolution,
+        "size": size,
+        "reference_images": refs,
+    }
 
 def _is_valid_data_url(value, allowed_mimes):
     raw = (value or "").strip()
@@ -937,15 +1552,20 @@ def _probe_data_video_duration(data_url):
             except OSError:
                 pass
 def _image_bytes_look_valid(raw):
+    return bool(_detect_image_mime(raw))
+
+
+def _detect_image_mime(raw):
+    """Identify an image from its bytes instead of trusting its label or suffix."""
     if not raw:
-        return False
+        return ""
     if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return True
+        return "image/png"
     if raw.startswith(b"\xff\xd8\xff"):
-        return True
+        return "image/jpeg"
     if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
-        return True
-    return False
+        return "image/webp"
+    return ""
 
 def _faststart_video_file(rel):
     raw = str(rel or "").strip()
@@ -970,6 +1590,55 @@ def _faststart_video_file(rel):
         print("[video] ffmpeg missing, skip faststart for %s" % raw, flush=True)
     except Exception as e:
         print("[video] faststart skipped for %s: %s" % (raw, str(e)[:160]), flush=True)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+    return rel
+
+
+def _normalize_seedance_upscale_video(rel, ratio):
+    """把 SeedVR2 成片收敛到标准 1080p 尺寸；音轨稍后从 Seedance 原片合回。"""
+    src = _resolve_out_file(rel)
+    if not src:
+        raise RuntimeError("AI 超清成片文件不存在")
+    tmp = src.with_name(src.stem + ".1080.tmp.mp4")
+    size = SEEDANCE_1080_SIZE_MAP.get(str(ratio or "").strip())
+    if size:
+        width, height = size
+        video_filter = (
+            "scale=w=%d:h=%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d:(iw-ow)/2:(ih-oh)/2,setsar=1"
+            % (width, height, width, height)
+        )
+    else:
+        video_filter = (
+            "scale=w='if(gte(iw,ih),-2,1080)':"
+            "h='if(gte(iw,ih),1080,-2)',setsar=1"
+        )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(src), "-map", "0:v:0", "-an",
+                "-vf", video_filter,
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(tmp),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+            timeout=1800,
+        )
+        if not tmp.is_file() or tmp.stat().st_size <= 0:
+            raise RuntimeError("标准化产物为空")
+        tmp.replace(src)
+    except FileNotFoundError as exc:
+        raise RuntimeError("服务器未安装 ffmpeg，无法完成 AI 超清标准化") from exc
+    except Exception as exc:
+        raise RuntimeError("AI 超清成片标准化失败: %s" % str(exc)[:160]) from exc
     finally:
         try:
             if tmp.exists():
@@ -1097,18 +1766,6 @@ def validate_video_payload(payload, username=None):
     if not 0.05 <= bgm_volume <= 0.8:
         raise ValueError("bgm_volume 必须是 0.05-0.8 的数字")
 
-    motion_prompts = {}
-    for field in ("motion_prompt_original", "motion_prompt"):
-        value = payload[field] if field in payload else ""
-        if not isinstance(value, str):
-            raise ValueError("%s 必须是字符串" % field)
-        value = value.strip()
-        if len(value) > 500:
-            raise ValueError("%s 最多 500 个字符" % field)
-        motion_prompts[field] = value
-    if motion_prompts["motion_prompt"]:
-        resolution, ratio = "1080p", "9:16"
-
     cleaned = dict(payload)
     cleaned["mode"] = mode
     cleaned["ratio"] = ratio
@@ -1119,7 +1776,6 @@ def validate_video_payload(payload, username=None):
         cleaned["audio_data"] = audio_data
     cleaned["bgm_data"] = bgm_data
     cleaned["bgm_volume"] = bgm_volume
-    cleaned.update(motion_prompts)
     cleaned.pop("duration", None)
     cleaned.pop("line", None)   # 动作模仿不再有线路，别把老前端传来的 line 写进 payload 混淆历史记录
     return cleaned
@@ -1237,9 +1893,9 @@ def record_video_asset(job_id, username, result):
         c.execute("""INSERT INTO video_assets
             (job_id, username, mode, image_file, audio_file, reference_video_file, video_file, video_url, text, voice_key,
              resolution, ratio, motion, phase, image_asset_id, audio_asset_id, reference_asset_id, provider_video_id,
-             provider_avatar_id, provider_avatar_group_id, source_video_url, background_file, tryon_mode, model,
+             provider_key_id, provider_avatar_id, provider_avatar_group_id, source_video_url, background_file, tryon_mode, model,
              status, error, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(job_id) DO UPDATE SET
                 mode=COALESCE(excluded.mode, video_assets.mode),
                 image_file=COALESCE(excluded.image_file, video_assets.image_file),
@@ -1257,6 +1913,7 @@ def record_video_asset(job_id, username, result):
                 audio_asset_id=COALESCE(excluded.audio_asset_id, video_assets.audio_asset_id),
                 reference_asset_id=COALESCE(excluded.reference_asset_id, video_assets.reference_asset_id),
                 provider_video_id=COALESCE(excluded.provider_video_id, video_assets.provider_video_id),
+                provider_key_id=COALESCE(excluded.provider_key_id, video_assets.provider_key_id),
                 provider_avatar_id=COALESCE(excluded.provider_avatar_id, video_assets.provider_avatar_id),
                 provider_avatar_group_id=COALESCE(excluded.provider_avatar_group_id, video_assets.provider_avatar_group_id),
                 source_video_url=COALESCE(excluded.source_video_url, video_assets.source_video_url),
@@ -1270,20 +1927,24 @@ def record_video_asset(job_id, username, result):
              result.get("reference_video_file"), result.get("video_file"), result.get("video_url"), result.get("text"), result.get("voice"),
              result.get("resolution"), result.get("ratio"), result.get("motion"), result.get("phase"),
              result.get("image_asset_id"), result.get("audio_asset_id"), result.get("reference_asset_id"),
-             result.get("provider_video_id") or result.get("video_id"), result.get("provider_avatar_id") or result.get("avatar_item_id"),
+             result.get("provider_video_id") or result.get("video_id"), result.get("provider_key_id"),
+             result.get("provider_avatar_id") or result.get("avatar_item_id"),
              result.get("provider_avatar_group_id") or result.get("avatar_group_id"), result.get("source_video_url"),
              result.get("background_file"), result.get("tryon_mode"), result.get("model"),
              result.get("status") or "pending", result.get("error"), now, now))
         c.commit()
 
-def update_video_asset_phase(job_id, phase, **fields):
+def update_video_asset_phase(job_id, phase, strict=False, **fields):
     if not job_id:
-        return
+        if strict:
+            raise ValueError("任务缺少 job_id")
+        return False
     now = int(time.time())
     allowed = {
         "mode", "image_file", "audio_file", "reference_video_file", "video_file", "video_url",
         "text", "voice_key", "resolution", "ratio", "motion", "image_asset_id",
         "audio_asset_id", "reference_asset_id", "provider_video_id", "provider_avatar_id",
+        "provider_key_id",
         "provider_avatar_group_id", "source_video_url", "background_file", "tryon_mode",
         "model", "status", "error"
     }
@@ -1297,18 +1958,378 @@ def update_video_asset_phase(job_id, phase, **fields):
             updates[k] = v
     sets = ", ".join("%s=?" % k for k in updates)
     vals = list(updates.values()) + [now, job_id]
+    asset_updated = True
     try:
         with closing(adb()) as c:
-            c.execute("UPDATE video_assets SET %s, updated_at=? WHERE job_id=?" % sets, vals)
+            cur = c.execute("UPDATE video_assets SET %s, updated_at=? WHERE job_id=?" % sets, vals)
             c.commit()
+            if strict and cur.rowcount != 1:
+                raise RuntimeError("视频任务恢复信息没有对应资产行")
     except Exception:
-        pass
+        if strict:
+            raise
+        asset_updated = False
     try:
         with closing(jdb()) as c:
             c.execute("UPDATE jobs SET updated_at=? WHERE id=? AND status='running'", (now, job_id))
             c.commit()
     except Exception:
         pass
+    return asset_updated
+
+
+def _persist_seedance_upscale_prediction(job_id, prediction_id):
+    """把第二次付费提交的 ID 写回原 job payload；不改公共数据库结构。"""
+    prediction_id = str(prediction_id or "").strip()
+    if not job_id or not prediction_id:
+        raise ValueError("AI 超清任务缺少本地 job_id 或 prediction id")
+    now = int(time.time())
+    with closing(jdb()) as c:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT payload,status FROM jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if not row or row["status"] != "running":
+            raise RuntimeError("AI 超清任务已不在运行状态")
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        existing = str(payload.get("upscale_prediction_id") or "").strip()
+        if existing and existing != prediction_id:
+            raise RuntimeError("AI 超清任务编号冲突，已停止自动恢复")
+        payload["upscale_prediction_id"] = prediction_id
+        cur = c.execute(
+            "UPDATE jobs SET payload=?,updated_at=? WHERE id=? AND status='running'",
+            (json.dumps(payload, ensure_ascii=False), now, job_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("AI 超清任务编号未能持久化")
+        c.commit()
+    return prediction_id
+
+def get_resumable_xai_request(job_id):
+    if not job_id:
+        return None
+    with closing(adb()) as c:
+        row = c.execute(
+            """SELECT provider_video_id, model, phase, status
+               FROM video_assets WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+    if not row or not row["provider_video_id"]:
+        return None
+    phase = str(row["phase"] or "")
+    if not (phase.startswith("xai_") or phase == "downloading"):
+        return None
+    return {
+        "request_id": row["provider_video_id"],
+        "model": row["model"] or "grok-imagine-video",
+        "provider": "xai",
+        "phase": phase,
+        "status": row["status"],
+    }
+
+
+def get_resumable_grok_request(job_id):
+    """读取 xiaole_video 共用任务中已持久化的真实官方供应商。"""
+    if not job_id:
+        return None
+    with closing(adb()) as c:
+        try:
+            row = c.execute(
+                """SELECT provider_video_id, provider_key_id, model, phase, status, resolution, ratio
+                   FROM video_assets WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such column: provider_key_id" not in str(exc):
+                raise
+            row = c.execute(
+                """SELECT provider_video_id, model, phase, status, resolution, ratio
+                   FROM video_assets WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        recovery_error = None
+        try:
+            error_row = c.execute(
+                "SELECT error FROM video_assets WHERE job_id=?", (job_id,)
+            ).fetchone()
+            recovery_error = error_row["error"] if error_row else None
+        except Exception:
+            # 兼容旧测试库/旧资产库没有 error 列的情况。
+            pass
+    if not row:
+        return None
+    provider_key_id = (
+        row["provider_key_id"]
+        if "provider_key_id" in row.keys()
+        else None
+    )
+    phase = str(row["phase"] or "")
+    upscale_prediction_id = ""
+    if phase.startswith("seedance_upscale_"):
+        with closing(jdb()) as c:
+            job = c.execute(
+                "SELECT payload FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+        try:
+            job_payload = json.loads((job or {})["payload"] or "{}")
+        except Exception:
+            job_payload = {}
+        if isinstance(job_payload, dict):
+            upscale_prediction_id = str(
+                job_payload.get("upscale_prediction_id") or ""
+            ).strip()
+        if phase in {
+            "seedance_upscale_submitting",
+            "seedance_upscale_recovery_required",
+        } and not upscale_prediction_id:
+            return {
+                "request_id": None,
+                "submission_unknown": True,
+                "provider": "seedance",
+                "phase": phase,
+            }
+    if not row["provider_video_id"]:
+        if phase.startswith("xai_") and phase in {
+                "xai_submitting", "xai_recovery_required"}:
+            return {
+                "request_id": None, "submission_unknown": True,
+                "provider": "xai", "provider_key_id": provider_key_id,
+                "phase": phase,
+            }
+        if phase.startswith("seedance_") and phase in {
+                "seedance_submitting", "seedance_recovery_required"}:
+            return {
+                "request_id": None, "submission_unknown": True,
+                "provider": "seedance", "phase": phase,
+            }
+        if phase.startswith("omni_") and phase in {
+                "omni_submitting", "omni_recovery_required"}:
+            return {
+                "request_id": None, "submission_unknown": True,
+                "provider": "omni", "phase": phase,
+            }
+        if phase.startswith("minimax_") and phase in {
+                "minimax_submitting", "minimax_recovery_required"}:
+            return {
+                "request_id": None, "submission_unknown": True,
+                "provider": "minimax", "phase": phase,
+            }
+        return None
+    if phase.startswith("openrouter_"):
+        provider = "openrouter"
+    elif phase.startswith("xai_") or phase == "downloading":
+        provider = "xai"
+    elif phase.startswith("seedance_"):
+        provider = "seedance"
+    elif phase.startswith("omni_"):
+        provider = "omni"
+    elif phase.startswith("minimax_"):
+        provider = "minimax"
+    else:
+        return None
+    return {
+        "request_id": row["provider_video_id"],
+        "provider_key_id": provider_key_id,
+        "model": row["model"],
+        "provider": provider,
+        "phase": phase,
+        "status": row["status"],
+        "resolution": row["resolution"],
+        "ratio": row["ratio"],
+        "error": recovery_error,
+        "upscale_prediction_id": upscale_prediction_id or None,
+    }
+
+
+def recover_official_video_paid_job(job_id, error, requeue=None):
+    """有官方 id 时只恢复 GET；提交结果未知时保留任务，禁止退款后重复计费。"""
+    recovery = get_resumable_grok_request(job_id)
+    if not recovery or recovery.get("provider") not in {"xai", "omni", "seedance", "minimax"}:
+        return False
+    provider = recovery["provider"]
+    if recovery.get("submission_unknown"):
+        update_video_asset_phase(
+            job_id, provider + "_recovery_required", error=str(error)[:300]
+        )
+        return True
+    if recovery.get("request_id"):
+        if recovery.get("phase") == provider + "_recovery_required":
+            # ponytail: only the adapter's stable HTTP-400 marker is terminal; keep other
+            # recovery-required jobs held so an unknown paid submission is never duplicated.
+            if provider == "omni" and "Gemini Omni 查询无法继续：HTTP 400" in str(recovery.get("error") or ""):
+                return False
+            return True
+        if requeue:
+            if requeue(job_id):
+                update_video_asset_phase(
+                    job_id, provider + "_retrying", error=str(error)[:300]
+                )
+            return True
+        update_video_asset_phase(
+            job_id, provider + "_recovery_required", error=str(error)[:300]
+        )
+        return True
+    return False
+
+
+def recovery_hold_expired(job_id, kind, age, grace):
+    getter = get_resumable_sora_request if kind == "sora_video" else get_resumable_grok_request
+    recovery = getter(job_id)
+    return bool(
+        recovery
+        and not recovery.get("submission_unknown")
+        and str(recovery.get("phase") or "").endswith("_recovery_required")
+        and age >= grace
+    )
+
+
+def get_resumable_sora_request(job_id):
+    """读取已持久化的 OpenAI video id；重启后只恢复 GET，绝不重发付费 POST。"""
+    if not job_id:
+        return None
+    with closing(adb()) as c:
+        try:
+            row = c.execute(
+                """SELECT provider_video_id, provider_key_id, model, phase, status, resolution, ratio
+                   FROM video_assets WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such column: provider_key_id" not in str(exc):
+                raise
+            row = c.execute(
+                """SELECT provider_video_id, model, phase, status, resolution, ratio
+                   FROM video_assets WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+    if not row:
+        return None
+    provider_key_id = (
+        row["provider_key_id"]
+        if "provider_key_id" in row.keys()
+        else None
+    )
+    phase = str(row["phase"] or "")
+    if not row["provider_video_id"]:
+        if phase in {"sora_submitting", "sora_recovery_required"}:
+            return {"video_id": None, "submission_unknown": True, "phase": phase}
+        return None
+    if not (phase.startswith("sora_") or phase == "downloading"):
+        return None
+    return {
+        "video_id": row["provider_video_id"],
+        "provider_key_id": provider_key_id,
+        "model": row["model"] or "sora-2",
+        "phase": phase,
+        "status": row["status"],
+        "resolution": row["resolution"] or "720p",
+        "ratio": row["ratio"] or "9:16",
+    }
+
+
+def recover_sora_paid_job(job_id, error, requeue=None):
+    """Protect an accepted/unknown paid submission from refund or a second POST."""
+    recovery = get_resumable_sora_request(job_id)
+    if recovery and recovery.get("submission_unknown"):
+        update_video_asset_phase(job_id, "sora_recovery_required", error=str(error)[:300])
+        return True
+    if recovery and recovery.get("video_id"):
+        if recovery.get("phase") == "sora_recovery_required":
+            return True
+        if requeue:
+            if requeue(job_id):
+                update_video_asset_phase(job_id, "sora_retrying", error=str(error)[:300])
+            return True  # CAS 输给另一恢复者也绝不能继续走失败退款。
+        update_video_asset_phase(job_id, "sora_recovery_required", error=str(error)[:300])
+        return True
+    return False
+
+
+def recover_paid_video_error(job_id, kind, payload, error, requeue=None,
+                             force_requeue=False):
+    """Classify paid video failures here so core only owns lifecycle wiring."""
+    if kind == "sora_video":
+        from . import video_openai
+        if isinstance(error, (
+                video_openai.CreateRejected,
+                video_openai.ProviderVideoFailed,
+        )):
+            return False
+        retry = requeue if force_requeue or isinstance(
+            error, video_openai.TransientOpenAIError
+        ) else None
+        return recover_sora_paid_job(job_id, error, retry)
+
+    channel = str((payload or {}).get("channel") or "").lower()
+    if kind != "xiaole_video" or channel not in {"grok", "micro", "omni", "minimax"}:
+        return False
+    from . import video_gemini_omni, video_minimax_h3, video_seedance, video_xai, wavespeed
+    if isinstance(error, (
+            video_xai.XaiCreateUnavailableError,
+            video_xai.XaiCreateRejected,
+            video_xai.XaiProviderFailed,
+            video_gemini_omni.GeminiOmniRejected,
+            video_gemini_omni.GeminiOmniProviderFailed,
+            video_seedance.SeedanceRejected,
+            video_seedance.SeedanceProviderFailed,
+            video_minimax_h3.MiniMaxRejected,
+            video_minimax_h3.MiniMaxProviderFailed,
+            wavespeed.WaveSpeedRejected,
+            wavespeed.WaveSpeedProviderFailed,
+    )):
+        return False
+    if channel == "micro" and bool((payload or {}).get("upscale")):
+        recovery = get_resumable_grok_request(job_id)
+        upscale_id = str(
+            (payload or {}).get("upscale_prediction_id") or ""
+        ).strip()
+        if isinstance(error, wavespeed.WaveSpeedCreateOutcomeUnknown) or (
+            recovery
+            and recovery.get("phase") in {
+                "seedance_upscale_submitting",
+                "seedance_upscale_recovery_required",
+            }
+            and not upscale_id
+        ):
+            update_video_asset_phase(
+                job_id,
+                "seedance_upscale_recovery_required",
+                error=str(error)[:300],
+            )
+            return True
+        if upscale_id and requeue and (
+            force_requeue
+            or isinstance(error, (wavespeed.WaveSpeedTransientRead, TimeoutError))
+        ):
+            if requeue(job_id):
+                update_video_asset_phase(
+                    job_id,
+                    "seedance_upscale_retrying",
+                    error=str(error)[:300],
+                )
+            return True
+        if upscale_id:
+            update_video_asset_phase(
+                job_id,
+                "seedance_upscale_recovery_required",
+                error=str(error)[:300],
+            )
+            return True
+    retry = requeue if force_requeue or isinstance(error, (
+        video_xai.TransientXaiError,
+        video_gemini_omni.GeminiOmniTransientRead,
+        video_seedance.TransientSeedanceError,
+        video_minimax_h3.TransientMiniMaxError,
+        wavespeed.WaveSpeedTransientRead,
+        TimeoutError,
+    )) else None
+    return recover_official_video_paid_job(job_id, error, retry)
+
 
 def record_video_pending_asset(job_id, username, payload):
     # 换装/换背景(tryon)与常规视频共用 video_assets 表；tryon 没有 mode/voice 等字段，兜底为空即可
@@ -1333,8 +2354,9 @@ def record_video_pending_asset(job_id, username, payload):
         "status": "running",
     })
 
-def list_video_assets(username, limit=120):
+def list_video_assets(username, limit=120, offset=0):
     limit = max(1, min(120, int(limit or 120)))
+    offset = max(0, min(100000, int(offset or 0)))
     with closing(adb()) as c:
         rows = c.execute("""SELECT id, job_id, username, mode, image_file, audio_file, reference_video_file, video_file, video_url,
                    text, voice_key, resolution, ratio, motion, phase, image_asset_id, audio_asset_id, reference_asset_id,
@@ -1343,7 +2365,7 @@ def list_video_assets(username, limit=120):
                    status, error, created_at, updated_at
             FROM video_assets
             WHERE username=? AND status!='deleted'
-            ORDER BY id DESC LIMIT ?""", (username, limit)).fetchall()
+            ORDER BY id DESC LIMIT ? OFFSET ?""", (username, limit, offset)).fetchall()
     items = [dict(r) for r in rows]
     job_ids = [item.get("job_id") for item in items if item.get("job_id")]
     if job_ids:
@@ -1372,12 +2394,30 @@ def list_video_assets(username, limit=120):
                 duration = result.get("duration") or result.get("seconds")
                 if duration is None and item.get("mode") == "tryon":
                     duration = payload.get("seconds")
+                if duration is None and item.get("mode") == "sora":
+                    duration = payload.get("seconds")
                 try:
                     duration = float(duration)
                 except (TypeError, ValueError):
                     duration = None
                 if duration and duration > 0:
                     item["duration"] = duration
+                audio_choice = result.get("generate_audio")
+                if not isinstance(audio_choice, bool):
+                    audio_choice = payload.get("generate_audio")
+                if isinstance(audio_choice, bool):
+                    item["generate_audio"] = audio_choice
+                upscale = result.get("upscale")
+                if not isinstance(upscale, bool):
+                    upscale = payload.get("upscale")
+                if isinstance(upscale, bool):
+                    item["upscale"] = upscale
+                if result.get("source_resolution") or payload.get("resolution"):
+                    item["source_resolution"] = (
+                        result.get("source_resolution") or payload.get("resolution")
+                    )
+                if result.get("upscale_provider"):
+                    item["upscale_provider"] = result["upscale_provider"]
                 if str(payload.get("line") or "") in {"1", "2"}:
                     item["line"] = str(payload["line"])
                 for key in ("batch_id", "batch_label", "batch_index", "batch_size"):
@@ -1456,7 +2496,11 @@ def get_video_avatar(username, avatar_id):
             FROM avatars WHERE id=? AND username=? AND status!='deleted'""", (avatar_id, username)).fetchone()
     if not row:
         raise ValueError("形象不存在")
-    return dict(row)
+    avatar = dict(row)
+    avatar["image_url"] = (
+        _file_url(avatar["image_file"]) if avatar.get("image_file") else None
+    )
+    return avatar
 
 def rename_video_avatar(username, avatar_id, name):
     avatar = get_video_avatar(username, avatar_id)
@@ -1510,19 +2554,56 @@ def _save_data_file(data_url, prefix, allowed_ext):
         data = base64.b64decode(raw, validate=True)
     except Exception:
         raise ValueError("文件内容解析失败")
+    image_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    if set(allowed_ext).issubset(image_exts):
+        detected = _detect_image_mime(data)
+        if not detected:
+            raise ValueError("图片内容无法识别，请重新导出后上传")
+        ext = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }[detected]
+        if ext not in allowed_ext and not (
+                ext == ".jpg" and ".jpeg" in allowed_ext):
+            raise ValueError("不支持的文件格式")
     max_size = (250 if ext in {".mp4", ".mov", ".webm"} else 35) * 1024 * 1024
     if len(data) > max_size:
         raise ValueError("文件过大，请压缩后再上传")
     folder = "audio/" if ext in {".mp3", ".wav", ".m4a"} else ("video/" if ext in {".mp4", ".mov", ".webm"} else "")
     fn = "%s%s_%s%s" % (folder, prefix, uuid.uuid4().hex, ext)  # 不可猜键(#185)：上传的真人素材防猜测
-    _out_path(fn).write_bytes(data)
+    path = _out_path(fn)
+    try:
+        path.write_bytes(data)
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
     return fn
 
 def _heygen_relay_token():
     return os.environ.get("HEYGEN_RELAY_TOKEN", "").strip()
 
-def _heygen_request_json(method, path, body=None, headers=None, timeout=180, direct=False,
-                         redact_values=None):
+def _heygen_official_base(base):
+    """官方 HeyGen 域名必须走专用出境通道，不能依赖进程级 HTTP(S)_PROXY。
+
+    本地启动器会清理全局代理，避免认证请求被错误送入代理后返回 401。视频生成仍需
+    访问 HeyGen 官方接口，因此这里只按目标域名选择专用 opener；自定义中转地址继续
+    使用原来的 urlopen，避免把内网/中转流量误送到 mihomo。
+    """
+    try:
+        host = (urllib.parse.urlsplit(base).hostname or "").lower()
+    except (TypeError, ValueError):
+        return False
+    return (
+        host == "api.heygen.com"
+        or host.endswith(".heygen.com")
+        or host.endswith(".heygen.ai")
+    )
+
+def _heygen_request_json(method, path, body=None, headers=None, timeout=180, direct=False):
     # direct=True 时同一套 v3 API 打 HeyGen 真身（泽龙即 v3 转发，路径同构），走 mihomo 代理出境
     if not HEYGEN_API_KEY:
         raise ValueError("视频生成服务未配置")
@@ -1533,52 +2614,57 @@ def _heygen_request_json(method, path, body=None, headers=None, timeout=180, dir
         h.update(headers)
     base = (_HEYGEN_DIRECT_API + "/v3") if direct else HEYGEN_API_BASE
     req = urllib.request.Request(base + path, data=body, headers=h, method=method)
-    open_fn = _heygen_direct_opener().open if direct else urllib.request.urlopen
+    # 登录/鉴权需要直连，所以本地运行器不会再给整个 8105 进程注入全局代理。
+    # 只有官方 HeyGen 请求使用专用出境 opener；非幂等 POST 仍只发送一次。
+    open_fn = (
+        _heygen_direct_opener().open
+        if direct or _heygen_official_base(base)
+        else urllib.request.urlopen
+    )
     try:
         with open_fn(req, timeout=timeout) as r:
             raw = r.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace").replace("\n", " ")[:600]
-        safe_detail = "响应已脱敏" if redact_values else detail
-        print("[heygen] FAIL %s %s -> HTTP %s %s" % (method, path, e.code, safe_detail), flush=True)
+        print("[heygen] FAIL %s %s -> HTTP %s %s" % (method, path, e.code, detail), flush=True)
         if e.code == 429:
             # 429 单独成一类：请求被【瞬间拒绝、未被处理、未计费】，可以安全重发。
             # 其余错误(超时/RST/5xx)不行——HeyGen 提交即扣 credit，那些可能已经计费了。
             # Retry-After 是 HeyGen 明确告诉我们该等多久（官方文档：「Check the Retry-After
             # response header for the number of seconds to wait before retrying」）——
             # 听它的，比我们瞎猜指数退避准。
-            err = HeyGenRateLimited("HeyGen 限流(429): %s" % safe_detail)
+            err = HeyGenRateLimited("HeyGen 限流(429): %s" % detail)
             try:
                 err.retry_after = float((e.headers or {}).get("Retry-After") or 0)
             except (TypeError, ValueError):
                 err.retry_after = 0.0
             raise err from e
-        raise RuntimeError("HeyGen接口失败: HTTP %s %s" % (e.code, safe_detail)) from e
+        raise RuntimeError("HeyGen接口失败: HTTP %s %s" % (e.code, detail)) from e
     except OSError as e:
         # URLError / socket.timeout(TimeoutError) / ssl.SSLError / ConnectionError —— 传输层瞬时错误。
         # 归为 HeyGenNetworkError：幂等 GET(轮询/下载)可安全重试；提交 POST 照旧穿透不重发。
         # 注意「read timeout」发生在 r.read() 阶段，是 TimeoutError 而非 URLError，
         # 原来的 `except URLError` 漏了它，会裸抛「The read operation timed out」——正是丢片主因(#605)。
         detail = str(getattr(e, "reason", e))[:300]
-        safe_detail = "响应已脱敏" if redact_values else detail
-        print("[heygen] FAIL %s %s -> network %s" % (method, path, safe_detail), flush=True)
-        raise HeyGenNetworkError("HeyGen接口网络失败: %s" % safe_detail) from e
+        print("[heygen] FAIL %s %s -> network %s" % (method, path, detail), flush=True)
+        raise HeyGenNetworkError("HeyGen接口网络失败: %s" % detail) from e
     try:
         return json.loads(raw.decode("utf-8"))
     except Exception:
-        if redact_values:
-            raise RuntimeError("HeyGen返回解析失败: 响应已脱敏")
         raise RuntimeError("HeyGen返回解析失败: %s" % raw[:300].decode("utf-8", "replace"))
 
 def _heygen_upload_asset(file_path, direct=False):
     path = pathlib.Path(file_path)
     if not path.is_file():
         raise ValueError("视频素材文件不存在")
-    mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+    raw = path.read_bytes()
+    mime = _detect_image_mime(raw) or mimetypes.guess_type(
+        str(path))[0] or "application/octet-stream"
     if direct:
         # HeyGen 素材上传端点收「raw 文件字节 + 文件 mime」(同口播直连 #405 的 /v1/asset)；
         # 发 multipart/form-data 会被 HeyGen 判 "Content type not supported application/octet-stream" 400。
-        d = _heygen_direct_req("POST", _HEYGEN_DIRECT_UPLOAD + "/v1/asset", path.read_bytes(), mime, timeout=240)
+        d = _heygen_direct_req(
+            "POST", _HEYGEN_DIRECT_UPLOAD + "/v1/asset", raw, mime, timeout=240)
         node = d.get("data") or {}
         asset_id = str(node.get("asset_id") or node.get("id") or "").strip()
         if not asset_id:
@@ -1592,7 +2678,7 @@ def _heygen_upload_asset(file_path, direct=False):
         'Content-Disposition: form-data; name="file"; filename="%s"\r\n'
         "Content-Type: %s\r\n\r\n"
     ) % (boundary, path.name.replace('"', ''), mime)
-    body = head.encode() + path.read_bytes() + ("\r\n--%s--\r\n" % boundary).encode()
+    body = head.encode() + raw + ("\r\n--%s--\r\n" % boundary).encode()
     data = _heygen_request_json("POST", "/assets", body, {
         "Content-Type": "multipart/form-data; boundary=%s" % boundary,
         "Content-Length": str(len(body)),
@@ -1629,29 +2715,93 @@ def _ensure_heygen_audio_mp3(audio_path):
 HEYGEN_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 def _ensure_heygen_image_jpg(image_path):
-    # HeyGen 素材接口只收 jpg/png；webp 等格式原样上传必然 400（invalid_parameter）
+    # HeyGen 会核对真实图片字节与 Content-Type。浏览器/系统给错 MIME 时，仅改后缀仍会
+    # 400；因此除已经是标准 JPEG 的文件外，一律重新解码成 canonical JPEG。
     path = pathlib.Path(image_path)
-    if path.suffix.lower() in HEYGEN_IMAGE_EXTS:
+    try:
+        detected = _detect_image_mime(path.read_bytes())
+    except OSError:
+        detected = ""
+    if not detected:
+        raise ValueError("图片内容无法识别，请重新导出后上传")
+    if detected == "image/jpeg" and path.suffix.lower() in {".jpg", ".jpeg"}:
         return path
-    out = path.parent / ("heygen_img_%d.jpg" % int(time.time() * 1000))
+    out = path.parent / ("heygen_img_%s.jpg" % uuid.uuid4().hex)
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(path),
         "-frames:v", "1", "-q:v", "2",
         str(out),
     ]
+    def discard_partial():
+        try:
+            out.unlink()
+        except OSError:
+            pass
     try:
         subprocess.run(cmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
+        discard_partial()
         raise ValueError("服务器未安装 ffmpeg，无法转换图片格式")
     except subprocess.CalledProcessError as e:
+        discard_partial()
         detail = (e.stderr or b"").decode("utf-8", "replace")[:220]
         raise ValueError("图片格式转换失败，请上传 jpg/png 格式的人物形象图" + (": " + detail if detail else ""))
     except subprocess.TimeoutExpired:
+        discard_partial()
         raise ValueError("图片格式转换超时，请上传 jpg/png 格式的人物形象图")
-    if not out.exists() or out.stat().st_size <= 0:
+    if (not out.exists() or out.stat().st_size <= 0
+            or _detect_image_mime(out.read_bytes()) != "image/jpeg"):
+        discard_partial()
         raise ValueError("图片格式转换失败，请上传 jpg/png 格式的人物形象图")
     return out
+
+
+def _owned_output_relative(path):
+    """Return an OUT_DIR-relative path, rejecting files outside managed output."""
+    root = pathlib.Path(OUT_DIR).resolve()
+    target = pathlib.Path(path).resolve()
+    try:
+        relative = target.relative_to(root)
+    except (OSError, ValueError):
+        raise ValueError("形象文件不在受管输出目录中")
+    if not relative.parts:
+        raise ValueError("形象文件路径无效")
+    return relative.as_posix()
+
+
+def _unlink_owned_output(path):
+    """Best-effort cleanup limited to files managed under OUT_DIR."""
+    if path is None:
+        return False
+    try:
+        root = pathlib.Path(OUT_DIR).resolve()
+        target = pathlib.Path(path).resolve()
+        relative = target.relative_to(root)
+        if not relative.parts or target == root:
+            return False
+        target.unlink()
+        return True
+    except (FileNotFoundError, IsADirectoryError, OSError, ValueError):
+        return False
+
+
+def _upload_heygen_image_asset(image_path, label, direct=False):
+    """Normalize one image for HeyGen and remove only the derived upload file."""
+    source = pathlib.Path(image_path)
+    upload = _ensure_heygen_image_jpg(source)
+    try:
+        return _heygen_retry_net(
+            lambda: _heygen_upload_asset(upload, direct=direct),
+            label,
+        )
+    finally:
+        try:
+            converted = upload.resolve() != source.resolve()
+        except OSError:
+            converted = upload != source
+        if converted:
+            _unlink_owned_output(upload)
 
 
 # 参考视频上传前压到 720p/2Mbps。用户传的是手机原片（实测 1920×1080 / 15.4 Mbps / 24MB），
@@ -1818,6 +2968,44 @@ def _mux_original_audio(video_file, audio_rel):
     return out_rel
 
 
+def _mux_seedance_upscale_audio(video_file, audio_rel):
+    """合回 Seedance 原声；短音轨补静音，最终时长始终由超分画面决定。"""
+    video_fp = _resolve_out_file(video_file)
+    audio_fp = _resolve_out_file(audio_rel)
+    if not video_fp or not audio_fp:
+        return video_file
+    out_rel = "video/seedance_upscale_snd_%s.mp4" % uuid.uuid4().hex
+    out_fp = _out_path(out_rel)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(video_fp), "-i", str(audio_fp),
+                "-filter_complex", "[1:a:0]apad[a]",
+                "-map", "0:v:0", "-map", "[a]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-shortest", "-movflags", "+faststart", str(out_fp),
+            ],
+            check=True,
+            timeout=180,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if not out_fp.is_file() or out_fp.stat().st_size <= 0:
+            raise RuntimeError("产物为空")
+    except Exception as exc:
+        print(
+            "[seedance-upscale] 合入原声失败: %s" % str(exc)[:110],
+            flush=True,
+        )
+        try:
+            out_fp.unlink()
+        except Exception:
+            pass
+        return video_file
+    return out_rel
+
+
 def _shrink_motion_reference(reference_video_file):
     """落盘后立刻压缩参考视频，返回新的相对路径（压不动就原样返回原路径）。
 
@@ -1842,44 +3030,36 @@ def _shrink_motion_reference(reference_video_file):
 
 def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion, direct=False):
     title = "huangque video %d" % int(time.time())
-    body = json.dumps({
-        "title": title,
-        "type": "image",
-        "image": {"type": "asset_id", "asset_id": image_asset_id},
-        "audio_asset_id": audio_asset_id,
-        "resolution": resolution,
-        "aspect_ratio": ratio,
-        "fit": "cover",
-        "expressiveness": motion,
-        "output_format": "mp4",
-    }, ensure_ascii=False).encode()
-    data = _heygen_request_json("POST", "/videos", body, {
-        "Content-Type": "application/json",
-    }, timeout=90, direct=direct)
-    video_id = ((data.get("data") or {}).get("video_id") or "").strip()
+    if _heygen_mcp_enabled():
+        data = _heygen_mcp_call("create_video_from_image", {
+            "title": title,
+            "image": {"type": "asset_id", "asset_id": image_asset_id},
+            "audioAssetId": audio_asset_id,
+            "resolution": resolution,
+            "aspectRatio": ratio,
+            "fit": "cover",
+            "expressiveness": motion,
+            "outputFormat": "mp4",
+        }, timeout=90)
+        video_id = str(data.get("video_id") or data.get("id") or "").strip()
+    else:
+        body = json.dumps({
+            "title": title,
+            "type": "image",
+            "image": {"type": "asset_id", "asset_id": image_asset_id},
+            "audio_asset_id": audio_asset_id,
+            "resolution": resolution,
+            "aspect_ratio": ratio,
+            "fit": "cover",
+            "expressiveness": motion,
+            "output_format": "mp4",
+        }, ensure_ascii=False).encode()
+        data = _heygen_request_json("POST", "/videos", body, {
+            "Content-Type": "application/json",
+        }, timeout=90, direct=direct)
+        video_id = ((data.get("data") or {}).get("video_id") or "").strip()
     if not video_id:
         raise RuntimeError("HeyGen未返回video_id: %s" % json.dumps(data, ensure_ascii=False)[:500])
-    return video_id
-
-def _heygen_create_avatar_iv_video(avatar_id, audio_asset_id, motion_prompt, motion, direct=False):
-    body = json.dumps({
-        "type": "avatar",
-        "avatar_id": avatar_id,
-        "audio_asset_id": audio_asset_id,
-        "resolution": "1080p",
-        "aspect_ratio": "9:16",
-        "fit": "cover",
-        "motion_prompt": motion_prompt,
-        "expressiveness": motion,
-        "engine": {"type": "avatar_iv"},
-        "output_format": "mp4",
-    }, ensure_ascii=False).encode()
-    data = _heygen_request_json("POST", "/videos", body, {
-        "Content-Type": "application/json",
-    }, timeout=90, direct=direct, redact_values=(motion_prompt,))
-    video_id = ((data.get("data") or {}).get("video_id") or "").strip()
-    if not video_id:
-        raise RuntimeError("HeyGen Avatar IV 未返回video_id: 响应已脱敏")
     return video_id
 
 def _find_nested_dict(obj, pred):
@@ -1898,15 +3078,21 @@ def _find_nested_dict(obj, pred):
     return None
 
 def _heygen_create_photo_avatar(image_asset_id, direct=False):
-    body = json.dumps({
-        "type": "photo",
-        "name": "huangque_photo_avatar_%d" % int(time.time()),
-        "file": {"type": "asset_id", "asset_id": image_asset_id},
-    }, ensure_ascii=False).encode()
-    data = _heygen_request_json("POST", "/avatars", body, {
-        "Content-Type": "application/json",
-    }, timeout=90, direct=direct)
-    root = data.get("data") or {}
+    name = "huangque_photo_avatar_%d" % int(time.time())
+    if _heygen_mcp_enabled():
+        data = _heygen_mcp_call("create_photo_avatar", {
+            "name": name,
+            "file": {"type": "asset_id", "asset_id": image_asset_id},
+        }, timeout=90)
+    else:
+        body = json.dumps({
+            "type": "photo", "name": name,
+            "file": {"type": "asset_id", "asset_id": image_asset_id},
+        }, ensure_ascii=False).encode()
+        data = _heygen_request_json("POST", "/avatars", body, {
+            "Content-Type": "application/json",
+        }, timeout=90, direct=direct)
+    root = data.get("data") or data
     avatar_item_id = (((root.get("avatar_item") or {}).get("id")) or "").strip()
     avatar_group_id = (((root.get("avatar_group") or {}).get("id")) or "").strip()
     if not avatar_item_id:
@@ -1936,6 +3122,12 @@ def _heygen_look_status(avatar_item_id, avatar_group_id="", direct=False):
 
     look 级状态只在 v2：`GET /v2/photo_avatar/{look_id}` → `status`（pending / completed / failed）。
     """
+    if _heygen_mcp_enabled():
+        d = _heygen_mcp_call("get_avatar_look", {"lookId": avatar_item_id}, timeout=20)
+        node = d.get("data") or d.get("avatar_item") or d
+        error = node.get("error") or {}
+        return str(node.get("status") or "").lower(), str(
+            node.get("moderation_msg") or error.get("message") or "")
     if direct:
         d = _heygen_direct_req("GET", _HEYGEN_DIRECT_API + "/v2/photo_avatar/" + urllib.parse.quote(avatar_item_id),
                                body=None, ctype=None, timeout=20)
@@ -2021,9 +3213,9 @@ CINEMATIC_IDENTITY_GUARD = (
 #     "Use these two avatars to replace the two people in the reference video"
 # 是换脸/深度伪造的教科书措辞。审核模型是英文的 —— 中文对它半透明，英文它读得懂。
 #
-# 所以这里【原样照抄】线上跑通的 #2173：
+# 所以提示词和非分辨率参数沿用线上跑通的 #2173；分辨率现统一降为 720p：
 #     提示词  「用这个人物形象模仿视频里面的动作」（用户写的，成片 383s）
-#     分辨率  1080p        比例 9:16（跟随参考视频）    时长 11s（自适应，参考视频 10.9s）
+#     分辨率  720p         比例 9:16（跟随参考视频）    时长 11s（自适应，参考视频 10.9s）
 #     润色    关           参考视频 576x1024 竖版
 #
 # ⚠️ 身份约束（CINEMATIC_IDENTITY_GUARD）【不要改】：#2173 发出去的是「这句中文 + 那段英文
@@ -2058,11 +3250,131 @@ DUO_MOTION_PROMPT_BASE = "用这两个人物形象模仿视频里面的动作" +
 DUO_MOTION_PROMPT = DUO_MOTION_PROMPT_BASE
 
 
+_HEYGEN_MCP_URL = "https://mcp.heygen.com/mcp/v1/"
+_HEYGEN_MCP_TOKEN_URL = "https://api2.heygen.com/v1/oauth/token"
+_HEYGEN_MCP_CREDENTIALS = os.environ.get("HEYGEN_MCP_CREDENTIALS", "").strip()
+_heygen_mcp_auth_lock = threading.Lock()
+
+
+class HeyGenMCPAuthError(RuntimeError):
+    pass
+
+
+def _heygen_mcp_enabled():
+    return bool(_HEYGEN_MCP_CREDENTIALS)
+
+
+def _heygen_mcp_access_token(force_refresh=False):
+    path = pathlib.Path(_HEYGEN_MCP_CREDENTIALS)
+    with _heygen_mcp_auth_lock:
+        if not path.is_file():
+            raise HeyGenMCPAuthError("HeyGen MCP OAuth 未配置")
+        if path.stat().st_mode & 0o077:
+            raise HeyGenMCPAuthError("HeyGen MCP OAuth 凭据权限必须为 600")
+        lock_fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            os.fchmod(lock_fd, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            credentials = json.loads(path.read_text(encoding="utf-8"))
+            if not force_refresh and credentials.get("access_token") and float(credentials.get("expires_at") or 0) > time.time() + 60:
+                return credentials["access_token"]
+            if not credentials.get("client_id") or not credentials.get("refresh_token"):
+                raise HeyGenMCPAuthError("HeyGen MCP OAuth 不可刷新，请重新授权")
+            body = urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "client_id": credentials["client_id"],
+                "refresh_token": credentials["refresh_token"],
+                "resource": _HEYGEN_MCP_URL.rstrip("/"),
+            }).encode()
+            req = urllib.request.Request(_HEYGEN_MCP_TOKEN_URL, data=body, headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "huangque-content/1.0",
+            }, method="POST")
+            try:
+                with _heygen_direct_opener().open(req, timeout=30) as response:
+                    refreshed = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace").replace("\n", " ")[:300]
+                raise HeyGenMCPAuthError("HeyGen MCP OAuth 刷新失败: HTTP %s %s" % (exc.code, detail)) from exc
+            credentials.update({
+                "access_token": refreshed["access_token"],
+                # HeyGen 当前 refresh token 为一次性；响应不下发新 token 时不能保留已失效的旧值。
+                "refresh_token": refreshed.get("refresh_token") or "",
+                "expires_at": int(time.time()) + int(refreshed.get("expires_in") or 3600),
+            })
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as temp:
+                json.dump(credentials, temp, ensure_ascii=False)
+                temp_path = temp.name
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, path)
+            return credentials["access_token"]
+        finally:
+            os.close(lock_fd)
+
+
+def _heygen_mcp_call(tool, arguments, timeout=90):
+    def request(token):
+        payload = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "tools/call",
+                   "params": {"name": tool, "arguments": arguments}}
+        req = urllib.request.Request(_HEYGEN_MCP_URL, data=json.dumps(payload, ensure_ascii=False).encode(), headers={
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": "2025-06-18",
+            "User-Agent": "huangque-content/1.0",
+        }, method="POST")
+        with _heygen_direct_opener().open(req, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+
+    token = _heygen_mcp_access_token()
+    for attempt in range(2):
+        try:
+            raw = request(token)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and attempt == 0:
+                token = _heygen_mcp_access_token(force_refresh=True)
+                continue
+            detail = exc.read().decode("utf-8", "replace").replace("\n", " ")[:500]
+            if exc.code in (401, 403):
+                raise HeyGenMCPAuthError("HeyGen MCP 鉴权失败: HTTP %s %s" % (exc.code, detail)) from exc
+            if exc.code == 429:
+                raise HeyGenRateLimited("HeyGen MCP 限流(429): %s" % detail) from exc
+            raise RuntimeError("HeyGen MCP 失败: HTTP %s %s" % (exc.code, detail)) from exc
+        except OSError as exc:
+            raise HeyGenNetworkError("HeyGen MCP 网络失败: %s" % str(getattr(exc, "reason", exc))[:200]) from exc
+
+    messages = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: ")]
+    if not messages and raw.lstrip().startswith("{"):
+        messages = [json.loads(raw)]
+    if not messages:
+        raise RuntimeError("HeyGen MCP 返回解析失败")
+    message = messages[-1]
+    if message.get("error"):
+        raise RuntimeError("HeyGen MCP 失败: %s" % json.dumps(message["error"], ensure_ascii=False)[:500])
+    result = message.get("result") or {}
+    texts = [item.get("text", "") for item in result.get("content", []) if item.get("type") == "text"]
+    detail = texts[0] if texts else json.dumps(result, ensure_ascii=False)
+    if result.get("isError"):
+        if "429" in detail or "rate_limit" in detail.lower():
+            raise HeyGenRateLimited("HeyGen MCP 限流: %s" % detail[:500])
+        raise RuntimeError("HeyGen MCP 工具失败: %s" % detail[:500])
+    if texts:
+        try:
+            return json.loads(texts[0])
+        except json.JSONDecodeError:
+            return {"text": texts[0]}
+    return result.get("structuredContent") or result
+
+
 def _heygen_create_cinematic_video(avatar_item_id, reference_asset_id, ratio, resolution, duration,
                                    prompt=None, direct=False, enhance_prompt=False):
     # avatar_id 是 1~3 个 look 的数组 —— 多个 look 会让 HeyGen 在【同一个镜头】里同时出现多个人，
     # 不是生成多条视频。所以 3 个形象仍然只扣 1 条视频的钱。
     ids = [i for i in (avatar_item_id if isinstance(avatar_item_id, (list, tuple)) else [avatar_item_id]) if i]
+    # 电影化身当前统一走 720p。这里是所有调用者（主工作台、画布、短剧）的共同上游边界，
+    # 不能只依赖页面或 payload 校验，否则直接调用 helper 的渠道仍可能提交 1080p。
+    resolution = CINEMATIC_OUTPUT_RESOLUTION
     payload = {
         "type": "cinematic_avatar",
         "title": "follow_reference_motion",
@@ -2081,11 +3393,27 @@ def _heygen_create_cinematic_video(avatar_item_id, reference_asset_id, ratio, re
     refs = [{"type": "asset_id", "asset_id": a} for a in refs if a]
     if refs:
         payload["references"] = refs
-    body = json.dumps(payload, ensure_ascii=False).encode()
-    data = _heygen_request_json("POST", "/videos", body, {
-        "Content-Type": "application/json",
-    }, timeout=90, direct=direct)
-    video_id = ((data.get("data") or {}).get("video_id") or "").strip()
+    if _heygen_mcp_enabled():
+        arguments = {
+            "prompt": payload["prompt"],
+            "avatarId": payload["avatar_id"],
+            "aspectRatio": payload["aspect_ratio"],
+            "resolution": payload["resolution"],
+            "autoDuration": False,
+            "duration": payload["duration"],
+            "enhancePrompt": payload["enhance_prompt"],
+            "title": payload["title"],
+        }
+        if refs:
+            arguments["references"] = refs
+        data = _heygen_mcp_call("create_video_from_cinematic_avatar", arguments, timeout=90)
+        video_id = str(data.get("video_id") or data.get("id") or "").strip()
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode()
+        data = _heygen_request_json("POST", "/videos", body, {
+            "Content-Type": "application/json",
+        }, timeout=90, direct=direct)
+        video_id = ((data.get("data") or {}).get("video_id") or "").strip()
     if not video_id:
         raise RuntimeError("HeyGen未返回video_id: %s" % json.dumps(data, ensure_ascii=False)[:500])
     return video_id
@@ -2211,7 +3539,7 @@ def _heygen_retry_429(fn, what=""):
             time.sleep(delay)
 
 
-# ============ HeyGen 账号级并发闸（削峰用，不是挡并发） ============
+# ============ HeyGen 账号级并发总闸 ============
 # 官方文档（Usage Limits）说 Pay-As-You-Go 的 "Max Concurrent Video Jobs" = 10。
 # 【实测证明这不是硬限制】——2026-07-12 跑 20 路并发（10 口播 + 10 剧情视频同时生成）：
 #     20/20 全部成功出片，零降速（口播平均 114s，而单条基线是 104s）
@@ -2222,12 +3550,12 @@ def _heygen_retry_429(fn, what=""):
 # 「please reduce the RATE to call this api」）。而退避 1.7~2.5 秒重发，一次就全过。
 # 兜住它的是 _heygen_retry_429，不是这个信号量。
 #
-# 那这个信号量还留着干嘛？—— 削峰。它把同时在飞的请求数摊平（21 = 口播10 + 剧情10 + 建形象1），
-# 顺带降低撞 429 的概率，是重试之外的一层保险。真要放开，改 env 即可，不用动代码。
+# 默认 31 = 口播 20 + 剧情 10 + 1 个缓冲，不让共享闸反过来收紧两个 worker 池；
+# 提交突发仍由 _heygen_retry_429 处理。需要紧急收紧账号总并发时可通过 env 下调。
 #
 # 槽只在【生成期间】持有（建视频 → 轮询出片）。上传素材、查 look 状态不占槽。
 # 中转(泽龙)转发的是同一个账号，所以中转路径同样要占槽 —— 不占就等于绕过了闸。
-HEYGEN_MAX_CONCURRENCY = int(os.environ.get("HEYGEN_MAX_CONCURRENCY", "21") or 21)
+HEYGEN_MAX_CONCURRENCY = int(os.environ.get("HEYGEN_MAX_CONCURRENCY", "31") or 31)
 _heygen_gen_sem = threading.BoundedSemaphore(HEYGEN_MAX_CONCURRENCY)
 
 
@@ -2275,43 +3603,48 @@ class HeyGenBilledError(RuntimeError):
 HEYGEN_MOTION_DEADLINE = CINEMATIC_GEN_DEADLINE
 
 
-def _heygen_poll_video(video_id, direct=False, deadline_s=None, redact_values=None):
+def _heygen_poll_video(video_id, direct=False, deadline_s=None, mcp=False):
     deadline = time.time() + (deadline_s or HEYGEN_TIMEOUT)
     last_status = ""
     net_fails = 0
     while time.time() < deadline:
         try:
-            request_kwargs = {"timeout": 90, "direct": direct}
-            if redact_values:
-                request_kwargs["redact_values"] = redact_values
-            data = _heygen_request_json(
-                "GET", "/videos/" + urllib.parse.quote(video_id), **request_kwargs)
+            if mcp:
+                try:
+                    info = _heygen_mcp_call("get_video", {"videoId": video_id}, timeout=90)
+                except RuntimeError as e:
+                    # GET 不计费。MCP OAuth 即使在已提交后失效，也必须用 API Key 把成片/真实失败接回来。
+                    print("[heygen] MCP GET 不可用，回退 API GET video_id=%s: %s"
+                          % (video_id, str(e)[:160]), flush=True)
+                    data = _heygen_request_json("GET", "/videos/" + urllib.parse.quote(video_id),
+                                                timeout=90, direct=direct)
+                    info = data.get("data") or {}
+            else:
+                data = _heygen_request_json("GET", "/videos/" + urllib.parse.quote(video_id), timeout=90, direct=direct)
+                info = data.get("data") or {}
         except HeyGenNetworkError as e:
             # 轮询是幂等 GET、不计费——隧道瞬时抖动不该判死任务、白烧提交费(#605)。
             # 等下一轮重试；deadline 仍是总上限，不会无限转。provider 明确 failed 才判失败(见下)。
             net_fails += 1
-            safe_detail = "响应已脱敏" if redact_values else str(e)[:120]
             print("[heygen] poll video_id=%s 网络抖动(%d)，%ds 后重试: %s"
-                  % (video_id, net_fails, HEYGEN_POLL_INTERVAL, safe_detail), flush=True)
+                  % (video_id, net_fails, HEYGEN_POLL_INTERVAL, str(e)[:120]), flush=True)
             time.sleep(HEYGEN_POLL_INTERVAL)
             continue
-        info = data.get("data") or {}
         status = str(info.get("status") or "").lower()
         if status != last_status:
-            safe_status = "响应已脱敏" if redact_values else status
-            print("[heygen] video_id=%s status=%s" % (video_id, safe_status), flush=True)
+            print("[heygen] video_id=%s status=%s" % (video_id, status), flush=True)
             last_status = status
         if status == "completed":
             if not info.get("video_url"):
                 raise RuntimeError("HeyGen完成但未返回video_url")
             return info
         if status in {"failed", "error"}:
-            if redact_values:
-                print("[heygen] FAIL GET /videos/%s -> provider 响应已脱敏" % video_id, flush=True)
-                raise RuntimeError("HeyGen视频生成失败: 响应已脱敏")
             detail = json.dumps(info, ensure_ascii=False)[:500]
             print("[heygen] FAIL GET /videos/%s -> provider %s" % (video_id, detail), flush=True)
-            raise RuntimeError("HeyGen视频生成失败: %s" % detail)
+            provider_error = str(info.get("failure_message") or info.get("error") or info.get("failure_code") or "").strip()
+            if any(word in provider_error.lower() for word in ("moderation", "flagged", "content policy", "real person")):
+                provider_error = "内容审核未通过，请更换人物图片、参考视频或提示词"
+            raise RuntimeError("HeyGen视频生成失败: %s" % (provider_error[:160] or "上游未返回失败原因"))
         time.sleep(HEYGEN_POLL_INTERVAL)
     raise TimeoutError("HeyGen视频生成超时")
 
@@ -2338,17 +3671,11 @@ def _download_video_file(url, prefix="vid"):
 # ==================== HeyGen 直连(数字人口播,绕开泽龙中转,走 mihomo 代理) ====================
 # 泽龙共享账号排队让口播动辄超 6 分钟；直连 HeyGen 真身实测约 1 分钟(kongli决策)。直连失败自动回退泽龙。
 _HEYGEN_DIRECT = os.environ.get("HEYGEN_DIRECT", "1").strip().lower() not in ("0", "false", "no")
-# 出境通道：显式 HEYGEN_DIRECT_PROXY 覆盖一切；否则 VPS 隧道优先、mihomo 备选（见 egress.preferred_proxy）。
+# 出境通道由 egress.heygen_proxy() 统一选择，运营后台检测复用同一规则。
 # 通道在发请求前选定：create-video 是非幂等的，换通道重发会让 HeyGen 出两条片、计两次费。
-_HEYGEN_DIRECT_PROXY = (os.environ.get("HEYGEN_DIRECT_PROXY") or "").strip()
-_HEYGEN_PROXY_FALLBACK = (os.environ.get("EGRESS_PROXY_FALLBACK") or os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:7897").strip()
-
-
 def _heygen_proxy():
-    if _HEYGEN_DIRECT_PROXY:
-        return _HEYGEN_DIRECT_PROXY
     from . import egress
-    return egress.preferred_proxy(_HEYGEN_PROXY_FALLBACK)
+    return egress.heygen_proxy()
 _HEYGEN_DIRECT_API = "https://api.heygen.com"
 _HEYGEN_DIRECT_UPLOAD = "https://upload.heygen.com"
 
@@ -2391,11 +3718,11 @@ def generate_heygen_video_direct(image_file, audio_file, resolution, ratio, moti
     audio_fp = _resolve_out_file(audio_file)
     if not image_fp or not audio_fp:
         raise ValueError("视频素材文件不存在")
-    image_fp = _ensure_heygen_image_jpg(image_fp)
     audio_fp = _ensure_heygen_audio_mp3(audio_fp)
     # 素材上传对瞬时网络错误重试：上传不计费(计费在 create-video)，重试安全。隧道抖动一下不该
     # 让整条口播失败(fang 的 cinematic/口播上传 240s 超时同源)。见 _heygen_retry_net。
-    image_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(image_fp, direct=True), "口播传图")
+    image_asset_id = _upload_heygen_image_asset(
+        image_fp, "口播传图", direct=True)
     audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp, direct=True), "口播传音")
     with heygen_slot("口播直连"):   # 账号级并发上限 10，三个池共用；超了在本地排队，不让 HeyGen 甩 429
         # 429 退避重试：请求被瞬间拒绝、未计费，是唯一可以安全重发的失败。
@@ -2428,16 +3755,18 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
             return generate_heygen_video_direct(image_file, audio_file, resolution, ratio, motion)
         except HeyGenBilledError:
             raise   # 已提交=已计费，重发就是再付一次钱（泽龙转发同一账号）
+        except HeyGenMCPAuthError:
+            raise   # MCP 创建前鉴权失败，第二条线路仍是同一份 OAuth；立刻退点，不能假回退。
         except Exception as e:
             print("[heygen] 直连失败(提交前),回退泽龙中转: %s" % str(e)[:200], flush=True)
     image_fp = _resolve_out_file(image_file)
     audio_fp = _resolve_out_file(audio_file)
     if not image_fp or not audio_fp:
         raise ValueError("视频素材文件不存在")
-    image_fp = _ensure_heygen_image_jpg(image_fp)
     audio_fp = _ensure_heygen_audio_mp3(audio_fp)
     # 素材上传对瞬时网络错误重试(不计费、安全，同直连)
-    image_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(image_fp), "口播中转传图")
+    image_asset_id = _upload_heygen_image_asset(
+        image_fp, "口播中转传图")
     audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp), "口播中转传音")
     # 中转(泽龙)转发的是同一个 HeyGen 账号，一样占账号的并发额度 —— 不占槽就等于绕过了闸
     with heygen_slot("口播中转"):
@@ -2463,99 +3792,6 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
         ret["image_url"] = public_url(cover, "image/jpeg")
     return ret
 
-def _generate_heygen_avatar_iv_attempt(image_file, audio_file, motion_prompt, motion,
-                                       avatar_look_id="", direct=False):
-    audio_fp = _resolve_out_file(audio_file)
-    if not audio_fp:
-        raise ValueError("视频素材文件不存在")
-    audio_fp = _ensure_heygen_audio_mp3(audio_fp)
-    image_asset_id = None
-    avatar_look_id = str(avatar_look_id or "").strip()
-    if not avatar_look_id:
-        image_fp = _resolve_out_file(image_file)
-        if not image_fp:
-            raise ValueError("视频素材文件不存在")
-        image_fp = _ensure_heygen_image_jpg(image_fp)
-        image_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(image_fp, direct=direct), "口播动作传图")
-        created_avatar = _heygen_retry_net(
-            lambda: _heygen_retry_429(
-                lambda: _heygen_create_photo_avatar(image_asset_id, direct=direct),
-                "口播动作建形象"),
-            "口播动作建形象提交")
-        if not created_avatar:
-            raise RuntimeError("HeyGen未返回Photo Avatar")
-        avatar_look_id, avatar_group_id = created_avatar
-        _heygen_wait_photo_avatar(avatar_look_id, avatar_group_id, direct=direct)
-    audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播动作传音")
-    label = "口播动作直连" if direct else "口播动作中转"
-    with heygen_slot(label):
-        try:
-            video_id = _heygen_retry_429(
-                lambda: _heygen_create_avatar_iv_video(
-                    avatar_look_id, audio_asset_id, motion_prompt, motion, direct=direct),
-                label)
-        except HeyGenRateLimited:
-            raise  # 429 明确拒绝、未计费；允许外层改走 relay。
-        except Exception as e:
-            # create-video 是计费 POST。只有能证明应用层字节未送达，或上游明确 4xx 拒绝，
-            # 才属于安全的“提交前失败”；超时/RST/5xx/200 解析失败都可能已经创建并扣费。
-            safe_to_fallback = False
-            if isinstance(e, HeyGenNetworkError):
-                from . import egress
-                safe_to_fallback = egress._pre_delivery_failure(e.__cause__ or e)
-            else:
-                matched = re.search(r"HTTP\s+(\d{3})", str(e))
-                safe_to_fallback = bool(matched and 400 <= int(matched.group(1)) < 500)
-            if safe_to_fallback:
-                raise
-            raise HeyGenBilledError(
-                "口播动作提交 HeyGen 后响应不确定（可能已计费），禁止自动重发") from e
-        try:
-            info = _heygen_poll_video(
-                video_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
-                redact_values=(motion_prompt,))
-            if direct:
-                video_file = _download_video_file_direct(info["video_url"], "heygen_avatar_iv")
-            else:
-                video_file = _download_video_file(info["video_url"], "heygen_avatar_iv")
-            cover = _extract_first_frame_cover(video_file)
-        except Exception as e:
-            raise HeyGenBilledError(
-                "口播动作已提交 HeyGen(video_id=%s，已计费)，轮询或成片处理失败，禁止自动重发"
-                % video_id) from e
-    ret = {
-        "video_id": video_id,
-        "video_file": video_file,
-        "video_url": _file_url(video_file),
-        "image_asset_id": image_asset_id,
-        "audio_asset_id": audio_asset_id,
-        "source_video_url": info.get("video_url"),
-        "thumbnail_url": info.get("thumbnail_url"),
-        "duration": info.get("duration"),
-        "provider_path": "talking_avatar_iv",
-        "motion_prompt_enabled": True,
-    }
-    if cover:
-        ret["image_file"] = cover
-        ret["image_url"] = public_url(cover, "image/jpeg")
-    return ret
-
-def generate_heygen_avatar_iv_video(image_file, audio_file, motion_prompt, motion,
-                                    avatar_look_id=""):
-    if _HEYGEN_DIRECT and HEYGEN_API_KEY:
-        try:
-            return _generate_heygen_avatar_iv_attempt(
-                image_file, audio_file, motion_prompt, motion,
-                avatar_look_id=avatar_look_id, direct=True)
-        except HeyGenBilledError:
-            raise
-        except Exception as e:
-            print("[heygen] 口播动作直连失败(提交前),回退泽龙中转: %s"
-                  % type(e).__name__, flush=True)
-    return _generate_heygen_avatar_iv_attempt(
-        image_file, audio_file, motion_prompt, motion,
-        avatar_look_id=avatar_look_id, direct=False)
-
 # ============ F4 · 口播视频自动字幕（whisper 时间轴 + libass 烧录） ============
 # 仅 text/audio 口播模式生效；motion 动作模仿不做字幕（多无语音，价值低）。
 # whisper 吃 CPU，用信号量把同时转写数限到 WHISPER_MAX_CONCURRENCY（默认 1），避免打满核。
@@ -2569,10 +3805,6 @@ _SUB_STYLES = {
     "white":   {"fs": 0.052, "primary": "&H00FFFFFF", "outline": "&H00000000", "back": "&H00000000", "border": 1, "ow": 3.0, "shadow": 1, "mv": 0.060},
     "variety": {"fs": 0.066, "primary": "&H0000E5FF", "outline": "&H00202020", "back": "&H00000000", "border": 1, "ow": 4.0, "shadow": 1, "mv": 0.072},
     "bar":     {"fs": 0.050, "primary": "&H00FFFFFF", "outline": "&H00000000", "back": "&H80101010", "border": 3, "ow": 8.0, "shadow": 0, "mv": 0.050},
-    # wg_red（网感·高级红）不吃上面这套通用参数：它是固定模板（顶部双行大标题+底部双行字幕+
-    # 关键词红标），由 _wg_build_ass 渲整份 ASS。挂进词表只是让参数校验一处生效；
-    # burn_subtitle 见到它就走模板分支，绝不进 _build_ass。
-    "wg_red":  {"template": "wg_red"},
 }
 # 字幕位置5档 → (ASS Alignment, MarginV系数)。底部/偏下用底锚(Align2,离底);顶部/偏上用顶锚(Align8,离顶);
 # 中央垂直居中(Align5)。bottom 的 mv=None 沿用样式自带值,保持旧默认行为(向后兼容)。
@@ -2784,243 +4016,33 @@ def _build_ass(segs, style_key, w, h, position="bottom"):
             body.append("Dialogue: 0,%s,%s,Default,,0,0,,%s" % (_ass_time(start), _ass_time(end), line))
     return "\n".join(head + body) + "\n"
 
-# ============ 网感字幕模板 wg_red（高级红：顶部双行大标题 + 底部双行字幕 + 关键词红标） ============
-# 版式/配色按 demo 拍板值（基准画布 1080x1920），只在实际视频尺寸不同时按高度等比缩放。
-# white/variety/bar 三个旧样式的渲染路径【一字不动】，wg_red 全部走这条独立分支。
-TALKING_ASR_PYTHON = os.environ.get("TALKING_ASR_PYTHON", "").strip()  # 缺省回退 sys.executable，见 _run_talking_asr
-TALKING_ASR_TIMEOUT = int(os.environ.get("TALKING_ASR_TIMEOUT", "600"))
-# 模板字体：demo 写的是 "Noto Sans CJK SC"，服务器上以 SUBTITLE_FONT 为准（已装、libass 可用）；
-# 同一字体族的不同打包名，想精确复刻 demo 可用 WG_RED_FONT 指回。
-_WG_FONT = os.environ.get("WG_RED_FONT", "") or SUBTITLE_FONT
-_WG_RED = "&H00303BFF"            # 高级红 RGB FF3B30（ASS 颜色 &HAABBGGRR），关键词 inline 高亮用
-_WG_TITLE_MAX = 10                # 标题每行最多 10 字（超出劈双行）；整题最多 20 字，超出截断
-_WG_TITLE_TOTAL_MAX = 20
-_WG_TWO_LINE_MAX = 13             # 字幕超过 13 字按最靠中点的标点劈双行
-# 关键词红标词表：模板自带默认词表（demo 拍板版），最长优先、每词只标第一处。
-_WG_KEYWORDS = [
-    "0元", "0 元", "20个名额", "20 个名额",
-    "冷光嫩肤", "毛孔细腻", "肤色透亮",
-    "免费", "小气泡深层清洁", "抢先预约",
-]
-
-def _wg_ms_to_ass(ms):
-    cs = max(0, int(ms)) // 10
-    return "%d:%02d:%02d.%02d" % (cs // 360000, (cs // 6000) % 60, (cs // 100) % 60, cs % 100)
-
-def _wg_split_sentences(text):
-    """口播原文 → 按句末标点切句（标点留在句尾；断双行优先在标点处劈）。空结果 = 对齐失败。"""
-    parts = re.findall(r"[^。！？!?；;…\n]+[。！？!?；;…]*", (text or "").replace("\r", "\n"))
-    out = [re.sub(r"\s+", "", p) for p in parts]   # 中文字幕不留空白，也免得空白干扰按字数分配
-    return [p for p in out if p]
-
-def _wg_align_script(segs, script_text):
-    """text 模式：ASR 只借时间轴，字幕文本换口播原文（ASR 会有错别字/繁简漂移）。
-    原文切句后与 ASR 段【按序】配对：句数相等一一对应；不等按各段识别字数比例分配整句
-    （不切半句，防张冠李戴；最后一段吃掉剩余全部，保证原文不丢字）；
-    切不出句 / 分不到句的段，退回该段 ASR 文本。"""
-    sents = _wg_split_sentences(script_text)
-    if not segs or not sents:
-        return segs
-    # 段多句少（whisper 把句子切碎，E2E 实测末句被切成 5:4）：先把多余的【尾部】时间轴
-    # 归并进最后一段——ASR 只借时间轴，它自己的错字文本永远不许上屏；
-    # 归并后一一对应，原文不丢字、碎段的语音区间仍有正确字幕。
-    if len(segs) > len(sents):
-        k = len(sents) - 1
-        segs = list(segs[:k]) + [(segs[k][0], segs[-1][1], "".join(s[2] for s in segs[k:]))]
-    n, m = len(segs), len(sents)
-    if n == m:
-        groups = [[s] for s in sents]
-    else:
-        # 句多段少：预算制按各段识别字数占比分整句（不切半句），并给后面每段留至少一句口粮，
-        # 任何段都不被饿到 0 句（饿到 0 句会退回 ASR 错字文本，E2E 亲眼见过"幻夫"上屏）；
-        # 段多句少：不够分时前段先得、后段退回 ASR 文本（原文只有那么多，没有就是没有）。
-        total = sum(max(1, len(s[2])) for s in segs)
-        groups, pos = [], 0
-        for i, s in enumerate(segs):
-            if i == n - 1:
-                take = m - pos                              # 末段吃余量，原文不丢字
-            else:
-                budget = max(1, int(round(len(s[2]) / total * m)))
-                take = min(budget, m - pos - (n - 1 - i))   # 口粮约束：后面每段还能分到一句
-                take = max(1, min(take, m - pos))           # 本段至少一句（还有剩的话）
-            groups.append(sents[pos:pos + take])
-            pos += take
-    return [(st, en, ("".join(g) if g else rec)) for (st, en, rec), g in zip(segs, groups)]
-
-_WG_GREETING = re.compile(
-    r"^\s*(hello大家好|哈喽大家好|大家好呀|大家好|哈喽|嗨|姐妹们好呀|宝子们好呀|家人们好呀|姐妹们|宝子们|家人们|各位(?:好|朋友(?:们)?))[呀啊呢哈~～，,！! ]*",
-    re.I)
-
-def _wg_titles(script_text, segs):
-    """标题双行：TitleTop=首句剥掉寒暄前缀后提炼（去标点 ≤20 字，渲染时超 10 字劈双行）；
-    TitleBox=次句提炼，但 >10 字必须截断时宁可不渲染（"0元体"式半句话丢人）。
-    audio 模式没有原文，退用 ASR 前两段文本。"""
-    src = _wg_split_sentences(script_text) if script_text else []
-    if not src:
-        src = [s[2] for s in segs][:3]
-    # 句首寒暄只剥前缀不整句丢：寒暄常和信息句焊在同一句（"姐妹们好呀～仙颜美容…"），
-    # 整句丢了标题就歪成下一句（E2E 实测跑偏成"首批20个名额…"）；剥空了保留原句兜底
-    src = [(_WG_GREETING.sub("", s, count=1) or s) for s in src]
-    def distill(s, hard_max):
-        return re.sub(r"[。.!！?？,，、;；:：…~～\s]+", "", s or "")[:hard_max]
-    top = distill(src[0], _WG_TITLE_TOTAL_MAX) if src else ""
-    box = ""
-    if len(src) > 1:
-        raw = re.sub(r"[。.!！?？,，、;；:：…~～\s]+", "", src[1] or "")
-        if len(raw) <= _WG_TITLE_MAX:   # 副标题只收能完整放下的，截断版不上屏
-            box = raw
-    return top, box
-
-def _wg_two_lines(text):
-    """双行排版更网感：超过 13 字按最靠中点的标点劈成两行（标点留在上行尾）。"""
-    if len(text) <= _WG_TWO_LINE_MAX:
-        return text
-    mid = len(text) // 2
-    best = -1
-    for i, ch in enumerate(text):
-        if ch in "，、；！？~～":
-            if best < 0 or abs(i - mid) < abs(best - mid):
-                best = i
-    if 0 < best < len(text) - 1:
-        return text[:best + 1] + "\\N" + text[best + 1:]
-    return text[:mid] + "\\N" + text[mid:]
-
-def _wg_highlight(text):
-    """关键词 inline 标红：{\c&H00303BFF&}…{\c&H00FFFFFF&}，最长词优先、每词只标第一处。"""
-    for kw in sorted(_WG_KEYWORDS, key=len, reverse=True):
-        m = re.compile(re.escape(kw)).search(text)
-        if m:
-            text = (text[:m.start()]
-                    + "{\\c" + _WG_RED + "&}" + kw + "{\\c&H00FFFFFF&}"
-                    + text[m.end():])
-    return text
-
-def _wg_build_ass(segs, w, h, title_top="", title_box=""):
-    """高级红网感模板 ASS。数值是 demo 拍板值（1080x1920），按实际视频宽高等比缩放。"""
-    r, rw = h / 1920.0, w / 1080.0
-    fs_top, fs_box, fs_sub = (max(18, int(round(v * r))) for v in (84, 72, 56))
-    mv_top, mv_box, mv_sub = (max(10, int(round(v * r))) for v in (130, 268, 120))
-    mlr_ttl, mlr_sub = (max(10, int(round(v * rw))) for v in (60, 50))
-    ow_top, ow_box, ow_sub = int(round(5 * r)), int(round(14 * r)), round(3.2 * r, 1)
-    head = [
-        "[Script Info]", "ScriptType: v4.00+", "PlayResX: %d" % w, "PlayResY: %d" % h,
-        "ScaledBorderAndShadow: yes", "WrapStyle: 2", "",
-        "[V4+ Styles]",
-        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        # TitleTop：白字 + 红粗描边（红 &H000000FF）；TitleBox：白字红底条(BorderStyle 3 不透明底框)；
-        # Sub：白字黑边底锚。三色值/边框/位置均为 demo 拍板值，别"顺手优化"。
-        "Style: TitleTop,%s,%d,&H00FFFFFF,&H000000FF,&H000000FF,&H00000000,1,0,0,0,100,100,2,0,1,%s,0,8,%d,%d,%d,1" % (
-            _WG_FONT, fs_top, ow_top, mlr_ttl, mlr_ttl, mv_top),
-        "Style: TitleBox,%s,%d,&H00FFFFFF,&H000000FF,&H00000000,&H000000FF,1,0,0,0,100,100,2,0,3,%s,0,8,%d,%d,%d,1" % (
-            _WG_FONT, fs_box, ow_box, mlr_ttl, mlr_ttl, mv_box),
-        "Style: Sub,%s,%d,&H00FFFFFF,&H000000FF,&H00141414,&H00000000,1,0,0,0,100,100,1,0,1,%s,0,2,%d,%d,%d,1" % (
-            _WG_FONT, fs_sub, ow_sub, mlr_sub, mlr_sub, mv_sub),
-        "", "[Events]",
-        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    ]
-    body = []
-    full_end = _wg_ms_to_ass(segs[-1][1] + 300) if segs else "0:00:10.00"
-    for style, text in (("TitleTop", title_top), ("TitleBox", title_box)):
-        if text:  # 第二行可选：没有就不渲染，不留空标题条
-            esc = _ass_escape(text)
-            if style == "TitleTop" and len(esc) > _WG_TITLE_MAX:
-                mid = (len(esc) + 1) // 2   # 长标题劈双行（提炼已去标点，无标点可借，硬劈）；
-                esc = esc[:mid] + "\\N" + esc[mid:]   # 转义后再插 \N，否则反斜杠被二次转义上屏
-            body.append("Dialogue: 0,0:00:00.00,%s,%s,,0,0,0,,%s" % (full_end, style, esc))
-    for (start, end, text) in segs:
-        # 先转义再断行/标红：防用户文案里的 {} 注入 ASS 覆盖块；我们自己的标红 tag 在转义之后插入
-        line = _wg_highlight(_wg_two_lines(_ass_escape(text)))
-        if line:
-            # 结束即走下句即来，不留尾延：尾延会让相邻两句短暂同屏（上一句没走下句已挂上）
-            body.append("Dialogue: 0,%s,%s,Sub,,0,0,0,,%s" % (_wg_ms_to_ass(start), _wg_ms_to_ass(end), line))
-    return "\n".join(head + body) + "\n"
-
-def _run_talking_asr(wav_fp, out_json):
-    """子进程跑 whisper small 逐句时间轴 → [(start_ms, end_ms, text)]。
-    服务器 3.4GB 内存，模型峰值约 1GB：有 systemd 就套 scope 限死内存（OOM 只杀 scope，
-    不拖垮主服务），没有就 nice 兜底让出 CPU 调度优先级。"""
-    # 缺省 = 当前解释器：服务器 content_api 的环境装着 faster-whisper，与旧口播 ASR 同源、
-    # 行为一致；要隔离 ASR 依赖/模型缓存，用 TALKING_ASR_PYTHON 指到独立 venv。
-    asr_python = TALKING_ASR_PYTHON or sys.executable
-    cmd = [asr_python, "-m", "content_domains.talking_asr_cli", str(wav_fp), str(out_json)]
-    # systemd-run --scope 建 transient unit 要 root/polkit（线上 E2E 实测：ubuntu 服务用户下报
-    # "Interactive authentication required"），非 root 用不了；非 root 一律 nice -n 19
-    # （非 root 只能调高 nice 值、恰好就是让出调度优先级）。geteuid 缺省按 root 处理（Windows 开发机无此函数）。
-    if getattr(os, "geteuid", lambda: 0)() == 0 and shutil.which("systemd-run"):
-        cmd = ["systemd-run", "--scope", "-q", "-p", "MemoryMax=1500M"] + cmd
-    elif shutil.which("nice"):
-        cmd = ["nice", "-n", "19"] + cmd
-    env = dict(os.environ)          # HF_ENDPOINT/HF_HUB_OFFLINE 随环境透传给子进程
-    env["OMP_NUM_THREADS"] = "2"    # 与 CLI 的 cpu_threads=2 对齐，防 OpenMP 默认把核打满
-    try:
-        # cwd 指到 server/：python -m 靠 cwd 上 sys.path 才能找到 content_domains 包
-        subprocess.run(cmd, check=True, timeout=TALKING_ASR_TIMEOUT, env=env,
-                       cwd=str(pathlib.Path(__file__).resolve().parents[1]),
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except FileNotFoundError:
-        raise ValueError("口播模板 ASR 解释器不存在: %s" % asr_python)
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or b"").decode("utf-8", "replace")[-220:]
-        raise ValueError("口播模板 ASR 识别失败" + (": " + detail if detail else ""))
-    except subprocess.TimeoutExpired:
-        raise ValueError("口播模板 ASR 识别超时")
-    try:
-        segs = json.loads(out_json.read_text(encoding="utf-8"))
-    except Exception:
-        raise ValueError("口播模板 ASR 结果解析失败")
-    out = []
-    for s in segs:
-        try:
-            text = str(s.get("text") or "").strip()
-            if text:
-                out.append((int(s["start"]), int(s["end"]), text))
-        except Exception:
-            continue
-    return out
-
 def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, position="bottom"):
-    """把 video_file 抽音频→whisper 转写→生成 .ass→ffmpeg 烧录，返回带字幕视频的相对路径。
-    wg_red 走网感模板分支（子进程 ASR + 整份模板 ASS）；white/variety/bar 维持进程内模型+单卡字幕。"""
+    """把 video_file 抽音频→whisper 转写→生成 .ass→ffmpeg 烧录，返回带字幕视频的相对路径。"""
     src = _resolve_out_file(video_file)
     if not src:
         raise ValueError("字幕烧录：视频文件不存在")
     tok = "%d_%s" % (int(time.time() * 1000), uuid.uuid4().hex[:8])  # 唯一，防同毫秒并发撞名/互相覆盖
     wav = VIDEO_OUT_DIR / ("sub_%s.wav" % tok)
     ass = VIDEO_OUT_DIR / ("sub_%s.ass" % tok)
-    js = VIDEO_OUT_DIR / ("sub_%s.json" % tok)
     out_rel = "video/subtitled_%s.mp4" % tok
     out_fp = _out_path(out_rel)
     try:
         _sub_ffmpeg(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
                      "-vn", "-ar", "16000", "-ac", "1", str(wav)], timeout=300)
-        with _whisper_sem:  # 限制并发转写，避免多任务把 CPU 打满（两种 ASR 共用同一把闸）
+        with _whisper_sem:  # 限制并发转写，避免多任务把 CPU 打满
             update_video_asset_phase(job_id, "burning_subtitle")  # 心跳：拿到信号量、开始转写，刷新 updated_at 防 reaper 误杀
-            if style_key == "wg_red":
-                segs = _run_talking_asr(wav, js)   # 子进程：内存即起即灭 + scope 限死
-            else:
-                model = _get_whisper_model()
-                seg_iter, _info = model.transcribe(str(wav), language="zh", vad_filter=True)
-                segs = [(s.start, s.end, (s.text or "").strip()) for s in seg_iter if (s.text or "").strip()]
+            model = _get_whisper_model()
+            seg_iter, _info = model.transcribe(str(wav), language="zh", vad_filter=True)
+            segs = [(s.start, s.end, (s.text or "").strip()) for s in seg_iter if (s.text or "").strip()]
         if not segs:
             raise ValueError("字幕识别结果为空")
-        if style_key == "wg_red":
-            if known_text:  # text 模式：借 ASR 时间轴、字幕文本换口播原文（防错别字/繁简漂移）
-                try:
-                    segs = _wg_align_script(segs, known_text)
-                except Exception:
-                    pass
-            w, h = _probe_video_size(src)
-            title_top, title_box = _wg_titles(known_text, segs)
-            ass_text = _wg_build_ass(segs, w, h, title_top, title_box)
-        else:
-            if known_text:  # text 模式：用已知文案替换识别文本，时间轴仍用 whisper
-                try:
-                    segs = _redistribute_known_text(known_text, segs)
-                except Exception:
-                    pass
-            w, h = _probe_video_size(src)
-            ass_text = _build_ass(segs, (style_key or "white"), w, h, position or "bottom")
-        ass.write_text(ass_text, encoding="utf-8")
+        if known_text:  # text 模式：用已知文案替换识别文本，时间轴仍用 whisper
+            try:
+                segs = _redistribute_known_text(known_text, segs)
+            except Exception:
+                pass
+        w, h = _probe_video_size(src)
+        ass.write_text(_build_ass(segs, (style_key or "white"), w, h, position or "bottom"), encoding="utf-8")
         update_video_asset_phase(job_id, "burning_subtitle")  # 心跳：开始烧录
         # cwd=视频目录 + ass 用文件名，避免 filtergraph 路径转义问题
         _sub_ffmpeg(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(src),
@@ -3031,7 +4053,7 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
             raise ValueError("字幕烧录输出为空")
         return _faststart_video_file(out_rel)
     finally:
-        for tmp in (wav, ass, js):
+        for tmp in (wav, ass):
             try:
                 if tmp.exists():
                     tmp.unlink()
@@ -3096,25 +4118,8 @@ def gen_video(payload):
         ratio = "9:16"
     if motion not in {"low", "medium", "high"}:
         motion = "medium"
-    motion_prompt = payload["motion_prompt"] if "motion_prompt" in payload else ""
-    if not isinstance(motion_prompt, str):
-        raise ValueError("motion_prompt 必须是字符串")
-    motion_prompt = motion_prompt.strip()
-    if len(motion_prompt) > 500:
-        raise ValueError("motion_prompt 最多 500 个字符")
     created_avatar = None
-    if motion_prompt:
-        resolution, ratio = "1080p", "9:16"
-        avatar_look_id = ""
-        if avatar:
-            avatar_look_id = str(avatar.get("provider_avatar_id") or "").strip()
-            if str(avatar.get("status") or "").lower() != "ready" or not avatar_look_id:
-                raise ValueError("所选形象尚未就绪，请重新创建后再试")
-        video_result = generate_heygen_avatar_iv_video(
-            image_file, audio_file, motion_prompt, motion,
-            avatar_look_id=avatar_look_id)
-    else:
-        video_result = generate_heygen_video(image_file, audio_file, resolution, ratio, motion)
+    video_result = generate_heygen_video(image_file, audio_file, resolution, ratio, motion)
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
@@ -3145,7 +4150,7 @@ def gen_video(payload):
             subtitle_on = True
         except Exception as e:
             subtitle_error = str(e)[:200]
-    result = {
+    return {
         "type": "video", "status": "done", "mode": mode,
         "image_file": video_result.get("image_file") or image_file,
         "image_url": video_result.get("image_url") or _file_url(video_result.get("image_file") or image_file),
@@ -3177,10 +4182,6 @@ def gen_video(payload):
         "batch_index": payload.get("batch_index"), "batch_size": payload.get("batch_size"),
         "message": "视频生成完成"
     }
-    if motion_prompt:
-        result["provider_path"] = "talking_avatar_iv"
-        result["motion_prompt_enabled"] = True
-    return result
 
 # ============ F8 · 视频换装 / 换背景（RunningHub 两段式 AI App） ============
 # 两段：换装(Wan2.2 Animate) → 换背景(VideoRefusion)。按有无衣服图/背景图裁剪阶段。
@@ -3431,7 +4432,7 @@ def gen_tryon(payload):
         "message": "换装换背景视频生成完成"
     }
 
-def _xiaole_request(method, path, body=None, timeout=90):
+def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
     if not XIAOLEVIDEO_API_KEY:
         raise ValueError("视频生成服务未配置（XIAOLEVIDEO_API_KEY）")
     url = path if path.startswith("http") else (XIAOLEVIDEO_API_BASE + path)
@@ -3439,29 +4440,53 @@ def _xiaole_request(method, path, body=None, timeout=90):
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
+        # 上游 xiaolevideo 要求付费创建请求带 8-128 字符幂等键，缺则 HTTP 400（果肉/豆姐/欧米共用此路）
+        headers["Idempotency-Key"] = uuid.uuid4().hex
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-    # 429（API Key 媒体任务过多）自动退避重试，扛并发限流
+    # 429（API Key 媒体任务过多）自动退避重试，扛并发限流。图像创建可传入
+    # monotonic 截止时间，避免这里的内层退避突破调用方的总重试预算。
+    last_retry_error = None
     for attempt in range(_xiaole_429_retries + 1):
+        request_timeout = timeout
+        if retry_deadline is not None:
+            remaining = retry_deadline - time.monotonic()
+            if attempt and remaining <= 0:
+                raise last_retry_error
+            request_timeout = min(timeout, max(0.001, remaining))
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=request_timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
+            error = RuntimeError("视频接口失败: HTTP %s %s" % (e.code, detail))
             if e.code == 429 and attempt < _xiaole_429_retries:
                 wait = min(45, 8 * (attempt + 1))
-                print("[video] 429 并发限流，%ds 后重试(%d/%d)" % (wait, attempt + 1, _xiaole_429_retries), flush=True)
+                if retry_deadline is not None:
+                    remaining = retry_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise error
+                    wait = min(wait, remaining)
+                print("[video] 429 并发限流，%.1fs 后重试(%d/%d)" % (wait, attempt + 1, _xiaole_429_retries), flush=True)
+                last_retry_error = error
                 time.sleep(wait)
                 continue
-            raise RuntimeError("视频接口失败: HTTP %s %s" % (e.code, detail))
+            raise error
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             # 瞬时网络抖动(SSL握手超时等)自动重试
+            error = RuntimeError("视频接口网络异常: %s" % str(e)[:120])
             if attempt < _xiaole_429_retries:
                 wait = min(30, 5 * (attempt + 1))
-                print("[video] 网络异常，%ds 后重试(%d/%d): %s" % (wait, attempt + 1, _xiaole_429_retries, str(e)[:80]), flush=True)
+                if retry_deadline is not None:
+                    remaining = retry_deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise error
+                    wait = min(wait, remaining)
+                print("[video] 网络异常，%.1fs 后重试(%d/%d): %s" % (wait, attempt + 1, _xiaole_429_retries, str(e)[:80]), flush=True)
+                last_retry_error = error
                 time.sleep(wait)
                 continue
-            raise RuntimeError("视频接口网络异常: %s" % str(e)[:120])
+            raise error
 
 def _xiaole_pick_video_url(output):
     for v in ((output or {}).get("videos") or []):
@@ -3473,7 +4498,8 @@ def _xiaole_pick_video_url(output):
             return v
     return None
 
-def _xiaole_download_candidates(url, tunnel_proxy, origin_headers=None):
+def _xiaole_download_candidates(
+        url, tunnel_proxy, origin_headers=None, direct_first=False):
     """成片下载候选链(GET 幂等，可自由多档尝试，不像出图 POST 有重复计费顾虑)。顺序：
       ① 原始 URL 走 egress 快隧道(Reality VPS/mihomo)—— tunnel_proxy 非空才加，避开拥塞的 heygen 中转
       ② heygen 法兰克福 /cdn/ 中转 —— 兜底(拥塞时慢到分钟级)，走进程默认(NO_PROXY 含 zelong.vip → 直连中转)
@@ -3498,38 +4524,37 @@ def _xiaole_download_candidates(url, tunnel_proxy, origin_headers=None):
         if token:
             headers["X-Relay-Token"] = token
         candidates.append((fetch, headers, None))
-    candidates.append((url, dict(plain_headers), None))
+    direct = (url, dict(plain_headers), None)
+    if direct_first:
+        candidates.insert(0, direct)
+    else:
+        candidates.append(direct)
     return candidates
 
 
-class _OriginAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follow redirects without leaking an origin bearer token cross-origin."""
+def _is_public_http_url(url):
+    from . import wavespeed
+    return wavespeed._public_http_url_state(url) == "ok"
 
+
+class _PublicVideoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
-        if redirected is None:
-            return None
-        old = urllib.parse.urlsplit(req.full_url)
-        new = urllib.parse.urlsplit(newurl)
-        if (old.scheme.lower(), old.netloc.lower()) != (new.scheme.lower(), new.netloc.lower()):
-            redirected.remove_header("Authorization")
-        return redirected
+        if not _is_public_http_url(newurl):
+            raise urllib.error.URLError("视频下载重定向到非公网地址")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _authenticated_download_opener(proxy):
-    proxy_handler = urllib.request.ProxyHandler(
-        {"http": proxy, "https": proxy} if proxy else None
-    )
-    return urllib.request.build_opener(proxy_handler, _OriginAuthRedirectHandler()).open
-
-
-def _download_xiaole_video(url, prefix="xiaole", origin_headers=None):
+def _download_xiaole_video(
+        url, prefix="xiaole", origin_headers=None, public_only=False):
     # 视频 CDN 多在海外(如 vidgen.x.ai)，国内直连不通。成片下载是 GET(幂等)，故可多档尝试：
     # 优先走 egress 快隧道，避开拥塞到分钟级的 heygen 法兰克福老中转(实测 xAI 2 分钟出片、
     # 走老中转下载却要 11~19 分钟，甚至卡死被 reaper 判超时退点)。中转仅作兜底。
     from . import egress
+    if public_only and not _is_public_http_url(url):
+        raise RuntimeError("视频下载地址不是公网 HTTP(S) URL")
     candidates = _xiaole_download_candidates(
-        url, egress.preferred_proxy(), origin_headers=origin_headers
+        url, egress.preferred_proxy(), origin_headers=origin_headers,
+        direct_first=public_only,
     )
     # 下载中断(IncompleteRead/网络抖动)自动重试；前一档耗尽后换下一档
     data = None
@@ -3537,10 +4562,17 @@ def _download_xiaole_video(url, prefix="xiaole", origin_headers=None):
     for fetch_url, headers, proxy in candidates:
         if data is not None:
             break
-        if headers.get("Authorization"):
-            opener_open = _authenticated_download_opener(proxy)
+        if public_only:
+            proxy_handler = urllib.request.ProxyHandler(
+                {"http": proxy, "https": proxy} if proxy else None
+            )
+            opener_open = urllib.request.build_opener(
+                proxy_handler, _PublicVideoRedirect()
+            ).open
         else:
-            opener_open = egress._opener(proxy).open if proxy else urllib.request.urlopen
+            opener_open = (
+                egress._opener(proxy).open if proxy else urllib.request.urlopen
+            )
         for attempt in range(_xiaole_dl_retries):
             try:
                 req = urllib.request.Request(fetch_url, headers=headers)
@@ -3635,73 +4667,223 @@ def generate_xiaole_video(model, prompt, reference_images=None, size="720x1280",
         time.sleep(XIAOLE_POLL_INTERVAL)
     raise TimeoutError("视频生成超时")
 
+
+def _prepare_sora_input_reference(data_url, size):
+    """把首帧裁成官方要求的精确输出尺寸，返回 PNG 字节。"""
+    encoded = str(data_url or "").split(",", 1)[1]
+    raw = base64.b64decode(encoded, validate=True)
+    width, height = [int(part) for part in str(size).split("x", 1)]
+    with tempfile.TemporaryDirectory(prefix="hq-sora-ref-") as folder:
+        source = pathlib.Path(folder) / "source"
+        target = pathlib.Path(folder) / "reference.png"
+        source.write_bytes(raw)
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(source), "-frames:v", "1", "-vf",
+                "scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d" %
+                (width, height, width, height),
+                str(target),
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("Sora 参考图处理失败，请换一张 JPEG、PNG 或 WebP") from exc
+        if not target.is_file() or not target.stat().st_size:
+            raise ValueError("Sora 参考图处理失败，请换一张图片")
+        return target.read_bytes()
+
+
+def gen_sora_video(payload):
+    """OpenAI Sora 2 限时 Beta：创建/恢复 → 轮询 → 鉴权下载 → 永久资产入库。"""
+    from . import video_openai
+
+    job_id = payload.get("_job_id")
+    if not job_id:
+        raise ValueError("付费 Sora 任务必须绑定 job_id")
+    model = str(payload.get("model") or "sora-2")
+    prompt = str(payload.get("prompt") or "").strip()
+    provider_prompt = str(payload.get("provider_prompt") or prompt).strip()
+    seconds = int(payload.get("seconds") or 4)
+    size = str(payload.get("size") or SORA_SIZE_MAP.get(
+        (model, payload.get("resolution") or "720p", payload.get("ratio") or "9:16"),
+        "720x1280",
+    ))
+    ratio = str(payload.get("ratio") or "9:16")
+    resolution = str(payload.get("resolution") or "720p")
+
+    existing = get_resumable_sora_request(job_id)
+    if existing and existing.get("submission_unknown"):
+        raise SoraSubmissionUnknown("Sora 已发起提交但未确认上游任务 ID，需人工核对")
+    if job_id and not existing:
+        update_video_asset_phase(
+            job_id, "sora_submitting", strict=True, mode="sora", text=prompt,
+            model=model, resolution=resolution, ratio=ratio,
+        )
+
+    provider_id_persisted = bool(existing)
+
+    def sora_heartbeat(heartbeat_job_id, phase, **fields):
+        nonlocal provider_id_persisted
+        update_video_asset_phase(
+            heartbeat_job_id, phase,
+            strict=bool(fields.get("provider_video_id")) and not provider_id_persisted,
+            **fields,
+        )
+        provider_id_persisted = provider_id_persisted or bool(fields.get("provider_video_id"))
+
+    if existing:
+        candidate = _bound_provider_key(
+            "sora", existing.get("provider_key_id")
+        )
+        rendered = video_openai.resume(
+            existing["video_id"], existing.get("model") or model, seconds, size,
+            job_id=job_id, heartbeat=sora_heartbeat,
+            api_key=candidate["secret"], provider_key_id=candidate["id"],
+        )
+    else:
+        refs = payload.get("reference_images") or []
+        input_reference = _prepare_sora_input_reference(refs[0], size) if refs else None
+        rendered, candidate = _create_with_provider_key(
+            "sora",
+            job_id,
+            "sora_submitting",
+            video_openai.CredentialRejected,
+            lambda selected: video_openai.generate(
+                model, provider_prompt, seconds, size,
+                job_id=job_id, heartbeat=sora_heartbeat,
+                api_key=selected["secret"],
+                provider_key_id=selected["id"],
+                input_reference=input_reference,
+            ),
+        )
+
+    video_id = str(rendered.get("video_id") or "").strip()
+    if not video_id:
+        raise RuntimeError("Sora 视频已完成但缺少 video_id")
+    if job_id:
+        update_video_asset_phase(
+            job_id, "sora_completed", provider_video_id=video_id,
+            provider_key_id=candidate["id"],
+            model=rendered.get("model") or model,
+        )
+        update_video_asset_phase(job_id, "sora_downloading", provider_video_id=video_id)
+    video_file = "video/sora_%s.mp4" % uuid.uuid4().hex
+    video_openai.download_content(
+        video_id, _out_path(video_file), api_key=candidate["secret"]
+    )
+    video_file = _faststart_video_file(video_file)
+    cover = _extract_first_frame_cover(video_file)
+    actual_seconds = rendered.get("seconds") or seconds
+    try:
+        actual_seconds = int(float(actual_seconds))
+    except (TypeError, ValueError):
+        actual_seconds = seconds
+    result = {
+        "type": "video", "status": "done", "mode": "sora",
+        "model": rendered.get("model") or model,
+        "text": prompt, "prompt": prompt,
+        "ratio": ratio, "resolution": resolution, "size": rendered.get("size") or size,
+        "duration": actual_seconds, "provider_video_id": video_id,
+        "video_file": video_file, "video_url": _file_url(video_file),
+        "image_file": cover,
+        "image_url": public_url(cover, "image/jpeg") if cover else None,
+        "phase": "done", "message": "Sora 视频生成完成",
+        "provider": "openai_sora",
+    }
+    return result
+
 def gen_xiaole_video(payload):
     job_id = payload.get("_job_id")
-    channel = (payload.get("channel") or "grok").strip()
-    use_seedance = channel == "micro"
+    channel = (payload.get("channel") or "grok").strip().lower()
+    if channel in DISABLED_XIAOLE_VIDEO_CHANNELS:
+        raise ValueError("该视频渠道维护中，请使用果肉视频生成")
     use_xai = channel == "grok" and GROK_VIDEO_PROVIDER != "xiaole"
-    if use_seedance:
-        from . import video_seedance
-        model = video_seedance.SEEDANCE_MODEL
-    else:
-        model = (payload.get("model") or "grok-imagine-video") if use_xai else XIAOLE_CHANNEL_MODELS.get(channel)
+    is_official = channel in {"micro", "omni", "minimax"}
+    model = (
+        payload.get("model") or "grok-imagine-video"
+        if use_xai else payload.get("model") or XIAOLE_CHANNEL_MODELS.get(channel)
+    )
     if not model:
         raise ValueError("未知视频渠道：%s" % channel)
-    prompt = (payload.get("prompt") or "").strip()
-    if not prompt:
+    user_prompt = (payload.get("prompt") or "").strip()
+    if not user_prompt:
         raise ValueError("请输入视频提示词")
-    ratio = (payload.get("ratio") or ("16:9" if use_xai else "9:16")).strip()
-    if not use_xai and not use_seedance and ratio not in XIAOLE_RATIO_SIZES:
+    ratio = (
+        payload.get("ratio")
+        or ("16:9" if use_xai or channel == "omni" else "9:16")
+    ).strip()
+    if not use_xai and not is_official and ratio not in XIAOLE_RATIO_SIZES:
         ratio = "9:16"
-    size = _xiaole_size_for_ratio(ratio) if not use_xai else None
+    size = _xiaole_size_for_ratio(ratio) if not use_xai and not is_official else None
+    existing = get_resumable_grok_request(job_id) if use_xai or is_official else None
     ref_images = None
-    if use_seedance:
-        ref_images = [_seedance_ref_to_signed_url(item, payload.get("_username")) for item in (payload.get("reference_images") or [])]
-    elif channel in XIAOLE_IMAGE_CHANNELS:
+    if channel in XIAOLE_IMAGE_CHANNELS:
         raw_refs = payload.get("reference_images") or None
-        if raw_refs:
-            ref_images = [_xiaole_ref_to_url(r) for r in raw_refs]
-    label = {"grok": "果肉视频", "micro": "豆姐视频", "omni": "欧米视频"}.get(channel, model)
-    if job_id:
-        update_video_asset_phase(job_id, "queued", mode=channel, text=prompt, model=model)
-    if use_seedance:
-        seedance_result = video_seedance.generate(
-            model=model,
-            prompt=prompt,
-            duration=payload.get("duration") or 10,
-            ratio=ratio,
-            resolution=payload.get("resolution") or "720p",
-            generate_audio=payload.get("generate_audio", True),
-            reference_images=ref_images,
-            job_id=job_id,
-            heartbeat=update_video_asset_phase,
-        )
-        source_url = seedance_result["source_video_url"]
-        if job_id:
-            update_video_asset_phase(
-                job_id,
-                "seedance_downloading",
-                source_video_url=source_url,
-                provider_video_id=seedance_result.get("request_id"),
-                model=seedance_result.get("model") or model,
+        if raw_refs and not existing:
+            ref_images = (
+                list(raw_refs)
+                if channel in {"omni", "minimax"}
+                else ([_seedance_ref_to_signed_url(r, payload.get("_username"))
+                       for r in raw_refs]
+                      if channel == "micro"
+                      else [_xiaole_ref_to_url(r) for r in raw_refs])
             )
-        video_file = _download_xiaole_video(source_url, "seedance")
-        cover = _extract_first_frame_cover(video_file)
-        result = {
-            "video_file": video_file,
-            "video_url": _file_url(video_file),
-            "source_video_url": source_url,
-            "model": seedance_result.get("model") or model,
-            "request_id": seedance_result.get("request_id"),
-            "duration": seedance_result.get("duration"),
-            "image_file": cover,
-            "image_url": public_url(cover, "image/jpeg") if cover else None,
-        }
-    elif use_xai:
+    mention_style = "xai" if use_xai else ("omni" if channel == "omni" else "generic")
+    prompt = resolve_image_mentions(user_prompt, len(ref_images or []), mention_style)
+    label = {
+        "grok": "果肉视频", "micro": "Seedance 视频", "omni": "Omni 视频",
+        "minimax": "麦克视频",
+    }.get(channel, model)
+    if not existing and channel == "micro":
+        # COS 回退可能仍是 data URL；必须在写 submitting 前用最终引用做完整校验。
+        from . import video_seedance
+        video_seedance._build_payload(
+            model, prompt, int(payload.get("duration") or 5), ratio,
+            str(payload.get("resolution") or "720p"),
+            payload.get("generate_audio", True), ref_images,
+        )
+    if existing and existing.get("submission_unknown"):
+        raise OfficialVideoSubmissionUnknown(
+            "%s 已发起提交但未确认上游任务 ID，需人工核对" % label
+        )
+    expected_provider = {
+        "micro": "seedance", "omni": "omni", "minimax": "minimax",
+    }.get(channel)
+    if existing and is_official and existing.get("provider") != expected_provider:
+        raise RuntimeError("%s 恢复信息与当前任务渠道不一致" % label)
+    if job_id and not existing:
+        phase = ({
+            "micro": "seedance_submitting",
+            "omni": "omni_submitting",
+            "minimax": "minimax_submitting",
+        }.get(channel, "queued"))
+        update_video_asset_phase(
+            job_id, phase, strict=is_official, mode=channel, text=prompt,
+            model=model, resolution=payload.get("resolution"), ratio=ratio,
+        )
+    if use_xai:
         from . import video_openrouter, video_xai
         operation = payload.get("operation") or "generate"
         reference_video_file = reference_video_url = None
-        if operation == "edit":
+        if existing:
+            adapter = video_openrouter if existing.get("provider") == "openrouter" else video_xai
+            if adapter is video_xai:
+                candidate = _bound_provider_key(
+                    "xai", existing.get("provider_key_id")
+                )
+                xres = adapter.resume(
+                    existing["request_id"], existing.get("model") or model,
+                    payload.get("duration") or 10,
+                    job_id=job_id, heartbeat=update_video_asset_phase,
+                    api_key=candidate["secret"],
+                    provider_key_id=candidate["id"],
+                )
+            else:
+                xres = adapter.resume(
+                    existing["request_id"], existing.get("model") or model,
+                    payload.get("duration") or 10,
+                    job_id=job_id, heartbeat=update_video_asset_phase,
+                )
+        elif operation == "edit":
             reference_video_file = _save_data_file(payload.get("reference_video_data"), "grok_edit_source", [".mp4"])
             if not reference_video_file:
                 raise RuntimeError("参考视频保存失败")
@@ -3709,36 +4891,46 @@ def gen_xiaole_video(payload):
             if not str(source_public_url).startswith(("http://", "https://")):
                 raise RuntimeError("xAI官方视频编辑需要可公网访问的参考视频，COS转存失败")
             reference_video_url = _file_url(reference_video_file)
-            xres = video_xai.edit(model="grok-imagine-video", prompt=prompt, video_url=source_public_url,
-                                  duration=payload.get("source_duration"), job_id=job_id,
-                                  heartbeat=update_video_asset_phase)
+            def create_xai_edit(candidate):
+                return video_xai.edit(
+                    model="grok-imagine-video", prompt=prompt,
+                    video_url=source_public_url,
+                    duration=payload.get("source_duration"), job_id=job_id,
+                    heartbeat=update_video_asset_phase,
+                    api_key=candidate["secret"],
+                    provider_key_id=candidate["id"],
+                )
+            xres, candidate = _create_with_provider_key(
+                "xai", job_id, "xai_submitting",
+                video_xai.XaiCreateUnavailableError, create_xai_edit,
+            )
         else:
-            image_url = ref_images[0] if ref_images else None
-            if image_url and not str(image_url).startswith(("http://", "https://")):
-                raise RuntimeError("xAI官方图生视频需要可公网访问的参考图，COS转存失败")
-            try:
-                xres = video_xai.generate(
-                    model=model, prompt=prompt, image_url=image_url,
+            for image_url in ref_images or []:
+                if not str(image_url).startswith(("http://", "https://")):
+                    raise RuntimeError("xAI官方图生视频需要可公网访问的参考图，COS转存失败")
+            def create_xai_video(candidate):
+                return video_xai.generate(
+                    model=model, prompt=prompt, reference_image_urls=ref_images,
                     duration=payload.get("duration") or 10,
-                    aspect_ratio=ratio, resolution=payload.get("resolution") or "720p",
+                    aspect_ratio=ratio,
+                    resolution=payload.get("resolution") or "720p",
                     job_id=job_id, heartbeat=update_video_asset_phase,
+                    api_key=candidate["secret"],
+                    provider_key_id=candidate["id"],
                 )
-            except video_xai.XaiCreateUnavailableError:
-                if not video_openrouter.available():
-                    raise
-                xres = video_openrouter.generate(
-                    model=model, prompt=prompt, image_urls=ref_images,
-                    duration=payload.get("duration") or 10,
-                    aspect_ratio=ratio, resolution=payload.get("resolution") or "720p",
-                    job_id=job_id, heartbeat=update_video_asset_phase,
-                )
+            xres, candidate = _create_with_provider_key(
+                "xai", job_id, "xai_submitting",
+                video_xai.XaiCreateUnavailableError, create_xai_video,
+            )
         source_url = xres["source_video_url"]
         provider = xres.get("provider") or "xai"
         if job_id:
             phase = "openrouter_downloading" if provider == "openrouter" else "downloading"
             update_video_asset_phase(job_id, phase, source_video_url=source_url,
-                                     provider_video_id=xres.get("request_id"), model=xres.get("model") or model)
-        origin_headers = video_openrouter.download_headers(source_url) if provider == "openrouter" else None
+                                     provider_video_id=xres.get("request_id"),
+                                     provider_key_id=xres.get("provider_key_id"),
+                                     model=xres.get("model") or model)
+        origin_headers = video_openrouter.download_headers() if provider == "openrouter" else None
         video_file = _download_xiaole_video(
             source_url, "grok_" + provider, origin_headers=origin_headers
         )
@@ -3747,31 +4939,346 @@ def gen_xiaole_video(payload):
             "video_file": video_file, "video_url": _file_url(video_file),
             "source_video_url": source_url, "model": xres.get("model") or model,
             "request_id": xres.get("request_id"), "duration": xres.get("duration"),
+            "provider_key_id": xres.get("provider_key_id"),
             "image_file": cover,
             "image_url": public_url(cover, "image/jpeg") if cover else None,
             "reference_video_file": reference_video_file,
             "reference_video_url": reference_video_url,
         }
+    elif channel == "micro":
+        from . import video_seedance, wavespeed
+
+        provider_id_persisted = bool(existing and existing.get("request_id"))
+
+        def seedance_heartbeat(heartbeat_job_id, phase, **fields):
+            nonlocal provider_id_persisted
+            update_video_asset_phase(
+                heartbeat_job_id, phase,
+                strict=bool(fields.get("provider_video_id"))
+                and not provider_id_persisted,
+                **fields,
+            )
+            provider_id_persisted = (
+                provider_id_persisted or bool(fields.get("provider_video_id"))
+            )
+
+        duration = int(payload.get("duration") or 5)
+        resolution = str(payload.get("resolution") or "720p")
+        generate_audio = payload.get("generate_audio", True)
+        if existing:
+            candidate = _bound_provider_key(
+                "seedance", existing.get("provider_key_id")
+            )
+            rendered = video_seedance.resume(
+                existing["request_id"], existing.get("model") or model,
+                duration, ratio, resolution, generate_audio,
+                job_id=job_id, heartbeat=seedance_heartbeat,
+                api_key=candidate["secret"],
+                provider_key_id=candidate["id"],
+            )
+        else:
+            rendered, candidate = _create_with_provider_key(
+                "seedance",
+                job_id,
+                "seedance_submitting",
+                video_seedance.SeedanceCredentialRejected,
+                lambda selected: video_seedance.generate(
+                    model=model, prompt=prompt, duration=duration, ratio=ratio,
+                    resolution=resolution, generate_audio=generate_audio,
+                    reference_images=ref_images,
+                    job_id=job_id, heartbeat=seedance_heartbeat,
+                    api_key=selected["secret"],
+                    provider_key_id=selected["id"],
+                ),
+            )
+        source_url = rendered["source_video_url"]
+        if job_id:
+            update_video_asset_phase(
+                job_id, "seedance_downloading",
+                source_video_url=source_url,
+                provider_video_id=rendered.get("request_id"),
+                provider_key_id=candidate["id"],
+                model=rendered.get("model") or model,
+            )
+        try:
+            video_file = _download_xiaole_video(source_url, "seedance")
+        except RuntimeError as exc:
+            if str(exc).startswith("视频下载失败"):
+                raise video_seedance.TransientSeedanceError(str(exc)) from exc
+            raise
+        upscale = payload.get("upscale") is True
+        upscale_id = str(payload.get("upscale_prediction_id") or "").strip()
+        upscale_source_url = None
+        upscale_cleanup = []
+        if upscale:
+            upscale_cleanup.append(video_file)
+            source_audio = (
+                _extract_reference_audio(video_file) if generate_audio else None
+            )
+            if source_audio:
+                upscale_cleanup.append(source_audio)
+            upscale_input_url = None
+            if not upscale_id:
+                try:
+                    upscale_input_url = wavespeed._material_url(
+                        video_file, private=True
+                    )
+                except Exception as exc:
+                    raise wavespeed.WaveSpeedTransientRead(
+                        "AI 超清素材转存失败，请稍后恢复"
+                    ) from exc
+                if not str(upscale_input_url).startswith(("http://", "https://")):
+                    raise wavespeed.WaveSpeedTransientRead(
+                        "AI 超清素材转存失败，请稍后恢复"
+                    )
+                update_video_asset_phase(
+                    job_id, "seedance_upscale_submitting", strict=True
+                )
+
+            def persist_upscale_id(prediction_id):
+                nonlocal upscale_id
+                _persist_seedance_upscale_prediction(job_id, prediction_id)
+                payload["upscale_prediction_id"] = prediction_id
+                upscale_id = prediction_id
+                update_video_asset_phase(
+                    job_id, "seedance_upscale_running", strict=True
+                )
+
+            def upscale_heartbeat(heartbeat_job_id, phase):
+                update_video_asset_phase(heartbeat_job_id, phase)
+
+            upscaled = wavespeed.run_seedvr2(
+                video_url=upscale_input_url,
+                prediction_id=upscale_id,
+                job_id=job_id,
+                on_submitted=persist_upscale_id,
+                heartbeat=upscale_heartbeat,
+            )
+            upscale_id = upscaled["prediction_id"]
+            upscale_source_url = upscaled["source_video_url"]
+            update_video_asset_phase(
+                job_id, "seedance_upscale_downloading"
+            )
+            try:
+                video_file = _download_xiaole_video(
+                    upscale_source_url, "seedance_upscale", public_only=True
+                )
+            except RuntimeError as exc:
+                if str(exc).startswith("视频下载失败"):
+                    raise wavespeed.WaveSpeedTransientRead(str(exc)) from exc
+                raise
+            update_video_asset_phase(
+                job_id, "seedance_upscale_normalizing"
+            )
+            try:
+                video_file = _normalize_seedance_upscale_video(
+                    video_file, rendered.get("ratio") or ratio
+                )
+            except RuntimeError as exc:
+                raise wavespeed.WaveSpeedProviderFailed(str(exc)) from exc
+            if source_audio:
+                upscale_cleanup.append(video_file)
+                with_audio = _mux_seedance_upscale_audio(
+                    video_file, source_audio
+                )
+                if with_audio == video_file:
+                    raise wavespeed.WaveSpeedProviderFailed(
+                        "AI 超清成片恢复原声失败"
+                    )
+                video_file = with_audio
+        cover = _extract_first_frame_cover(video_file)
+        for intermediate in upscale_cleanup:
+            if intermediate == video_file:
+                continue
+            intermediate_file = _resolve_out_file(intermediate)
+            if intermediate_file:
+                try:
+                    intermediate_file.unlink()
+                except OSError:
+                    pass
+        result = {
+            "video_file": video_file,
+            "video_url": _file_url(video_file),
+            "source_video_url": source_url,
+            "model": rendered.get("model") or model,
+            "request_id": rendered.get("request_id"),
+            "duration": rendered.get("duration") or duration,
+            "resolution": "1080p" if upscale else (
+                rendered.get("resolution") or resolution
+            ),
+            "source_resolution": resolution,
+            "ratio": rendered.get("ratio") or ratio,
+            "generate_audio": rendered.get("generate_audio"),
+            "completion_tokens": rendered.get("completion_tokens"),
+            "provider": (
+                "volcengine_seedance+wavespeed_seedvr2"
+                if upscale else "volcengine_seedance"
+            ),
+            "upscale": upscale,
+            "upscale_provider": "wavespeed_seedvr2" if upscale else None,
+            "image_file": cover,
+            "image_url": public_url(cover, "image/jpeg") if cover else None,
+        }
+    elif channel == "omni":
+        from . import video_gemini_omni
+
+        provider_id_persisted = bool(existing and existing.get("request_id"))
+
+        def omni_heartbeat(heartbeat_job_id, phase, **fields):
+            nonlocal provider_id_persisted
+            update_video_asset_phase(
+                heartbeat_job_id, phase,
+                strict=bool(fields.get("provider_video_id"))
+                and not provider_id_persisted,
+                **fields,
+            )
+            provider_id_persisted = (
+                provider_id_persisted or bool(fields.get("provider_video_id"))
+            )
+
+        duration = int(payload.get("duration") or 5)
+        if existing:
+            candidate = _bound_provider_key(
+                "omni", existing.get("provider_key_id")
+            )
+            rendered = video_gemini_omni.resume(
+                existing["request_id"], duration, ratio,
+                job_id=job_id, heartbeat=omni_heartbeat,
+                api_key=candidate["secret"],
+                provider_key_id=candidate["id"],
+            )
+        else:
+            rendered, candidate = _create_with_provider_key(
+                "omni",
+                job_id,
+                "omni_submitting",
+                video_gemini_omni.GeminiOmniCredentialRejected,
+                lambda selected: video_gemini_omni.generate(
+                    prompt, reference_images=ref_images, aspect_ratio=ratio,
+                    duration=duration, delivery="uri",
+                    job_id=job_id, heartbeat=omni_heartbeat,
+                    api_key=selected["secret"],
+                    provider_key_id=selected["id"],
+                ),
+            )
+        provider_id = rendered.get("request_id")
+        if job_id:
+            update_video_asset_phase(
+                job_id, "omni_downloading",
+                provider_video_id=provider_id,
+                provider_key_id=candidate["id"],
+                source_video_url=rendered.get("source_video_url"),
+                model=rendered.get("model") or model,
+            )
+        video_file = "video/omni_%s.mp4" % uuid.uuid4().hex
+        destination = _out_path(video_file)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(rendered["video_bytes"])
+        video_file = _faststart_video_file(video_file)
+        cover = _extract_first_frame_cover(video_file)
+        result = {
+            "video_file": video_file,
+            "video_url": _file_url(video_file),
+            "source_video_url": rendered.get("source_video_url"),
+            "model": rendered.get("model") or model,
+            "request_id": provider_id,
+            "duration": rendered.get("duration") or duration,
+            "resolution": "720p",
+            "ratio": rendered.get("aspect_ratio") or ratio,
+            "provider": rendered.get("provider") or "google_gemini_omni",
+            "image_file": cover,
+            "image_url": public_url(cover, "image/jpeg") if cover else None,
+        }
+    elif channel == "minimax":
+        from . import video_minimax_h3
+
+        provider_id_persisted = bool(existing and existing.get("request_id"))
+
+        def minimax_heartbeat(heartbeat_job_id, phase, **fields):
+            nonlocal provider_id_persisted
+            update_video_asset_phase(
+                heartbeat_job_id, phase,
+                strict=bool(fields.get("provider_video_id"))
+                and not provider_id_persisted,
+                **fields,
+            )
+            provider_id_persisted = provider_id_persisted or bool(
+                fields.get("provider_video_id")
+            )
+
+        duration = int(payload.get("duration") or 5)
+        if existing:
+            candidate = _bound_provider_key(
+                "minimax", existing.get("provider_key_id")
+            )
+            rendered = video_minimax_h3.resume(
+                existing["request_id"], duration, ratio,
+                job_id=job_id, heartbeat=minimax_heartbeat,
+                api_key=candidate["secret"], provider_key_id=candidate["id"],
+            )
+        else:
+            rendered, candidate = _create_with_provider_key(
+                "minimax", job_id, "minimax_submitting",
+                video_minimax_h3.MiniMaxCredentialRejected,
+                lambda selected: video_minimax_h3.generate(
+                    prompt, ref_images, ratio=ratio, duration=duration,
+                    resolution="768P", job_id=job_id,
+                    heartbeat=minimax_heartbeat, api_key=selected["secret"],
+                    provider_key_id=selected["id"],
+                ),
+            )
+        source_url = rendered["source_video_url"]
+        if job_id:
+            update_video_asset_phase(
+                job_id, "minimax_downloading", source_video_url=source_url,
+                provider_video_id=rendered.get("request_id"),
+                provider_key_id=candidate["id"], model=video_minimax_h3.MODEL,
+            )
+        try:
+            video_file = _download_xiaole_video(source_url, "minimax_h3")
+        except RuntimeError as exc:
+            if str(exc).startswith("视频下载失败"):
+                raise video_minimax_h3.TransientMiniMaxError(str(exc)) from exc
+            raise
+        cover = _extract_first_frame_cover(video_file)
+        result = dict(
+            rendered, video_file=video_file, image_file=cover,
+            image_url=public_url(cover, "image/jpeg") if cover else None,
+        )
     else:
-        duration = payload.get("duration") if channel == "micro" else XIAOLE_CHANNEL_DURATION.get(channel)
         result = generate_xiaole_video(model, prompt, reference_images=ref_images, size=size, job_id=job_id, prefix=channel,
-                                       duration=duration)
+                                       duration=XIAOLE_CHANNEL_DURATION.get(channel))
+    video_file = result.get("video_file")
+    # 成片与封面一样在任务完成时转存 COS，避免把仅支持鉴权读取的本地
+    # /api/gen/file/ 链接写进资产记录。public_url 内部会在 COS 不可用时安全回退。
+    video_url = public_url(video_file, "video/mp4", private=True) if video_file else result.get("video_url")
     return {
-        "type": "video", "status": "done", "mode": channel, "model": result.get("model") or model, "text": prompt,
+        "type": "video", "status": "done", "mode": channel, "model": result.get("model") or model, "text": user_prompt,
         "operation": payload.get("operation") or "generate",
-        "ratio": ratio, "resolution": payload.get("resolution") if use_seedance or (use_xai and payload.get("operation") != "edit") else None,
-        "duration": result.get("duration") or (payload.get("duration") if use_xai or channel == "micro"
-                                                else XIAOLE_CHANNEL_DURATION.get(channel)),
+        "ratio": result.get("ratio") or ratio,
+        "resolution": result.get("resolution") or (
+            payload.get("resolution")
+            if (use_xai or is_official) and payload.get("operation") != "edit"
+            else None
+        ),
+        "duration": result.get("duration") or (
+            payload.get("duration") if use_xai or is_official else None
+        ),
         "provider_video_id": result.get("request_id"),
-        "video_file": result.get("video_file"), "video_url": result.get("video_url"),
+        "video_file": video_file, "video_url": video_url,
         "source_video_url": result.get("source_video_url"),
         "reference_video_file": result.get("reference_video_file"),
         "reference_video_url": result.get("reference_video_url"),
         "image_file": result.get("image_file"),
         "image_url": result.get("image_url") or (public_url(result.get("image_file"), "image/jpeg") if result.get("image_file") else None),
+        "provider": result.get("provider"),
+        "generate_audio": result.get("generate_audio"),
+        "completion_tokens": result.get("completion_tokens"),
         "reference_storyboard_count": payload.get("_reference_storyboard_count"),
         "reference_storyboard_source_hashes": payload.get("_reference_storyboard_source_hashes"),
-        "reference_storyboard_sha256": payload.get("_reference_storyboard_sha256"),
+        "source_resolution": result.get("source_resolution"),
+        "upscale": result.get("upscale"),
+        "upscale_provider": result.get("upscale_provider"),
         "phase": "done", "message": "%s生成完成" % label,
     }
 
@@ -3798,37 +5305,79 @@ def gen_avatar(payload):
     image_file = _save_data_file(payload.get("image_data"), "avatar_src", [".jpg", ".png", ".webp"])
     if not image_file:
         raise ValueError("请先上传人物照片")
-    fp = _ensure_heygen_image_jpg(_resolve_out_file(image_file))
+    source_fp = pathlib.Path(OUT_DIR) / image_file
+    canonical_fp = None
+    persisted_fp = None
     try:
+        source_fp = _resolve_out_file(image_file)
+        canonical_fp = _ensure_heygen_image_jpg(source_fp)
+        canonical_file = (
+            image_file if canonical_fp == source_fp
+            else _owned_output_relative(canonical_fp)
+        )
         # 传图和建 look 都对瞬时网络错误重试 —— 建形象免费，重发不会重复计费（见 _heygen_retry_net）。
         # 隧道扛不住 5 路以上的并发 TLS 握手，不重试的话用户会莫名其妙地建形象失败。
-        asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(fp, direct=True), "建形象传图")
+        asset_id = _heygen_retry_net(
+            lambda: _heygen_upload_asset(canonical_fp, direct=True),
+            "建形象传图",
+        )
         item_id, group_id = _heygen_retry_net(
             lambda: _heygen_retry_429(
                 lambda: _heygen_create_photo_avatar(asset_id, direct=True), "建形象"),
             "建形象提交")
         _heygen_wait_photo_avatar(item_id, group_id, direct=True)
+        row = record_video_avatar(
+            username, canonical_file, item_id, group_id,
+            payload.get("name"),
+        ) or {}
+        persisted_fp = canonical_fp
+        return {
+            "avatar_id": row.get("id"), "name": row.get("name"),
+            "status": "ready", "image_file": canonical_file,
+            "image_url": public_url(canonical_file, "image/jpeg"),
+            "provider_avatar_id": item_id,
+            "provider_avatar_group_id": group_id,
+            "phase": "done",
+            "message": "形象创建完成，可在剧情视频里反复使用",
+        }
     except Exception as e:
         # 线上最常见的失败就是这个。原样把 HeyGen 的英文报文抛给用户毫无意义，翻译成人话。
         if "No face detected" in str(e):
-            raise ValueError("照片里没有检测到人脸，请换一张正脸清晰、光线充足的照片")
+            raise ValueError(
+                "照片里没有检测到人脸，请换一张正脸清晰、光线充足的照片"
+            ) from e
         raise
-    row = record_video_avatar(username, image_file, item_id, group_id, payload.get("name")) or {}
-    return {
-        "avatar_id": row.get("id"), "name": row.get("name"), "status": "ready",
-        "image_file": image_file, "image_url": public_url(image_file, "image/jpeg"),
-        "provider_avatar_id": item_id, "provider_avatar_group_id": group_id,
-        "phase": "done", "message": "形象创建完成，可在剧情视频里反复使用",
-    }
+    finally:
+        keep = None
+        if persisted_fp is not None:
+            try:
+                keep = pathlib.Path(persisted_fp).resolve()
+            except OSError:
+                keep = None
+        candidates = [source_fp, canonical_fp]
+        cleaned = set()
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            try:
+                resolved = pathlib.Path(candidate).resolve()
+            except OSError:
+                resolved = pathlib.Path(candidate)
+            marker = str(resolved)
+            if marker in cleaned or (keep is not None and resolved == keep):
+                continue
+            cleaned.add(marker)
+            _unlink_owned_output(candidate)
 
 
 # ============ 电影化身：HeyGen cinematic_avatar ============
 # 三个玩法共用同一个上游接口（type=cinematic_avatar），差别只在【谁来写提示词】和【几个形象】：
-#   motion 单人动作模仿：1 个形象 + 必传参考视频，提示词写死，用户只调分辨率和时长
+#   motion 单人动作模仿：1 个形象 + 必传参考视频，提示词和生成参数写死
 #   duo   双人动作模仿：2 个形象 + 必传参考视频，提示词写死（另一段）
 #   open  开放式生成  ：1~3 个形象，自己写提示词，参考视频选填
 CINEMATIC_MAX_AVATARS = 3        # HeyGen 硬上限：avatar_id 是 1~3 个 look 的数组
-CINEMATIC_RESOLUTIONS = {"720p", "1080p"}
+CINEMATIC_RESOLUTIONS = {"720p", "1080p"}  # 兼容旧客户端；服务端最终统一覆盖为 720p
+CINEMATIC_OUTPUT_RESOLUTION = "720p"
 CINEMATIC_PROMPT_MAX = 2000
 CINEMATIC_DURATION_RANGE = (4, 15)   # HeyGen: 4~15 秒
 CINEMATIC_AUTO_DURATION = 10         # 选了「自适应」但没传参考视频时的回落值
@@ -3844,50 +5393,42 @@ CINEMATIC_MODES = ("motion", "duo", "open")
 CINEMATIC_DUO_ENABLED = os.environ.get("CINEMATIC_DUO_ENABLED", "").strip().lower() in ("1", "true", "yes")
 CINEMATIC_COMING_SOON = {} if CINEMATIC_DUO_ENABLED else {"duo": "双人动作模仿暂未开放"}
 # 动作模仿只给三档：自适应 / 10 秒 / 15 秒（开放式仍可在 4~15 内任选）
-# 动作模仿锁死的参数（照抄 #2173 —— 目前唯一已知能过 HeyGen 审核的配置）。
+# 动作模仿锁死的参数。
 # 用户只能换形象和参考视频；分辨率/时长/润色都不给选，也不认客户端传的值。
-CINEMATIC_MOTION_RESOLUTION = "1080p"
+CINEMATIC_MOTION_RESOLUTION = CINEMATIC_OUTPUT_RESOLUTION
 
 # 每秒点数。HeyGen 那边是扁平价（$7/条，与时长无关），我们按时长卖 —— 这是产品定价，不是成本。
 # ⚠️ 改这里等于改价：cost_of() 直接乘这个数。
 #
-# 三个玩法统一 30 点/秒（kongli 2026-07-15 调价；此前 10，更早 motion 3/duo 5/open 5）。
-# HeyGen 对三者收一样的钱，这里不分档。保留 per-mode 的表结构和 env 覆盖，以后想再分档不用改代码。
+# 已确认玩法 motion/open 统一 10 点/秒；未开放的 duo 保持原价。
 
 CINEMATIC_RATE_PER_SEC = {
-    "motion": _env_positive_int("CINEMATIC_RATE_MOTION", 30),   # 单人动作模仿
+    "motion": _env_positive_int("CINEMATIC_RATE_MOTION", 10),   # 单人动作模仿
     "duo":    _env_positive_int("CINEMATIC_RATE_DUO", 30),      # 双人动作模仿
-    "open":   _env_positive_int("CINEMATIC_RATE_OPEN", 30),     # 开放式生成
+    "open":   _env_positive_int("CINEMATIC_RATE_OPEN", 10),     # 开放式生成
 }
 CINEMATIC_RATE_FALLBACK = 30   # 玩法认不出来时按最贵的收，绝不按最便宜的（更不能按 0）
 
 
 def cinematic_rate(cine_mode):
-    key = {
-        "motion": "cinematic.motion.per_sec",
-        "duo": "cinematic.duo.per_sec",
-        "open": "cinematic.open.per_sec",
-    }.get(cine_mode)
-    if key:
-        return pricing_config.get_price(key)
-    return max(pricing_config.get_price("cinematic.motion.per_sec"),
-               pricing_config.get_price("cinematic.duo.per_sec"),
-               pricing_config.get_price("cinematic.open.per_sec"))
+    keys = {
+        "motion": "video.cinematic.motion",
+        "duo": "video.cinematic.duo",
+        "open": "video.cinematic.open",
+    }
+    return pricing.get_price(keys.get(cine_mode, "video.cinematic.duo"))
 
 
-# ===== 口播(video kind)按秒计费：10 点/秒 × 输出时长（kongli 2026-07-15）=====
+# ===== 口播(video kind)按 30 秒阶梯计费：每档 30 点 =====
 # 口播成片时长 ≈ 音频时长。扣点时机不同：
 #   audio 模式：上传/引用音频，扣点前 ffprobe 就能拿到精确时长 → 扣准，跑完无需结算。
 #   text 模式：TTS 在 job 里才跑，扣点那刻不知道语音多长 → 按文本长度【偏保守】估算预扣，
 #              跑完再按成片真实时长结算（core.run_job 里调 talking_actual_cost，多退少不补）。
-TALKING_RATE_PER_SEC = _env_positive_int("TALKING_RATE_PER_SEC", 10)
+TALKING_BLOCK_SECONDS = _env_positive_int("TALKING_BLOCK_SECONDS", 30)
+TALKING_BLOCK_POINTS = _env_positive_int("TALKING_BLOCK_POINTS", 30)
 # 中文口播语速估算：偏保守取 4 字/秒（估长一点→预扣偏高→跑完退差，避免系统性少扣）。
 TALKING_CHARS_PER_SEC = float(os.environ.get("TALKING_CHARS_PER_SEC", "4") or 4)
 TALKING_FALLBACK_SEC = 10.0   # 音频探不到时长时的兜底估算秒数
-
-
-def talking_rate():
-    return pricing_config.get_price("talking.per_sec")
 
 
 def _talking_estimate_seconds(body):
@@ -3918,21 +5459,25 @@ def _talking_estimate_seconds(body):
 
 
 def video_cost(body):
-    """口播扣点前的预扣(hold)：10 点/秒 × 估算/精确输出秒数。text 模式偏估、跑完结算。"""
+    """口播预扣：每 30 秒 30 点。text 模式按文本偏保守估算，跑完按成片结算。"""
     secs = _talking_estimate_seconds(body)
-    rate = talking_rate()
-    return max(rate, int(math.ceil(secs)) * rate)
+    block_points = pricing.get_price("video.talking.block")
+    body["_talking_block_points"] = block_points
+    return max(block_points, int(math.ceil(secs / TALKING_BLOCK_SECONDS)) * block_points)
 
 
-def talking_actual_cost(result):
-    """口播成片后的真实点数 = 10 点/秒 × 成片真实秒数（HeyGen 返回的 duration）。
+def talking_actual_cost(result, block_points=None):
+    """口播成片后的真实点数 = 每 30 秒 30 点（HeyGen 返回的 duration）。
     拿不到时长返回 None（不结算，保留预扣）。"""
     secs = (result or {}).get("duration") or (result or {}).get("seconds")
     if not secs:
         return None
     try:
-        rate = talking_rate()
-        return max(rate, int(math.ceil(float(secs))) * rate)
+        value = float(secs)
+        if value <= 0:
+            return None
+        block_points = int(block_points or pricing.get_price("video.talking.block"))
+        return max(block_points, int(math.ceil(value / TALKING_BLOCK_SECONDS)) * block_points)
     except (TypeError, ValueError):
         return None
 
@@ -3998,7 +5543,7 @@ def _cinematic_duration(raw, reference_video_file=None):
     return max(lo, min(hi, int(secs + 0.999999)))
 
 
-def validate_cinematic_payload(body, username=None):
+def validate_cinematic_payload(body, username=None, temporary_reference_files=None):
     """校验并【落定】payload —— 尤其是时长。
 
     时长必须在这里就变成一个确定的整数秒，不能留 "auto" 带下去：调用链是
@@ -4043,6 +5588,11 @@ def validate_cinematic_payload(body, username=None):
     # 参考素材的校验统一放在下面（reference_videos/reference_images，老的单字段会先合进去）。
     # 别在这里按老字段 reference_video_data 再判一次「动作模仿必须传参考视频」——
     # 新前端发的是 reference_videos[]，那样判会把每一条动作模仿都拒掉。
+    requested_resolution = (body.get("resolution") or CINEMATIC_OUTPUT_RESOLUTION).strip().lower()
+    if requested_resolution not in CINEMATIC_RESOLUTIONS:
+        raise ValueError("分辨率仅支持 720p、1080p")
+    resolution = CINEMATIC_OUTPUT_RESOLUTION
+
     if cine_mode in CINEMATIC_FIXED_PROMPTS:
         # 提示词写死。客户端传什么都不看 —— 它是计费和成片效果的一部分，不能由前端说了算。
         prompt = CINEMATIC_FIXED_PROMPTS[cine_mode]
@@ -4054,20 +5604,15 @@ def validate_cinematic_payload(body, username=None):
             raise ValueError("画面描述不能超过 %d 字" % CINEMATIC_PROMPT_MAX)
 
     if cine_mode in CINEMATIC_FIXED_PROMPTS:
-        # 动作模仿【锁死】成 #2173 那一条的形状 —— 它是目前唯一一个已知能过 HeyGen 审核的配置。
+        # 动作模仿锁死参数；所有电影化身统一输出 720p。
         # 用户只能换两样东西：形象、参考视频。分辨率/时长/润色一律不接受客户端的值。
-        #     分辨率 1080p         （#2173 就是 1080p；不再给 720p 的选项）
+        #     分辨率 720p          （所有电影化身渠道统一）
         #     时长   自适应        （跟随参考视频：#2173 的参考片段 10.9s → 成片 11s）
         #     润色   关            （下面统一置 False）
         #     比例   跟随参考视频   （#2173 的参考是 576x1024 竖版 → 9:16；前端按宽高算好传上来。
         #                           这里仍然校验它是合法值，但不给用户在界面上选）
-        resolution = CINEMATIC_MOTION_RESOLUTION
         duration = "auto"
     else:
-        resolution = (body.get("resolution") or "720p").strip().lower()
-        if resolution not in CINEMATIC_RESOLUTIONS:
-            raise ValueError("分辨率仅支持 720p、1080p")
-
         lo, hi = CINEMATIC_DURATION_RANGE
         raw = str(body.get("duration") or "").strip().lower()
         if raw in ("", "auto"):
@@ -4098,6 +5643,7 @@ def validate_cinematic_payload(body, username=None):
         raise ValueError("参考视频最多 %d 个" % max_videos)
 
     images = [i for i in (body.get("reference_images") or []) if str(i or "").strip()]
+    validate_image_mentions(prompt, len(images))
     for i in images:
         if not _is_valid_data_url(i, VALID_IMAGE_MIMES):
             raise ValueError("参考图片格式不支持（jpg/png/webp）")
@@ -4121,8 +5667,14 @@ def validate_cinematic_payload(body, username=None):
     #   1. 【必须】按成片秒数计费，而扣点发生在 worker 之前 —— 「自适应」要在这里探测出秒数，
     #      否则扣点这一刻不知道该扣多少，只能预扣上限再退差。
     #   2. 顺带：payload 里存路径而不是几十 MB 的 base64，jobs.payload 不再被撑爆。
-    video_files = [f for f in (_save_data_file(v, "motion_ref", [".mp4", ".mov", ".webm"]) for v in videos) if f]
-    image_files = [f for f in (_save_data_file(i, "cine_ref", [".jpg", ".png", ".webp"]) for i in images) if f]
+    def save_reference(value, prefix, extensions):
+        saved = _save_data_file(value, prefix, extensions)
+        if saved and temporary_reference_files is not None:
+            temporary_reference_files.append(saved)
+        return saved
+
+    video_files = [f for f in (save_reference(v, "motion_ref", [".mp4", ".mov", ".webm"]) for v in videos) if f]
+    image_files = [f for f in (save_reference(i, "cine_ref", [".jpg", ".png", ".webp"]) for i in images) if f]
     if video_files:
         _motion_reference_duration(video_files[0])   # 超长（>120s）在这里就明确拒绝
     # 「自适应」跟随第一个参考视频的长度
@@ -4144,6 +5696,40 @@ def validate_cinematic_payload(body, username=None):
     return cleaned
 
 
+def _cleanup_cinematic_reference_files(reference_files):
+    for relative in reference_files:
+        try:
+            _out_path(relative).unlink()
+        except OSError:
+            pass
+
+
+def dispatch_cinematic_quote(handler, verify, cost_of):
+    """Serve the free quote beside the cinematic payload validator it relies on."""
+    if handler.path.split("?")[0] != "/api/gen/cinematic/quote":
+        return False
+    user = verify(handler._token())
+    if not user:
+        handler._send(401, {"detail": "未登录"}); return True
+    if user.get("must_change"):
+        handler._send(403, {"detail": "请先修改初始密码"}); return True
+    temporary_reference_files = []
+    try:
+        cleaned = validate_cinematic_payload(
+            handler._json_body_strict(), user["username"], temporary_reference_files
+        )
+        cost = int(cost_of("cinematic", cleaned))
+        if cost < 0:
+            raise ValueError("电影化身视频报价无效")
+        status, response = 200, {"cost": cost}
+    except ValueError as exc:
+        status, response = 400, {"detail": str(exc)[:220]}
+    finally:
+        _cleanup_cinematic_reference_files(temporary_reference_files)
+    handler._send(status, response)
+    return True
+
+
 def gen_cinematic(payload):
     """选 1~3 个自己的形象 + 提示词（+ 可选参考视频）→ HeyGen cinematic_avatar。
 
@@ -4152,6 +5738,15 @@ def gen_cinematic(payload):
     """
     username = (payload.get("_username") or "").strip()
     job_id = payload.get("_job_id")
+    short_drama_metadata = payload.get("_short_drama_video") or {}
+    visual_only = bool(short_drama_metadata.get("visual_only"))
+    display_prompt = payload.get("prompt") or ""
+    if visual_only:
+        display_prompt = str(
+            short_drama_metadata.get("user_prompt") or ""
+        ).strip()
+        if not display_prompt:
+            raise ValueError("短剧无声画面任务缺少原始用户提示词")
     avatars = [get_video_avatar(username, a) for a in payload["avatar_ids"]]
     look_ids = [a["provider_avatar_id"] for a in avatars]
     if not all(look_ids):
@@ -4164,6 +5759,7 @@ def gen_cinematic(payload):
     # 队列里可能还躺着改版前入队的 job，它们的素材还没落盘。
     video_files = list(payload.get("reference_video_files") or [])
     image_files = list(payload.get("reference_image_files") or [])
+    provider_prompt = resolve_image_mentions(payload.get("prompt"), len(image_files))
     if not video_files and payload.get("reference_videos"):
         video_files = [_save_data_file(v, "motion_ref", [".mp4", ".mov", ".webm"])
                        for v in payload["reference_videos"]]
@@ -4178,7 +5774,11 @@ def gen_cinematic(payload):
     #   「同一条片子，只是换了个人演」。
     #
     # 原声只取【第一个】参考视频的 —— 它同时也是决定成片时长的那一个（_cinematic_duration）。
-    source_audio = _extract_reference_audio(video_files[0]) if video_files else None
+    source_audio = (
+        None
+        if visual_only
+        else _extract_reference_audio(video_files[0]) if video_files else None
+    )
     #
     # ⚠️ 【不压缩】（kongli 的决定，2026-07-14）。原来这里会把 >6MB 的参考视频转码成
     # 720p/2Mbps —— 那是重编码，画质有损，而动作模仿的成片质量直接取决于参考视频。
@@ -4225,40 +5825,94 @@ def gen_cinematic(payload):
             # 同样的话说两遍。所以这里【什么都不拼】——
             #     payload 里的 prompt == HeyGen 真正收到的 prompt，一个字不差。
             # 顺带一个好处：排查时不用再脑补「后端还偷偷加了什么」。
-            prompt=payload["prompt"], direct=True,
+            prompt=provider_prompt, direct=True,
             enhance_prompt=payload.get("enhance_prompt")), "剧情视频")
 
         # ↓ 此刻已计费。之后任何失败都不能重发（见 HeyGenBilledError）——HeyGen 提交即扣费。
         update_video_asset_phase(job_id, "polling_video", provider_video_id=video_id)
         try:
-            info = _heygen_poll_video(video_id, direct=True, deadline_s=HEYGEN_MOTION_DEADLINE)
+            info = _heygen_poll_video(video_id, direct=True, deadline_s=HEYGEN_MOTION_DEADLINE,
+                                      mcp=_heygen_mcp_enabled())
             update_video_asset_phase(job_id, "downloading_video", source_video_url=info.get("video_url"))
             video_file = _download_video_file_direct(info["video_url"], "cinematic")
-            # 把参考视频的原声合回成片（HeyGen 的成片本身是无声的）。
-            # 合失败就保留无声成片 —— 宁可无声，也不能因为配音失败把片子丢了。
-            if source_audio:
-                video_file = _mux_original_audio(video_file, source_audio)
-            cover = _extract_first_frame_cover(video_file)   # 封面从【最终】成片抽
         except Exception as e:
             raise HeyGenBilledError("剧情视频已提交 HeyGen(video_id=%s，已扣费)，后续失败: %s"
                                     % (video_id, str(e)[:180])) from e
 
+    # Provider concurrency ends after download.  Media normalization, ASR and
+    # multimodal inspection have their own resource controls and must not hold
+    # a scarce HeyGen generation slot.
+    try:
+        raw_video_file = video_file
+        source_media_report = None
+        visual_gate_report = None
+        if visual_only:
+            relative = pathlib.PurePosixPath(str(video_file).replace("\\", "/"))
+            silent_relative = relative.with_name(
+                relative.stem + "_silent" + relative.suffix
+            )
+            source_path = _resolve_out_file(video_file)
+            if source_path is None:
+                raise short_drama_media_sanitize.MediaSanitizeError(
+                    "missing_source_file", "供应商视频文件不存在"
+                )
+            silent_path = _out_path(silent_relative.as_posix())
+            sanitized = short_drama_media_sanitize.sanitize_visual_source(
+                source_path, silent_path,
+            )
+            video_file = silent_relative.as_posix()
+            source_media_report = {
+                "source": sanitized["source_report"],
+                "silent": sanitized["silent_report"],
+            }
+            visual_gate_report = short_drama_visual_gate.inspect_visual_source(
+                source_path,
+                pathlib.Path(sanitized.get("silent_file") or silent_path),
+                source_media_report,
+                short_drama_metadata.get("visual_spec") or {},
+            )
+        # 把参考视频的原声合回成片（HeyGen 的成片本身是无声的）。
+        # 合失败就保留无声成片 —— 宁可无声，也不能因为配音失败把片子丢了。
+        if source_audio:
+            video_file = _mux_original_audio(video_file, source_audio)
+        cover = _extract_first_frame_cover(video_file)   # 封面从【最终】成片抽
+    except Exception as e:
+        raise HeyGenBilledError("剧情视频已提交 HeyGen(video_id=%s，已扣费)，后续失败: %s"
+                                % (video_id, str(e)[:180])) from e
+
+    # 成片在入库前转存 COS；上传失败时 public_url 会回退本地鉴权链接，
+    # 不因对象存储故障把已经完成的 HeyGen 任务标记为失败。
+    video_url = public_url(video_file, "video/mp4", private=True)
     ret = {
         # ⚠️ status/mode/type 一个都不能少 —— record_video_asset 从 result 里取它们写进
         # video_assets，而前端读的是那张表。漏了 status，它会写成 "pending"，
         # UPSERT 的 COALESCE 又挡不住非 NULL 值，资产行就永远停在 running，
         # 用户看到的就是「一直显示生成中」——哪怕 jobs 表早就 done 了。
         "type": "video", "status": "done", "mode": "cinematic",
-        "video_id": video_id, "video_file": video_file, "video_url": _file_url(video_file),
+        "video_id": video_id, "video_file": video_file, "video_url": video_url,
         "reference_video_file": reference_video_file,
         "avatar_ids": payload["avatar_ids"],
         "avatar_names": [a.get("name") for a in avatars],
-        "text": payload["prompt"],   # video_assets 的文案列叫 text，前端卡片也读它
-        "prompt": payload["prompt"], "resolution": payload["resolution"], "ratio": payload["ratio"],
+        "text": display_prompt,   # video_assets 的文案列叫 text，前端卡片也读它
+        "prompt": display_prompt, "resolution": payload["resolution"], "ratio": payload["ratio"],
         "duration": info.get("duration") or duration,
         "source_video_url": info.get("video_url"), "thumbnail_url": info.get("thumbnail_url"),
         "provider": "heygen_direct", "phase": "done", "message": "剧情视频生成完成",
     }
+    if visual_only:
+        ret.update({
+            "visual_only": True,
+            "raw_video_file": raw_video_file,
+            "source_media_report": source_media_report,
+            "prompt_template_version": short_drama_metadata.get(
+                "prompt_template_version"
+            ),
+            "compiled_prompt_hash": short_drama_metadata.get(
+                "compiled_prompt_hash"
+            ),
+            "visual_spec_hash": short_drama_metadata.get("visual_spec_hash"),
+            "visual_gate_report": visual_gate_report,
+        })
     if cover:
         ret["image_file"] = cover
         ret["image_url"] = public_url(cover, "image/jpeg")
@@ -4266,4 +5920,5 @@ def gen_cinematic(payload):
 
 
 HANDLERS = {"video": gen_video, "tryon": gen_tryon, "xiaole_video": gen_xiaole_video,
+            "sora_video": gen_sora_video,
             "avatar": gen_avatar, "cinematic": gen_cinematic}

@@ -14,14 +14,13 @@ content_out/ 鍑哄浘鐩綍(鏂囦欢鐢?content_api 鐨?/api/gen/file 鏈�
 鈿狅笍 鏈嶅姟鍣ㄥ湪澶ч檰锛孏oogle API 琚 鈫?鏈湇鍔?*璧扮幆澧冧唬鐞?*(content.env 閲岀殑 HTTPS_PROXY=mihomo)鍑哄锛?
    涓?TikHub(寮哄埗鐩磋繛)鐩稿弽銆俿ystemd 鍔犺浇鍚屼竴浠?content.env銆?
 """
-import os, json, time, base64, threading, queue, sqlite3, pathlib, urllib.request, urllib.error, io, re
+import os, json, time, base64, threading, queue, sqlite3, pathlib, urllib.request, urllib.error, io
 from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-try:
-    import pricing_config
-except ModuleNotFoundError:
-    from . import pricing_config
+
+from content_domains.image_mentions import resolve_image_mentions, validate_image_mentions
+from content_domains import pricing
 
 try:
     from content_domains import feature_flags
@@ -61,7 +60,7 @@ SERVICE_OWNER = "imggen"   # 写进 jobs.owner，让 content 的 pending 重排/
 # 闸数的是 jobs 全表 kind='image'，content(gpt/seedream/果肉/泽龙2) 也写这张表，
 # 所以「每人最多 3 个生图在跑」是跨两个服务统一的，不是各算各的 3 个。
 JOB_WORKERS  = max(1, int(os.environ.get("IMGGEN_JOB_WORKERS", "10") or 10))
-JOB_QUEUE_MAX = max(1, int(os.environ.get("IMGGEN_JOB_QUEUE_MAX", "32") or 32))
+JOB_QUEUE_MAX = max(1, int(os.environ.get("IMGGEN_JOB_QUEUE_MAX", "64") or 64))  # 32→64：与 content 对齐，50 齐点不再当场拒
 MAX_USER_RUNNING_IMAGE = max(1, int(os.environ.get("MAX_USER_RUNNING_IMAGE", "3") or 3))   # 与 content 同名同默认值
 MAX_USER_ACTIVE_JOBS = max(1, int(os.environ.get("MAX_USER_ACTIVE_JOBS", "5") or 5))       # pending+running 提交闸，防单用户占满队列
 
@@ -80,6 +79,9 @@ REVERSE_INSTRUCTION = ("你是资深美业广告视觉分析师。仔细看这�
     "约 60-120 字，直接输出这条提示词本身，不要任何解释、前后缀或引号。")
 # 反推并发闸：同步调 Gemini 会占住 HTTP 线程，限并发防打爆上游/线程池（可 env 覆盖）
 _reverse_sem = threading.BoundedSemaphore(max(1, int(os.environ.get("REVERSE_MAX_CONCURRENCY", "2") or "2")))
+_prompt_optimize_sem = threading.BoundedSemaphore(2)
+_prompt_optimize_lock = threading.Lock()
+_prompt_optimize_recent = {}
 
 # ============ COS 出图存储（可选，与 content_api 共用同一个 content.env 的 COS_* 环境变量）============
 # 配置齐全且文件存在 → 上传 COS 返回直链；未配置/失败 → 回退本地 /api/gen/file/，零影响。密钥仅走环境变量。
@@ -124,21 +126,12 @@ def _public_url(rel, content_type=None):
 
 MODELS = {"nb2": "gemini-3.1-flash-image", "pro": "gemini-3-pro-image"}
 # 璐ㄩ噺鍩轰环(鏈€缁堢偣鏁?鍩轰环脳鏁伴噺) + 娓呮櫚搴︹啋imageSize(鎸?model 鍒嗘。锛屽ぇ鍐橩)
-BASE_COST   = {"nb2": {"std": 15, "hd": 25}, "pro": {"std": 25, "hd": 30}}
+BASE_COST   = {"nb2": {"std": 18, "hd": 35}, "pro": {"std": 35, "hd": 44}}
 IMAGE_SIZES = {"nb2": {"std": "1K", "hd": "2K"}, "pro": {"std": "2K", "hd": "4K"}}
 RATIOS = {"1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
-
-
-def banana_cost(model, quality, count=1):
-    model = model if model in MODELS else "nb2"
-    quality = quality if quality in {"std", "hd"} else "hd"
-    count = max(1, min(4, int(count or 1)))
-    return pricing_config.get_price("banana.%s.%s" % (model, quality)) * count
-
-
-def reverse_cost():
-    return pricing_config.get_price("image.reverse")
+MAX_REFERENCE_IMAGES = 14
+MAX_REFERENCE_TOTAL_BYTES = 48 * 1024 * 1024
 
 def _clean_b64(value):
     raw = (value or "").strip()
@@ -178,10 +171,30 @@ def validate_banana_payload(body):
     try:
         count = int(body.get("count") or 1)
     except Exception:
-        raise ValueError("count 必须是 1 或 2")
-    if count not in {1, 2}:
-        raise ValueError("count 必须是 1 或 2")
+        raise ValueError("count 必须是 1、2 或 4")
+    if count not in {1, 2, 4}:
+        raise ValueError("count 必须是 1、2 或 4")
+    if body.get("image") and body.get("reference_images") is not None:
+        raise ValueError("image 与 reference_images 不能同时传；多图请统一使用 reference_images")
     _validate_b64_image(body, "image")
+    refs = body.get("reference_images")
+    if refs is not None:
+        if not isinstance(refs, list) or not refs:
+            raise ValueError("reference_images 必须是非空图片数组")
+        if len(refs) > MAX_REFERENCE_IMAGES:
+            raise ValueError("Nano Banana 最多支持 14 张参考图")
+        cleaned, total = [], 0
+        for index, value in enumerate(refs, 1):
+            one = {"image": value}
+            _validate_b64_image(one, "image")
+            if not one.get("image"):
+                raise ValueError("第%d张参考图不能为空" % index)
+            total += len(base64.b64decode(one["image"]))
+            cleaned.append(one["image"])
+        if total > MAX_REFERENCE_TOTAL_BYTES:
+            raise ValueError("参考图合计不能超过 48MB")
+        body["reference_images"] = cleaned
+    validate_image_mentions(prompt, len(body.get("reference_images") or ([] if not body.get("image") else [body["image"]])))
     body["prompt"] = prompt
     body["model"] = mkey
     body["ratio"] = ratio
@@ -224,12 +237,19 @@ def _normalize_image_ratio(raw, ratio):
 
 # ============ 鍏变韩绠￠亾锛氫换鍔″簱 / 鐐规暟 / 閴存潈 ============
 def jdb():
-    c = sqlite3.connect(JOB_DB, timeout=10); c.row_factory = sqlite3.Row; return c
+    # timeout 10→30 + WAL：与 content 共写同一张 jobs 表，压测级并发下 10s 写锁
+    # 等待不够（INSERT 超时=走补偿路径）。WAL 为库级持久设置，重复 PRAGMA 是 no-op。
+    c = sqlite3.connect(JOB_DB, timeout=30); c.row_factory = sqlite3.Row
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
 
-def _auth_points(path, username, amount, reason=""):
+def _auth_points(path, username, amount, reason="", transaction_key=""):
     if not INTERNAL_TOKEN:
         return 500, {"detail": "HQ_INTERNAL_TOKEN 未配置"}
-    body = json.dumps({"username": username, "amount": int(amount), "reason": reason}, ensure_ascii=False).encode()
+    payload = {"username": username, "amount": int(amount), "reason": reason}
+    if transaction_key:
+        payload["transaction_key"] = str(transaction_key)
+    body = json.dumps(payload, ensure_ascii=False).encode()
     req = urllib.request.Request(
         AUTH_BASE + path,
         data=body,
@@ -251,8 +271,18 @@ def _auth_points(path, username, amount, reason=""):
 def deduct_points(username, amount, reason=""):
     return _auth_points("/api/auth/points/deduct", username, amount, reason)
 
-def refund_points(username, amount, reason=""):
+def refund_points(username, amount, reason="", transaction_key=""):
+    if transaction_key:
+        return _auth_points("/api/auth/points/refund", username, amount, reason, transaction_key)
     return _auth_points("/api/auth/points/refund", username, amount, reason)
+
+
+def _deduct_paid_job(username, amount, reason):
+    from content_domains import jobs_store
+    status, data = deduct_points(username, amount, reason)
+    if status != 200:
+        raise jobs_store.PaidJobDeductError(status, (data or {}).get("detail") or "点数扣除失败")
+    return int((data or {}).get("points") or 0)
 
 def verify(token):
     if not token: return None
@@ -265,10 +295,10 @@ def verify(token):
 
 
 # ============ Nano Banana / Gemini image generation ============
-def _build_banana_body(prompt, ratio, image=None, image_size=None):
+def _build_banana_body(prompt, ratio, images=None, image_size=None):
     """Build Gemini generateContent request body."""
     parts = []
-    if image:
+    for image in images or []:
         # Frontend sends uploaded/reference/result images as PNG base64.
         parts.append({"inlineData": {"mimeType": "image/png", "data": image}})
     parts.append({"text": prompt})
@@ -303,24 +333,26 @@ def _banana_one(model, body, idx, ratio=None):
 # ============ worker锛堝け璐ラ€€鐐癸紱娓呴亾澶敱 content_api 缁熶竴璺戯級 ============
 def gen_banana(payload):
     payload = validate_banana_payload(payload)
-    prompt = payload["prompt"]
+    user_prompt = payload["prompt"]
     mkey = payload["model"]
     model = MODELS[mkey]
     ratio = payload["ratio"]
     image = payload.get("image")
+    images = list(payload.get("reference_images") or ([] if not image else [image]))
+    prompt = resolve_image_mentions(user_prompt, len(images))
     q = payload["quality"]
     image_size = IMAGE_SIZES[mkey][q]
     count = payload["count"]
     if not GEMINI_KEY:
         raise ValueError("GEMINI_API_KEY 未配置")
-    body = json.dumps(_build_banana_body(prompt, ratio, image, image_size)).encode()
+    body = json.dumps(_build_banana_body(prompt, ratio, images, image_size)).encode()
     items = [_banana_one(model, body, i, ratio) for i in range(count)]
     files = [fn for fn, _ in items]
     dimensions = [dim for _, dim in items if dim]
     urls = [_public_url(f, "image/png") for f in files]
-    result = {"type": "image", "mode": ("nanobanana_img2img_" if image else "nanobanana_") + mkey, "model": model,
+    result = {"type": "image", "mode": ("nanobanana_img2img_" if images else "nanobanana_") + mkey, "model": model,
             "image_size": image_size, "quality": q, "count": count, "file": files[0], "url": urls[0],
-            "files": files, "urls": urls, "ratio": ratio, "prompt": prompt}
+            "files": files, "urls": urls, "ratio": ratio, "prompt": user_prompt}
     if dimensions:
         result["width"] = dimensions[0]["width"]
         result["height"] = dimensions[0]["height"]
@@ -335,19 +367,21 @@ def _set_terminal(job_id, status, result=None, error=None, from_states=("running
     from content_domains import jobs_store
     return jobs_store.set_terminal(jdb, job_id, status, result, error, from_states)
 
-def _refund_via_auth(username, cost, reason=""):
-    """本服务没有直写 users.db 的兜底：auth 不可用就退不了点，返回 False 让 jobs_store 回滚 refunded。"""
-    status, data = refund_points(username, cost, reason)
+def _refund_via_auth(username, cost, reason="", transaction_key=""):
+    """本服务没有直写 users.db 的兜底：Auth 未确认就保持退款待确认态。"""
+    status, data = refund_points(username, cost, reason, transaction_key)
     if status == 200:
         return True
-    print("imggen refund failed user=%s status=%s detail=%s（refunded 标记将回滚，留待重试）" % (
+    print("imggen refund pending user=%s status=%s detail=%s（保留待确认，稍后重试）" % (
         username, status, (data or {}).get("detail")), flush=True)
     return False
 
 def _refund_once(job_id, username, cost):
     from content_domains import jobs_store
+    transaction_key = jobs_store.refund_transaction_key(job_id, username)
     return jobs_store.refund_once(jdb, job_id, username, cost,
-                                  lambda u, c: _refund_via_auth(u, c, "job#%d" % job_id))
+                                  lambda u, c: _refund_via_auth(
+                                      u, c, "job#%d" % job_id, transaction_key))
 
 def run_job(job_id):
     with closing(jdb()) as c:
@@ -483,23 +517,6 @@ def start_job_workers():
 
 
 # ============ 提示词反推：图 → Gemini 多模态 → 文生图提示词（同步，不建 job） ============
-def _clean_reverse_prompt(text):
-    """清洗反推输出：去代码围栏/包裹引号、合并空白、截掉结尾悬空半句。
-
-    模型偶发输出 ``` 围栏、首尾引号，或被截断时以“，、；：”等顿号收尾的半截
-    句子——这类残句直接填进生成框就是用户看到的“一堆符号”，在这里兜底清掉。
-    """
-    t = re.sub(r"\s+", " ", (text or "")).strip()
-    if t.startswith("```"):                      # markdown 代码围栏
-        t = re.sub(r"^```[a-zA-Z]*\s*", "", t)
-        t = re.sub(r"\s*```\s*$", "", t).strip()
-    t = t.strip('"“”\'')
-    if t and t[-1] in "，、；：,;:":             # 结尾悬空半句：回退到上一个句读
-        cut = max(t.rfind(p) for p in ("。", "！", "？", ".", "!", "?"))
-        t = t[:cut + 1] if cut > 0 else t.rstrip("，、；：,;:")
-    return t
-
-
 def gen_reverse(image):
     if not GEMINI_KEY:
         raise ValueError("GEMINI_API_KEY 未配置")
@@ -510,11 +527,7 @@ def gen_reverse(image):
             {"inlineData": {"mimeType": "image/png", "data": image}},
             {"text": REVERSE_INSTRUCTION},
         ]}],
-        # gemini-2.5-flash 默认开启思考且思考 token 计入 maxOutputTokens：
-        # 旧值 500 曾被思考吃光，提示词只吐出二十来字就被截断（线上已复现）。
-        # 反推是直出任务无需推理，thinkingBudget=0 关掉思考，预算提到 1024 兜底。
-        "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.7,
-                             "maxOutputTokens": 1024, "thinkingConfig": {"thinkingBudget": 0}},
+        "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.7, "maxOutputTokens": 500},
     }).encode()
     req = urllib.request.Request(
         GEMINI_BASE + "/v1beta/models/" + REVERSE_MODEL + ":generateContent",
@@ -524,15 +537,48 @@ def gen_reverse(image):
             d = json.loads(r.read())
     except urllib.error.HTTPError as e:
         raise ValueError("Gemini %s: %s" % (e.code, e.read()[:160].decode("u8", "ignore")))
-    cand = (d.get("candidates") or [{}])[0]
-    parts = cand.get("content", {}).get("parts", [])
-    text = _clean_reverse_prompt(" ".join(p.get("text", "") for p in parts if p.get("text")))
+    parts = (d.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+    text = " ".join(p.get("text", "") for p in parts if p.get("text")).strip().strip('"“”')
     if not text:
         raise ValueError("反推失败：" + str((d.get("error") or {}).get("message") or d)[:140])
-    if cand.get("finishReason") == "MAX_TOKENS":
-        # 关思考+1024 仍打满说明输出异常，按失败处理（路由会退点），不给用户半截提示词
-        raise ValueError("反推失败：输出异常被截断，请重试")
     return text[:600]
+
+
+def gen_prompt_optimize(prompt, kind):
+    instruction = (
+        "你是中文 AI %s提示词编辑。把用户给出的关键词整理为一条可直接生成的中文提示词。"
+        "保留用户明确的主体、品牌、文字与限制；补足构图、场景、光线、质感。"
+        "%s不要解释、不要标题、不要 Markdown，只输出可编辑的提示词，控制在 80 到 220 字。\n用户关键词：%s"
+        % ("视频" if kind == "video" else "图片", "视频需补充自然镜头运动与节奏；" if kind == "video" else "", prompt)
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": instruction}]}],
+        "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.5,
+                             "maxOutputTokens": 600, "thinkingConfig": {"thinkingBudget": 0}},
+    }).encode()
+    req = urllib.request.Request(
+        GEMINI_BASE + "/v1beta/models/" + REVERSE_MODEL + ":generateContent",
+        data=body, headers={"Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise ValueError("Gemini %s: %s" % (e.code, e.read()[:160].decode("u8", "ignore")))
+    parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts", [])
+    text = " ".join(part.get("text", "") for part in parts if part.get("text")).strip().strip('"“”')
+    if not text:
+        raise ValueError("优化失败：" + str((data.get("error") or {}).get("message") or data)[:140])
+    return text[:1000]
+
+
+def _check_prompt_optimize_rate(username):
+    now = time.time()
+    with _prompt_optimize_lock:
+        recent = [stamp for stamp in _prompt_optimize_recent.get(username, []) if now - stamp < 60]
+        if len(recent) >= 10:
+            raise ValueError("提示词优化过于频繁，请稍后再试")
+        recent.append(now)
+        _prompt_optimize_recent[username] = recent
 
 
 # ============ HTTP ============
@@ -571,11 +617,7 @@ class H(BaseHTTPRequestHandler):
             mk = body["model"]
             cq = body["quality"]
             cn = body["count"]
-            try:
-                cost = banana_cost(mk, cq, cn)
-            except pricing_config.PricingUnavailable as e:
-                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
-                                        "retry_after_ms": 1000})
+            cost = pricing.get_price("image.banana.%s.%s" % (mk, cq)) * cn
             with _submission_lock:
                 active_jobs = _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
@@ -583,28 +625,18 @@ class H(BaseHTTPRequestHandler):
                                             "code": "active_job_cap", "active_jobs": active_jobs,
                                             "max_active_jobs": MAX_USER_ACTIVE_JOBS,
                                             "retry_after_ms": 4000, "need": cost})
-                deduct_status, deduct_data = deduct_points(user["username"], cost, "job:image")
-                if deduct_status == 402:
-                    return self._send(402, {"detail": "点数不足", "need": cost})
-                if deduct_status != 200:
-                    return self._send(500, {"detail": (deduct_data or {}).get("detail") or "点数扣除失败"})
-                points_left = (deduct_data.get("points") if isinstance(deduct_data, dict) else None)
-                now = int(time.time())
-                from content_domains import jobs_store
                 try:
-                    with closing(jdb()) as c:
-                        jobs_store.ensure_service_sha_column_on_conn(c)  # 兜底：启动 ensure 漏了也不至于 500
-                        cur = c.execute("INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner,service_sha) VALUES('image',?,?,?,?,?,?,?)",
-                                        (user["username"], cost, json.dumps(body, ensure_ascii=False), now, now, SERVICE_OWNER,
-                                         jobs_store.SERVICE_SHA))
-                        c.commit(); jid = cur.lastrowid
-                except Exception:
-                    refund_status, refund_data = refund_points(user["username"], cost, "job:image:insert_failed")
-                    if refund_status != 200:
-                        print("imggen refund failed after job insert error user=%s status=%s detail=%s" % (
-                            user["username"], refund_status, (refund_data or {}).get("detail")
-                        ))
-                    return self._send(500, {"detail": "任务创建失败，已尝试退点"})
+                    from content_domains import jobs_store
+                    jid, points_left = jobs_store.create_paid_job(
+                        jdb, _deduct_paid_job, _refund_via_auth, "image", user["username"],
+                        cost, body, SERVICE_OWNER)
+                except jobs_store.PaidJobDeductError as e:
+                    return self._send(e.status if e.status in (402, 403) else 500,
+                                      {"detail": e.detail, "need": cost})
+                except jobs_store.PaidJobInsertError as e:
+                    return self._send(500, {"detail": {"refunded": "任务创建失败，点数已退回",
+                        "queued": "任务创建失败，退款正在自动确认"}.get(e.compensation,
+                        "任务创建失败，退款需人工核对"), "submission_ref": e.submission_ref})
                 # 入队，不再裸起线程：有界 worker 池 + 单用户运行闸(见 run_job)。
                 # 队列满就当场判死退点——静默丢任务等于白扣用户的点。
                 if not enqueue_job(jid):
@@ -617,6 +649,20 @@ class H(BaseHTTPRequestHandler):
             if user.get("must_change"):
                 return self._send(403, {"detail": "请先修改初始密码后再使用"})
             body = self._json_body()
+            if body.get("action") == "optimize":
+                prompt = (body.get("prompt") or "").strip()
+                kind = (body.get("kind") or "image").strip().lower()
+                if not prompt: return self._send(400, {"detail": "请先输入关键词或提示词"})
+                if len(prompt) > 2000: return self._send(400, {"detail": "提示词不能超过 2000 字"})
+                if kind not in {"image", "video"}: return self._send(400, {"detail": "kind 仅支持 image 或 video"})
+                if not GEMINI_KEY: return self._send(503, {"detail": "提示词优化暂未配置"})
+                try:
+                    _check_prompt_optimize_rate(user["username"])
+                    with _prompt_optimize_sem:
+                        prompt = gen_prompt_optimize(prompt, kind)
+                    return self._send(200, {"prompt": prompt, "model": REVERSE_MODEL})
+                except ValueError as e:
+                    return self._send(429 if "频繁" in str(e) else 502, {"detail": str(e)[:180]})
             image = (body.get("image") or "").strip()
             if image.startswith("data:") and "," in image:
                 image = image.split(",", 1)[1]  # 去掉 data URL 前缀，只留 base64
@@ -624,14 +670,10 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"detail": "请先上传或粘贴一张图片"})
             if len(image) > 8 * 1024 * 1024:     # base64 ~8MB ≈ 原图 6MB
                 return self._send(400, {"detail": "图片太大，请压缩后再试"})
-            try:
-                cost = reverse_cost()
-            except pricing_config.PricingUnavailable as e:
-                return self._send(503, {"detail": str(e), "code": "pricing_unavailable",
-                                        "retry_after_ms": 1000})
+            cost = pricing.get_price("image.reverse")
             deduct_status, deduct_data = deduct_points(user["username"], cost, "reverse")
-            if deduct_status == 402:
-                return self._send(402, {"detail": "点数不足", "need": cost})
+            if deduct_status in (402, 403):
+                return self._send(deduct_status, {"detail": (deduct_data or {}).get("detail") or "点数不足", "need": cost})
             if deduct_status != 200:
                 return self._send(500, {"detail": (deduct_data or {}).get("detail") or "点数扣除失败"})
             points_left = (deduct_data.get("points") if isinstance(deduct_data, dict) else None)
@@ -662,7 +704,7 @@ def _selftest():
     b3 = _build_banana_body("x", "1:1", None, "4K")
     assert b3["generationConfig"]["imageConfig"]["imageSize"] == "4K", b3
     assert IMAGE_SIZES["pro"]["hd"] == "4K" and IMAGE_SIZES["nb2"]["std"] == "1K"
-    assert BASE_COST["pro"]["hd"] == 26 and BASE_COST["nb2"]["std"] == 10
+    assert BASE_COST["pro"]["hd"] == 44 and BASE_COST["nb2"]["std"] == 18
     if Image is not None:
         buf = io.BytesIO()
         Image.new("RGB", (1, 1), (255, 255, 255)).save(buf, format="PNG")
@@ -680,9 +722,9 @@ if __name__ == "__main__":
         _selftest(); raise SystemExit(0)
     if feature_flags is not None:
         feature_flags.init_db()
+    pricing.init_db()
     from content_domains import jobs_store
     jobs_store.ensure_owner_column(jdb)   # 必须在 start_job_workers 之前：重排扫描按 owner 过滤
-    jobs_store.ensure_service_sha_column(jdb)   # 同理：INSERT 带 service_sha，列不在会 500
     start_job_workers()
     print("huangque-imggen-api on 127.0.0.1:%d  models=%s workers=%d 单用户生图并发上限=%d"
           % (PORT, MODELS, JOB_WORKERS, MAX_USER_RUNNING_IMAGE))

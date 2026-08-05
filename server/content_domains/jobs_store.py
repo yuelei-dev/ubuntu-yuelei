@@ -17,52 +17,36 @@ content_jobs.db 的 jobs 表被三个进程共写：
 本模块只依赖标准库，不 import core —— 三个服务都能安全 import（leadgen/imggen 本来
 就在 `from content_domains import cos / assets_store`）。
 """
+import hashlib
 import json
-import os
 import time
 import uuid
 from contextlib import closing
 
 
-REFUND_UNCLAIMED = 0
-REFUND_CONFIRMED = 1
-REFUND_PENDING = 2
-REFUND_LEASE_SECONDS = 45
-
-# ship 部署时写入的精确 commit SHA（content_api.py 所在目录，单行文本）。
-# 健康检查每次读文件；建任务写 jobs.service_sha 用启动时的缓存值，不每次碰盘。
-DEPLOY_VERSION_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".deploy-version")
+def refund_transaction_key(job_id, username=""):
+    """跨 content/auth 重试时保持稳定的任务退款键。"""
+    return "job-refund:%s:%d" % (str(username or "unknown")[:64], int(job_id))
 
 
-def read_deploy_sha():
-    """读取 .deploy-version；文件不存在或读取失败返回 "unknown"，绝不抛异常。"""
-    try:
-        with open(DEPLOY_VERSION_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip() or "unknown"
-    except Exception:
-        return "unknown"
+class PaidJobInsertError(Exception):
+    def __init__(self, compensation, submission_ref):
+        super().__init__("paid job insert failed")
+        self.compensation = compensation
+        self.submission_ref = submission_ref
 
 
-def _read_service_sha():
-    """启动时读一次 .deploy-version 供 jobs.service_sha 用；读不到存 NULL。"""
-    try:
-        with open(DEPLOY_VERSION_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip() or None
-    except Exception:
-        return None
-
-
-SERVICE_SHA = _read_service_sha()
+class PaidJobDeductError(Exception):
+    def __init__(self, status, detail):
+        super().__init__(detail)
+        self.status = int(status or 500)
+        self.detail = str(detail or "点数扣除失败")
 
 
 def public_dict(row, phase=None):
     data = {key: row[key] for key in (
         "id", "kind", "username", "cost", "status", "result", "error", "created_at", "updated_at")}
-    refund_state = int(row["refunded"] or 0) if "refunded" in row.keys() else 0
-    data["refunded"] = refund_state == REFUND_CONFIRMED
-    if refund_state == REFUND_PENDING:
-        data["refund_pending"] = True
+    data["refunded"] = int(row["refunded"] or 0) == 1 if "refunded" in row.keys() else False
     if data.get("result"):
         try:
             data["result"] = json.loads(data["result"])
@@ -74,12 +58,6 @@ def public_dict(row, phase=None):
     return data
 
 
-def ensure_owner_column_on_conn(conn):
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    if "owner" not in cols:
-        conn.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
-
-
 def ensure_owner_column(jdb):
     """保证 jobs.owner 存在（#511）。三个服务启动时各调一次，谁先起谁建，与部署顺序无关。
 
@@ -89,45 +67,10 @@ def ensure_owner_column(jdb):
     COALESCE(owner,'content') 把它们仍归自己，语义与建列前完全一致。
     """
     with closing(jdb()) as c:
-        ensure_owner_column_on_conn(c)
-        c.commit()
-
-
-def ensure_service_sha_column_on_conn(conn):
-    """在同一连接上保证 jobs.service_sha 存在（PRAGMA 守卫的 ALTER，不动既有数据）。
-
-    供已持有连接的写入路径（core 建任务、imggen/leadgen 直写 jobs 等）在 INSERT 前兜底：
-    服务启动时 ensure_service_sha_column 已建列，这里是第二道保险 —— 任何调用方漏了启动
-    ensure，也不至于让 INSERT 直接 500。SQLite 的 ALTER 是事务性的，跟随外层事务提交/回滚。
-    历史行 service_sha 为 NULL —— 显示「版本未知」，不回填。
-    """
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    if "service_sha" not in cols:
-        conn.execute("ALTER TABLE jobs ADD COLUMN service_sha TEXT")
-
-
-def ensure_service_sha_column(jdb):
-    """保证 jobs.service_sha 存在（任务-代码版本绑定）。与 ensure_owner_column 同款：
-    共写 jobs 表的服务启动时各调一次，谁先起谁建；不建列则 INSERT 带 service_sha 会直接 500。
-    """
-    with closing(jdb()) as c:
-        ensure_service_sha_column_on_conn(c)
-        c.commit()
-
-
-def ensure_refund_lease_columns_on_conn(conn):
-    """增加可恢复退款租约列；旧行保持未认领状态。"""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)").fetchall()}
-    if "refund_lease_token" not in cols:
-        conn.execute("ALTER TABLE jobs ADD COLUMN refund_lease_token TEXT")
-    if "refund_lease_until" not in cols:
-        conn.execute("ALTER TABLE jobs ADD COLUMN refund_lease_until INTEGER DEFAULT 0")
-
-
-def ensure_refund_lease_columns(jdb):
-    with closing(jdb()) as c:
-        ensure_refund_lease_columns_on_conn(c)
-        c.commit()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)").fetchall()}
+        if "owner" not in cols:
+            c.execute("ALTER TABLE jobs ADD COLUMN owner TEXT")
+            c.commit()
 
 
 def set_terminal(jdb, job_id, status, result=None, error=None, from_states=("running",)):
@@ -151,10 +94,69 @@ def set_terminal(jdb, job_id, status, result=None, error=None, from_states=("run
                 (json.dumps(result, ensure_ascii=False), now, job_id) + tuple(from_states))
         else:
             cur = c.execute(
-                "UPDATE jobs SET status='error', error=?, updated_at=? WHERE id=? AND status IN (%s)" % holes,
+                """UPDATE jobs SET status='error', error=?, updated_at=?,
+                   refunded=CASE WHEN COALESCE(cost,0)>0 AND COALESCE(refunded,0)=0 THEN 2 ELSE refunded END
+                   WHERE id=? AND status IN (%s)""" % holes,
                 (str(error or "")[:300], now, job_id) + tuple(from_states))
         c.commit()
         return cur.rowcount >= 1
+
+
+VIDEO_NOTIFICATION_KINDS = {"video", "tryon", "xiaole_video", "sora_video", "cinematic"}
+
+
+def ensure_video_notification_outbox(jdb):
+    with closing(jdb()) as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS video_notification_outbox(
+            job_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            lease_until INTEGER NOT NULL DEFAULT 0,
+            next_retry_at INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            sent_at INTEGER
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_video_notify_ready ON video_notification_outbox(status,next_retry_at,job_id)")
+        c.commit()
+
+
+def set_done_with_video_outbox(jdb, job_id, username, kind, result=None, from_states=("running",)):
+    """Atomically win jobs.done and enqueue only supported video notifications."""
+    if kind not in VIDEO_NOTIFICATION_KINDS:
+        return set_terminal(jdb, job_id, "done", result=result, from_states=from_states)
+    ensure_video_notification_outbox(jdb)
+    now = int(time.time())
+    holes = ",".join("?" * len(from_states))
+    with closing(jdb()) as c:
+        c.execute("BEGIN IMMEDIATE")
+        cur = c.execute(
+            "UPDATE jobs SET status='done', result=?, updated_at=? WHERE id=? AND status IN (%s)" % holes,
+            (json.dumps(result, ensure_ascii=False), now, job_id) + tuple(from_states),
+        )
+        if cur.rowcount:
+            c.execute(
+                """INSERT OR IGNORE INTO video_notification_outbox(
+                   job_id,username,kind,status,created_at,updated_at)
+                   VALUES(?,?,?,'pending',?,?)""",
+                (int(job_id), str(username or ""), str(kind), now, now),
+            )
+        c.commit()
+        return cur.rowcount >= 1
+
+
+def set_terminal_with_video_outbox(jdb, job_id, status, result=None, error=None, from_states=("running",)):
+    if status != "done":
+        return set_terminal(jdb, job_id, status, result, error, from_states)
+    with closing(jdb()) as c:
+        row = c.execute("SELECT username,kind FROM jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return set_terminal(jdb, job_id, status, result, error, from_states)
+    return set_done_with_video_outbox(
+        jdb, job_id, row["username"], row["kind"], result, from_states)
 
 
 def claim_running(jdb, job_id):
@@ -169,45 +171,10 @@ def claim_running(jdb, job_id):
         return cur.rowcount >= 1
 
 
-def _release_refund_lease(jdb, job_id, lease_token):
-    with closing(jdb()) as c:
-        c.execute(
-            "UPDATE jobs SET refunded=?,refund_lease_token=NULL,refund_lease_until=0 "
-            "WHERE id=? AND refunded=? AND refund_lease_token=?",
-            (REFUND_UNCLAIMED, job_id, REFUND_PENDING, lease_token))
-        c.commit()
-
-
 def refund_once(jdb, job_id, username, cost, refund):
-    """保留三个共享服务既有退款 ABI；失败回滚 0，成功落 1。"""
-    try:
-        cost = int(cost or 0)
-    except (TypeError, ValueError):
-        cost = 0
-    if cost <= 0:
-        return False
-    with closing(jdb()) as c:
-        cur = c.execute(
-            "UPDATE jobs SET refunded=1 WHERE id=? AND refunded=0 AND status='error'",
-            (job_id,))
-        c.commit()
-        if cur.rowcount < 1:
-            return False
-    if refund(username, cost):
-        return True
-    with closing(jdb()) as c:
-        c.execute(
-            "UPDATE jobs SET refunded=0 WHERE id=? AND refunded=1", (job_id,))
-        c.commit()
-    return False
+    """确认待退款任务：2=待确认，1=Auth 已确认，0=历史未知/未发起。
 
-
-def refund_once_recoverable(jdb, job_id, username, cost, refund,
-                            lease_seconds=REFUND_LEASE_SECONDS):
-    """可恢复退点：0=未处理、2=租约处理中、1=上游已确认。
-
-    只有持有当前随机租约的调用方可落最终 1。进程在 CAS 后、发网前退出时会保留状态 2；
-    租约过期后 scanner 使用同一稳定交易键重放，避免永久漏退和双 scanner 重复执行。
+    refund(username, cost) 只有在幂等 Auth 明确确认后才返回真；未知结果保持 2。
     """
     try:
         cost = int(cost or 0)
@@ -215,52 +182,189 @@ def refund_once_recoverable(jdb, job_id, username, cost, refund,
         cost = 0
     if cost <= 0:
         return False
-    try:
-        lease_seconds = max(1, int(lease_seconds or REFUND_LEASE_SECONDS))
-    except (TypeError, ValueError):
-        lease_seconds = REFUND_LEASE_SECONDS
-    now = int(time.time())
-    lease_token = uuid.uuid4().hex
     with closing(jdb()) as c:
-        c.execute("BEGIN IMMEDIATE")
-        ensure_refund_lease_columns_on_conn(c)
-        cur = c.execute(
-            "UPDATE jobs SET refunded=?,refund_lease_token=?,refund_lease_until=? "
-            "WHERE id=? AND status='error' AND (COALESCE(refunded,0)=? OR "
-            "(refunded=? AND COALESCE(refund_lease_until,0)<=?))",
-            (REFUND_PENDING, lease_token, now + lease_seconds, job_id,
-             REFUND_UNCLAIMED, REFUND_PENDING, now))
-        c.commit()
-        if cur.rowcount < 1:
-            return False
-    try:
-        succeeded = bool(refund(username, cost))
-    except Exception:
-        _release_refund_lease(jdb, job_id, lease_token)
-        raise
-    if not succeeded:
-        _release_refund_lease(jdb, job_id, lease_token)
+        row = c.execute("SELECT 1 FROM jobs WHERE id=? AND status='error' AND refunded=2",
+                        (job_id,)).fetchone()
+    if not row:
         return False
+    try:
+        refunded = bool(refund(username, cost))
+    except Exception:
+        refunded = False
+    if refunded:
+        with closing(jdb()) as c:
+            cur = c.execute("UPDATE jobs SET refunded=1,updated_at=? WHERE id=? AND refunded=2",
+                            (int(time.time()), job_id))
+            c.commit()
+            return cur.rowcount > 0 or bool(c.execute(
+                "SELECT 1 FROM jobs WHERE id=? AND refunded=1", (job_id,)).fetchone())
     with closing(jdb()) as c:
-        cur = c.execute(
-            "UPDATE jobs SET refunded=?,refund_lease_token=NULL,refund_lease_until=0 "
-            "WHERE id=? AND refunded=? AND refund_lease_token=?",
-            (REFUND_CONFIRMED, job_id, REFUND_PENDING, lease_token))
+        c.execute("UPDATE jobs SET updated_at=? WHERE id=? AND refunded=2",
+                  (int(time.time()), job_id))
         c.commit()
-        return cur.rowcount >= 1
+    return False
 
 
-def pending_refunds(jdb, limit=100, owner="content"):
-    """只返回指定服务到期的退款任务，避免跨服务退款和无关行饿死。"""
-    bounded = max(1, min(int(limit or 100), 500))
+def retry_failed_refunds(jdb, refund_job, limit=100):
+    """轮转补扫明确处于待确认态的退款；历史 refunded=0 永远不自动处理。"""
+    with closing(jdb()) as c:
+        import sqlite3
+        c.row_factory = sqlite3.Row
+        c.execute("""CREATE TABLE IF NOT EXISTS job_refund_transactions(
+            job_id INTEGER PRIMARY KEY, transaction_key TEXT NOT NULL UNIQUE)""")
+        c.commit()
+        owned_attempt_tables = {
+            row[0] for row in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN ("
+                "'short_drama_charge_attempts',"
+                "'short_drama_character_reference_attempts',"
+                "'short_drama_voice_charge_attempts')"
+            ).fetchall()
+        }
+        attempt_exclusion = " ".join(
+            "AND NOT EXISTS (SELECT 1 FROM %s a WHERE a.job_id=jobs.id)" % table
+            for table in (
+                "short_drama_charge_attempts",
+                "short_drama_character_reference_attempts",
+                "short_drama_voice_charge_attempts",
+            )
+            if table in owned_attempt_tables
+        )
+        rows = c.execute(
+            """SELECT jobs.id,jobs.username,jobs.cost,
+                      refund_tx.transaction_key AS recovery_refund_key FROM jobs
+               LEFT JOIN job_refund_transactions AS refund_tx
+                 ON refund_tx.job_id=jobs.id
+               WHERE status='error' AND refunded=2 AND COALESCE(cost,0)>0
+               %s ORDER BY updated_at ASC,id ASC LIMIT ?""" % attempt_exclusion,
+            (max(1, int(limit or 100)),),
+        ).fetchall()
+    recovered = 0
+    for row in rows:
+        transaction_key = str(row["recovery_refund_key"] or "")
+        confirmed = (refund_job(
+            row["id"], row["username"], row["cost"],
+            transaction_key=transaction_key) if transaction_key else
+            refund_job(row["id"], row["username"], row["cost"]))
+        if confirmed:
+            recovered += 1
+    return recovered
+
+
+def _compensate_failed_insert(jdb, refund, username, cost, kind, submission_ref,
+                              error, owner, charge_transaction_key=""):
+    if int(cost or 0) <= 0:
+        return "refunded"
+    fallback_key = ("job-charge-refund:" + hashlib.sha256(
+        str(charge_transaction_key).encode("utf-8")).hexdigest()
+        if charge_transaction_key else "job-insert-refund:%s" % submission_ref)
+    reason = "job:%s:insert_failed submit:%s" % (kind, submission_ref)
     now = int(time.time())
-    with closing(jdb()) as c:
-        ensure_owner_column_on_conn(c)
-        ensure_refund_lease_columns_on_conn(c)
-        c.commit()
-        return c.execute(
-            "SELECT id,username,cost FROM jobs WHERE status='error' AND cost>0 "
-            "AND COALESCE(owner,'content')=? AND "
-            "(COALESCE(refunded,0)=? OR (refunded=? AND COALESCE(refund_lease_until,0)<=?)) "
-            "ORDER BY id ASC LIMIT ?",
-            (owner, REFUND_UNCLAIMED, REFUND_PENDING, now, bounded)).fetchall()
+    payload = json.dumps({"_submission_ref": submission_ref}, ensure_ascii=False)
+    try:
+        with closing(jdb()) as c:
+            cur = c.execute(
+                """INSERT INTO jobs(kind,username,cost,status,payload,error,created_at,updated_at,owner,refunded)
+                   VALUES(?,?,?,'error',?,?,?,?,?,2)""",
+                (kind, username, int(cost), payload,
+                 "任务创建失败，退款待确认: %s" % str(error or "")[:180], now, now, owner),
+            )
+            retry_job_id = cur.lastrowid
+            if charge_transaction_key:
+                c.execute("""CREATE TABLE IF NOT EXISTS job_refund_transactions(
+                    job_id INTEGER PRIMARY KEY, transaction_key TEXT NOT NULL UNIQUE)""")
+                c.execute(
+                    "INSERT INTO job_refund_transactions(job_id,transaction_key) VALUES(?,?)",
+                    (retry_job_id, fallback_key),
+                )
+            c.commit()
+    except Exception as record_error:
+        try:
+            if refund(username, cost, reason, transaction_key=fallback_key) is False:
+                raise RuntimeError("refund not confirmed")
+            return "refunded"
+        except Exception as refund_error:
+            print("[points-critical] job insert/refund record both failed submit=%s user=%s cost=%s "
+                  "insert=%s refund=%s record=%s" % (
+                      submission_ref, username, cost, str(error)[:120],
+                      str(refund_error)[:120], str(record_error)[:120]), flush=True)
+            return "untracked"
+    transaction_key = (fallback_key if charge_transaction_key else
+                       refund_transaction_key(retry_job_id, username))
+    confirmed = refund_once(
+        jdb, retry_job_id, username, cost,
+        lambda u, c: refund(u, c, reason, transaction_key=transaction_key))
+    return "refunded" if confirmed else "queued"
+
+
+def create_paid_jobs(jdb, deduct, refund, kind, username, items, owner, reason_kind="",
+                     before_commit=None, charge_transaction_key="", before_charge=None):
+    """一次预扣并原子写入一个或多个任务；失败补偿只维护这一处。"""
+    items = [(int(cost or 0), payload) for cost, payload in items]
+    total = sum(cost for cost, _ in items)
+    submission_ref = uuid.uuid4().hex
+    reason = "job:%s submit:%s" % (reason_kind or kind, submission_ref)
+    if before_charge is not None:
+        before_charge()
+    points_left = (deduct(username, total, reason, charge_transaction_key)
+                   if charge_transaction_key else deduct(username, total, reason))
+    now = int(time.time())
+    try:
+        with closing(jdb()) as c:
+            try:
+                job_ids = []
+                for cost, payload in items:
+                    cur = c.execute(
+                        "INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) VALUES(?,?,?,?,?,?,?)",
+                        (kind, username, cost, json.dumps(payload, ensure_ascii=False), now, now, owner),
+                    )
+                    job_ids.append(cur.lastrowid)
+                if before_commit is not None:
+                    before_commit(c, tuple(job_ids))
+                c.commit()
+                return job_ids, points_left
+            except Exception:
+                c.rollback()
+                raise
+    except Exception as error:
+        state = _compensate_failed_insert(
+            jdb, refund, username, total, kind, submission_ref, error, owner,
+            charge_transaction_key=charge_transaction_key)
+        raise PaidJobInsertError(state, submission_ref) from error
+
+
+def create_paid_job(jdb, deduct, refund, kind, username, cost, payload, owner,
+                    before_commit=None, charge_transaction_key="", before_charge=None):
+    batch_callback = None
+    if before_commit is not None:
+        batch_callback = lambda connection, job_ids: before_commit(connection, job_ids[0])
+    job_ids, points_left = create_paid_jobs(
+        jdb, deduct, refund, kind, username, [(cost, payload)], owner,
+        before_commit=batch_callback, charge_transaction_key=charge_transaction_key,
+        before_charge=before_charge)
+    return job_ids[0], points_left
+
+
+def create_job_after_charge(jdb, kind, username, cost, payload, owner, before_commit=None):
+    """Insert a job whose durable charge attempt was already reconciled.
+
+    This intentionally has no billing side effect.  Its caller owns the persisted
+    compensation state and must record refund intent before contacting Auth.
+    """
+    now = int(time.time())
+    with closing(jdb()) as connection:
+        try:
+            cursor = connection.execute(
+                "INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (kind, username, int(cost), json.dumps(payload, ensure_ascii=False),
+                 now, now, owner),
+            )
+            job_id = int(cursor.lastrowid)
+            if before_commit is not None:
+                before_commit(connection, job_id)
+            connection.commit()
+            return job_id
+        except Exception:
+            connection.rollback()
+            raise

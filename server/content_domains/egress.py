@@ -40,11 +40,7 @@ EGRESS_TIMEOUT = int(os.environ.get("EGRESS_TIMEOUT", "210") or 210)
 EGRESS_PRIMARY_TIMEOUT = int(os.environ.get("EGRESS_PRIMARY_TIMEOUT", str(EGRESS_TIMEOUT)) or EGRESS_TIMEOUT)
 HEYGEN_TIMEOUT = int(os.environ.get("EGRESS_HEYGEN_TIMEOUT", "300") or 300)
 HEYGEN_DIRECT_PROXY = os.environ.get("HEYGEN_DIRECT_PROXY", "").strip()
-HEYGEN_PROXY_FALLBACK = (
-    EGRESS_FALLBACK
-    or os.environ.get("HTTPS_PROXY")
-    or "http://127.0.0.1:7897"
-).strip()
+HEYGEN_PROXY_FALLBACK = (EGRESS_FALLBACK or os.environ.get("HTTPS_PROXY") or "http://127.0.0.1:7897").strip()
 
 # 直连 opener：ProxyHandler({}) 显式清空，绕过 content.env 里进程级的 HTTP(S)_PROXY，
 # 保证 heygen 兜底那一档确实直连、不会误走进 mihomo。
@@ -105,7 +101,7 @@ def preferred_proxy(fallback=""):
 
 
 def heygen_proxy():
-    """Use the same dedicated HeyGen egress selection in calls and probes."""
+    """HeyGen 直连与后台检测共用的专属出境选择。"""
     return HEYGEN_DIRECT_PROXY or preferred_proxy(HEYGEN_PROXY_FALLBACK)
 
 
@@ -206,30 +202,33 @@ def post_json(official_base, heygen_base, path, data, headers, log=None):
 
 
 def post_json_idempotent(official_base, heygen_base, path, data, headers, log=None,
-                         max_attempts=2, timeout=None):
-    """POST an idempotent analysis request, retrying a broken read once.
+                         max_attempts=2):
+    """POST an idempotent analysis request, retrying a slow/broken read once.
 
-    Unlike media generation, analysis can be safely repeated within one paid
-    site job. Prefer the next usable route; with one route, retry it once.
+    Unlike image generation, chat analysis can be safely repeated from the
+    user's perspective: the paid site job is created and charged only once.
+    Prefer the next configured route; with a single route, retry it once.
     """
     available = channels(official_base, heygen_base)
     if not available:
-        raise RuntimeError("egress: no available channel")
-    attempts = [channel for channel in available if _channel_usable(channel[2])]
+        raise RuntimeError("egress: 无可用通道")
+    attempts = []
+    for channel in available:
+        if _channel_usable(channel[2]):
+            attempts.append(channel)
     if not attempts:
-        raise RuntimeError("egress: no available channel")
-    limit = max(1, int(max_attempts or 1))
-    while len(attempts) < limit:
+        raise RuntimeError("egress: 无可用通道")
+    while len(attempts) < max(1, int(max_attempts or 1)):
         attempts.append(attempts[-1])
 
     last = None
-    for number, (label, base, proxy, channel_timeout) in enumerate(attempts[:limit], 1):
+    for number, (label, base, proxy, timeout) in enumerate(
+            attempts[:max(1, int(max_attempts or 1))], 1):
         request = urllib.request.Request(
             base + path, data=data, headers=headers, method="POST",
         )
         try:
-            request_timeout = timeout if timeout is not None else channel_timeout
-            with _opener(proxy).open(request, timeout=request_timeout) as response:
+            with _opener(proxy).open(request, timeout=timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as error:
             last = error
@@ -240,13 +239,13 @@ def post_json_idempotent(official_base, heygen_base, path, data, headers, log=No
         if log:
             log(
                 "[egress] idempotent %s attempt %d/%d via %s failed: %s"
-                % (path, number, limit, label, str(last)[:120])
+                % (path, number, max_attempts, label, str(last)[:120])
             )
-    raise last if last is not None else RuntimeError("egress: request failed")
+    raise last if last is not None else RuntimeError("egress: 请求失败")
 
 
 def _read_image_stream(response, expected=1):
-    """Read Images API SSE while retaining the last valid progressive image."""
+    """读取 Images API SSE；连接中断时保留已收到的最后一张有效渐进图。"""
     completed, partial = [], []
     try:
         while True:
@@ -268,23 +267,12 @@ def _read_image_stream(response, expected=1):
                     return {"data": [{"b64_json": value} for value in completed]}
             else:
                 partial.append(image)
-    except (
-        http.client.RemoteDisconnected,
-        http.client.IncompleteRead,
-        urllib.error.URLError,
-        TimeoutError,
-        ConnectionError,
-    ):
+    except (http.client.RemoteDisconnected, http.client.IncompleteRead,
+            urllib.error.URLError, TimeoutError, ConnectionError):
         if completed:
-            return {
-                "data": [{"b64_json": value} for value in completed],
-                "stream_incomplete": True,
-            }
+            return {"data": [{"b64_json": value} for value in completed], "stream_incomplete": True}
         if partial:
-            return {
-                "data": [{"b64_json": partial[-1]}],
-                "stream_incomplete": True,
-            }
+            return {"data": [{"b64_json": partial[-1]}], "stream_incomplete": True}
         raise
     images = completed or (partial[-1:] if partial else [])
     if images:
@@ -296,7 +284,7 @@ def _read_image_stream(response, expected=1):
 
 
 def post_image_json(official_base, heygen_base, path, data, headers, log=None):
-    """Use SSE on official image routes and preserve the existing JSON relay."""
+    """官方通道使用 SSE 防长生成期间空闲断连；中转兜底保持原 JSON 协议。"""
     original = json.loads(data)
     expected = max(1, int(original.get("n") or 1))
     stream_body = dict(original)
@@ -305,24 +293,18 @@ def post_image_json(official_base, heygen_base, path, data, headers, log=None):
     last = None
     for label, base, proxy, timeout in channels(official_base, heygen_base):
         if not _channel_usable(proxy):
-            last = last or urllib.error.URLError(
-                ConnectionRefusedError("代理 %s 不可达" % proxy)
-            )
+            last = last or urllib.error.URLError(ConnectionRefusedError("代理 %s 不可达" % proxy))
             if log:
                 log("[egress] %s 代理不可达，跳过该档（未发出任何请求）" % label)
             continue
         is_official = label != "heygen"
-        request_headers = dict(headers)
+        req_headers = dict(headers)
         if is_official:
-            request_headers["Accept"] = "text/event-stream"
-        request = urllib.request.Request(
-            base + path,
-            data=stream_data if is_official else data,
-            headers=request_headers,
-            method="POST",
-        )
+            req_headers["Accept"] = "text/event-stream"
+        req = urllib.request.Request(base + path, data=stream_data if is_official else data,
+                                     headers=req_headers, method="POST")
         try:
-            with _opener(proxy).open(request, timeout=timeout) as response:
+            with _opener(proxy).open(req, timeout=timeout) as response:
                 if is_official:
                     result = _read_image_stream(response, expected)
                     if result.get("stream_incomplete") and log:
@@ -333,14 +315,10 @@ def post_image_json(official_base, heygen_base, path, data, headers, log=None):
             last = error
             if not _pre_delivery_failure(error):
                 if log:
-                    log(
-                        "[egress] %s via %s 失败，且请求可能已送达上游，直接失败退点: %s"
-                        % (path, label, str(error)[:120])
-                    )
+                    log("[egress] %s via %s 失败，且请求可能已送达上游，直接失败退点: %s" %
+                        (path, label, str(error)[:120]))
                 raise
             if label != "heygen" and log:
-                log(
-                    "[egress] %s via %s 连接阶段失败(未送达)，降级下一档: %s"
-                    % (path, label, str(error)[:120])
-                )
+                log("[egress] %s via %s 连接阶段失败(未送达)，降级下一档: %s" %
+                    (path, label, str(error)[:120]))
     raise last if last is not None else RuntimeError("egress: 无可用通道")

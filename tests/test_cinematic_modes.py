@@ -75,26 +75,24 @@ class BillingTests(_Base):
     """按成片秒数计费。算错一次就是真金白银 —— 一条片子上游成本 $7。"""
 
     def test_rates(self):
-        """三个玩法统一 30 点/秒（kongli 2026-07-15；此前 10，更早 motion 3/duo 5/open 5）。
-        HeyGen 对三者收同一个价（$7/条，与玩法和时长都无关），这里不分档。
-        """
-        self.assertEqual(video.cinematic_rate("motion"), 30)
+        """已开放的动作模仿与开放式生成统一 10 点/秒；未开放 duo 保持原价。"""
+        self.assertEqual(video.cinematic_rate("motion"), 10)
         self.assertEqual(video.cinematic_rate("duo"), 30)
-        self.assertEqual(video.cinematic_rate("open"), 30)
+        self.assertEqual(video.cinematic_rate("open"), 10)
 
     def test_cost_is_seconds_times_rate(self):
         # 动作模仿：时长锁死自适应 —— 参考片段 8.2s → 成片 9s
-        self.assertEqual(points.cost_of("cinematic", self.v()), 270)                       # 9 × 30
+        self.assertEqual(points.cost_of("cinematic", self.v()), 90)                        # 9 × 10
         self.assertEqual(points.cost_of("cinematic",
                                         self.v(cine_mode="duo", avatar_ids=[1, 2])), 270)  # 9 × 30
         self.assertEqual(points.cost_of("cinematic", self.v(cine_mode="open", avatar_ids=[1],
-                                                            prompt="海边跳舞", duration=12)), 360)  # 12 × 30
+                                                            prompt="海边跳舞", duration=12)), 120)  # 12 × 10
 
     def test_auto_is_billed_by_the_probed_length(self):
-        """8.2 秒的参考片段 → 成片 9 秒 → 270 点。界面上显示的必须就是这个数。"""
+        """8.2 秒的参考片段 → 成片 9 秒 → 90 点。界面上显示的必须就是这个数。"""
         body = self.v(duration="auto")
         self.assertEqual(body["duration"], 9)
-        self.assertEqual(points.cost_of("cinematic", body), 270)
+        self.assertEqual(points.cost_of("cinematic", body), 90)
 
     def test_an_unknown_mode_is_billed_at_the_highest_rate(self):
         """玩法认不出来时按最贵的收 —— 绝不能回落到最便宜的，更不能回落到 0。
@@ -106,19 +104,25 @@ class BillingTests(_Base):
         self.assertGreater(points.cost_of("cinematic", {}), 0, "空 payload 也不能免费")
 
     def test_the_frontend_estimate_matches_the_backend(self):
-        """前端预估必须在权威目录就绪后采用与后端扣点相同的动态价格。"""
-        for mode in video.CINEMATIC_RATE_PER_SEC:
-            assignment = "CINE_MODES.%s.rate=PRICING_VALUES['cinematic.%s.per_sec']" % (mode, mode)
-            self.assertIn(assignment, HTML, "%s 未采用权威价格目录" % mode)
-        self.assertIn("if(!(pricingGate&&pricingGate.guard()))", HTML)
+        """前端预估的点数和后端扣的必须一致，否则就是「界面说 27 点、实际扣 90 点」。
+
+        不再逐字比对整行 —— 那样一改缩进就红。直接把前端 CINE_MODES 里的 rate 抠出来
+        跟后端的表比。
+        """
+        block = HTML.split("var CINE_MODES={")[1].split("};")[0]
+        for mode, rate in video.CINEMATIC_RATE_PER_SEC.items():
+            m = re.search(r"\b%s:\s*\{[^}]*\brate:\s*(\d+)" % mode, block)
+            self.assertIsNotNone(m, "前端 CINE_MODES 里没有 %s" % mode)
+            self.assertEqual(int(m.group(1)), rate,
+                             "%s：前端标 %s 点/秒，后端扣 %d 点/秒" % (mode, m.group(1), rate))
         self.assertIn("function cineCost(){ return cineSeconds()*cineCfg().rate; }", HTML)
 
     def test_the_tab_labels_show_the_real_price(self):
-        """目录就绪前页签不得冒充实价；就绪后必须在下单前显示动态价。"""
+        """页签上写的价钱是用户【下单前】唯一能看到的价 —— 写错就是明码标错价。"""
         for mode, label in (("motion", "动作模仿"), ("open", "开放式生成")):
             tab = HTML.split('data-cine-mode="%s"' % mode)[1].split("</button>")[0]
-            self.assertIn("价格加载后显示", tab, "%s 页签不应显示未校验默认价" % label)
-            self.assertNotRegex(tab, r"\d+ 点/秒")
+            self.assertIn("%d 点/秒" % video.cinematic_rate(mode), tab,
+                          "%s 页签上的单价和后端对不上" % label)
         # 秒数的算法也要一致：向上取整、夹进 4~15、无参考视频回落 10
         self.assertIn("return Math.max(4, Math.min(15, Math.ceil(cineRefSeconds)));", HTML)
         self.assertIn("if(!cineRefSeconds) return 10;", HTML)
@@ -142,11 +146,12 @@ class FixedPromptTests(_Base):
 
     def test_the_guard_is_no_longer_appended_by_gen_cinematic(self):
         """反过来了：现在固定提示词【自带】约束，gen_cinematic 什么都不拼。
-        payload 里的 prompt == HeyGen 收到的 prompt。"""
+        没有 @图片N 时 payload 里的 prompt == HeyGen 收到的 prompt。"""
         gen = VIDEO_SRC.split("def gen_cinematic")[1].split(chr(10) + "def ")[0]
         code = chr(10).join(ln for ln in gen.splitlines() if not ln.lstrip().startswith("#"))
         self.assertNotIn("CINEMATIC_IDENTITY_GUARD", code)
-        self.assertIn('prompt=payload["prompt"]', code)
+        self.assertIn('prompt=provider_prompt', code)
+        self.assertIn('provider_prompt = resolve_image_mentions', code)
 
     def test_the_single_person_prompt_is_the_one_kongli_gave(self):
         """kongli 2026-07-14 换的这段（详见 test_open_mode_no_guard）。
@@ -289,16 +294,16 @@ class UiTests(unittest.TestCase):
 
     def test_all_params_are_locked_for_the_fixed_prompt_modes(self):
         """动作模仿【整个参数区】都藏起来：分辨率/时长/比例一样都不给选，
-        只留一行说明。锁死的形状照抄 #2173 —— 唯一已知能过 HeyGen 审核的配置。"""
+        只留一行说明；分辨率统一 720p，时长和比例跟随参考视频。"""
         self.assertIn("$('cineParamGrid').classList.toggle('hidden', cfg.fixed)", HTML)
         self.assertIn("$('cineFixedParams').classList.toggle('hidden', !cfg.fixed)", HTML)
-        self.assertIn("selectedCineResolution='1080p'", HTML)   # 和后端 CINEMATIC_MOTION_RESOLUTION 对齐
+        self.assertIn("selectedCineResolution='720p'", HTML)   # 和后端 CINEMATIC_OUTPUT_RESOLUTION 对齐
         self.assertIn("selectedCineDuration='auto'", HTML)
         # 比例仍然由参考视频的宽高算出来（#2173 的参考是 576x1024 竖版 → 9:16）
         self.assertIn("selectedCineRatio = r>1.15 ? '16:9' : (r<0.87 ? '9:16' : '1:1')", HTML)
 
     def test_the_locked_resolution_matches_the_backend(self):
-        self.assertEqual(video.CINEMATIC_MOTION_RESOLUTION, "1080p")
+        self.assertEqual(video.CINEMATIC_MOTION_RESOLUTION, "720p")
 
     def test_switching_modes_trims_an_oversized_selection(self):
         """双人选了 2 个形象 → 切回单人，不裁掉就会带着 2 个提交，后端直接拒。"""
@@ -325,7 +330,7 @@ class SubmitButtonTests(unittest.TestCase):
         """后端 MAX_USER_ACTIVE_CINEMATIC=2。#603 统计了 counts.cinematic 却没人用 ——
         排到第 3 条时按钮还亮着，点下去只会吃一个 429。"""
         self.assertIn("var cineCapReached=counts.cinematic>=maxActiveCinematic;", HTML)
-        self.assertIn("applyButtonState('cineGenerateBtn', pricingReady && !videoSubmitLocks.cinematic && !cineCapReached,", HTML)
+        self.assertIn("applyButtonState('cineGenerateBtn', !videoSubmitLocks.cinematic && !cineCapReached,", HTML)
 
     def test_the_cap_comes_from_the_backend(self):
         """写死在前端会跟 env 漂移（MAX_USER_ACTIVE_CINEMATIC 是 _env_positive_int）。"""

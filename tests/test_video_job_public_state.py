@@ -35,10 +35,8 @@ class VideoJobPublicStateTests(unittest.TestCase):
         self.assertIs(False, public["refunded"])
 
     def test_pending_refund_is_not_reported_as_confirmed(self):
-        public = core._job_public_dict(self._row("error", refunded=2), "running")
-        self.assertEqual("failed", public["phase"])
+        public = core._job_public_dict(self._row("error", refunded=2))
         self.assertIs(False, public["refunded"])
-        self.assertIs(True, public["refund_pending"])
 
 
 if __name__ == "__main__":

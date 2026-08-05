@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import hashlib
+import sqlite3
+
 from .core import (
-    DOUBAO_APPID, DOUBAO_CLONE_MODEL_TYPE, DOUBAO_CLONE_RESOURCE,
-    DOUBAO_TOKEN, DOUBAO_TTS_RESOURCE, TTS_MODEL,
+    TTS_MODEL,
     _ensure_column, _file_url, _out_path, _post_bytes, _resolve_out_file,
     adb, base64, closing, jdb, json, os, public_url, re, subprocess,
     threading, time, urllib, uuid,
@@ -9,10 +11,7 @@ from .core import (
 from .points import _auth_points_request
 from . import cosyvoice, cos
 from . import points as points_domain
-try:
-    import pricing_config
-except ModuleNotFoundError:
-    from .. import pricing_config
+from . import pricing
 
 VOICE_SLOT_COST = 50
 VOICE_SLOT_MAX_PER_USER = 5
@@ -21,7 +20,7 @@ _voice_slot_purchase_lock = threading.Lock()
 
 
 def voice_slot_cost():
-    return pricing_config.get_price("voice_slot")
+    return pricing.get_price("audio.voice_slot")
 
 
 class VoiceSlotError(Exception):
@@ -54,10 +53,58 @@ def count_user_audio_voice_slots(username):
         return _valid_voice_slot_count(conn, username)
 
 
+def _membership_voice_slot_entitlement(username):
+    q = urllib.parse.quote(str(username or ""), safe="")
+    res = _auth_points_request(
+        "/api/auth/membership/voice-slot-entitlement?username=" + q,
+        method="GET",
+    )
+    return bool((res.get("entitlement") or {}).get("eligible"))
+
+
+def ensure_membership_voice_slot(username):
+    """幂等落地会员免费槽位；失败不扣点，下次读取或购买时自动重试。"""
+    username = (username or "").strip()
+    if not username or not _membership_voice_slot_entitlement(username):
+        return None
+    user_id = get_user_id(username)
+    slot_id = "member_" + hashlib.sha256(username.encode("utf-8")).hexdigest()[:24]
+    now = int(time.time())
+    with _voice_slot_purchase_lock:
+        with closing(adb()) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                if _valid_voice_slot_count(conn, username) > 0:
+                    conn.commit()
+                    return {"created": False, "slot_id": None, "status": "existing", "cost": 0}
+                conn.execute(
+                    """INSERT OR IGNORE INTO audio_voice_slots(
+                           username,user_id,slot_id,status,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?)""",
+                    (username, user_id, slot_id, "active", now, now),
+                )
+                created = bool(conn.execute("SELECT changes()").fetchone()[0])
+                conn.commit()
+                return {
+                    "created": created,
+                    "slot_id": slot_id,
+                    "status": "active",
+                    "cost": 0,
+                }
+            except Exception:
+                conn.rollback()
+                raise
+
+
 def purchase_audio_voice_slot(username):
     username = (username or "").strip()
     if not username:
         raise ValueError("missing username")
+
+    free_slot = ensure_membership_voice_slot(username)
+    if free_slot and free_slot.get("created"):
+        free_slot["points_left"] = None
+        return free_slot
 
     with _voice_slot_purchase_lock:
         if count_user_audio_voice_slots(username) >= VOICE_SLOT_MAX_PER_USER:
@@ -180,6 +227,11 @@ def redeem_audio_voice_slot(username, code):
         return {"slot_id": slot_id, "username": username, "user_id": user_id, "status": "active"}
 
 def list_user_audio_voice_slots(username):
+    try:
+        ensure_membership_voice_slot(username)
+    except Exception:
+        # 权益仍保留在 auth 数据库，下一次读取会继续尝试；不影响已有槽位展示。
+        pass
     with closing(adb()) as c:
         rows = c.execute("""SELECT s.id, s.username, s.user_id, s.slot_id, s.status, s.voice_id, COALESCE(s.reclone_count, 0) AS reclone_count,
                    s.created_at, s.updated_at, s.clone_started_at, s.clone_upload_at, s.clone_error,
@@ -196,126 +248,6 @@ def list_user_audio_voice_slots(username):
             d["status"] = "ready"
         items.append(d)
     return items
-
-def generate_doubao_preview(speaker_id, text=None, speech_rate=0, loudness_rate=0, pitch_rate=0):
-    text = (text or "\u4f60\u597d\uff0c\u8fd9\u662f\u6211\u7684\u4e13\u5c5e\u590d\u523b\u97f3\u8272\u8bd5\u542c\u3002\u58f0\u97f3\u6e05\u6670\u81ea\u7136\uff0c\u9002\u5408\u7528\u4e8e\u77ed\u89c6\u9891\u53e3\u64ad\u548c\u6587\u6848\u914d\u97f3\u3002").strip()
-    reqid = "hq_preview_%d" % int(time.time() * 1000)
-    body = json.dumps({
-        "user": {"uid": "huangque"},
-        "req_params": {
-            "text": text,
-            "speaker": speaker_id,
-            "audio_params": {
-                "format": "mp3",
-                "sample_rate": 24000,
-                "speech_rate": int(speech_rate or 0),
-                "loudness_rate": int(loudness_rate or 0),
-                "pitch_rate": int(pitch_rate or 0),
-            },
-            "additions": json.dumps({"explicit_language": "zh", "disable_markdown_filter": True}),
-        },
-    }, ensure_ascii=False).encode()
-    req = urllib.request.Request("https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "X-Api-App-Id": DOUBAO_APPID,
-            "X-Api-Access-Key": DOUBAO_TOKEN,
-            "X-Api-Resource-Id": DOUBAO_TTS_RESOURCE,
-            "X-Api-Request-Id": reqid,
-        },
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise ValueError("\u8bd5\u542c\u97f3\u9891\u751f\u6210\u5931\u8d25: " + detail)
-    chunks = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(b"data:"):
-            line = line[5:].strip()
-        elif line.startswith(b"event:"):
-            continue
-        try:
-            d = json.loads(line.decode("utf-8", "replace"))
-        except Exception:
-            continue
-        if d.get("code") == 20000000:
-            break
-        data = d.get("data") or d.get("audio") or d.get("audio_data")
-        if isinstance(data, str) and data:
-            try:
-                chunks.append(base64.b64decode(data))
-            except Exception:
-                pass
-        if d.get("code") not in (None, 0, 20000000) or d.get("error") or d.get("message") == "error":
-            raise ValueError(json.dumps(d, ensure_ascii=False)[:200])
-    if not chunks:
-        try:
-            d = json.loads(raw.decode("utf-8", "replace"))
-            data = d.get("data") or d.get("audio") or d.get("audio_data")
-            if isinstance(data, str) and data:
-                chunks.append(base64.b64decode(data))
-        except Exception:
-            pass
-    if not chunks:
-        raise ValueError("\u8bd5\u542c\u97f3\u9891\u751f\u6210\u8fd4\u56de\u4e3a\u7a7a")
-    fn = "audio/voice_preview_%s.mp3" % uuid.uuid4().hex  # 不可猜键(#185)
-    _out_path(fn).write_bytes(b"".join(chunks))
-    return {"file": fn, "url": _file_url(fn), "text": text}
-
-def query_doubao_clone_status(slot_id):
-    body = json.dumps({"appid": DOUBAO_APPID, "speaker_id": slot_id}).encode()
-    req = urllib.request.Request("https://openspeech.bytedance.com/api/v1/mega_tts/status",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer;" + DOUBAO_TOKEN,
-            "Resource-Id": DOUBAO_CLONE_RESOURCE,
-        },
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            raw = r.read().decode("utf-8", "replace")
-            resp = json.loads(raw or "{}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise ValueError("\u8c46\u5305\u590d\u523b\u72b6\u6001\u67e5\u8be2\u5931\u8d25: " + detail)
-    base = resp.get("BaseResp") or resp.get("base_resp") or {}
-    code = base.get("StatusCode", base.get("status_code", resp.get("code", 0)))
-    try:
-        code_i = int(code)
-    except Exception:
-        code_i = 0 if code in ("0", "OK", "ok", None) else -1
-    if code_i not in (0,):
-        msg = base.get("StatusMessage") or base.get("status_message") or resp.get("message") or json.dumps(resp, ensure_ascii=False)[:200]
-        raise ValueError("\u8c46\u5305\u590d\u523b\u72b6\u6001\u5f02\u5e38: " + str(msg)[:200])
-    return resp
-
-def finalize_ready_voice(username, slot_id, display_name=None, demo_audio=None, preview_file=None):
-    now = int(time.time())
-    voice_key = "vip_" + re.sub(r"[^a-zA-Z0-9_\\-]", "_", slot_id)
-    name = (display_name or "\u6211\u7684VIP\u590d\u523b\u97f3\u8272").strip()[:40]
-    with closing(adb()) as c:
-        c.execute("""INSERT OR IGNORE INTO audio_voices
-            (username, scope, voice_key, display_name, provider_voice, preview_file, preview_url, slot_id, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""",
-            (username, "personal", voice_key, name, slot_id, preview_file, demo_audio, slot_id, now, now))
-        c.execute("""UPDATE audio_voices
-            SET display_name=?, provider_voice=?, preview_file=?, preview_url=?, slot_id=?, updated_at=?
-            WHERE username=? AND scope='personal' AND voice_key=?""",
-            (name, slot_id, preview_file, demo_audio, slot_id, now, username, voice_key))
-        r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
-                      (username, voice_key)).fetchone()
-        voice_id = r["id"] if r else None
-        c.execute("""UPDATE audio_voice_slots SET voice_id=?, status='ready', clone_started_at=NULL, previous_preview_url=NULL, clone_error=NULL, updated_at=?
-            WHERE username=? AND slot_id=?""", (voice_id, now, username, slot_id))
-        c.commit()
-    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name, "preview_file": preview_file, "preview_url": demo_audio, "status": "ready"}
 
 def clear_voice_preview(username, slot_id):
     username = (username or "").strip()
@@ -356,100 +288,61 @@ def check_clone_status(username, slot_id):
                    clone_baseline_version, clone_baseline_icl_speaker_id, clone_baseline_demo_audio
             FROM audio_voice_slots
             WHERE username=? AND slot_id=?""", (username, slot_id)).fetchone()
-        voice = c.execute("""SELECT display_name, preview_url FROM audio_voices
-            WHERE username=? AND slot_id=? ORDER BY id DESC LIMIT 1""", (username, slot_id)).fetchone()
+        voice = c.execute("""SELECT display_name, provider_voice, preview_url FROM audio_voices
+            WHERE id=? AND username=? AND slot_id=?""",
+            (slot["voice_id"] if slot else -1, username, slot_id)).fetchone()
     if not slot:
         raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
-    # CosyVoice\uff1aprovider_voice \u662f CosyVoice voice_id \u5c31\u67e5\u5b83\u7684 list_voice \u72b6\u6001\uff0c\u4e0d\u78b0\u8c46\u5305\u3002
-    if cosyvoice.enabled():
+    if (slot["status"] == "training" and slot["voice_id"] and voice
+            and str(voice["provider_voice"] or "").startswith(cosyvoice.CLONE_MODEL)
+            and voice["preview_url"]):
+        now = int(time.time())
         with closing(adb()) as c:
-            pv = c.execute("""SELECT provider_voice FROM audio_voices WHERE username=? AND slot_id=?
-                ORDER BY id DESC LIMIT 1""", (username, slot_id)).fetchone()
-        provider_voice = (pv["provider_voice"] if pv else "") or ""
-        if provider_voice.startswith(cosyvoice.CLONE_MODEL):
-            if slot["status"] == "failed":
-                return {"status": "failed", "clone_error": slot["clone_error"] or "\u590d\u523b\u5931\u8d25"}
-            try:
-                cv_status, _ = cosyvoice.voice_status(provider_voice)
-            except Exception:
-                return {"status": slot["status"] or "training"}
-            new_status = "ready" if cv_status == "OK" else ("failed" if cv_status not in ("", "OK") and "ing" not in cv_status.lower() else "training")
-            if new_status != slot["status"]:
-                with closing(adb()) as c:
-                    c.execute("UPDATE audio_voice_slots SET status=?, updated_at=? WHERE username=? AND slot_id=?",
-                              (new_status, int(time.time()), username, slot_id))
-                    c.commit()
-            return {"status": new_status, "cosy_status": cv_status}
-    if slot["status"] == "failed":
-        return {"status": "failed", "clone_error": slot["clone_error"] or "\u8c46\u5305\u590d\u523b\u5931\u8d25", "doubao_status": None}
-    if slot["status"] == "ready" and voice and voice["preview_url"] and not slot["clone_started_at"]:
-        return {"status": "ready", "preview_url": voice["preview_url"], "doubao_status": 2}
-    try:
-        resp = query_doubao_clone_status(slot_id)
-    except Exception:
-        if slot["status"] == "training":
-            return {"status": "training", "doubao_status": None}
-        raise
-    st = resp.get("status")
-    demo = resp.get("demo_audio")
-    version = str(resp.get("version") or "")
-    icl_speaker_id = str(resp.get("icl_speaker_id") or "")
-    create_time = resp.get("create_time") or resp.get("createTime") or resp.get("created_at")
-    try:
-        create_time_i = int(create_time or 0)
-    except Exception:
-        create_time_i = 0
-    clone_started_at = int(slot["clone_started_at"] or 0)
-    clone_upload_at = int(slot["clone_upload_at"] or 0)
-    baseline_version = str(slot["clone_baseline_version"] or "")
-    baseline_icl = str(slot["clone_baseline_icl_speaker_id"] or "")
-    baseline_demo = str(slot["clone_baseline_demo_audio"] or "")
-    same_as_baseline = bool(baseline_version or baseline_icl or baseline_demo) and (
-        (not baseline_version or version == baseline_version) and
-        (not baseline_icl or icl_speaker_id == baseline_icl) and
-        (not baseline_demo or str(demo or "") == baseline_demo)
-    )
-    if st == 2 and same_as_baseline:
-        return {
-            "status": "training",
-            "doubao_status": st,
-            "doubao_create_time": create_time_i,
-            "doubao_version": version,
-            "doubao_icl_speaker_id": icl_speaker_id,
-            "clone_started_at": clone_started_at,
-            "clone_upload_at": clone_upload_at,
-            "stale_result": True,
-        }
-    if st == 2:
-        try:
-            preview = generate_doubao_preview(slot_id)
-            preview_url = preview.get("url")
-            preview_file = preview.get("file")
-        except Exception as e:
-            err = "\u6d4b\u8bd5\u97f3\u9891\u751f\u6210\u5931\u8d25: " + str(e)[:220]
-            print("[check_clone_status] preview tts failed username=%s slot_id=%s error=%s" %
-                  (username, slot_id, str(e)[:240]), flush=True)
-            with closing(adb()) as c:
-                c.execute("UPDATE audio_voice_slots SET status='failed', clone_error=?, updated_at=? WHERE username=? AND slot_id=?",
-                          (err, int(time.time()), username, slot_id))
-                c.commit()
-            return {"status": "failed", "clone_error": err, "doubao_status": st, "doubao_demo_audio": demo}
-        if not preview_url:
-            err = "\u6d4b\u8bd5\u97f3\u9891\u751f\u6210\u8fd4\u56de\u4e3a\u7a7a"
-            with closing(adb()) as c:
-                c.execute("UPDATE audio_voice_slots SET status='failed', clone_error=?, updated_at=? WHERE username=? AND slot_id=?",
-                          (err, int(time.time()), username, slot_id))
-                c.commit()
-            return {"status": "failed", "clone_error": err, "doubao_status": st, "doubao_demo_audio": demo}
-        v = finalize_ready_voice(username, slot_id, voice["display_name"] if voice else None, preview_url, preview_file)
-        return {"status": "ready", "preview_url": preview_url, "voice": v, "doubao_status": st, "doubao_demo_audio": demo, "doubao_create_time": create_time_i}
-    if st == 3:
-        with closing(adb()) as c:
-            c.execute("UPDATE audio_voice_slots SET status='failed', updated_at=? WHERE username=? AND slot_id=?",
-                      (int(time.time()), username, slot_id))
+            cur = c.execute("""UPDATE audio_voice_slots SET status='ready', updated_at=?
+                WHERE id=? AND username=? AND slot_id=? AND status='training' AND voice_id=?
+                  AND EXISTS (
+                    SELECT 1 FROM audio_voices v
+                    WHERE v.id=audio_voice_slots.voice_id AND v.scope='personal'
+                      AND v.username=? AND v.slot_id=? AND v.provider_voice=?
+                      AND v.preview_url=?
+                  )""", (now, slot["id"], username, slot_id, slot["voice_id"],
+                           username, slot_id, voice["provider_voice"], voice["preview_url"]))
             c.commit()
-        return {"status": "failed", "doubao_status": st}
-    return {"status": "training", "doubao_status": st}
+        if cur.rowcount == 1:
+            return {"status": "ready", "preview_url": voice["preview_url"]}
+        with closing(adb()) as c:
+            current = c.execute("""SELECT s.status, s.clone_error, v.preview_url
+                FROM audio_voice_slots s LEFT JOIN audio_voices v ON v.id=s.voice_id
+                WHERE s.username=? AND s.slot_id=?""", (username, slot_id)).fetchone()
+        result = {"status": (current["status"] if current else "training") or "training"}
+        if current and current["preview_url"]:
+            result["preview_url"] = current["preview_url"]
+        if current and current["clone_error"]:
+            result["clone_error"] = current["clone_error"]
+        return result
+    if not cosyvoice.enabled():
+        return {"status": "failed", "clone_error": "声音复刻服务暂不可用"}
+    # CosyVoice: provider_voice is replaced with the real voice id by the
+    # background clone. Until then mark_clone_training intentionally stores the
+    # slot id as a placeholder, so polling must keep reporting "training".
+    provider_voice = (voice["provider_voice"] if voice else "") or ""
+    if provider_voice.startswith(cosyvoice.CLONE_MODEL):
+        if slot["status"] == "failed":
+            return {"status": "failed", "clone_error": slot["clone_error"] or "\u590d\u523b\u5931\u8d25"}
+        try:
+            cv_status, _ = cosyvoice.voice_status(provider_voice)
+        except Exception:
+            return {"status": slot["status"] or "training"}
+        new_status = "ready" if cv_status == "OK" else ("failed" if cv_status not in ("", "OK") and "ing" not in cv_status.lower() else "training")
+        if new_status != slot["status"]:
+            with closing(adb()) as c:
+                c.execute("UPDATE audio_voice_slots SET status=?, updated_at=? WHERE username=? AND slot_id=?",
+                          (new_status, int(time.time()), username, slot_id))
+                c.commit()
+        return {"status": new_status, "cosy_status": cv_status}
+    if slot["status"] == "training":
+        return {"status": "training"}
+    return {"status": "failed", "clone_error": "该音色来自已停用渠道，请重新复刻"}
 
 ALLOWED_CLONE_AUDIO_FORMATS = {"mp3", "wav", "m4a", "aac", "ogg"}
 
@@ -497,10 +390,6 @@ def validate_clone_vip_payload(username, payload):
         last_at = int(slot["clone_upload_at"] or slot["updated_at"] or 0)
         if last_at and now - last_at < 600:
             raise CloneVipValidationError(409, "音色正在复刻中，请等待完成")
-    is_reclone = slot["status"] == "ready" and bool(slot["voice_id"])
-    reclone_count = int(slot["reclone_count"] or 0)
-    if is_reclone and reclone_count >= 10:
-        raise CloneVipValidationError(409, "该槽位已达复刻上限")
     checked = dict(payload)
     checked["slot_id"] = slot_id
     checked["audio"] = audio_b64
@@ -525,8 +414,6 @@ def mark_clone_training(username, slot_id, name):
                 raise ValueError("\u97f3\u8272\u6b63\u5728\u590d\u523b\u4e2d\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210")
         is_reclone = slot["status"] == "ready" and bool(slot["voice_id"])
         reclone_count = int(slot["reclone_count"] or 0)
-        if is_reclone and reclone_count >= 10:
-            raise ValueError("\u8be5\u97f3\u8272\u5df2\u8fbe\u5230\u6700\u9ad810\u6b21\u91cd\u65b0\u590d\u523b\u4e0a\u9650")
         next_reclone_count = reclone_count + 1 if is_reclone else reclone_count
         c.execute("""INSERT OR IGNORE INTO audio_voices
             (username, scope, voice_key, display_name, provider_voice, slot_id, created_at, updated_at)
@@ -543,7 +430,7 @@ def mark_clone_training(username, slot_id, name):
             WHERE username=? AND slot_id=?""", (voice_id, next_reclone_count, now, now, username, slot_id))
         c.commit()
     clear_voice_preview(username, slot_id)
-    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name, "status": "training", "reclone_count": next_reclone_count, "reclone_remaining": max(0, 10 - next_reclone_count)}
+    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name, "status": "training", "reclone_count": next_reclone_count}
 
 def clone_vip_voice_background(username, payload):
     try:
@@ -622,17 +509,27 @@ def _cosy_clone_preview(voice_id):
 
 def _cosy_backfill_preview_async(voice_id, username, voice_key):
     """复刻返回后【异步】生成试听并回填，不拖慢音色「就绪」。synth 对就绪窗口重试(#602)，
-    成功就 UPDATE 该音色行的 preview(仅当其仍为空，避免覆盖已回填/后续重刻)。"""
+    成功就 UPDATE 该音色行的 preview 并同步槽位 ready。provider_voice 必须仍匹配本次
+    复刻，避免旧异步任务覆盖随后发起的新复刻。"""
     def _run():
         pf, url = _cosy_clone_preview(voice_id)
         if not url:
             return
         try:
             with closing(adb()) as c:
-                c.execute("""UPDATE audio_voices SET preview_file=?, preview_url=?, updated_at=?
+                now = int(time.time())
+                cur = c.execute("""UPDATE audio_voices SET preview_file=?, preview_url=?, updated_at=?
                     WHERE username=? AND scope='personal' AND voice_key=?
+                      AND provider_voice=?
                       AND (preview_url IS NULL OR preview_url='')""",
-                    (pf, url, int(time.time()), username, voice_key))
+                    (pf, url, now, username, voice_key, voice_id))
+                if cur.rowcount:
+                    c.execute("""UPDATE audio_voice_slots SET status='ready', updated_at=?
+                        WHERE username=? AND status='training' AND voice_id IN (
+                            SELECT id FROM audio_voices
+                            WHERE username=? AND scope='personal' AND voice_key=?
+                              AND provider_voice=?
+                        )""", (now, username, username, voice_key, voice_id))
                 c.commit()
         except Exception as e:
             print("[cosyvoice] 试听回填落库失败: %s" % str(e)[:120], flush=True)
@@ -695,94 +592,15 @@ def clone_vip_voice(username, payload):
         raise ValueError("\u7f3a\u5c11\u97f3\u8272\u69fd\u4f4d")
     if not audio_b64:
         raise ValueError("\u8bf7\u5148\u4e0a\u4f20\u6837\u97f3")
-    if not cosyvoice.enabled() and (not DOUBAO_APPID or not DOUBAO_TOKEN):
-        raise ValueError("\u8c46\u5305\u58f0\u97f3\u590d\u523b\u914d\u7f6e\u672a\u5b8c\u6210")
+    if not cosyvoice.enabled():
+        raise ValueError("声音复刻服务暂不可用")
     with closing(adb()) as c:
         slot = c.execute("""SELECT id, slot_id, voice_id FROM audio_voice_slots
             WHERE username=? AND slot_id=? AND status IN ('active','training','failed','ready')""", (username, slot_id)).fetchone()
     if not slot:
         raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
     audio_b64, audio_format = prepare_clone_audio(audio_b64, audio_format)
-    if cosyvoice.enabled():
-        return _clone_via_cosyvoice(username, slot_id, name, audio_b64)
-    baseline_version = baseline_icl = baseline_demo = ""
-    try:
-        baseline = query_doubao_clone_status(slot_id)
-        baseline_version = str(baseline.get("version") or "")
-        baseline_icl = str(baseline.get("icl_speaker_id") or "")
-        baseline_demo = str(baseline.get("demo_audio") or "")
-    except Exception as e:
-        print("[clone_vip_voice] baseline status skipped username=%s slot_id=%s error=%s" %
-              (username, slot_id, str(e)[:200]), flush=True)
-    body = json.dumps({
-        "appid": DOUBAO_APPID,
-        "speaker_id": slot_id,
-        "audios": [{"audio_bytes": audio_b64, "audio_format": audio_format}],
-        "source": 2,
-        "language": 0,
-        "model_type": DOUBAO_CLONE_MODEL_TYPE,
-    }).encode()
-    req = urllib.request.Request("https://openspeech.bytedance.com/api/v1/mega_tts/audio/upload",
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": "Bearer;" + DOUBAO_TOKEN,
-            "Resource-Id": DOUBAO_CLONE_RESOURCE,
-        },
-        method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            raw = r.read().decode("utf-8", "replace")
-            resp = json.loads(raw or "{}")
-    except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise ValueError("\u8c46\u5305VIP\u590d\u523b\u63a5\u53e3\u5931\u8d25: " + detail)
-    except Exception as e:
-        raise ValueError("\u8c46\u5305VIP\u590d\u523b\u8bf7\u6c42\u5931\u8d25: " + str(e)[:160])
-    base = resp.get("BaseResp") or resp.get("base_resp") or {}
-    code = base.get("StatusCode", base.get("status_code", resp.get("code", 0)))
-    try:
-        code_i = int(code)
-    except Exception:
-        code_i = 0 if code in ("0", "OK", "ok", None) else -1
-    if code_i not in (0,):
-        msg = base.get("StatusMessage") or base.get("status_message") or resp.get("message") or json.dumps(resp, ensure_ascii=False)[:200]
-        raise ValueError("\u8c46\u5305VIP\u590d\u523b\u5931\u8d25: " + str(msg)[:200])
-    returned_speaker_id = (resp.get("speaker_id") or resp.get("speakerId") or "").strip()
-    if returned_speaker_id and returned_speaker_id != slot_id:
-        raise ValueError("\u8c46\u5305VIP\u590d\u523b\u8fd4\u56de\u7684\u97f3\u8272ID\u4e0e\u69fd\u4f4dID\u4e0d\u4e00\u81f4")
-    upload_resp = json.dumps({
-        "BaseResp": base,
-        "speaker_id": returned_speaker_id,
-        "message": resp.get("message"),
-        "code": resp.get("code"),
-    }, ensure_ascii=False)[:1000]
-    now = int(time.time())
-    voice_key = "vip_" + re.sub(r"[^a-zA-Z0-9_\\-]", "_", slot_id)
-    with closing(adb()) as c:
-        c.execute("""INSERT OR IGNORE INTO audio_voices
-            (username, scope, voice_key, display_name, provider_voice, slot_id, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?)""",
-            (username, "personal", voice_key, name, slot_id, slot_id, now, now))
-        c.execute("""UPDATE audio_voices
-            SET display_name=?, provider_voice=?, preview_file=NULL, preview_url=NULL, slot_id=?, updated_at=?
-            WHERE username=? AND scope='personal' AND voice_key=?""",
-            (name, slot_id, slot_id, now, username, voice_key))
-        r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
-                      (username, voice_key)).fetchone()
-        voice_id = r["id"] if r else None
-        c.execute("""UPDATE audio_voice_slots
-            SET voice_id=?, status='training', clone_started_at=?, clone_upload_at=?, clone_error=NULL,
-                clone_upload_speaker_id=?, clone_upload_response=?,
-                clone_baseline_version=?, clone_baseline_icl_speaker_id=?, clone_baseline_demo_audio=?,
-                updated_at=?
-            WHERE username=? AND slot_id=?""",
-            (voice_id, now, now, returned_speaker_id, upload_resp,
-             baseline_version, baseline_icl, baseline_demo, now, username, slot_id))
-        c.commit()
-    print("[clone_vip_voice] upload ok username=%s slot_id=%s returned_speaker_id=%s response=%s" %
-          (username, slot_id, returned_speaker_id or "", upload_resp[:500]), flush=True)
-    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name, "status": "training", "speaker_id": returned_speaker_id or slot_id}
+    return _clone_via_cosyvoice(username, slot_id, name, audio_b64)
 
 def ensure_audio_voice(username, voice_key):
     username = (username or "").strip()
@@ -846,16 +664,37 @@ def record_audio_asset(job_id, username, result):
     if not result or result.get("type") != "audio":
         return
     now = int(time.time())
-    raw_voice_key = (result.get("voice") or "S_d21F8OR62").strip()
-    voice_key = raw_voice_key.lower() if raw_voice_key.lower() in set() else raw_voice_key
-    voice_id = ensure_audio_voice(username, voice_key)  # #604: 遗留/占位 key 现在返 None，voice_id 存 NULL、不再凭空建占位行
+    asset_kind = str(result.get("asset_kind") or "voice")
+    if asset_kind == "sound_effect":
+        voice_key, voice_id = "", None
+    else:
+        raw_voice_key = (result.get("voice") or "S_d21F8OR62").strip()
+        voice_key = raw_voice_key.lower() if raw_voice_key.lower() in set() else raw_voice_key
+        voice_id = ensure_audio_voice(username, voice_key)
     with closing(adb()) as c:
+        _ensure_column(c, "audio_assets", "asset_kind", "TEXT NOT NULL DEFAULT 'voice'")
+        _ensure_column(c, "audio_assets", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
         c.execute("""INSERT OR REPLACE INTO audio_assets
             (job_id, username, voice_id, voice_key, file, url, text, speed, pitch, volume, created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, username, voice_id, voice_key, result.get("file"), result.get("url"),
              result.get("text") or result.get("prompt"), result.get("speed"), result.get("pitch"),
              result.get("volume"), now))
+        c.execute(
+            "UPDATE audio_assets SET asset_kind=?,metadata_json=? WHERE job_id=?",
+            (
+                asset_kind,
+                json.dumps({
+                    "provider": result.get("provider"),
+                    "provider_model": result.get("provider_model"),
+                    "provider_request_id": result.get("provider_request_id"),
+                    "quality": result.get("quality") or {},
+                    "sound_design": result.get("sound_design") or {},
+                    "duration_ms": result.get("duration_ms"),
+                }, ensure_ascii=False, sort_keys=True),
+                job_id,
+            ),
+        )
         c.commit()
 
 def _cleanup_alloy_placeholder_voices():
@@ -872,8 +711,42 @@ def _cleanup_alloy_placeholder_voices():
     except Exception as e:
         print("[audio] alloy 占位清理失败: %s" % str(e)[:120], flush=True)
 
+def _migrate_public_voice_presets():
+    """切换公共音色到 CosyVoice，并让旧供应商生成的试听只失效一次。"""
+    now = int(time.time())
+    changed = 0
+    with closing(adb()) as c:
+        for legacy_voice, preset_voice in cosyvoice.PUBLIC_VOICE_PRESETS.items():
+            changed += c.execute("""UPDATE audio_voices
+                SET provider_voice=?, preview_file=NULL, preview_url=NULL, updated_at=?
+                WHERE scope='public' AND username='' AND voice_key=? AND provider_voice=?""",
+                (preset_voice, now, legacy_voice, legacy_voice)).rowcount
+        c.commit()
+    if changed:
+        print("[audio] 公共音色已切换 CosyVoice，旧试听缓存失效 %d 条" % changed, flush=True)
+    return changed
+
+def _repair_ready_cosyvoice_slots():
+    """试听已生成即代表音色可用；把历史遗留的 training 状态幂等落成 ready。"""
+    with closing(adb()) as c:
+        changed = c.execute("""UPDATE audio_voice_slots
+            SET status='ready', updated_at=?
+            WHERE status='training' AND EXISTS (
+                SELECT 1 FROM audio_voices v
+                WHERE v.id=audio_voice_slots.voice_id
+                  AND v.scope='personal'
+                  AND v.provider_voice LIKE 'cosyvoice-%'
+                  AND COALESCE(v.preview_url, '')<>''
+            )""", (int(time.time()),)).rowcount
+        c.commit()
+    if changed:
+        print("[audio] 修正已就绪 CosyVoice 槽位 %d 条" % changed, flush=True)
+    return changed
+
 def backfill_audio_assets():
     _cleanup_alloy_placeholder_voices()   # #604: 先清存量占位，再重放(ensure 已不再重建)
+    _migrate_public_voice_presets()
+    _repair_ready_cosyvoice_slots()
     try:
         with closing(jdb()) as c:
             rows = c.execute("""SELECT id, username, result FROM jobs
@@ -899,20 +772,20 @@ def _ensure_public_voice_preview(row):
     if d.get("scope") != "public" or d.get("preview_url"):
         return d
     speaker = (d.get("provider_voice") or d.get("voice_key") or "").strip()
-    if not speaker.startswith("S_"):   # 仅豆包/火山 S_ 音色可合成试听样音
+    if not cosyvoice.enabled():
         return d
     try:
-        preview = generate_doubao_preview(speaker, PUBLIC_VOICE_SAMPLE_TEXT)
-        fn = preview.get("file")
-        if fn:
-            url = public_url(fn, "audio/mpeg")   # 走 COS 直链（与其它产出一致）
-            now = int(time.time())
-            with closing(adb()) as c:
-                c.execute("UPDATE audio_voices SET preview_file=?, preview_url=?, updated_at=? WHERE id=?",
-                          (fn, url, now, d["id"]))
-                c.commit()
-            d["preview_file"] = fn
-            d["preview_url"] = url
+        audio_bytes = cosyvoice.synth(_cosy_voice_for(speaker), PUBLIC_VOICE_SAMPLE_TEXT)
+        fn = "audio/voice_preview_%s.mp3" % uuid.uuid4().hex
+        _out_path(fn).write_bytes(audio_bytes)
+        url = public_url(fn, "audio/mpeg")
+        now = int(time.time())
+        with closing(adb()) as c:
+            c.execute("UPDATE audio_voices SET preview_file=?, preview_url=?, updated_at=? WHERE id=?",
+                      (fn, url, now, d["id"]))
+            c.commit()
+        d["preview_file"] = fn
+        d["preview_url"] = url
     except Exception as e:
         print("[audio-preview-warmup] 公共音色试听样音生成失败 voice=%s error=%s" %
               (d.get("voice_key"), str(e)[:200]), flush=True)
@@ -976,17 +849,55 @@ def rename_audio_voice(username, slot_id, display_name):
         c.commit()
     return {"slot_id": slot_id, "display_name": name, "updated_at": now}
 
-def list_audio_assets(username, limit=120):
+def list_audio_assets(username, limit=120, offset=0):
     limit = max(1, min(120, int(limit or 120)))
+    offset = max(0, min(100000, int(offset or 0)))
     with closing(adb()) as c:
         _ensure_column(c, "audio_assets", "deleted", "INTEGER DEFAULT 0")
+        _ensure_column(c, "audio_assets", "asset_kind", "TEXT NOT NULL DEFAULT 'voice'")
+        _ensure_column(c, "audio_assets", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
         rows = c.execute("""SELECT a.id, a.job_id, a.username, a.voice_id, a.voice_key, a.file, a.url, a.text,
                    a.speed, a.pitch, a.volume, a.created_at, v.display_name AS voice_name, v.preview_url
+                   ,a.asset_kind,a.metadata_json
             FROM audio_assets a
             LEFT JOIN audio_voices v ON v.id = a.voice_id
             WHERE a.username=? AND COALESCE(a.deleted,0)=0
-            ORDER BY a.id DESC LIMIT ?""", (username, limit)).fetchall()
+            ORDER BY a.id DESC LIMIT ? OFFSET ?""", (username, limit, offset)).fetchall()
     return [dict(r) for r in rows]
+
+
+def get_audio_asset_by_job(username, job_id):
+    try:
+        job_id = int(job_id)
+    except (TypeError, ValueError):
+        return None
+    with closing(adb()) as conn:
+        _ensure_column(conn, "audio_assets", "deleted", "INTEGER DEFAULT 0")
+        _ensure_column(conn, "audio_assets", "asset_kind", "TEXT NOT NULL DEFAULT 'voice'")
+        _ensure_column(conn, "audio_assets", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+        row = conn.execute(
+            "SELECT id,job_id,username,file,url,text,created_at,asset_kind,"
+            "metadata_json FROM audio_assets WHERE job_id=? AND username=? "
+            "AND COALESCE(deleted,0)=0", (job_id, username),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_audio_asset(username, asset_id):
+    """Return one owned, non-deleted audio asset for internal composition use."""
+    try:
+        asset_id = int(asset_id)
+    except (TypeError, ValueError):
+        return None
+    with closing(adb()) as conn:
+        conn.row_factory = sqlite3.Row
+        _ensure_column(conn, "audio_assets", "deleted", "INTEGER DEFAULT 0")
+        row = conn.execute(
+            "SELECT id,username,file,url,created_at FROM audio_assets "
+            "WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
+            (asset_id, username),
+        ).fetchone()
+    return dict(row) if row else None
 
 # ============ 配音能力：OpenAI TTS（同事的 audio 能力，合并保留） ============
 VOICE_MAP = {
@@ -995,6 +906,35 @@ VOICE_MAP = {
     "fable": "fable", "nova": "nova", "onyx": "onyx", "sage": "sage", "shimmer": "shimmer",
 }
 SPEED_MAP = {"slow": 0.88, "normal": 1.0, "fast": 1.12, "偏慢": 0.88, "正常": 1.0, "偏快": 1.12}
+
+
+def _audio_duration_ms(file_name):
+    """Return authoritative ffprobe duration, or None for metadata recovery."""
+    try:
+        path = _out_path(file_name)
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            ],
+            check=True, timeout=30, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        duration_ms = int(round(float(proc.stdout.strip()) * 1000))
+        return duration_ms if duration_ms > 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return None
+
+
+def _audio_result(file_name, voice_key, speed, pitch, volume, text):
+    return {
+        "type": "audio", "file": file_name,
+        "url": public_url(file_name, "audio/mpeg"),
+        "voice": voice_key, "speed": speed, "pitch": pitch, "volume": volume,
+        "text": text, "prompt": text,
+        "duration_ms": _audio_duration_ms(file_name),
+    }
+
 
 def _cosy_voice_for(provider_voice):
     """把库里的 provider_voice 翻成 CosyVoice 能用的 voice：
@@ -1011,30 +951,55 @@ def _cosy_voice_for(provider_voice):
         raise ValueError("该音色尚未迁移到新引擎，请重新复刻一次")
     return v      # 兜底：当作预置名直接用
 
-def gen_audio(payload):
-    text = (payload.get("text") or payload.get("prompt") or "").strip()
+def validate_audio_payload(payload, username=""):
+    if not isinstance(payload, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    body = dict(payload)
+    text = str(body.get("text") or body.get("prompt") or "").strip()
     if not text:
         raise ValueError("配音文案不能为空")
-    if len(text) > 1200:
-        raise ValueError("配音文案过长，请控制在 1200 字以内")
-    username = (payload.get("_username") or "").strip()
-    raw_voice_key = (payload.get("voice") or "S_d21F8OR62").strip()
-    voice_key = raw_voice_key.lower() if raw_voice_key.lower() in set() else raw_voice_key
-    voice = resolve_audio_provider_voice(username, voice_key)
-    raw_speed = payload.get("speed")
+    if len(text) > 1000:
+        raise ValueError("配音文案过长，请控制在 1000 字以内")
+    raw_voice_key = body.get("voice") or "S_d21F8OR62"
+    if not isinstance(raw_voice_key, str) or not raw_voice_key.strip() or len(raw_voice_key.strip()) > 128:
+        raise ValueError("音色参数无效")
+    voice_key = raw_voice_key.strip()
+    if username:
+        resolve_audio_provider_voice(username, voice_key)
+    raw_speed = body.get("speed")
     if isinstance(raw_speed, (int, float)):
-        speed = max(0.5, min(2.0, round(float(raw_speed), 1)))
+        if isinstance(raw_speed, bool) or raw_speed != raw_speed or not 0.5 <= float(raw_speed) <= 2.0:
+            raise ValueError("语速必须是 0.5-2.0")
+        speed = round(float(raw_speed), 1)
     else:
+        if raw_speed not in (None, "", *SPEED_MAP):
+            raise ValueError("语速参数无效")
         speed = SPEED_MAP.get(raw_speed or "normal", 1.0)
-    def knob(name, minv, maxv, default):
+    for name, minimum, maximum in (("pitch", -12, 12), ("volume", -50, 100)):
+        raw = body.get(name, 0)
+        if isinstance(raw, bool):
+            raise ValueError("%s 必须是整数" % name)
         try:
-            return max(minv, min(maxv, int(float(payload.get(name, default)))))
-        except Exception:
-            return default
-    pitch = knob("pitch", -12, 12, 0)
-    volume = knob("volume", -50, 100, 0)
+            clean = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError("%s 必须是整数" % name)
+        if str(raw).strip() != str(clean) or not minimum <= clean <= maximum:
+            raise ValueError("%s 超出范围" % name)
+        body[name] = clean
+    body.update({"text": text, "voice": voice_key, "speed": speed})
+    return body
 
-    # CosyVoice 全量通道：配了 DASHSCOPE_API_KEY 就走这里，否则回落豆包/OpenAI(合并零风险)。
+
+def gen_audio(payload):
+    username = str((payload or {}).get("_username") or "").strip()
+    payload = validate_audio_payload(payload, username)
+    text = payload["text"]
+    voice_key = payload["voice"]
+    voice = resolve_audio_provider_voice(username, voice_key)
+    speed, pitch, volume = payload["speed"], payload["pitch"], payload["volume"]
+
+    # Current public and personal voices use CosyVoice. Never fall back to
+    # the retired provider when the CosyVoice channel is unavailable.
     if cosyvoice.enabled():
         cv_voice = _cosy_voice_for(voice)
         # knob 的 pitch/-12~12、volume/-50~100 是豆包量纲；CosyVoice 用 pitch 0.5~2、volume 0~100。
@@ -1043,26 +1008,11 @@ def gen_audio(payload):
                                    volume=max(0, min(100, 50 + volume // 2)))
         fn = "audio/aud_%d.mp3" % int(time.time() * 1000)   # 非敏感命名 → 可走 COS 公开直链
         _out_path(fn).write_bytes(cv_audio)
-        return {"type": "audio", "file": fn, "url": public_url(fn, "audio/mpeg"), "voice": voice_key,
-                "speed": speed, "pitch": pitch, "volume": volume, "text": text, "prompt": text}
+        return _audio_result(fn, voice_key, speed, pitch, volume, text)
 
-    if str(voice).startswith("S_"):
-        speech_rate = int(round((speed - 1.0) * 100))
-        preview = generate_doubao_preview(voice, text, speech_rate=speech_rate, loudness_rate=volume, pitch_rate=pitch)
-        fn = preview.get("file")
-        # 正式配音不能复用 voice_preview 本地URL(敏感文件需归属鉴权且不走COS)。
-        # 转存为独立 aud_*.mp3(非敏感)再 public_url→COS公开直链,可直接试听/下载。
-        if fn:
-            formal_fn = "audio/aud_%d.mp3" % int(time.time() * 1000)
-            _out_path(formal_fn).write_bytes(_out_path(fn).read_bytes())
-            try:
-                _out_path(fn).unlink()
-            except Exception:
-                pass
-            fn = formal_fn
-        url = public_url(fn, "audio/mpeg") if fn else preview.get("url")
-        return {"type": "audio", "file": fn, "url": url, "voice": voice_key,
-                "speed": speed, "pitch": pitch, "volume": volume, "text": text, "prompt": text}
+    if voice_key.startswith(("S_", "vip_")) or str(voice).startswith(("S_", "vip_", "cosyvoice-")):
+        raise ValueError("声音服务暂不可用，请稍后重试")
+
     instructions = "中文短视频口播配音，语气自然，吐字清晰，节奏适合美业/本地生活转化。"
     body = json.dumps({
         "model": TTS_MODEL, "voice": voice, "input": text,
@@ -1071,7 +1021,6 @@ def gen_audio(payload):
     data = _post_bytes("/v1/audio/speech", body, "application/json")
     fn = "audio/aud_%d.mp3" % int(time.time() * 1000)
     _out_path(fn).write_bytes(data)
-    return {"type": "audio", "file": fn, "url": public_url(fn, "audio/mpeg"), "voice": voice_key,
-            "speed": speed, "pitch": pitch, "volume": volume, "text": text, "prompt": text}
+    return _audio_result(fn, voice_key, speed, pitch, volume, text)
 
 HANDLERS = {"audio": gen_audio}

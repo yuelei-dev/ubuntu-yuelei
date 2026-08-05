@@ -28,10 +28,10 @@ class VideoResolutionValidationTests(unittest.TestCase):
             video.validate_video_payload({"mode": "text", "image_data": PNG, "text": "hi",
                                           "voice": "v", "resolution": "4k"})
 
-    def test_cinematic_is_where_1080p_lives_now(self):
+    def test_cinematic_overrides_legacy_1080p_to_720p(self):
         out = video.validate_cinematic_payload({
             "avatar_ids": [1], "prompt": "海边跳舞", "resolution": "1080p", "ratio": "9:16"})
-        self.assertEqual("1080p", out["resolution"])
+        self.assertEqual("720p", out["resolution"])
 
 
 class TryonParameterValidationTests(unittest.TestCase):
@@ -117,20 +117,31 @@ class VideoParameterUiTests(unittest.TestCase):
         self.assertNotIn("seconds:6", VIDEO_HTML)
 
     def test_xiaole_and_tryon_show_cost_and_match_backend(self):
-        """视频预估价必须读取与后端受理计价相同的实时收费目录。"""
-        self.assertIn('src="pricing-gate.js', VIDEO_HTML)
-        self.assertIn("HQPricingGate.create", VIDEO_HTML)
-        self.assertIn("requiredKeys:VIDEO_PRICING_KEYS", VIDEO_HTML)
-        self.assertIn("if(pricingGate.guard()) return true", VIDEO_HTML)
-        for key in ("grok_video.v1.480p.per_sec", "grok_video.v1.720p.per_sec",
-                    "grok_video.v1_5.480p.per_sec", "grok_video.v1_5.720p.per_sec",
-                    "grok_video.v1_5.1080p.per_sec", "xiaole_video.per_sec",
-                    "tryon.single", "tryon.combo"):
-            self.assertIn("'%s'" % key, VIDEO_HTML)
-        self.assertIn("GROK_PRICE_KEYS[model+'|'+resolution]", VIDEO_HTML)
+        """果肉分档价格与试衣价格都要在前端显示，且与后端实扣对上。"""
+        from content_domains import points
+        self.assertIn("'grok-imagine-video':{'480p':10,'720p':12}", VIDEO_HTML)
+        self.assertIn("'grok-imagine-video-1.5':{'480p':15,'720p':25,'1080p':44}", VIDEO_HTML)
+        self.assertEqual(points.cost_of("xiaole_video", {"duration": 1, "resolution": "480p"}), 10)
         # 四个成本提示元素都在
         for eid in ("grokCostNote", "microCostNote", "omniCostNote", "tryonCostNote"):
             self.assertIn('id="%s"' % eid, VIDEO_HTML, eid)
+        # 试衣两档由统一价目动态注入；默认值仍与后端一致。
+        self.assertIn("TRYON_SINGLE_POINTS=p['video.tryon.single']||25", VIDEO_HTML)
+        self.assertIn("TRYON_DOUBLE_POINTS=p['video.tryon.double']||40", VIDEO_HTML)
+        self.assertIn("'换装+换背景 '+TRYON_DOUBLE_POINTS+' 点", VIDEO_HTML)
+        self.assertIn("'换装 '+TRYON_SINGLE_POINTS+' 点", VIDEO_HTML)
+        self.assertEqual(points.cost_of("tryon", {"clothes_data": "x", "background_data": "y"}), 40)
+        self.assertEqual(points.cost_of("tryon", {"clothes_data": "x"}), 25)
+
+    def test_grok_duration_and_reference_controls_match_model_capabilities(self):
+        self.assertNotIn('id="grok15Btn"', VIDEO_HTML)
+        self.assertNotIn("通用版带参考图最长支持10秒", VIDEO_HTML)
+        self.assertIn(
+            "function grokRefLimit(){return GROK_REF_MAX;}",
+            VIDEO_HTML,
+        )
+        self.assertIn("Grok Video 1.5 至少上传1张参考图（最多7张）", VIDEO_HTML)
+        self.assertIn("Grok 参考图生视频最高支持 720p", VIDEO_HTML)
 
     def test_hidden_output_shadow_ui_is_removed(self):
         for stale_id in ("outputThumb", "outputMotion", "outputRatio", "outputDuration", "outputPreview"):

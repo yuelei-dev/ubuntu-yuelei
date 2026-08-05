@@ -124,15 +124,14 @@ def _url0(node):
     return node
 
 def _urls(node):
+    """返回播放地址的全部 CDN 候选并去重，供下载失败时切换线路。"""
     if isinstance(node, dict):
         values = node.get("url_list") or node.get("urlList") or []
     elif isinstance(node, list):
         values = node
     else:
         values = [node] if node else []
-    return list(dict.fromkeys(
-        value for value in values if isinstance(value, str) and value
-    ))
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value))
 
 def _tags_from_text(text):
     return re.findall(r"#([^#\s]{1,20})", text or "")
@@ -484,6 +483,20 @@ def ch_comments(object_id, last_buffer=""):
 _URL_RE = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
 _DY_HOST_SUFFIXES = ("douyin.com", "iesdouyin.com")
 _DY_HOSTS = {"v.douyin.com", "douyinvod.com"}
+_XHS_HOST_SUFFIXES = ("xiaohongshu.com", "xhslink.com", "xhslink.cn")
+
+def _is_xhs_url(url):
+    parsed = urllib.parse.urlparse(url or "")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme in ("http", "https") and any(host == suffix or host.endswith("." + suffix) for suffix in _XHS_HOST_SUFFIXES)
+
+class _XhsRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _is_xhs_url(newurl):
+            raise urllib.error.HTTPError(newurl, code, "unsafe Xiaohongshu redirect", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+_XHS_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _XhsRedirectHandler())
 
 def _extract_url(text):
     """从分享文案里提取第一个干净 URL；没有则返回 None（口令式分享无 URL）。"""
@@ -494,6 +507,23 @@ def _is_douyin_url(url):
     """只按 hostname 判断抖音链接，避免 notdouyin.com 这类子串误判。"""
     host = (urllib.parse.urlparse(url or "").hostname or "").lower().rstrip(".")
     return host in _DY_HOSTS or any(host == suffix or host.endswith("." + suffix) for suffix in _DY_HOST_SUFFIXES)
+
+def _xhs_note_id(url):
+    m = re.search(r"(?:explore|discovery/item|item)/([0-9a-fA-F]+)", url or "")
+    if m:
+        return m.group(1)
+    if not _is_xhs_url(url):
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA})
+        with _XHS_OPENER.open(req, timeout=10) as r:
+            final_url = r.geturl()
+        if not _is_xhs_url(final_url):
+            return None
+        m = re.search(r"(?:explore|discovery/item|item)/([0-9a-fA-F]+)", final_url)
+        return m.group(1) if m else None
+    except (OSError, urllib.error.URLError):
+        return None
 
 def dy_share_code(text):
     """抖音「口令式」无链接分享 → aweme_id（best-effort）。
@@ -529,10 +559,8 @@ def parse_link(text):
     url = _extract_url(text)         # 干净 URL（截断粘连的中文）；口令式分享无 URL → None
     probe = (url or text).strip()
     low = probe.lower()
-    if "xiaohongshu.com" in low or "xhslink" in low:
-        nm = re.search(r"(?:explore|discovery/item|item)/([0-9a-fA-F]+)", probe)
-        nid = nm.group(1) if nm else (_g("/api/v1/xiaohongshu/app/extract_share_info", share_link=probe) or {}).get("note_id")
-        return {"platform": "xhs", "id": nid, "note_type": None}
+    if _is_xhs_url(probe):
+        return {"platform": "xhs", "id": _xhs_note_id(probe), "note_type": None}
     if "weixin.qq.com" in low or "/sph" in low or "channels" in low or "finder" in low:
         return {"platform": "channels", "id": probe, "note_type": "video"}
     # 抖音：优先链接解析；纯口令(无链接)退回 best-effort 口令解析
@@ -603,12 +631,24 @@ def comments(platform, id_or_url, cursor=None, count=20, fresh=False):
 def _http_get(url, max_bytes=26_000_000, timeout=60):
     """⚠ timeout 只管单次 socket 读：慢 CDN 每次都在 timeout 内吐一点数据就能无限续命，
     总耗时不受控。要硬上限请用 http_get_budgeted()。此函数保留给小文件(字幕等)。"""
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    req = urllib.request.Request(url, headers=cdn_headers(url))
     with _OPENER.open(req, timeout=timeout) as r:  # CDN 直连，绕过环境代理
         return r.read(max_bytes)
 
 # ASR 下载预算：下载顶过 reaper 判死线会导致「判死退点 → worker 又写回 done」的双发事故
 ASR_DL_DEADLINE = int(os.environ.get("ASR_DOWNLOAD_DEADLINE", "120"))
+
+DOUYIN_CDN_SUFFIXES = (
+    "zjcdn.com", "douyinvod.com", "douyinstatic.com", "douyinpic.com", "amemv.com",
+    "bytecdn.cn", "ixigua.com", "pstatp.com", "snssdk.com", "byteimg.com",
+    "bytedance.net", "lf-douyin.com", "365yg.com",
+)
+
+def cdn_headers(url):
+    headers = {"User-Agent": UA}
+    if (urllib.parse.urlparse(url).hostname or "").lower().endswith(DOUYIN_CDN_SUFFIXES):
+        headers["Referer"] = "https://www.douyin.com/"
+    return headers
 
 def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_timeout=30):
     """流式下载到文件，内存恒定（一次只驻留 256KB）。返回落盘字节数。
@@ -620,16 +660,12 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
     remain = deadline_ts - time.time()
     if remain <= 0:
         raise TimeoutError("下载预算已耗尽")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    req = urllib.request.Request(url, headers=cdn_headers(url))
     got = 0
     with _OPENER.open(req, timeout=min(read_timeout, remain)) as r, open(dest_path, "wb") as f:
-        declared_raw = r.headers.get("Content-Length")
-        try:
-            declared = int(declared_raw) if declared_raw else None
-        except (TypeError, ValueError):
-            declared = None
-        if declared is not None and declared > max_bytes:
-            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (declared / 1048576.0, max_bytes / 1048576.0))
+        declared = r.headers.get("Content-Length")
+        if declared and int(declared) > max_bytes:
+            raise ValueError("文件 %.1fMB 超过上限 %.0fMB" % (int(declared) / 1048576.0, max_bytes / 1048576.0))
         while True:
             if time.time() >= deadline_ts:
                 raise TimeoutError("下载超过预算（已下载 %.1fMB）" % (got / 1048576.0))
@@ -640,10 +676,6 @@ def download_to_file(url, deadline_ts, dest_path, max_bytes=26_000_000, read_tim
             if got > max_bytes:
                 raise ValueError("文件超过上限 %.0fMB" % (max_bytes / 1048576.0))
             f.write(block)
-    if declared is not None and got < declared:
-        raise ConnectionError(
-            "下载响应截断：Content-Length=%d，实际=%d" % (declared, got)
-        )
     return got
 
 
@@ -657,7 +689,7 @@ def http_get_budgeted(url, deadline_ts, max_bytes=26_000_000, read_timeout=30):
     remain = deadline_ts - time.time()
     if remain <= 0:
         raise TimeoutError("下载预算已耗尽")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    req = urllib.request.Request(url, headers=cdn_headers(url))
     with _OPENER.open(req, timeout=min(read_timeout, remain)) as r:  # CDN 直连，绕过环境代理
         declared = r.headers.get("Content-Length")
         if declared and int(declared) > max_bytes:

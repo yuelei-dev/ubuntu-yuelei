@@ -18,28 +18,32 @@ def clean_key(raw):
         raise ValueError("Idempotency-Key 需为 8-128 位字母、数字或 . _ : -")
     return key
 
-def request_hash(body):
+def _request_hash(body):
     canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 def begin(db_factory, username, endpoint, key, body):
     if not key:
         return "disabled", None
-    digest, now = request_hash(body), int(time.time())
+    digest, now = _request_hash(body), int(time.time())
     with closing(db_factory()) as connection:
         ensure_table(connection)
-        row = connection.execute(
-            "SELECT request_hash,response_json FROM submission_idempotency WHERE username=? AND endpoint=? AND idem_key=?",
-            (username, endpoint, key)).fetchone()
-        if row:
-            if row["request_hash"] != digest:
-                return "conflict", None
-            return ("replay", json.loads(row["response_json"])) if row["response_json"] else ("processing", None)
-        connection.execute(
-            "INSERT INTO submission_idempotency(username,endpoint,idem_key,request_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (username, endpoint, key, digest, now, now))
+        inserted = connection.execute(
+            "INSERT OR IGNORE INTO submission_idempotency"
+            "(username,endpoint,idem_key,request_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (username, endpoint, key, digest, now, now)).rowcount
         connection.commit()
-    return "new", None
+        if inserted == 1:
+            return "new", None
+        row = connection.execute(
+            "SELECT request_hash,response_json FROM submission_idempotency "
+            "WHERE username=? AND endpoint=? AND idem_key=?",
+            (username, endpoint, key)).fetchone()
+        if not row:
+            raise RuntimeError("idempotency claim disappeared")
+        if row["request_hash"] != digest:
+            return "conflict", None
+        return ("replay", json.loads(row["response_json"])) if row["response_json"] else ("processing", None)
 
 def complete(db_factory, username, endpoint, key, response):
     if key:
