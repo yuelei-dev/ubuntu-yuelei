@@ -9,6 +9,21 @@
 3. 记录 Nginx PID、配置哈希、域名 health、未登录 401 和关键页面状态。
 4. 备份 `/etc/nginx/conf.d/yuelei-canonical-redirect.conf`，记录 SHA-256。
 
+## 安装位置（2026-08-06 实测修正）
+
+渲染产物**不得**放入 `conf.d/`：它引用主站 conf 在 http 级定义的 `huangque_observed`
+日志格式与 `hq_cli_upload_*` 限流区，而 `nginx.conf` 先 include `conf.d/*.conf`
+后 include `sites-enabled/*`，放 conf.d 会因解析顺序报 unknown log format。
+正确布局：
+
+- 正式文件：`/etc/nginx/sites-available/yuelei-test.conf`
+- 软链：`/etc/nginx/sites-enabled/yuelei-test.conf`（字母序在主站 huangquechuanmei 之后）
+- 同时移除 `/etc/nginx/conf.d/yuelei-canonical-redirect.conf`（备份后再删）
+
+渲染器已去掉 `listen [::]:443 ssl ipv6only=on;` 中的 `ipv6only=on`：该 socket
+选项全进程只能声明一次，主站 block 已声明（nginx 对 `[::]` 默认即 ipv6only=on，
+行为不变）。
+
 ## 生成与验证
 
 从精确合并提交执行：
@@ -31,7 +46,9 @@ python3 deploy/render_yuelei_test_nginx.py \
 ## 正式切换
 
 1. 再次确认当前正式文件哈希等于发布前记录；不一致立即停止。
-2. 原子替换测试域名配置。
+2. 原子写入 `/etc/nginx/sites-available/yuelei-test.conf`，建立
+   `sites-enabled/yuelei-test.conf` 软链，并移除
+   `/etc/nginx/conf.d/yuelei-canonical-redirect.conf`。
 3. 执行 `nginx -t`，通过后仅 `systemctl reload nginx`，不重启六个应用服务。
 4. 验证：
    - HTTP 跳转仍为测试域名；
@@ -43,4 +60,8 @@ python3 deploy/render_yuelei_test_nginx.py \
 
 ## 回滚
 
-任何验证失败时，立即用本次发布前备份原子恢复配置，执行 `nginx -t` 后 reload，并重新核对健康、401、页面和服务状态。不得修改数据库、环境变量、点数、任务、用户文件、Nginx 证书或生产服务器。
+任何验证失败时：删除 `sites-enabled/yuelei-test.conf` 软链与
+`sites-available/yuelei-test.conf`，用本次发布前备份原子恢复
+`/etc/nginx/conf.d/yuelei-canonical-redirect.conf`，执行 `nginx -t` 后 reload，
+并重新核对健康、401、页面和服务状态。不得修改数据库、环境变量、点数、任务、
+用户文件、Nginx 证书或生产服务器。

@@ -50,6 +50,14 @@ class YueleiTestDomainNginxTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertNotIn(marker, rendered)
 
+    def test_rendered_listen_options_cannot_collide_with_main_vhost(self):
+        # 测试服主站 block 已声明 [::]:443 的 ipv6only socket 选项；
+        # 渲染产物重复声明会让 nginx -t 报 duplicate listen options。
+        rendered = self.renderer.render_config(self.source)
+        self.assertNotIn("ipv6only", rendered)
+        self.assertIn("listen [::]:443 ssl;", rendered)
+        self.assertIn("listen 443 ssl;", rendered)
+
     def test_http_redirect_and_clean_url_redirect_stay_on_test_origin(self):
         rendered = self.renderer.render_config(self.source)
         self.assertIn(

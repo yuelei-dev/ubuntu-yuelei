@@ -68,6 +68,10 @@ def render_config(source: str) -> str:
 
     https = https.replace(PRODUCTION_NAMES, f"server_name {TEST_NAME};", 1)
     https = https.replace(PRODUCTION_CERT, TEST_CERT)
+    # 测试服与主站 vhost 共存于同一 Nginx：[::]:443 的 socket 选项（ipv6only）
+    # 全进程只能声明一次，主站 block 已声明。渲染结果必须去掉，否则 nginx -t
+    # 报 duplicate listen options。nginx 对 [::] 监听默认即 ipv6only=on，行为不变。
+    https = https.replace("listen [::]:443 ssl ipv6only=on;", "listen [::]:443 ssl;")
     https = https.replace(
         "/var/log/nginx/huangquechuanmei.access.log",
         "/var/log/nginx/yuelei.huangquechuanmei.access.log",
