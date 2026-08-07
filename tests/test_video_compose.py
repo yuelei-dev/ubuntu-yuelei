@@ -451,6 +451,7 @@ class VideoComposeDeploymentTests(unittest.TestCase):
         self.assertIn("ONNXRUNTIME_NODE_INSTALL_CUDA=skip", script)
         self.assertIn("HYPERFRAMES_BROWSER_PATH=/usr/bin/chromium-browser", script)
         self.assertIn("hyperframes@0.7.90", script)
+        self.assertIn('SMART_MONTAGE_HYPERFRAMES_VERSION="0.7.96"', script)
         renderer_source = (ROOT / "server/content_domains/video_compose_render.py").read_text(
             encoding="utf-8"
         )

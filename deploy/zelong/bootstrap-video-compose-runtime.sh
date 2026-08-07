@@ -5,6 +5,7 @@ NODE_VERSION="v22.14.0"
 NODE_ARCHIVE="node-${NODE_VERSION}-linux-x64.tar.xz"
 NODE_SHA256="69b09dba5c8dcb05c4e4273a4340db1005abeafe3927efda2bc5b249e80437ec"
 NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/${NODE_ARCHIVE}"
+SMART_MONTAGE_HYPERFRAMES_VERSION="0.7.96"
 RUNTIME_ROOT="/home/ubuntu/.local"
 NODE_ROOT="${RUNTIME_ROOT}/hq-node"
 CACHE_ROOT="/home/ubuntu/.cache/hyperframes"
@@ -39,4 +40,7 @@ node --version
 npm --version
 npx --yes hyperframes@0.7.90 browser ensure
 npx --yes hyperframes@0.7.90 --version
-printf 'video-compose runtime ready: node=%s hyperframes=0.7.90\n' "$(node --version)"
+npx --yes "hyperframes@${SMART_MONTAGE_HYPERFRAMES_VERSION}" browser ensure
+npx --yes "hyperframes@${SMART_MONTAGE_HYPERFRAMES_VERSION}" --version
+printf 'video-compose runtime ready: node=%s hyperframes=0.7.90 smart-montage=%s\n' \
+  "$(node --version)" "$SMART_MONTAGE_HYPERFRAMES_VERSION"

@@ -1,0 +1,10 @@
+{
+  "id": "smart-montage-v1",
+  "name": "文案智能成片",
+  "version": "1.0.0",
+  "framework": "hyperframes",
+  "hyperframesVersion": "0.7.96",
+  "ratios": ["16:9", "9:16"],
+  "styles": ["luxe", "pop", "clinic"],
+  "sceneRange": [3, 20]
+}

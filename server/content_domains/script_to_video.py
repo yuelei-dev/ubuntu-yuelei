@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """一键成片：现有数字人口播 + 用户图片资产/按需生图 + FFmpeg 自动穿插。"""
+import hashlib
 import json
 import random
 import re
 import subprocess
 import time
+import uuid
 
 from .core import OUT_DIR, adb, closing, jdb
 
@@ -12,6 +14,10 @@ MAX_MATERIAL_SCENES = 8
 PHOTO_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
 MATERIAL_IMAGE_RETRY_CODES = {520}
 MATERIAL_IMAGE_RETRY_DELAY = 2
+SMART_MONTAGE_PIPELINE = "smart_montage"
+SMART_MONTAGE_PLAN_PATH = "/api/gen/script_to_video/plan"
+SMART_MONTAGE_TEMPLATE = "smart-montage-v1"
+SMART_MONTAGE_DUPLICATE_RETRIES = 2
 
 
 def _scene_prompt(scene):
@@ -75,6 +81,39 @@ def _match_image_asset(username, prompt):
 def prepare_script_to_video_payload(payload, username):
     """提交扣点前冻结素材计划，保证能一次算清总价且不发生生成到一半欠费。"""
     body = dict(payload or {})
+    if str(body.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
+        from .script_video_montage import plan_script_video
+
+        # 浏览器里的 plan 只用于用户预览；提交时由服务器重新计算，避免篡改
+        # 分镜数量、时长或出图提示后少扣点/执行任意模板内容。
+        frozen = plan_script_video({
+            "copy": body.get("copy") or body.get("script") or body.get("text"),
+            "style": body.get("style"),
+            "ratio": body.get("ratio"),
+        })
+        scenes = [dict(scene) for scene in frozen["scenes"]]
+        body.pop("plan", None)
+        body.update({
+            "pipeline": SMART_MONTAGE_PIPELINE,
+            "mode": SMART_MONTAGE_PIPELINE,
+            "copy": frozen["copy"],
+            "style": frozen["style"],
+            "ratio": frozen["ratio"],
+            "duration": frozen["duration_seconds"],
+            "scenes": scenes,
+            "smart_plan": frozen,
+            "material_plan": [
+                {
+                    "scene_index": index,
+                    "prompt": _scene_prompt({"scene": scene.get("image_prompt")}),
+                    "source": "generate",
+                    "file": None,
+                }
+                for index, scene in enumerate(scenes)
+            ],
+            "material_generate_count": len(scenes),
+        })
+        return body
     scenes = [dict(scene) for scene in (body.get("scenes") or []) if isinstance(scene, dict)]
     if not scenes:
         raise ValueError("没有可生成的分镜")
@@ -104,11 +143,351 @@ def prepare_script_to_video_payload(payload, username):
 def gen_script_to_video(payload):
     """由 run_job 调用，走标准 job 生命周期。"""
     username = (payload.get("_username") or "").strip()
+    if str(payload.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
+        return _gen_smart_montage(username, payload)
     scenes = payload.get("scenes") or []
     style = (payload.get("style") or "口播").strip()
     if style == "剧情":
         return _gen_drama(username, scenes, payload)
     return _gen_talking(username, scenes, payload)
+
+
+def dispatch_http(handler, method, verify_token, must_change_password):
+    """Authenticated, read-only smart-montage planning endpoint."""
+    path = handler.path.split("?", 1)[0]
+    if path != SMART_MONTAGE_PLAN_PATH:
+        return False
+    if method != "POST":
+        handler._method_not_allowed()
+        return True
+    user = verify_token(handler._token())
+    if not user:
+        handler._send(401, {"detail": "未登录或登录已过期"})
+        return True
+    if must_change_password(user):
+        handler._send(403, {"detail": "请先修改初始密码"})
+        return True
+    try:
+        body = handler._json_body_strict()
+        if not isinstance(body, dict):
+            raise ValueError("请求体必须是 JSON 对象")
+        allowed = {"copy", "script", "text", "styles", "style", "ratio"}
+        if set(body) - allowed:
+            raise ValueError("请求包含未支持字段")
+        from .script_video_montage import plan_script_video
+        handler._send(200, {"plan": plan_script_video(body)})
+    except ValueError as exc:
+        handler._send(400, {"detail": str(exc)[:220]})
+    return True
+
+
+def _smart_phase(job_id, phase, **fields):
+    try:
+        from . import video as video_domain
+        video_domain.update_video_asset_phase(job_id, phase, **fields)
+    except Exception:
+        # 阶段信息仅用于进度展示，不能让一次已付费生成因状态写入失败而中断。
+        pass
+
+
+def _smart_voiceover_text(plan):
+    """Narrate the complete user-confirmed copy; never silently summarize it."""
+    from .script_video_montage import MAX_COPY_CHARACTERS
+
+    copy = re.sub(r"\s+", " ", str(plan.get("copy") or "")).strip()
+    if not copy or len(copy) > MAX_COPY_CHARACTERS:
+        raise ValueError("智能成片文案必须在 1-%d 个字符内" % MAX_COPY_CHARACTERS)
+    return copy
+
+
+def _probe_media_duration(path):
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            ],
+            check=True, timeout=30, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        duration = float(completed.stdout.strip())
+        return duration if duration > 0 else 0.0
+    except (OSError, subprocess.SubprocessError, TypeError, ValueError):
+        return 0.0
+
+
+def _atempo_filter(speed_factor):
+    factor = max(1.0, float(speed_factor or 1.0))
+    values = []
+    while factor > 2.0:
+        values.append(2.0)
+        factor /= 2.0
+    values.append(factor)
+    return ",".join("atempo=%.6f" % value for value in values)
+
+
+def _fit_voiceover_to_plan(audio_rel, voiceover, duration, planned_duration):
+    """Speed up an overlong narration so the user-confirmed plan stays frozen."""
+    planned_duration = float(planned_duration or 0)
+    duration = float(duration or 0)
+    if duration <= 0 or duration <= planned_duration - 0.35:
+        return audio_rel, voiceover, duration
+    target = max(1.0, planned_duration - 0.6)
+    speed_factor = duration / target
+    fitted_rel = "audio/aud_fit_%s.mp3" % uuid.uuid4().hex
+    fitted = (OUT_DIR / fitted_rel).resolve()
+    fitted.relative_to(OUT_DIR.resolve())
+    fitted.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(voiceover), "-vn",
+                "-filter:a", _atempo_filter(speed_factor),
+                "-c:a", "libmp3lame", "-q:a", "3", str(fitted),
+            ],
+            check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        fitted_duration = _probe_media_duration(fitted)
+        if fitted_duration <= 0 or fitted_duration > planned_duration - 0.15:
+            raise RuntimeError("旁白时长校准结果无效")
+    except Exception as exc:
+        try:
+            fitted.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("旁白时长校准失败") from exc
+    _remove_out_file(audio_rel)
+    return fitted_rel, fitted, fitted_duration
+
+
+def _retime_smart_plan(plan, voiceover_duration=0):
+    frozen = json.loads(json.dumps(plan, ensure_ascii=False))
+    planned = float(frozen.get("duration_seconds") or 10)
+    voiceover_duration = max(0.0, float(voiceover_duration or 0))
+    if voiceover_duration > planned - 0.1:
+        raise ValueError("旁白时长超过已确认方案")
+    duration = round(max(10.0, min(90.0, planned)), 3)
+    scenes = frozen.get("scenes") or []
+    if not 3 <= len(scenes) <= 20:
+        raise ValueError("智能成片分镜数量无效")
+    total_ms = int(round(duration * 1000))
+    weights = [max(250, int(round(float(scene.get("duration_seconds") or 0) * 1000))) for scene in scenes]
+    weight_sum = sum(weights)
+    raw = [total_ms * weight / float(weight_sum) for weight in weights]
+    units = [int(value) for value in raw]
+    remainder = total_ms - sum(units)
+    order = sorted(range(len(units)), key=lambda index: (-(raw[index] - units[index]), index))
+    for index in order[:remainder]:
+        units[index] += 1
+    cursor = 0
+    for scene, scene_ms in zip(scenes, units):
+        scene["start_seconds"] = round(cursor / 1000.0, 3)
+        scene["duration_seconds"] = round(scene_ms / 1000.0, 3)
+        cursor += scene_ms
+    frozen["duration_seconds"] = duration
+    frozen["scene_count"] = len(scenes)
+    return frozen
+
+
+def _out_file(rel, suffixes=None):
+    try:
+        path = (OUT_DIR / str(rel)).resolve()
+        path.relative_to(OUT_DIR.resolve())
+    except Exception:
+        return None
+    if not path.is_file() or (suffixes and path.suffix.lower() not in suffixes):
+        return None
+    return path
+
+
+def _remove_out_file(rel):
+    path = _out_file(rel)
+    if path:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _smart_material_images(plan):
+    from . import image as image_domain
+
+    materials, hashes = [], set()
+    ratio = plan.get("ratio") or "16:9"
+    scenes = plan.get("scenes") or []
+    try:
+        for position, scene in enumerate(scenes):
+            base_prompt = str(scene.get("image_prompt") or "").strip()
+            if not base_prompt:
+                raise ValueError("第 %d 幕缺少画面提示" % (position + 1))
+            accepted = None
+            for attempt in range(SMART_MONTAGE_DUPLICATE_RETRIES + 1):
+                prompt = (
+                    "%s 本次成片唯一镜头编号 %02d/%02d，视觉变化版本 %d；"
+                    "必须与其他镜头在主体动作、机位和构图上明显不同。"
+                ) % (base_prompt, position + 1, len(scenes), attempt + 1)
+                try:
+                    generated = image_domain.gen_image({
+                        "prompt": prompt,
+                        "ratio": ratio,
+                        "quality": "standard",
+                        "provider": "openai",
+                        "count": 1,
+                    })
+                except Exception as exc:
+                    if (
+                        getattr(exc, "code", None) in MATERIAL_IMAGE_RETRY_CODES
+                        and attempt < SMART_MONTAGE_DUPLICATE_RETRIES
+                    ):
+                        time.sleep(MATERIAL_IMAGE_RETRY_DELAY)
+                        continue
+                    raise
+                rel = generated.get("file") if isinstance(generated, dict) else None
+                path = _out_file(rel, {".jpg", ".jpeg", ".png", ".webp", ".avif"})
+                if not path:
+                    raise RuntimeError("第 %d 幕生图结果不可用" % (position + 1))
+                digest = _sha256_file(path)
+                if digest in hashes:
+                    _remove_out_file(rel)
+                    if attempt < SMART_MONTAGE_DUPLICATE_RETRIES:
+                        continue
+                    raise RuntimeError("第 %d 幕素材与其他分镜重复" % (position + 1))
+                accepted = {
+                    "scene_index": position,
+                    "prompt": base_prompt,
+                    "source": "generate",
+                    "file": str(rel),
+                    "sha256": digest,
+                }
+                hashes.add(digest)
+                break
+            if not accepted:
+                raise RuntimeError("第 %d 幕素材生成失败" % (position + 1))
+            materials.append(accepted)
+        if len(materials) != len(scenes) or len(hashes) != len(scenes):
+            raise RuntimeError("分镜素材数量或唯一性校验未通过")
+        return materials
+    except Exception:
+        _cleanup_generated_materials(materials)
+        raise
+
+
+def _gen_smart_montage(username, payload):
+    from . import audio as audio_domain
+    from . import script_video_render as montage_renderer
+    from . import video as video_domain
+
+    if not username:
+        raise ValueError("智能成片任务缺少用户信息")
+    plan = payload.get("smart_plan")
+    if not isinstance(plan, dict):
+        raise ValueError("智能成片任务缺少服务端方案")
+    job_id = payload.get("_job_id")
+    voice = str(payload.get("voice") or "S_d21F8OR62").strip()
+    materials, audio_rel, output_rel = [], None, None
+    try:
+        _smart_phase(job_id, "generating_audio", mode=SMART_MONTAGE_PIPELINE)
+        narration = _smart_voiceover_text(plan)
+        audio_result = audio_domain.gen_audio({
+            "_username": username,
+            "text": narration,
+            "voice": voice,
+            "speed": "normal",
+            "pitch": 0,
+            "volume": 0,
+        })
+        audio_rel = audio_result.get("file") if isinstance(audio_result, dict) else None
+        voiceover = _out_file(audio_rel, {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"})
+        if not voiceover:
+            raise RuntimeError("旁白生成结果不可用")
+        duration_ms = audio_result.get("duration_ms") if isinstance(audio_result, dict) else None
+        voiceover_duration = float(duration_ms or 0) / 1000.0
+        if voiceover_duration <= 0:
+            voiceover_duration = _probe_media_duration(voiceover)
+        audio_rel, voiceover, voiceover_duration = _fit_voiceover_to_plan(
+            audio_rel, voiceover, voiceover_duration,
+            float(plan.get("duration_seconds") or 10),
+        )
+        render_plan = _retime_smart_plan(plan, voiceover_duration)
+
+        _smart_phase(job_id, "generating_assets", audio_file=audio_rel, voice=voice)
+        materials = _smart_material_images(render_plan)
+
+        output_rel = "video/script_montage_%s.mp4" % uuid.uuid4().hex
+        output_path = (OUT_DIR / output_rel).resolve()
+        output_path.relative_to(OUT_DIR.resolve())
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        material_paths = [_out_file(item["file"]) for item in materials]
+        if any(path is None for path in material_paths):
+            raise RuntimeError("智能成片素材在渲染前不可用")
+
+        _smart_phase(job_id, "rendering", image_file=materials[0]["file"])
+        report = montage_renderer.render(
+            render_plan,
+            material_paths,
+            output_path,
+            voiceover=voiceover,
+            timeout=max(600, int(render_plan["duration_seconds"] * 24)),
+        )
+        _smart_phase(job_id, "verifying", video_file=output_rel)
+        verified_duration = float(((report.get("output") or {}).get("duration_ms") or 0)) / 1000.0
+        if verified_duration <= 0:
+            verified_duration = _probe_media_duration(output_path)
+        if verified_duration <= 0:
+            raise RuntimeError("智能成片输出时长校验失败")
+        video_url = video_domain.public_url(output_rel, "video/mp4", private=True)
+        result = {
+            "type": "script_to_video",
+            "pipeline": SMART_MONTAGE_PIPELINE,
+            "mode": SMART_MONTAGE_PIPELINE,
+            "status": "done",
+            "phase": "completed",
+            "video_file": output_rel,
+            "video_url": video_url,
+            "audio_file": str(audio_rel),
+            "image_file": materials[0]["file"],
+            "text": plan.get("copy") or "",
+            "copy": plan.get("copy") or "",
+            "voice": voice,
+            "style": render_plan["style"],
+            "ratio": render_plan["ratio"],
+            "resolution": "%dx%d" % (
+                1920 if render_plan["ratio"] == "16:9" else 1080,
+                1080 if render_plan["ratio"] == "16:9" else 1920,
+            ),
+            "motion": "template",
+            "duration": round(verified_duration, 3),
+            "scene_count": len(render_plan["scenes"]),
+            "materials": materials,
+            "material_generated_count": len(materials),
+            "material_reused_count": 0,
+            "smart_plan": render_plan,
+            "model": "%s@%s" % (
+                report.get("template_id") or SMART_MONTAGE_TEMPLATE,
+                report.get("template_version") or "1.0.0",
+            ),
+        }
+        _smart_phase(
+            job_id, "completed", status="done", video_file=output_rel,
+            video_url=video_url, audio_file=audio_rel,
+        )
+        return result
+    except Exception:
+        _cleanup_generated_materials(materials)
+        if audio_rel:
+            _remove_out_file(audio_rel)
+        if output_rel:
+            _remove_out_file(output_rel)
+        _smart_phase(job_id, "failed", status="failed", error="智能成片生成失败")
+        raise
 
 
 def _material_images(plan):

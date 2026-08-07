@@ -1,4 +1,5 @@
 import importlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ class ScriptToVideoTests(unittest.TestCase):
         server_dir = str(Path(__file__).resolve().parents[1] / "server")
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
+        cls.core = importlib.import_module("content_domains.core")
         cls.script_to_video = importlib.import_module("content_domains.script_to_video")
         cls.video = importlib.import_module("content_domains.video")
 
@@ -54,6 +56,18 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertEqual(result["pipeline"], "grok")
         self.assertEqual(result["scene_count"], 2)
         self.assertEqual(result["type"], "script_to_video")
+
+    def test_smart_montage_uses_a_single_worker_local_render_pool(self):
+        self.assertIs(
+            self.core._pick_job_queue("script_to_video", "smart_montage"),
+            self.core._smart_montage_job_queue,
+        )
+        self.assertIs(
+            self.core._pick_job_queue("script_to_video", "talking"),
+            self.core._talking_job_queue,
+        )
+        self.assertEqual(1, self.core.SMART_MONTAGE_JOB_WORKERS)
+        self.assertEqual(12, self.core._smart_montage_job_queue.maxsize)
 
     def test_talking_style_uses_selected_avatar_id(self):
         calls = {}
@@ -137,6 +151,199 @@ class ScriptToVideoTests(unittest.TestCase):
             self.script_to_video.prepare_script_to_video_payload(
                 {"scenes": scenes, "style": "口播"}, "fang",
             )
+
+    def test_prepare_smart_montage_recomputes_and_freezes_all_fresh_scenes(self):
+        body = self.script_to_video.prepare_script_to_video_payload({
+            "pipeline": "smart_montage",
+            "copy": "从专业评估开始，理解肌肤真正需要，再用温和护理找回自然透亮。",
+            "style": "pop",
+            "ratio": "16:9",
+            "plan": {"duration_seconds": 10, "scenes": [{"headline": "被篡改"}]},
+        }, "fang")
+        self.assertEqual(body["pipeline"], "smart_montage")
+        self.assertEqual(body["mode"], "smart_montage")
+        self.assertEqual(body["style"], "pop")
+        self.assertNotIn("plan", body)
+        self.assertEqual(body["material_generate_count"], body["smart_plan"]["scene_count"])
+        self.assertEqual(len(body["material_plan"]), body["material_generate_count"])
+        self.assertTrue(all(item["source"] == "generate" for item in body["material_plan"]))
+        self.assertTrue(all(item["file"] is None for item in body["material_plan"]))
+        self.assertNotEqual(body["scenes"][0]["headline"], "被篡改")
+
+    def test_smart_plan_http_contract_is_authenticated_and_aggregate(self):
+        class Handler:
+            path = "/api/gen/script_to_video/plan"
+
+            def __init__(self):
+                self.sent = None
+
+            def _token(self): return "token"
+            def _json_body_strict(self):
+                return {
+                    "copy": "专业护理理解真实需求，让肌肤回到自然透亮的状态。",
+                    "styles": ["luxe", "pop"],
+                    "ratio": "16:9",
+                }
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        handler = Handler()
+        handled = self.script_to_video.dispatch_http(
+            handler, "POST", lambda token: {"username": "fang"}, lambda user: False,
+        )
+        self.assertTrue(handled)
+        self.assertEqual(handler.sent[0], 200)
+        self.assertEqual(
+            [item["style"] for item in handler.sent[1]["plan"]["styles"]],
+            ["luxe", "pop"],
+        )
+
+    def test_smart_voiceover_preserves_the_complete_confirmed_copy(self):
+        copy = ("完整朗读每一段用户文案。" * 30)[:320]
+        plan = {
+            "copy": copy,
+            "duration_seconds": 90,
+            "scenes": [
+                {"supporting_copy": "第一幕护理评估" * 40},
+                {"supporting_copy": "第二幕定制方案" * 40},
+                {"supporting_copy": "第三幕长期管理" * 40},
+            ],
+        }
+        narration = self.script_to_video._smart_voiceover_text(plan)
+        self.assertEqual(narration, copy)
+
+    def test_retime_smart_plan_keeps_contiguous_exact_timeline(self):
+        plan = {
+            "duration_seconds": 10,
+            "scenes": [
+                {"start_seconds": 0, "duration_seconds": 3},
+                {"start_seconds": 3, "duration_seconds": 3},
+                {"start_seconds": 6, "duration_seconds": 4},
+            ],
+        }
+        retimed = self.script_to_video._retime_smart_plan(plan, 9.2)
+        self.assertEqual(retimed["duration_seconds"], 10.0)
+        cursor = 0.0
+        for scene in retimed["scenes"]:
+            self.assertEqual(scene["start_seconds"], cursor)
+            cursor = round(cursor + scene["duration_seconds"], 3)
+        self.assertEqual(cursor, retimed["duration_seconds"])
+        with self.assertRaisesRegex(ValueError, "超过已确认方案"):
+            self.script_to_video._retime_smart_plan(plan, 9.95)
+
+    def test_overlong_voiceover_is_fitted_without_changing_confirmed_plan(self):
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            source = Path(raw) / "audio" / "voice.mp3"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"voice")
+
+            def fake_run(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"fitted")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            try:
+                with mock.patch.object(self.script_to_video.subprocess, "run", side_effect=fake_run) as run, \
+                     mock.patch.object(self.script_to_video, "_probe_media_duration", return_value=9.3):
+                    rel, path, duration = self.script_to_video._fit_voiceover_to_plan(
+                        "audio/voice.mp3", source, 12.0, 10.0,
+                    )
+                self.assertTrue(rel.startswith("audio/aud_fit_"))
+                self.assertEqual(path, Path(raw) / rel)
+                self.assertEqual(duration, 9.3)
+                self.assertFalse(source.exists())
+                command = run.call_args.args[0]
+                self.assertIn("-filter:a", command)
+                self.assertIn("atempo=", command[command.index("-filter:a") + 1])
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
+    def test_smart_material_generation_retries_duplicate_hash(self):
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            calls = []
+
+            def fake_gen_image(payload):
+                calls.append(payload)
+                index = len(calls)
+                name = "image-%d.png" % index
+                (Path(raw) / name).write_bytes(b"same" if index < 3 else b"different")
+                return {"file": name}
+
+            plan = {
+                "ratio": "16:9",
+                "scenes": [
+                    {"image_prompt": "第一幕"},
+                    {"image_prompt": "第二幕"},
+                ],
+            }
+            try:
+                with mock.patch("content_domains.image.gen_image", side_effect=fake_gen_image):
+                    materials = self.script_to_video._smart_material_images(plan)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(len({item["sha256"] for item in materials}), 2)
+                self.assertFalse((Path(raw) / "image-2.png").exists())
+                self.assertTrue(all(call["count"] == 1 for call in calls))
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
+    def test_smart_pipeline_generates_voice_every_scene_and_verified_mp4(self):
+        plan = self.script_to_video.prepare_script_to_video_payload({
+            "pipeline": "smart_montage",
+            "copy": "专业评估看见真实需求，温和护理改善肤质，持续管理让状态自然稳定。",
+            "style": "clinic",
+            "ratio": "9:16",
+        }, "fang")["smart_plan"]
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            image_calls = []
+
+            def fake_audio(payload):
+                (Path(raw) / "voice.mp3").write_bytes(b"voice")
+                return {"file": "voice.mp3", "duration_ms": 8200}
+
+            def fake_image(payload):
+                image_calls.append(payload)
+                name = "scene-%d.png" % len(image_calls)
+                (Path(raw) / name).write_bytes(("image-%d" % len(image_calls)).encode())
+                return {"file": name}
+
+            def fake_render(render_plan, materials, output_path, **kwargs):
+                Path(output_path).write_bytes(b"mp4")
+                return {
+                    "template_id": "smart-montage-v1",
+                    "template_version": "1.0.0",
+                    "output": {"duration_ms": int(render_plan["duration_seconds"] * 1000)},
+                }
+
+            try:
+                with mock.patch("content_domains.audio.gen_audio", side_effect=fake_audio) as audio, \
+                     mock.patch("content_domains.image.gen_image", side_effect=fake_image), \
+                     mock.patch("content_domains.script_video_render.render", side_effect=fake_render) as render, \
+                     mock.patch.object(self.video, "public_url", return_value="/private/final.mp4") as public_url, \
+                     mock.patch.object(self.script_to_video, "_smart_phase") as phase:
+                    result = self.script_to_video.gen_script_to_video({
+                        "_username": "fang",
+                        "_job_id": 88,
+                        "pipeline": "smart_montage",
+                        "smart_plan": plan,
+                    })
+                audio.assert_called_once()
+                self.assertEqual(len(image_calls), plan["scene_count"])
+                self.assertEqual(render.call_args.kwargs["voiceover"].name, "voice.mp3")
+                public_url.assert_called_once()
+                self.assertTrue(public_url.call_args.kwargs["private"])
+                self.assertEqual(result["pipeline"], "smart_montage")
+                self.assertEqual(result["material_generated_count"], plan["scene_count"])
+                self.assertEqual(result["material_reused_count"], 0)
+                self.assertEqual(len({item["sha256"] for item in result["materials"]}), plan["scene_count"])
+                self.assertTrue((Path(raw) / result["video_file"]).is_file())
+                self.assertEqual(phase.call_args_list[-1].args[1], "completed")
+            finally:
+                self.script_to_video.OUT_DIR = old_out
 
     def test_talking_material_pipeline_composes_then_burns_subtitles(self):
         self.script_to_video._get_first_avatar = lambda username: {"id": 1}

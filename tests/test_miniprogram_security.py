@@ -38,6 +38,12 @@ class MiniProgramSecurityTests(unittest.TestCase):
         self.assertEqual(check_image.call_args.args[0], b"png-bytes")
         self.assertEqual(check_image.call_args.args[2], "image/png")
 
+    def test_payload_checks_smart_montage_copy(self):
+        with patch.dict(os.environ, {"WX_MP_APPID": "a", "WX_MP_APPSECRET": "s"}, clear=True), \
+             patch.object(security, "check_text") as check_text:
+            security.check_payload({"pipeline": "smart_montage", "copy": "让肌肤状态自然透亮"})
+        check_text.assert_called_once_with("让肌肤状态自然透亮")
+
     def test_risky_result_is_rejected(self):
         with self.assertRaises(security.ContentRejected):
             security._check_result({"errcode": 87014, "errmsg": "risky content"})
