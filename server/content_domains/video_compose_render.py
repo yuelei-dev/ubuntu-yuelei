@@ -235,6 +235,9 @@ def render(clean_video, payload, output_path, timeout=None):
         ]
         environment = dict(os.environ)
         environment.update({"HYPERFRAMES_SKIP_SKILLS": "1", "PRODUCER_LOW_MEMORY_MODE": "1"})
+        node_bin = pathlib.Path(_DEFAULT_NPX).parent
+        if node_bin.is_dir():
+            environment["PATH"] = str(node_bin) + os.pathsep + environment.get("PATH", "")
         if "HYPERFRAMES_BROWSER_PATH" not in environment and pathlib.Path(
                 "/usr/bin/chromium-browser").is_file():
             environment["HYPERFRAMES_BROWSER_PATH"] = "/usr/bin/chromium-browser"

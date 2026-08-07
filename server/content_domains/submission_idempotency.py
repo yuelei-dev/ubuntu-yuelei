@@ -22,6 +22,28 @@ def _request_hash(body):
     canonical = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+def lookup(db_factory, username, endpoint, key, body):
+    """Inspect an existing claim without creating one.
+
+    This lets callers replay a completed request before running versioned
+    server-side derivation such as the smart-montage planner.
+    """
+    if not key:
+        return "disabled", None
+    digest = _request_hash(body)
+    with closing(db_factory()) as connection:
+        ensure_table(connection)
+        connection.commit()
+        row = connection.execute(
+            "SELECT request_hash,response_json FROM submission_idempotency "
+            "WHERE username=? AND endpoint=? AND idem_key=?",
+            (username, endpoint, key)).fetchone()
+        if not row:
+            return "missing", None
+        if row["request_hash"] != digest:
+            return "conflict", None
+        return ("replay", json.loads(row["response_json"])) if row["response_json"] else ("processing", None)
+
 def begin(db_factory, username, endpoint, key, body):
     if not key:
         return "disabled", None

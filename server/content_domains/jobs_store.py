@@ -30,10 +30,13 @@ def refund_transaction_key(job_id, username=""):
 
 
 class PaidJobInsertError(Exception):
-    def __init__(self, compensation, submission_ref):
+    def __init__(self, compensation, submission_ref, compensation_job_id=None):
         super().__init__("paid job insert failed")
         self.compensation = compensation
         self.submission_ref = submission_ref
+        self.compensation_job_id = (
+            int(compensation_job_id) if compensation_job_id is not None else None
+        )
 
 
 class PaidJobDeductError(Exception):
@@ -46,7 +49,9 @@ class PaidJobDeductError(Exception):
 def public_dict(row, phase=None):
     data = {key: row[key] for key in (
         "id", "kind", "username", "cost", "status", "result", "error", "created_at", "updated_at")}
-    data["refunded"] = int(row["refunded"] or 0) == 1 if "refunded" in row.keys() else False
+    refund_value = int(row["refunded"] or 0) if "refunded" in row.keys() else 0
+    data["refunded"] = refund_value == 1
+    data["refund_state"] = {1: "refunded", 2: "pending"}.get(refund_value, "none")
     if data.get("result"):
         try:
             data["result"] = json.loads(data["result"])
@@ -254,7 +259,7 @@ def retry_failed_refunds(jdb, refund_job, limit=100):
 def _compensate_failed_insert(jdb, refund, username, cost, kind, submission_ref,
                               error, owner, charge_transaction_key=""):
     if int(cost or 0) <= 0:
-        return "refunded"
+        return "refunded", None
     fallback_key = ("job-charge-refund:" + hashlib.sha256(
         str(charge_transaction_key).encode("utf-8")).hexdigest()
         if charge_transaction_key else "job-insert-refund:%s" % submission_ref)
@@ -282,19 +287,19 @@ def _compensate_failed_insert(jdb, refund, username, cost, kind, submission_ref,
         try:
             if refund(username, cost, reason, transaction_key=fallback_key) is False:
                 raise RuntimeError("refund not confirmed")
-            return "refunded"
+            return "refunded", None
         except Exception as refund_error:
             print("[points-critical] job insert/refund record both failed submit=%s user=%s cost=%s "
                   "insert=%s refund=%s record=%s" % (
                       submission_ref, username, cost, str(error)[:120],
                       str(refund_error)[:120], str(record_error)[:120]), flush=True)
-            return "untracked"
+            return "untracked", None
     transaction_key = (fallback_key if charge_transaction_key else
                        refund_transaction_key(retry_job_id, username))
     confirmed = refund_once(
         jdb, retry_job_id, username, cost,
         lambda u, c: refund(u, c, reason, transaction_key=transaction_key))
-    return "refunded" if confirmed else "queued"
+    return ("refunded" if confirmed else "queued"), int(retry_job_id)
 
 
 def create_paid_jobs(jdb, deduct, refund, kind, username, items, owner, reason_kind="",
@@ -327,10 +332,12 @@ def create_paid_jobs(jdb, deduct, refund, kind, username, items, owner, reason_k
                 c.rollback()
                 raise
     except Exception as error:
-        state = _compensate_failed_insert(
+        state, compensation_job_id = _compensate_failed_insert(
             jdb, refund, username, total, kind, submission_ref, error, owner,
             charge_transaction_key=charge_transaction_key)
-        raise PaidJobInsertError(state, submission_ref) from error
+        raise PaidJobInsertError(
+            state, submission_ref, compensation_job_id=compensation_job_id,
+        ) from error
 
 
 def create_paid_job(jdb, deduct, refund, kind, username, cost, payload, owner,

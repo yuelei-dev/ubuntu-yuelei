@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=__WIDTH__, height=__HEIGHT__" />
+  <title>黄雀 AI · 文案智能成片</title>
+  <script src="assets/vendor/gsap.min.js"></script>
+  <style>
+    @font-face{font-family:"Noto Sans SC";src:url("assets/fonts/noto-sans-sc-variable.ttf") format("truetype");font-style:normal;font-weight:100 900;font-display:block}
+    @font-face{font-family:"JetBrains Mono";src:url("assets/fonts/jetbrains-mono-600.woff2") format("woff2");font-weight:600}
+    *{box-sizing:border-box}
+    html,body{width:__WIDTH__px;height:__HEIGHT__px;margin:0;overflow:hidden;font-family:"Noto Sans SC",sans-serif}
+    #root{position:relative;width:__WIDTH__px;height:__HEIGHT__px;overflow:hidden}
+    .clip{position:absolute}
+    .scene{inset:0;width:100%;height:100%;overflow:hidden;color:var(--ink)}
+    .scene-fill{position:absolute;inset:0;background-color:var(--canvas)}
+    .atmosphere{position:absolute;inset:-14%;pointer-events:none}
+    .photo-stage{position:absolute;overflow:hidden}
+    .photo-shell{position:absolute;inset:0;overflow:hidden;background:var(--surface);border:3px solid var(--line);box-shadow:0 28px 80px rgba(15,18,26,.24)}
+    .photo-shell img{display:block;width:100%;height:100%;object-fit:cover;will-change:transform}
+    .photo-tint{position:absolute;inset:0;pointer-events:none}
+    .content{position:absolute;z-index:5;display:flex;flex-direction:column;justify-content:center}
+    .eyebrow{display:flex;align-items:center;gap:16px;font-family:"JetBrains Mono",monospace;font-weight:600;letter-spacing:.18em;text-transform:uppercase}
+    .eyebrow i{display:block;width:72px;height:4px;background:var(--accent);transform-origin:left center}
+    h1{margin:24px 0 0;font-size:82px;line-height:1.06;letter-spacing:-.045em;font-weight:900;max-width:880px}
+    .support{margin:26px 0 0;max-width:780px;font-size:31px;line-height:1.55;font-weight:400;color:var(--muted)}
+    .badge{position:absolute;z-index:6;display:flex;align-items:center;justify-content:center;min-width:138px;height:58px;padding:0 22px;border:2px solid var(--accent);color:var(--badge-ink);background:var(--badge-bg);font-family:"JetBrains Mono",monospace;font-size:20px;letter-spacing:.1em;font-weight:600}
+    .ordinal{position:absolute;z-index:4;font-family:"JetBrains Mono",monospace;font-weight:600;color:var(--ghost);line-height:.8}
+    .accent-orb{position:absolute;z-index:2;width:420px;height:420px;border-radius:50%;background:radial-gradient(circle,var(--glow) 0%,rgba(0,0,0,0) 68%);pointer-events:none}
+    .decor-line{position:absolute;z-index:4;height:4px;background:var(--accent);transform-origin:left center}
+    .metric{position:absolute;z-index:6;display:flex;align-items:flex-end;gap:12px;color:var(--ink)}
+    .metric b{font-family:"JetBrains Mono",monospace;font-size:58px;line-height:1}
+    .metric small{font-size:18px;letter-spacing:.12em;padding-bottom:8px;color:var(--muted)}
+    .clinical-bars{position:absolute;z-index:6;display:flex;flex-direction:column;gap:12px;width:270px}
+    .clinical-bars i{display:block;width:100%;height:10px;border-radius:99px;background:var(--accent);transform-origin:left center}
+    .clinical-bars i:nth-child(2){width:78%;opacity:.72}.clinical-bars i:nth-child(3){width:54%;opacity:.42}
+    .transition-layer{position:absolute;z-index:20;inset:0;background:var(--transition);pointer-events:none;opacity:0;transform-origin:right center}
+    .frame-progress{position:absolute;z-index:40;left:5%;right:5%;bottom:4%;height:6px;background:var(--progress-track);overflow:hidden}
+    .frame-progress i{display:block;width:100%;height:100%;background:var(--progress);transform-origin:left center}
+    .frame-brand{position:absolute;z-index:41;top:4%;left:5%;display:flex;align-items:center;gap:13px;color:var(--brand-ink);font-family:"JetBrains Mono",monospace;font-size:18px;font-weight:600;letter-spacing:.12em}
+    .frame-brand i{width:15px;height:15px;border-radius:50%;background:var(--progress);box-shadow:0 0 24px var(--glow)}
+
+    body.style-luxe{--canvas:#130d13;--surface:#271a24;--ink:#fff6ef;--muted:#d8c5bd;--accent:#e5b68b;--line:rgba(229,182,139,.72);--badge-bg:#e5b68b;--badge-ink:#24151c;--ghost:rgba(229,182,139,.16);--glow:rgba(180,92,121,.34);--transition:#f1d1b5;--progress-track:rgba(255,246,239,.18);--progress:#e5b68b;--brand-ink:#fff6ef}
+    .style-luxe .scene-fill{background-color:#130d13}
+    .style-luxe .atmosphere{background:radial-gradient(circle at 24% 36%,rgba(180,92,121,.25),rgba(19,13,19,0) 42%)}
+    .style-luxe .photo-shell{border-radius:34px}
+    .style-luxe .photo-tint{background:radial-gradient(circle at 72% 42%,rgba(229,182,139,0),rgba(19,13,19,.42) 86%)}
+    .style-luxe .badge{border-radius:999px;right:6%;top:7%}
+    .style-luxe .ordinal{right:3%;bottom:8%;font-size:230px}
+    .style-luxe .accent-orb{left:-8%;bottom:-16%}
+    .style-luxe .decor-line{left:7%;bottom:13%;width:230px}
+    .style-luxe .metric,.style-luxe .clinical-bars{display:none}
+
+    body.style-pop{--canvas:#fff4e8;--surface:#ffcf5c;--ink:#25152d;--muted:#5c415f;--accent:#ff496d;--line:#25152d;--badge-bg:#ff496d;--badge-ink:#292826;--ghost:rgba(37,21,45,.10);--glow:rgba(255,73,109,.31);--transition:#ffe257;--progress-track:rgba(37,21,45,.18);--progress:#ff496d;--brand-ink:#25152d}
+    .style-pop .scene-fill{background-color:#fff4e8}
+    .style-pop .atmosphere{background:radial-gradient(circle at 85% 18%,rgba(255,226,87,.85),rgba(255,244,232,0) 34%)}
+    .style-pop .photo-shell{border-radius:42px;border-width:7px;box-shadow:18px 20px 0 #25152d}
+    .style-pop .photo-tint{background:radial-gradient(circle at 50% 40%,rgba(255,244,232,0),rgba(255,73,109,.14) 88%)}
+    .style-pop .badge{border-radius:18px;right:5%;top:6%;transform:rotate(3deg);box-shadow:8px 8px 0 #25152d}
+    .style-pop .ordinal{left:2%;top:9%;font-size:250px}
+    .style-pop .accent-orb{right:-9%;bottom:-13%}
+    .style-pop .decor-line{right:7%;bottom:12%;width:280px;transform-origin:right center}
+    .style-pop .metric,.style-pop .clinical-bars{display:none}
+
+    body.style-clinic{--canvas:#f2f8f6;--surface:#dceee9;--ink:#123843;--muted:#456b72;--accent:#238f83;--line:rgba(35,143,131,.72);--badge-bg:#123843;--badge-ink:#f2f8f6;--ghost:rgba(35,143,131,.12);--glow:rgba(70,185,169,.26);--transition:#238f83;--progress-track:rgba(18,56,67,.15);--progress:#238f83;--brand-ink:#123843}
+    .style-clinic .scene-fill{background-color:#f2f8f6}
+    .style-clinic .atmosphere{background:radial-gradient(circle at 18% 16%,rgba(126,202,193,.42),rgba(242,248,246,0) 36%)}
+    .style-clinic .photo-shell{border-radius:24px;box-shadow:0 28px 70px rgba(18,56,67,.16)}
+    .style-clinic .photo-tint{background:radial-gradient(circle at 44% 48%,rgba(242,248,246,0),rgba(35,143,131,.13) 86%)}
+    .style-clinic .badge{border-radius:10px;left:5%;top:6%}
+    .style-clinic .ordinal{right:3%;top:8%;font-size:220px}
+    .style-clinic .accent-orb{right:-11%;top:-18%}
+    .style-clinic .decor-line{right:7%;top:14%;width:240px}
+    .style-clinic .metric{right:6%;bottom:14%}
+    .style-clinic .clinical-bars{right:6%;bottom:8%}
+
+    body.ratio-landscape .photo-stage{right:5%;top:12%;width:50%;height:72%}
+    body.ratio-landscape .content{left:6%;top:18%;bottom:18%;width:38%;padding-right:2%}
+    body.ratio-landscape .eyebrow{font-size:20px}
+    body.ratio-landscape h1{font-size:78px}
+    body.ratio-landscape .support{font-size:29px}
+    body.ratio-landscape.style-pop .photo-stage{right:5%;top:14%;width:48%;height:66%}
+    body.ratio-landscape.style-pop .content{left:7%;top:20%;width:39%}
+    body.ratio-landscape.style-clinic .photo-stage{left:5%;right:auto;top:16%;width:48%;height:68%}
+    body.ratio-landscape.style-clinic .content{left:57%;top:20%;width:37%}
+
+    body.ratio-portrait .photo-stage{left:6%;right:6%;top:10%;height:54%}
+    body.ratio-portrait .content{left:7%;right:7%;top:62%;bottom:10%;width:auto;justify-content:flex-start}
+    body.ratio-portrait .eyebrow{font-size:19px}
+    body.ratio-portrait h1{margin-top:18px;font-size:72px;max-width:920px}
+    body.ratio-portrait .support{margin-top:18px;font-size:29px;max-width:900px}
+    body.ratio-portrait .badge{top:4%}
+    body.ratio-portrait .ordinal{font-size:210px}
+    body.ratio-portrait.style-pop .photo-stage{top:9%;height:52%}
+    body.ratio-portrait.style-pop .content{top:59%}
+    body.ratio-portrait.style-clinic .metric{right:7%;bottom:9%}
+    body.ratio-portrait.style-clinic .clinical-bars{right:7%;bottom:5%;width:230px}
+    body.ratio-portrait.style-clinic .badge{left:auto;right:7%;top:4%}
+  </style>
+</head>
+<body class="style-__STYLE__ ratio-__RATIO_CLASS__">
+  <div id="root" data-composition-id="main" data-start="0" data-duration="__DURATION__" data-width="__WIDTH__" data-height="__HEIGHT__" data-fps="30">
+__SCENES__
+__AUDIO__
+    <div id="frame-progress" class="clip frame-progress" data-start="0" data-duration="__DURATION__" data-track-index="30"><i id="frame-progress-fill"></i></div>
+    <div id="frame-brand" class="clip frame-brand" data-start="0" data-duration="__DURATION__" data-track-index="31"><i></i><span>黄雀 AI · SMART CUT</span></div>
+  </div>
+  <script>
+    window.__timelines = window.__timelines || {};
+__TIMELINE_SCRIPT__
+  </script>
+</body>
+</html>

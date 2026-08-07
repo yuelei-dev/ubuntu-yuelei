@@ -334,12 +334,14 @@ def _public_points_error(points_domain, error, need):
 VIDEO_COST = _env_positive_int("VIDEO_COST", 20)
 JOB_WORKERS, FAST_JOB_WORKERS = _env_positive_int("CONTENT_JOB_WORKERS", 3), _env_positive_int("CONTENT_FAST_JOB_WORKERS", 3)  # 慢队列(换装/果肉video)/快队列(图片/音频等)各自worker数，分开防视频堵死快任务
 TALKING_JOB_WORKERS = _env_positive_int("CONTENT_TALKING_JOB_WORKERS", 20)  # 口播(video mode=text/audio)专用池：20 路并发任务独立消费
+SMART_MONTAGE_JOB_WORKERS = _env_positive_int("CONTENT_SMART_MONTAGE_JOB_WORKERS", 1)  # 本地 Chromium+FFmpeg 重任务独立限流；开发机 2C/3.4G 默认只跑 1 条
 CINEMATIC_JOB_WORKERS = _env_positive_int("CONTENT_CINEMATIC_JOB_WORKERS", 10)  # AI剧情视频池(HeyGen)。20路并发实测(10口播+10剧情同时生成)：20/20全成、零降速(口播114s vs 单条基线104s)——HeyGen 的渲染容量远大于20，文档说的「Max Concurrent Video Jobs=10」不是硬限制。唯一的真限制是【提交突发】，由 _heygen_retry_429 兜住
 AVATAR_JOB_WORKERS = _env_positive_int("CONTENT_AVATAR_JOB_WORKERS", 5)        # 建形象池。5 路是实测的干净档位(2026-07-12)：5并发 5/5成功、0×429、零降速(就绪中位19.7s vs 单条基线19.8s)；10并发 HeyGen 侧照样零429不降速，但【我们的出境隧道】开始丢包(1条TLS握手超时、1条提交花了57s)。所以瓶颈是隧道不是HeyGen，隧道扩容后可再往上调。串行(1)的吞吐只有144个/小时——500人集中建形象要排3.5小时，而建形象是电影化身的【入口】，堵在这里等于整个功能没法用；5路→约900个/小时，排队压到35分钟
 IMAGE_JOB_WORKERS = _env_positive_int("CONTENT_IMAGE_JOB_WORKERS", 10)       # 生图专用池(生图慢90~450s，从快池拆出别拖死秒级任务)。10=500用户高峰约150张/时所需6.3个+60%余量；1worker≈24张/时(实测中位149s)
 JOB_QUEUE_MAX = _env_positive_int("CONTENT_JOB_QUEUE_MAX", 64)  # 32→64：50 齐点压测 3 条「队列已满」当场拒；64+worker 收得下整批
 TALKING_JOB_QUEUE_MAX = _env_positive_int("CONTENT_TALKING_JOB_QUEUE_MAX", 192)  # 口播独立积压上限，不放大其他任务队列
-_PENDING_RECOVERY_LIMIT = max(JOB_QUEUE_MAX, TALKING_JOB_QUEUE_MAX)
+SMART_MONTAGE_JOB_QUEUE_MAX = _env_positive_int("CONTENT_SMART_MONTAGE_JOB_QUEUE_MAX", 12)
+_PENDING_RECOVERY_LIMIT = max(JOB_QUEUE_MAX, TALKING_JOB_QUEUE_MAX, SMART_MONTAGE_JOB_QUEUE_MAX)
 MAX_USER_ACTIVE_JOBS = _env_positive_int("MAX_USER_ACTIVE_JOBS", 5)                  # 单用户可同时提交(pending+running)的任务上限，超了提交即 429
 MAX_USER_ACTIVE_XIAOLE_VIDEO = _env_positive_int("MAX_USER_ACTIVE_XIAOLE_VIDEO", 2)  # 单用户果肉/豆姐/欧米视频共享 active 上限：别让单一渠道吃满全部任务位
 MAX_USER_ACTIVE_SORA_VIDEO = _env_positive_int("MAX_USER_ACTIVE_SORA_VIDEO", 1)      # Sora 高价限时 Beta：每用户默认只允许 1 条在飞
@@ -850,9 +852,43 @@ def _must_change_password(user):
     return bool(user and user.get("must_change"))
 
 _job_public_dict, _idempotency_key = jobs_store.public_dict, submission_idempotency.clean_key
+def _idempotency_lookup(username, endpoint, key, body): return submission_idempotency.lookup(jdb, username, endpoint, key, body)
 def _idempotency_begin(username, endpoint, key, body): return submission_idempotency.begin(jdb, username, endpoint, key, body)
 def _idempotency_complete(username, endpoint, key, response): submission_idempotency.complete(jdb, username, endpoint, key, response)
 def _idempotency_abort(username, endpoint, key): submission_idempotency.abort(jdb, username, endpoint, key)
+
+
+def _compensation_tracking_response(job_id, cost, detail, *, points_left=None,
+                                    submission_ref=""):
+    """Return a durable smart-montage refund tracker after a charged failure.
+
+    A 202 response is deliberately successful from the browser's point of view:
+    it stores ``job_id`` and polls the job until ``refund_state`` is confirmed,
+    instead of rotating the idempotency key while the refund is still ambiguous.
+    """
+    job_id = int(job_id)
+    with closing(jdb()) as connection:
+        row = connection.execute(
+            "SELECT status,refunded FROM jobs WHERE id=?", (job_id,),
+        ).fetchone()
+    if not row:
+        raise RuntimeError("compensation tracking job disappeared")
+    refund_value = int(row["refunded"] or 0)
+    if int(cost or 0) > 0 and (
+            str(row["status"] or "") != "error" or refund_value not in {1, 2}):
+        raise RuntimeError("charged compensation job has no durable refund intent")
+    refund_state = {1: "refunded", 2: "pending"}.get(refund_value, "none")
+    response = {
+        "job_id": job_id,
+        "cost": int(cost or 0),
+        "detail": str(detail or "任务创建失败，退款正在自动确认"),
+        "refund_state": refund_state,
+    }
+    if points_left is not None:
+        response["points_left"] = int(points_left)
+    if submission_ref:
+        response["submission_ref"] = str(submission_ref)
+    return response
 # ============ 图片能力：gpt-image-2 ============
 # 三种模式同一入口：无图=文生图(generations)；有图无蒙版=图生图(edits)；有图有蒙版=局部修改(edits+mask)
 # 老表把 9:16 和 3:4 都映射成 1024x1536 —— 那是 2:3，两个按钮出的是同一张图，谁都没拿到自己选的比例。
@@ -893,6 +929,7 @@ def _post_bytes(path, data, ctype):  # 返回原始字节(TTS 拿 mp3 二进制)
 _job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)          # 慢队列(tryon/xiaole_video + video兜底)
 _fast_job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)     # 快队列(audio/copy/collect/leads等秒级任务)
 _talking_job_queue = queue.Queue(maxsize=TALKING_JOB_QUEUE_MAX)  # 口播队列(video mode=text/audio)
+_smart_montage_job_queue = queue.Queue(maxsize=SMART_MONTAGE_JOB_QUEUE_MAX)  # 文案成片本地渲染池
 _image_job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)    # 生图队列(kind=image，从快池拆出防拖死快任务)
 _cinematic_job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)  # AI剧情视频队列(kind=cinematic，HeyGen，约8分钟/条)
 _avatar_job_queue = queue.Queue(maxsize=JOB_QUEUE_MAX)     # 建形象队列(kind=avatar，串行池)
@@ -920,9 +957,18 @@ _workers_started = False
 _shutting_down = threading.Event()
 _inflight = 0                      # 正在 run_job 里跑着的任务数
 _inflight_lock = threading.Lock()
-# 排空最长等多久。最长任务是电影化身 30 分钟（CINEMATIC_GEN_DEADLINE=1800s）+ 上传下载余量。
-# 必须 ≥ 最长死线，否则重启时会把跑到一半的 30 分钟剧情视频砍掉（$7 已扣，片子丢）。
-DRAIN_TIMEOUT = _env_positive_int("CONTENT_DRAIN_TIMEOUT", 1800)
+# 智能成片会串行生成最多 20 张图，再进行最长 90 秒的本地渲染。给整单一个明确的
+# 两小时总死线，并为已经开始的单次上游请求 / 清理留 10 分钟余量。排空窗口必须覆盖
+# 这两者；排队但尚未开始的任务会在 SIGTERM 后保留为 durable pending，由新进程恢复。
+SMART_MONTAGE_MAX_RUNTIME = 7200
+SMART_MONTAGE_BLOCKING_MARGIN = 600
+DRAIN_TIMEOUT = max(
+    _env_positive_int(
+        "CONTENT_DRAIN_TIMEOUT",
+        SMART_MONTAGE_MAX_RUNTIME + SMART_MONTAGE_BLOCKING_MARGIN,
+    ),
+    SMART_MONTAGE_MAX_RUNTIME + SMART_MONTAGE_BLOCKING_MARGIN,
+)
 def is_shutting_down():
     return _shutting_down.is_set()
 # CAS 抢终态 / 退点幂等：实现在 content_domains/jobs_store.py，三个共写 jobs 表的服务共用一份。
@@ -968,6 +1014,8 @@ def _pick_job_queue(kind, mode=None):
         return _job_queue
     if kind == "image":
         return _image_job_queue
+    if kind == "script_to_video" and str(mode or "").strip().lower() == "smart_montage":
+        return _smart_montage_job_queue
     if kind == "breakdown":
         return _job_queue               # 下载+ffmpeg+ASR+多模态，走慢池别堵快任务
     if kind == "short_drama_preview":
@@ -1108,6 +1156,13 @@ def _job_worker_loop(q):
             if _shutting_down.is_set():
                 return          # 停机中且队列已空 → 这个 worker 可以退了
             continue
+        if _shutting_down.is_set():
+            # 任务仍是数据库里的 durable pending；停机期间不要开始新的昂贵任务。只从
+            # 进程内队列摘下，下一进程会由 _recover_pending_jobs() 重新入队。
+            with _job_queue_lock:
+                _queued_job_ids.discard(job_id)
+            q.task_done()
+            continue
         with _inflight_lock:
             _inflight += 1
         try:
@@ -1160,7 +1215,7 @@ def _pending_job_scanner():
             pass
         time.sleep(30)
 
-_ALL_JOB_QUEUES = (_job_queue, _fast_job_queue, _talking_job_queue,
+_ALL_JOB_QUEUES = (_job_queue, _fast_job_queue, _talking_job_queue, _smart_montage_job_queue,
                    _image_job_queue, _cinematic_job_queue, _avatar_job_queue)
 
 
@@ -1172,6 +1227,7 @@ def start_job_workers():
         _workers_started = True
     for count, q, prefix in ((JOB_WORKERS, _job_queue, "content-job-worker"), (FAST_JOB_WORKERS, _fast_job_queue, "content-fast-worker"),
                              (TALKING_JOB_WORKERS, _talking_job_queue, "content-talking-worker"),
+                             (SMART_MONTAGE_JOB_WORKERS, _smart_montage_job_queue, "content-smart-montage-worker"),
                              (IMAGE_JOB_WORKERS, _image_job_queue, "content-image-worker"),
                              (CINEMATIC_JOB_WORKERS, _cinematic_job_queue, "content-cinematic-worker"),
                              (AVATAR_JOB_WORKERS, _avatar_job_queue, "content-avatar-worker")):
@@ -1235,11 +1291,17 @@ def _drain_then_exit(t0):
         queued = sum(q.qsize() for q in _ALL_JOB_QUEUES)
         with _inflight_lock:
             running = _inflight
-        if queued == 0 and running == 0:
+        # HTTP 提交线程也会在 _submission_lock 内执行幂等 claim、扣点、落 job 和入队。
+        # 不等待它，就可能在 Auth 已扣点而本地 job 尚未提交时退出。
+        submission_busy = not _submission_lock.acquire(blocking=False)
+        if not submission_busy:
+            _submission_lock.release()
+        if queued == 0 and running == 0 and not submission_busy:
             print("[drain] 排空完成，用时 %.0fs" % (time.time() - t0), flush=True)
             os._exit(0)
-        print("[drain] 等在飞任务：排队 %d、执行中 %d（已等 %.0fs / 上限 %ds，期间读接口正常）"
-              % (queued, running, time.time() - t0, DRAIN_TIMEOUT), flush=True)
+        print("[drain] 等在飞任务：排队 %d、执行中 %d、付费提交 %d（已等 %.0fs / 上限 %ds，期间读接口正常）"
+              % (queued, running, int(submission_busy), time.time() - t0,
+                 DRAIN_TIMEOUT), flush=True)
         time.sleep(3)
 
     print("[drain] 超过 %ds 仍未排空，强制退出 —— 剩下的由 reclaim_orphaned_running 判失败退点"
@@ -2601,6 +2663,7 @@ class H(BaseHTTPRequestHandler):
             still_idem_started = False
             still_attempt = None
             still_access = _short_drama_canvas_access(self) if is_still_route else None
+            smart_montage_submission = False
             try:
                 body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent"} else self._json_body()
                 if is_still_route:
@@ -2636,7 +2699,38 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "sora_video": body = video_domain.validate_sora_video_payload(body)
                 elif kind == "script_to_video":
                     from . import script_to_video as script_to_video_domain
-                    body = script_to_video_domain.prepare_script_to_video_payload(body, user["username"])
+                    smart_montage_submission = script_to_video_domain.is_smart_montage_payload(body)
+                    if smart_montage_submission:
+                        idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
+                        if not idem_key:
+                            raise script_to_video_domain.SmartMontageRequestError(
+                                "智能成片提交必须提供 Idempotency-Key",
+                                "idempotency_key_required",
+                            )
+                        request_body = script_to_video_domain.normalize_smart_montage_submission(body)
+                        idem_state, idem_response = _idempotency_lookup(
+                            user["username"], p, idem_key, request_body,
+                        )
+                        if idem_state == "replay":
+                            replay = dict(idem_response or {})
+                            return self._send(int(replay.pop("_http_status", 200)), replay)
+                        if idem_state == "conflict":
+                            return self._send(409, {
+                                "detail": "同一个 Idempotency-Key 不能用于不同请求",
+                                "code": "idempotency_conflict",
+                            })
+                        if idem_state == "processing":
+                            return self._send(409, {
+                                "detail": "相同请求正在受理，请稍后查询",
+                                "code": "idempotency_in_progress", "retry_after_ms": 1000,
+                            })
+                        body = script_to_video_domain.prepare_script_to_video_payload(
+                            request_body, user["username"],
+                        )
+                    else:
+                        body = script_to_video_domain.prepare_script_to_video_payload(
+                            body, user["username"],
+                        )
                 elif kind == "breakdown":
                     from . import breakdown as breakdown_domain
                     body = breakdown_domain.validate_breakdown_payload(body)
@@ -2659,9 +2753,11 @@ class H(BaseHTTPRequestHandler):
                     body = audio_domain.validate_audio_payload(
                         body, user["username"]
                     )
-                if not is_still_route: request_body = dict(body) if isinstance(body, dict) else body
+                if not is_still_route and not smart_montage_submission:
+                    request_body = dict(body) if isinstance(body, dict) else body
                 # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
-                if not is_still_route: idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown"} else ""
+                if not is_still_route and not smart_montage_submission:
+                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown"} else ""
                 if kind == "canvas_agent" and not idem_key:
                     raise ValueError("画布 Agent 提交必须提供 Idempotency-Key")
                 if kind == "sora_video" and not idem_key: raise ValueError("Sora 视频提交必须提供 Idempotency-Key")
@@ -2680,6 +2776,10 @@ class H(BaseHTTPRequestHandler):
             except (ValueError, LookupError, PermissionError, _short_drama_domain().RevisionConflict) as e:
                 if still_idem_started:
                     _idempotency_abort(user["username"], p, idem_key)
+                if getattr(e, "code", ""):
+                    return self._send(int(getattr(e, "status", 400) or 400), {
+                        "detail": str(e)[:220], "code": str(e.code),
+                    })
                 _short_drama_domain()._http_error(self, e,
                     operation_terminal=is_still_route and bool(locals().get("idem_key")))
                 return
@@ -2707,7 +2807,20 @@ class H(BaseHTTPRequestHandler):
             staged_ref_keys, seedance_idem_reserved, seedance_early = video_domain.prepare_xiaole_reference_submission(kind, body, cost, user.get("points"), user["username"], idem_key, p, _submission_lock, lambda: _idempotency_begin(user["username"], p, idem_key, request_body), lambda: _idempotency_abort(user["username"], p, idem_key), lambda: _user_video_submit_limit(kind, body, user["username"], cost), lambda: _user_active_job_count(user["username"]), MAX_USER_ACTIVE_JOBS) if kind == "xiaole_video" else ([], False, None)
             if seedance_early: return self._send(*seedance_early)
             with _submission_lock:
-                if seedance_idem_reserved and is_shutting_down(): video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)); return self._send(503, {"detail": "服务正在更新，请稍等几秒后重试（未扣点）", "code": "shutting_down", "retry_after_ms": 5000})
+                # 外层停机检查与真正进入付费临界区之间仍有竞态。锁内必须再次检查，
+                # 且要早于 idempotency claim / Auth 扣点 / 本地 job 写入。
+                if is_shutting_down() and not is_still_route:
+                    if seedance_idem_reserved:
+                        video_domain.abort_xiaole_reference_submission(
+                            staged_ref_keys, user["username"], p, idem_key,
+                            lambda: _idempotency_abort(
+                                user["username"], p, idem_key,
+                            ),
+                        )
+                    return self._send(503, {
+                        "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
+                        "code": "shutting_down", "retry_after_ms": 5000,
+                    })
                 if (is_still_route and is_shutting_down()
                         and (not still_attempt or still_attempt.get("state") in {"accepted", "charged"})):
                     if still_idem_started and not still_attempt: _idempotency_abort(user["username"], p, idem_key)
@@ -2845,6 +2958,32 @@ class H(BaseHTTPRequestHandler):
                     )
                 except jobs_store.PaidJobInsertError as e:
                     if staged_ref_keys: video_domain.cleanup_staged_seedance_references(staged_ref_keys); video_domain.release_seedance_staging_attempt(user["username"], p, idem_key)
+                    if (smart_montage_submission and e.compensation == "queued"
+                            and e.compensation_job_id is not None):
+                        tracking_response = _compensation_tracking_response(
+                            e.compensation_job_id, cost,
+                            "任务创建失败，退款正在自动重试",
+                            submission_ref=e.submission_ref,
+                        )
+                        _idempotency_complete(
+                            user["username"], p, idem_key,
+                            dict(tracking_response, _http_status=202),
+                        )
+                        return self._send(202, tracking_response)
+                    if smart_montage_submission and e.compensation != "refunded":
+                        # No queryable compensation row could be persisted.  Keep
+                        # the claim terminal-but-not-rotatable so the browser
+                        # cannot turn an ambiguous charge into a second charge.
+                        ambiguous_response = {
+                            "detail": "任务创建失败，退款状态需人工核对；请勿重复提交",
+                            "refund_state": "pending",
+                            "compensation_ref": e.submission_ref,
+                        }
+                        _idempotency_complete(
+                            user["username"], p, idem_key,
+                            dict(ambiguous_response, _http_status=202),
+                        )
+                        return self._send(202, ambiguous_response)
                     failed_response = {"detail": {"refunded": "任务创建失败，点数已退回",
                         "queued": "任务创建失败，退款正在自动重试"}.get(e.compensation, "任务创建失败，退款需人工核对"),
                         "submission_ref": e.submission_ref}
@@ -2882,7 +3021,21 @@ class H(BaseHTTPRequestHandler):
                 if kind in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"}:
                     try: video_domain.record_video_pending_asset(jid, user["username"], body)
                     except Exception:
-                        failed_response = {"detail": "任务创建失败，退款正在自动处理", "job_id": jid}; _reject_pending_job(jid, user["username"], cost, "视频资产登记失败"); _idempotency_complete(user["username"], p, idem_key, dict(failed_response, _http_status=500))
+                        failed_response = {"detail": "任务创建失败，退款正在自动处理", "job_id": jid}
+                        _reject_pending_job(jid, user["username"], cost, "视频资产登记失败")
+                        if smart_montage_submission:
+                            tracking_response = _compensation_tracking_response(
+                                jid, cost, failed_response["detail"],
+                                points_left=points_left,
+                            )
+                            if tracking_response["refund_state"] != "refunded":
+                                _idempotency_complete(
+                                    user["username"], p, idem_key,
+                                    dict(tracking_response, _http_status=202),
+                                )
+                                return self._send(202, tracking_response)
+                            failed_response["operation_terminal"] = True
+                        _idempotency_complete(user["username"], p, idem_key, dict(failed_response, _http_status=500))
                         return self._send(500, failed_response)
                 if not (is_still_route and is_shutting_down()) and not enqueue_job(jid, kind, body.get("mode")):
                     if not is_still_route:
@@ -2890,6 +3043,18 @@ class H(BaseHTTPRequestHandler):
                     if kind in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"}:
                         video_domain.update_video_asset_phase(jid, "failed", status="failed", error="任务队列已满，请稍后再试")
                     queue_response = {"detail": "任务队列已满，请稍后再试", "code": "queue_full", "retry_after_ms": 4000, "need": cost}
+                    if smart_montage_submission:
+                        tracking_response = _compensation_tracking_response(
+                            jid, cost, queue_response["detail"],
+                            points_left=points_left,
+                        )
+                        if tracking_response["refund_state"] != "refunded":
+                            _idempotency_complete(
+                                user["username"], p, idem_key,
+                                dict(tracking_response, _http_status=202),
+                            )
+                            return self._send(202, tracking_response)
+                        queue_response["operation_terminal"] = True
                     if is_still_route:
                         queue_response["operation_terminal"] = True
                         still_attempt = _short_drama_domain().short_drama_production.mark_linked_attempt_failed(
@@ -2974,7 +3139,7 @@ class H(BaseHTTPRequestHandler):
             if not r: return self._send(404, {"detail": "任务不存在"})
             if r["username"] != user.get("username"):
                 return self._send(404, {"detail": "任务不存在"})
-            phase = video_domain.get_video_job_phase(jid) if r["kind"] in {"video", "tryon", "xiaole_video", "sora_video", "cinematic"} else None
+            phase = video_domain.get_video_job_phase(jid) if r["kind"] in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"} else None
             if phase is None and r["kind"] == "breakdown":
                 try:
                     phase = (json.loads(r["payload"] or "{}") or {}).get("phase")
@@ -3181,7 +3346,7 @@ class H(BaseHTTPRequestHandler):
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
             return self._send(200, {"items": items, "cost": search_cost, "points_left": points_left})
         if p == "/api/gen/health":
-            return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS, "job_queue_max": JOB_QUEUE_MAX, "talking_job_queue_max": TALKING_JOB_QUEUE_MAX,
+            return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "smart_montage_job_workers": SMART_MONTAGE_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS, "job_queue_max": JOB_QUEUE_MAX, "talking_job_queue_max": TALKING_JOB_QUEUE_MAX, "smart_montage_job_queue_max": SMART_MONTAGE_JOB_QUEUE_MAX,
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_sora_video": MAX_USER_ACTIVE_SORA_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
                                     "sora_video_enabled": bool(video_domain.sora_video_is_open() and OPENAI_KEY and feature_flags.is_enabled("sora_video")),
                                     "omni_video_enabled": bool(video_domain.omni_video_is_open() and feature_flags.is_enabled("omni_video")), "seedance_video_enabled": bool(video_domain.seedance_video_is_open() and feature_flags.is_enabled("seedance_video")), "minimax_h3_video_enabled": bool(video_domain.minimax_h3_video_is_open() and feature_flags.is_enabled("minimax_h3_video")), "reverse_remake_video_offer": (reverse_remake_offer := video_domain.reverse_remake_video_offer(feature_flags, points_domain.cost_of)), "reverse_remake_video_channel": reverse_remake_offer["channel"], "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(), "seedance_upscale_enabled": bool(video_domain.seedance_upscale_is_open() and feature_flags.is_enabled("seedance_video")),

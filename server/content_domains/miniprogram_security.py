@@ -36,7 +36,7 @@ _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE = {"value": "", "expires_at": 0}
 _TEXT_KEYS = {
     "prompt", "text", "topic", "selling_points", "style", "title", "name",
-    "description", "script", "content", "negative_prompt", "batch_label",
+    "description", "script", "copy", "content", "negative_prompt", "batch_label",
 }
 _IMAGE_KEY_MARKERS = ("image", "img", "photo", "clothes", "background")
 _MAX_TEXT_BYTES = 480 * 1024

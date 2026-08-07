@@ -46,6 +46,27 @@ class CostOfTests(unittest.TestCase):
             "total": 70,
         })
 
+    def test_smart_montage_charges_fresh_images_and_one_voiceover(self):
+        body = {
+            "pipeline": "smart_montage",
+            "material_generate_count": 7,
+            "style": "luxe",
+        }
+        self.assertEqual(self.points.cost_of("script_to_video", body), 150)
+        self.assertEqual(body["cost_breakdown"], {
+            "voiceover": 10,
+            "material_images": 140,
+            "material_generate_count": 7,
+            "material_reused_count": 0,
+            "total": 150,
+        })
+
+    def test_smart_montage_cost_clamps_scene_count_to_supported_range(self):
+        low = {"pipeline": "smart_montage", "material_generate_count": 0}
+        high = {"pipeline": "smart_montage", "material_generate_count": 99}
+        self.assertEqual(self.points.cost_of("script_to_video", low), 70)
+        self.assertEqual(self.points.cost_of("script_to_video", high), 410)
+
     def test_script_to_video_drama_aligns_with_xiaole_per_second(self):
         """剧情复用 Grok 1.0 720p 的统一价格：12 点/秒。"""
         self.assertEqual(

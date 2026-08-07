@@ -137,6 +137,24 @@ def cost_of(kind, body):
         seconds = max(4, min(12, seconds))
         return rate * seconds
     if kind == "script_to_video":
+        if str(body.get("pipeline") or "").strip().lower() == "smart_montage":
+            try:
+                generated = int(body.get("material_generate_count") or 0)
+            except (TypeError, ValueError):
+                generated = 0
+            generated = max(3, min(20, generated))
+            images = generated * cost_of("image", {
+                "provider": "openai", "quality": "standard", "count": 1,
+            })
+            voiceover = pricing.get_price("audio.tts")
+            body["cost_breakdown"] = {
+                "voiceover": voiceover,
+                "material_images": images,
+                "material_generate_count": generated,
+                "material_reused_count": 0,
+                "total": voiceover + images,
+            }
+            return voiceover + images
         style = (body.get("style") or "口播").strip()
         if style == "剧情":
             try:

@@ -1,0 +1,30 @@
+{
+  "template_id": "smart-montage-v1",
+  "template_version": "1.0.1",
+  "status": "verified",
+  "verification": {
+    "hyperframes_version": "0.7.96",
+    "runtime_check": true,
+    "strict_render": true,
+    "dynamic_duration_seconds": 14,
+    "variants": [
+      "luxe/16:9", "luxe/9:16",
+      "pop/16:9", "pop/9:16",
+      "clinic/16:9", "clinic/9:16"
+    ]
+  },
+  "input_contract": {
+    "style": ["luxe", "pop", "clinic"],
+    "ratio": ["16:9", "9:16"],
+    "duration_seconds": {"min": 10, "max": 90},
+    "scenes": {"min": 3, "max": 20, "one_unique_image_per_scene": true},
+    "voiceover": "optional local audio",
+    "bgm": "optional local audio"
+  },
+  "security": {
+    "accepts_arbitrary_html": false,
+    "accepts_arbitrary_javascript": false,
+    "accepts_remote_media": false,
+    "bundled_full_cjk_font": "Noto Sans SC variable 100-900"
+  }
+}

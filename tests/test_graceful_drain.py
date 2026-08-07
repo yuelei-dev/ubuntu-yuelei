@@ -21,11 +21,14 @@
 **两者必须配套。** 只改一个，另一个就成了新的天花板 —— 这是这次最容易漏的一环。
 """
 import os
+import queue
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = str(ROOT / "server")
@@ -61,8 +64,12 @@ class SystemdMustGiveItTimeTests(unittest.TestCase):
                            % (self._systemd_timeout(), core.DRAIN_TIMEOUT))
 
     def test_the_drain_window_covers_the_longest_job(self):
-        """最长的一档是视频：VIDEO_GEN_DEADLINE=900s，加上传下载。"""
+        """排空必须覆盖旧视频死线，也必须覆盖智能成片总死线和阻塞余量。"""
         self.assertGreaterEqual(core.DRAIN_TIMEOUT, core.VIDEO_GEN_DEADLINE)
+        self.assertGreaterEqual(
+            core.DRAIN_TIMEOUT,
+            core.SMART_MONTAGE_MAX_RUNTIME + core.SMART_MONTAGE_BLOCKING_MARGIN,
+        )
 
 
 class TheCodeActuallyHandlesSigtermTests(unittest.TestCase):
@@ -94,6 +101,15 @@ class TheCodeActuallyHandlesSigtermTests(unittest.TestCase):
 
 
 class NoNewJobsWhileDrainingTests(unittest.TestCase):
+    def test_submission_lock_rechecks_shutdown_before_claim_or_deduction(self):
+        block = CORE_SRC.split("staged_ref_keys, seedance_idem_reserved", 1)[1]
+        block = block.split("with _submission_lock:", 1)[1]
+        block = block.split("except jobs_store.PaidJobInsertError", 1)[0]
+        guard = block.index("if is_shutting_down() and not is_still_route:")
+        self.assertLess(guard, block.index("_idempotency_begin"))
+        self.assertLess(guard, block.index("points_domain.deduct_points"))
+        self.assertIn("服务正在更新，请稍等几秒后重试（未扣点）", block)
+
     def test_submits_are_rejected_before_the_deduction(self):
         """⚠️ 拦在扣点之后等于没拦：用户被扣了点、任务入了队，进程下一秒就退了 ——
         又是一条「服务重启中断」。"""
@@ -112,6 +128,65 @@ class NoNewJobsWhileDrainingTests(unittest.TestCase):
 
 
 class WorkersDrainInsteadOfBlockingTests(unittest.TestCase):
+    def test_drain_waits_for_the_paid_submission_critical_section(self):
+        looped = threading.Event()
+        release_loop = threading.Event()
+        exit_codes = []
+
+        def fake_sleep(_seconds):
+            looped.set()
+            release_loop.wait(1)
+
+        def fake_exit(code):
+            exit_codes.append(code)
+            raise SystemExit(code)
+
+        core._submission_lock.acquire()
+        core._shutting_down.set()
+        try:
+            with mock.patch.object(core.time, "sleep", side_effect=fake_sleep), \
+                 mock.patch.object(core.os, "_exit", side_effect=fake_exit):
+                drainer = threading.Thread(
+                    target=core._drain_then_exit,
+                    args=(core.time.time(),), daemon=True,
+                )
+                drainer.start()
+                self.assertTrue(looped.wait(1))
+                self.assertEqual([], exit_codes)
+                core._submission_lock.release()
+                release_loop.set()
+                drainer.join(2)
+            self.assertFalse(drainer.is_alive())
+            self.assertEqual([0], exit_codes)
+        finally:
+            if core._submission_lock.locked():
+                core._submission_lock.release()
+            core._shutting_down.clear()
+            release_loop.set()
+
+    def test_shutdown_hands_queued_jobs_back_to_the_durable_database(self):
+        pending = queue.Queue()
+        pending.put(987654)
+        with core._job_queue_lock:
+            core._queued_job_ids.add(987654)
+        core._shutting_down.set()
+        try:
+            with mock.patch.object(core, "run_job") as run_job:
+                worker = threading.Thread(
+                    target=core._job_worker_loop, args=(pending,), daemon=True,
+                )
+                worker.start()
+                worker.join(3)
+            self.assertFalse(worker.is_alive())
+            run_job.assert_not_called()
+            self.assertEqual(0, pending.unfinished_tasks)
+            with core._job_queue_lock:
+                self.assertNotIn(987654, core._queued_job_ids)
+        finally:
+            core._shutting_down.clear()
+            with core._job_queue_lock:
+                core._queued_job_ids.discard(987654)
+
     def test_the_worker_loop_can_notice_the_shutdown(self):
         """原来是 q.get()【无限阻塞】—— 停机时 worker 永远卡在那里，排空检测不到队列已空。
         改成带超时地取。"""
@@ -119,6 +194,8 @@ class WorkersDrainInsteadOfBlockingTests(unittest.TestCase):
         self.assertIn("q.get(timeout=", block)
         self.assertIn("if _shutting_down.is_set():", block)
         self.assertNotIn("job_id = q.get()", block)
+        self.assertIn("durable pending", block)
+        self.assertIn("_queued_job_ids.discard(job_id)", block)
 
     def test_inflight_is_counted(self):
         """排空要等的是【正在跑的】，不只是队列里排队的。"""
@@ -130,12 +207,12 @@ class WorkersDrainInsteadOfBlockingTests(unittest.TestCase):
         self.assertIn("qsize()", drain)
 
     def test_every_queue_is_drained(self):
-        """漏掉一个队列，那个队列里的任务就会被丢掉 —— 而它是 6 个池之一。"""
+        """漏掉一个队列，那个队列里的任务就会被丢掉 —— 而它是 7 个池之一。"""
         names = ast.literal_eval(
             "(" + CORE_SRC.split("_ALL_JOB_QUEUES = (")[1].split(")")[0].replace(",\n", ",") + ",)"
-        ) if False else None  # 直接数：源码里那个元组必须包含全部 6 个队列
+        ) if False else None  # 直接数：源码里那个元组必须包含全部 7 个队列
         block = CORE_SRC.split("_ALL_JOB_QUEUES = (")[1].split(")")[0]
-        for q in ("_job_queue", "_fast_job_queue", "_talking_job_queue",
+        for q in ("_job_queue", "_fast_job_queue", "_talking_job_queue", "_smart_montage_job_queue",
                   "_image_job_queue", "_cinematic_job_queue", "_avatar_job_queue"):
             self.assertIn(q, block, "_ALL_JOB_QUEUES 漏了 %s —— 那个池的任务会被丢掉" % q)
 
