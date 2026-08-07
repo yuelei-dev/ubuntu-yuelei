@@ -6,6 +6,7 @@ dependencies.  A request can therefore be planned before charging points and
 the exact same JSON can be persisted with the job for a later render worker.
 """
 
+import hashlib
 import json
 import math
 import re
@@ -381,8 +382,29 @@ def canonical_plan_json(plan):
         raise MontagePlanError("成片计划包含不可序列化的数据") from error
 
 
+def plan_digest(plan):
+    """Return a stable SHA-256 binding for a server-generated plan.
+
+    Digest metadata is excluded so a plan returned by the HTTP endpoint can be
+    verified again after ``plan_digest`` has been attached to it.
+    """
+    def without_digest_metadata(value):
+        if isinstance(value, dict):
+            return {
+                key: without_digest_metadata(item)
+                for key, item in value.items()
+                if key not in {"plan_digest", "plan_digests"}
+            }
+        if isinstance(value, list):
+            return [without_digest_metadata(item) for item in value]
+        return value
+
+    canonical = canonical_plan_json(without_digest_metadata(plan))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 __all__ = [
     "MAX_DURATION_SECONDS", "MAX_SCENES", "MIN_DURATION_SECONDS", "MIN_SCENES",
     "MontagePlanError", "PLANNER_VERSION", "STYLE_PROFILES",
-    "canonical_plan_json", "plan_script_video",
+    "canonical_plan_json", "plan_digest", "plan_script_video",
 ]

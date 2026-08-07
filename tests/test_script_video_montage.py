@@ -142,6 +142,15 @@ class ScriptVideoMontageTests(unittest.TestCase):
         with self.assertRaises(montage.MontagePlanError):
             montage.canonical_plan_json({"duration": float("nan")})
 
+    def test_plan_digest_is_stable_and_ignores_digest_metadata(self):
+        plan = self.plan()
+        digest = montage.plan_digest(plan)
+        self.assertRegex(digest, r"^[0-9a-f]{64}$")
+        self.assertEqual(digest, montage.plan_digest({**plan, "plan_digest": digest}))
+        changed = json.loads(json.dumps(plan, ensure_ascii=False))
+        changed["scenes"][0]["headline"] += "更新"
+        self.assertNotEqual(digest, montage.plan_digest(changed))
+
     def test_invalid_payloads_are_rejected(self):
         invalid = [
             None,

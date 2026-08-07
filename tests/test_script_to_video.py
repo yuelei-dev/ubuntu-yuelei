@@ -153,13 +153,15 @@ class ScriptToVideoTests(unittest.TestCase):
             )
 
     def test_prepare_smart_montage_recomputes_and_freezes_all_fresh_scenes(self):
-        body = self.script_to_video.prepare_script_to_video_payload({
+        request = {
             "pipeline": "smart_montage",
             "copy": "从专业评估开始，理解肌肤真正需要，再用温和护理找回自然透亮。",
             "style": "pop",
             "ratio": "16:9",
-            "plan": {"duration_seconds": 10, "scenes": [{"headline": "被篡改"}]},
-        }, "fang")
+        }
+        preview = self.script_to_video.smart_montage_plan_response(request)
+        request["plan_digest"] = preview["plan_digest"]
+        body = self.script_to_video.prepare_script_to_video_payload(request, "fang")
         self.assertEqual(body["pipeline"], "smart_montage")
         self.assertEqual(body["mode"], "smart_montage")
         self.assertEqual(body["style"], "pop")
@@ -168,7 +170,36 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertEqual(len(body["material_plan"]), body["material_generate_count"])
         self.assertTrue(all(item["source"] == "generate" for item in body["material_plan"]))
         self.assertTrue(all(item["file"] is None for item in body["material_plan"]))
-        self.assertNotEqual(body["scenes"][0]["headline"], "被篡改")
+        self.assertEqual(body["plan_digest"], preview["plan_digest"])
+
+    def test_smart_montage_rejects_missing_stale_or_injected_plan_digest(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "专业评估看见真实需求，温和护理让状态自然稳定。",
+            "style": "clinic",
+            "ratio": "9:16",
+        }
+        with self.assertRaisesRegex(
+            self.script_to_video.SmartMontageRequestError, "缺少已确认",
+        ) as missing:
+            self.script_to_video.prepare_script_to_video_payload(request, "fang")
+        self.assertEqual("plan_digest_required", missing.exception.code)
+
+        with self.assertRaises(self.script_to_video.SmartMontageRequestError) as stale:
+            self.script_to_video.prepare_script_to_video_payload(
+                {**request, "plan_digest": "0" * 64}, "fang",
+            )
+        self.assertEqual(409, stale.exception.status)
+        self.assertEqual("plan_digest_mismatch", stale.exception.code)
+
+        preview = self.script_to_video.smart_montage_plan_response(request)
+        with self.assertRaises(self.script_to_video.SmartMontageRequestError) as injected:
+            self.script_to_video.prepare_script_to_video_payload({
+                **request,
+                "plan_digest": preview["plan_digest"],
+                "plan": {"scenes": [{"headline": "被篡改"}]},
+            }, "fang")
+        self.assertEqual("invalid_request", injected.exception.code)
 
     def test_smart_plan_http_contract_is_authenticated_and_aggregate(self):
         class Handler:
@@ -196,6 +227,16 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertEqual(
             [item["style"] for item in handler.sent[1]["plan"]["styles"]],
             ["luxe", "pop"],
+        )
+        digests = handler.sent[1]["plan_digests"]
+        self.assertEqual({"luxe", "pop"}, set(digests))
+        self.assertTrue(all(len(value) == 64 for value in digests.values()))
+        self.assertEqual(
+            digests,
+            {
+                item["style"]: item["plan_digest"]
+                for item in handler.sent[1]["plan"]["styles"]
+            },
         )
 
     def test_smart_voiceover_preserves_the_complete_confirmed_copy(self):
@@ -289,13 +330,28 @@ class ScriptToVideoTests(unittest.TestCase):
             finally:
                 self.script_to_video.OUT_DIR = old_out
 
+    def test_smart_material_generation_honors_the_total_job_deadline(self):
+        plan = {"ratio": "16:9", "scenes": [{"image_prompt": "第一幕"}]}
+        with mock.patch.object(
+            self.script_to_video.time, "monotonic", return_value=101.0,
+        ), mock.patch("content_domains.image.gen_image") as generate:
+            with self.assertRaisesRegex(TimeoutError, "两小时总时限"):
+                self.script_to_video._smart_material_images(plan, deadline=100.0)
+        generate.assert_not_called()
+
     def test_smart_pipeline_generates_voice_every_scene_and_verified_mp4(self):
-        plan = self.script_to_video.prepare_script_to_video_payload({
+        request = {
             "pipeline": "smart_montage",
             "copy": "专业评估看见真实需求，温和护理改善肤质，持续管理让状态自然稳定。",
             "style": "clinic",
             "ratio": "9:16",
-        }, "fang")["smart_plan"]
+        }
+        request["plan_digest"] = self.script_to_video.smart_montage_plan_response(
+            request,
+        )["plan_digest"]
+        plan = self.script_to_video.prepare_script_to_video_payload(
+            request, "fang",
+        )["smart_plan"]
         with tempfile.TemporaryDirectory() as raw:
             old_out = self.script_to_video.OUT_DIR
             self.script_to_video.OUT_DIR = Path(raw)
@@ -315,7 +371,7 @@ class ScriptToVideoTests(unittest.TestCase):
                 Path(output_path).write_bytes(b"mp4")
                 return {
                     "template_id": "smart-montage-v1",
-                    "template_version": "1.0.0",
+                    "template_version": "1.0.1",
                     "output": {"duration_ms": int(render_plan["duration_seconds"] * 1000)},
                 }
 
@@ -334,6 +390,11 @@ class ScriptToVideoTests(unittest.TestCase):
                 audio.assert_called_once()
                 self.assertEqual(len(image_calls), plan["scene_count"])
                 self.assertEqual(render.call_args.kwargs["voiceover"].name, "voice.mp3")
+                self.assertGreaterEqual(render.call_args.kwargs["timeout"], 1)
+                self.assertLessEqual(
+                    render.call_args.kwargs["timeout"],
+                    self.script_to_video.SMART_MONTAGE_MAX_RUNTIME,
+                )
                 public_url.assert_called_once()
                 self.assertTrue(public_url.call_args.kwargs["private"])
                 self.assertEqual(result["pipeline"], "smart_montage")

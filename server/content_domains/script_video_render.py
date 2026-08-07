@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import wave
 
 from . import video_compose_media as media
@@ -25,7 +26,7 @@ TEMPLATE_ROOT = pathlib.Path(os.environ.get(
     str(_LOCAL_TEMPLATE_ROOT if _LOCAL_TEMPLATE_ROOT.is_dir() else _DEPLOYED_TEMPLATE_ROOT),
 ))
 TEMPLATE_ID = "smart-montage-v1"
-TEMPLATE_VERSION = "1.0.0"
+TEMPLATE_VERSION = "1.0.1"
 HYPERFRAMES_VERSION = "0.7.96"
 _DEFAULT_NPX = (
     "/home/ubuntu/.local/hq-node/bin/npx"
@@ -637,13 +638,25 @@ def render(
                 and pathlib.Path("/usr/bin/chromium-browser").is_file()
             ):
                 environment["HYPERFRAMES_BROWSER_PATH"] = "/usr/bin/chromium-browser"
-            command_timeout = timeout or max(300, int(data["duration_seconds"] * 20))
+            total_timeout = float(
+                timeout or max(300, int(data["duration_seconds"] * 20))
+            )
+            command_deadline = time.monotonic() + total_timeout
+
+            def remaining_timeout(message):
+                remaining = command_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RenderError(message)
+                return remaining
+
             _run_command(
-                runner, check_command, workspace, environment, command_timeout,
+                runner, check_command, workspace, environment,
+                remaining_timeout("文案成片模板检查超时"),
                 ("文案成片模板检查超时", "文案成片模板检查未通过"),
             )
             _run_command(
-                runner, render_command, workspace, environment, command_timeout,
+                runner, render_command, workspace, environment,
+                remaining_timeout("文案成片渲染超时"),
                 ("文案成片渲染超时", "文案成片渲染失败"),
             )
     except RenderError:
@@ -656,7 +669,9 @@ def render(
     except Exception as error:
         raise RenderError("文案成片输出验证失败") from error
     expected_ms = int(round(data["duration_seconds"] * 1000))
-    tolerance_ms = max(1200, int(expected_ms * 0.05))
+    # Container timestamps can drift slightly, but a long render must never
+    # pass after losing several seconds (and potentially its closing frame).
+    tolerance_ms = max(1200, min(2000, int(expected_ms * 0.02)))
     if report.get("video_codec") != "h264" or not report.get("has_audio"):
         raise RenderError("文案成片输出编码不符合交付要求")
     if (

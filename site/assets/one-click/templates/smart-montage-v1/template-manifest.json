@@ -1,11 +1,17 @@
 {
   "template_id": "smart-montage-v1",
-  "template_version": "1.0.0",
+  "template_version": "1.0.1",
   "status": "verified",
   "verification": {
     "hyperframes_version": "0.7.96",
-    "strict": true,
-    "variants": ["luxe/16:9", "pop/9:16", "clinic/9:16"]
+    "runtime_check": true,
+    "strict_render": true,
+    "dynamic_duration_seconds": 14,
+    "variants": [
+      "luxe/16:9", "luxe/9:16",
+      "pop/16:9", "pop/9:16",
+      "clinic/16:9", "clinic/9:16"
+    ]
   },
   "input_contract": {
     "style": ["luxe", "pop", "clinic"],
@@ -18,6 +24,7 @@
   "security": {
     "accepts_arbitrary_html": false,
     "accepts_arbitrary_javascript": false,
-    "accepts_remote_media": false
+    "accepts_remote_media": false,
+    "bundled_full_cjk_font": "Noto Sans SC variable 100-900"
   }
 }

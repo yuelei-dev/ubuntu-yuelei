@@ -28,15 +28,18 @@ class VideoJobPublicStateTests(unittest.TestCase):
         public = core._job_public_dict(self._row("failed", refunded=1), "downloading")
         self.assertEqual("failed", public["phase"])
         self.assertIs(True, public["refunded"])
+        self.assertEqual("refunded", public["refund_state"])
 
     def test_done_job_has_done_phase(self):
         public = core._job_public_dict(self._row("done"), "downloading")
         self.assertEqual("done", public["phase"])
         self.assertIs(False, public["refunded"])
+        self.assertEqual("none", public["refund_state"])
 
     def test_pending_refund_is_not_reported_as_confirmed(self):
         public = core._job_public_dict(self._row("error", refunded=2))
         self.assertIs(False, public["refunded"])
+        self.assertEqual("pending", public["refund_state"])
 
 
 if __name__ == "__main__":

@@ -176,8 +176,9 @@ class JobsStoreTests(unittest.TestCase):
         self.assertEqual(1, len(refund_calls))
         self.assertEqual(("u", 40), refund_calls[0][:2])
         with closing(self._conn()) as c:
-            row = c.execute("SELECT status,cost,refunded FROM jobs").fetchone()
-        self.assertEqual(("error", 40, 1), tuple(row))
+            row = c.execute("SELECT id,status,cost,refunded FROM jobs").fetchone()
+        self.assertEqual(("error", 40, 1), tuple(row)[1:])
+        self.assertEqual(row["id"], ctx.exception.compensation_job_id)
 
     def test_paid_job_before_commit_is_atomic_and_pending_is_invisible(self):
         with closing(self._conn()) as c:
@@ -263,6 +264,13 @@ class JobsStoreTests(unittest.TestCase):
                 charge_transaction_key=charge_key,
             )
         self.assertEqual("queued", ctx.exception.compensation)
+        with closing(self._conn()) as c:
+            tracker = c.execute(
+                "SELECT id,status,refunded FROM jobs WHERE id=?",
+                (ctx.exception.compensation_job_id,),
+            ).fetchone()
+        self.assertIsNotNone(tracker)
+        self.assertEqual(("error", 2), tuple(tracker)[1:])
 
         def retry_job(job_id, username, cost, transaction_key=""):
             return jobs_store.refund_once(

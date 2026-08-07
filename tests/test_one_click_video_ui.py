@@ -72,16 +72,85 @@ class OneClickVideoUiTests(unittest.TestCase):
     def test_each_style_submits_an_independent_real_job(self):
         self.assertIn("pipeline:'smart_montage'", self.html)
         self.assertNotIn("plan:stylePlan", self.html)
-        self.assertIn("var payload={pipeline:'smart_montage',copy:copy,style:style,ratio:ratio}", self.html)
-        self.assertIn("'Idempotency-Key':stableIdempotencyKey(style)", self.html)
-        self.assertIn("sessionStorage.setItem('hq-smart-montage-batch-v1'", self.html)
+        self.assertIn("plan_digest:stylePlan.plan_digest", self.html)
+        self.assertIn("idempotencyKey=stableIdempotencyKey(style)", self.html)
+        self.assertIn("'Idempotency-Key':idempotencyKey", self.html)
+        self.assertIn("smartStorageKey='hq-smart-montage-batch-v2'", self.html)
+        self.assertIn("sessionStorage.setItem(smartStorageKey", self.html)
         self.assertIn("pendingPlans=activePlan.styles.filter", self.html)
-        self.assertIn("markStyleRetryable(style)", self.html)
+        self.assertIn("markStyleRetryable(style,binding)", self.html)
         self.assertIn("canRotateRejectedSubmission(error)", self.html)
         self.assertIn("error&&error.status===404", self.html)
         self.assertIn("'/api/gen/script_to_video'", self.html)
         self.assertIn("'/api/gen/job/'+encodeURIComponent(jobId)", self.html)
         self.assertIn("pendingPlans.map", self.html)
+
+    def test_smart_batch_restores_full_input_plan_and_jobs_after_refresh(self):
+        for marker in (
+            "saved.input={copy:",
+            "saved.plan=plan",
+            "function restoreBatchOnLoad()",
+            "$('smartCopy').value=copy",
+            "activePlan=plan",
+            "resumeBatchJobs(plan)",
+            "restoreBatchOnLoad();",
+        ):
+            self.assertIn(marker, self.html)
+
+    def test_smart_polling_is_bound_to_one_batch_job_and_submission_key(self):
+        for marker in (
+            "smartPolls={}",
+            "function batchJobMatches(binding)",
+            "smartBatch.signature===binding.signature",
+            "String(smartBatch.jobs[binding.style]||'')===binding.jobId",
+            "String(smartBatch.keys[binding.style]||'')===binding.key",
+            "function pollIsCurrent(binding)",
+            "smartPolls[binding.style]===binding",
+            "function startJobPoll(style,jobId)",
+            "if(!pollIsCurrent(binding))return",
+            "markStyleRetryable(style,binding)",
+            "if(!batchJobMatches(binding))return false",
+        ):
+            self.assertIn(marker, self.html)
+
+        start_poll = self.html.split("function startJobPoll(style,jobId)", 1)[1]
+        start_poll = start_poll.split("function resumeBatchJobs(plan)", 1)[0]
+        self.assertIn("existing.signature===signature", start_poll)
+        self.assertIn("existing.jobId===jobId", start_poll)
+        self.assertIn("existing.key===key", start_poll)
+        self.assertIn("return existing", start_poll)
+
+        retryable = self.html.split(
+            "function markStyleRetryable(style,binding)", 1
+        )[1].split("function canRotateRejectedSubmission", 1)[0]
+        self.assertLess(
+            retryable.index("if(!batchJobMatches(binding))return false"),
+            retryable.index("delete smartBatch.jobs[style]"),
+        )
+        self.assertNotIn("pollJob(item.style,jobId,0)", self.html)
+        self.assertNotIn("pollJob(style,data.job_id,0)", self.html)
+
+    def test_stale_submission_response_cannot_overwrite_a_new_batch(self):
+        submit = self.html.split("function submitStyle(copy,ratio,stylePlan)", 1)[1]
+        submit = submit.split("function generateAll()", 1)[0]
+        guard = (
+            "if(smartBatch.signature!==submissionSignature||"
+            "smartBatch.keys[style]!==idempotencyKey)return false"
+        )
+        self.assertEqual(2, submit.count(guard))
+        self.assertLess(
+            submit.index(guard),
+            submit.index("smartBatch.jobs[style]=data.job_id"),
+        )
+
+    def test_refund_pending_never_enables_a_second_paid_submission(self):
+        self.assertIn("job.refund_state", self.html)
+        self.assertIn("refundState==='pending'", self.html)
+        self.assertIn("退款确认完成前不会重复提交", self.html)
+        pending_branch = self.html.split("if(refundState==='pending')", 1)[1].split(
+            "renderJobCard(style,'失败'", 1
+        )[0]
+        self.assertNotIn("markStyleRetryable(", pending_branch)
 
     def test_smart_mode_does_not_advertise_a_fixed_duration_or_asset_count(self):
         self.assertIn("时长与素材数由文案决定", self.html)

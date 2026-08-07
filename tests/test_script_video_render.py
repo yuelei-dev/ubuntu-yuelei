@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 
+import hashlib
+import json
 import pathlib
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -18,6 +21,17 @@ from content_domains import script_video_render as renderer
 
 
 class ScriptVideoRenderTests(unittest.TestCase):
+    def test_renderer_template_version_matches_bundled_metadata(self):
+        meta = json.loads((
+            ROOT / "site/assets/one-click/templates/smart-montage-v1/meta.json"
+        ).read_text(encoding="utf-8"))
+        manifest = json.loads((
+            ROOT
+            / "site/assets/one-click/templates/smart-montage-v1/template-manifest.json"
+        ).read_text(encoding="utf-8"))
+        self.assertEqual(meta["version"], renderer.TEMPLATE_VERSION)
+        self.assertEqual(manifest["template_version"], renderer.TEMPLATE_VERSION)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temp.name)
@@ -148,7 +162,7 @@ class ScriptVideoRenderTests(unittest.TestCase):
         self.assertTrue((workspace / "assets/materials/scene-01.jpg").is_file())
         self.assertTrue((workspace / "assets/audio/voiceover.mp3").is_file())
         self.assertTrue((workspace / "assets/audio/bgm.mp3").is_file())
-        self.assertTrue((workspace / "assets/fonts/noto-sans-sc-900.woff2").is_file())
+        self.assertTrue((workspace / "assets/fonts/noto-sans-sc-variable.ttf").is_file())
 
     def test_template_is_self_contained_without_the_legacy_template(self):
         templates = self.root / "templates"
@@ -160,8 +174,51 @@ class ScriptVideoRenderTests(unittest.TestCase):
             renderer.prepare_workspace(self.plan(), self.images, workspace)
 
         self.assertTrue(
-            (workspace / "assets/fonts/noto-sans-sc-900.woff2").is_file()
+            (workspace / "assets/fonts/noto-sans-sc-variable.ttf").is_file()
         )
+
+    def test_bundled_font_is_pinned_variable_font_with_extended_cjk_coverage(self):
+        font = (
+            ROOT / "site/assets/one-click/templates/smart-montage-v1/assets/fonts"
+            / "noto-sans-sc-variable.ttf"
+        )
+        payload = font.read_bytes()
+        self.assertEqual(17772300, len(payload))
+        self.assertEqual(
+            "a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da",
+            hashlib.sha256(payload).hexdigest(),
+        )
+
+        table_count = struct.unpack_from(">H", payload, 4)[0]
+        tables = {}
+        for index in range(table_count):
+            offset = 12 + index * 16
+            tag, _, table_offset, length = struct.unpack_from(">4sIII", payload, offset)
+            tables[tag.decode("ascii")] = (table_offset, length)
+        self.assertIn("fvar", tables)
+        self.assertIn("cmap", tables)
+
+        cmap_offset, _ = tables["cmap"]
+        cmap_count = struct.unpack_from(">H", payload, cmap_offset + 2)[0]
+        format12_groups = []
+        for index in range(cmap_count):
+            record = cmap_offset + 4 + index * 8
+            _, _, relative = struct.unpack_from(">HHI", payload, record)
+            subtable = cmap_offset + relative
+            if struct.unpack_from(">H", payload, subtable)[0] != 12:
+                continue
+            group_count = struct.unpack_from(">I", payload, subtable + 12)[0]
+            format12_groups.extend(
+                struct.unpack_from(">III", payload, subtable + 16 + group * 12)[:2]
+                for group in range(group_count)
+            )
+        self.assertTrue(format12_groups)
+        for character in "焕颜抗衰祛斑痘肌水光针玻尿酸胶原蛋白颧皱褶莹润":
+            codepoint = ord(character)
+            self.assertTrue(
+                any(start <= codepoint <= end for start, end in format12_groups),
+                "bundled font misses U+%04X %s" % (codepoint, character),
+            )
 
     def test_style_motion_is_distinct_and_last_scene_has_no_exit_cover(self):
         expectations = {
@@ -199,7 +256,9 @@ class ScriptVideoRenderTests(unittest.TestCase):
                 target.write_bytes(b"rendered")
             return subprocess.CompletedProcess(command, 0, b"ok", b"")
 
-        with mock.patch.object(renderer.media, "probe_media", return_value={
+        with mock.patch.object(
+            renderer.time, "monotonic", side_effect=(100.0, 100.0, 110.0),
+        ), mock.patch.object(renderer.media, "probe_media", return_value={
             "duration_ms": 12000,
             "width": 1920,
             "height": 1080,
@@ -216,13 +275,14 @@ class ScriptVideoRenderTests(unittest.TestCase):
         self.assertEqual("render", calls[1][0][3])
         for command, kwargs in calls:
             self.assertEqual("hyperframes@0.7.96", command[2])
-            self.assertEqual(77, kwargs["timeout"])
             self.assertTrue(kwargs["check"])
             if pathlib.Path(renderer._DEFAULT_NPX).is_absolute():
                 self.assertEqual(
                     str(pathlib.Path(renderer._DEFAULT_NPX).parent),
                     kwargs["env"]["PATH"].split(renderer.os.pathsep, 1)[0],
                 )
+        self.assertEqual(77, calls[0][1]["timeout"])
+        self.assertEqual(67, calls[1][1]["timeout"])
         render_command = calls[1][0]
         self.assertIn("--workers", render_command)
         self.assertEqual("1", render_command[render_command.index("--workers") + 1])
@@ -230,6 +290,24 @@ class ScriptVideoRenderTests(unittest.TestCase):
         self.assertEqual("h264", result["output"]["video_codec"])
         self.assertEqual("smart-montage-v1", result["template_id"])
         probe.assert_called_once_with(output.resolve())
+
+    def test_check_and_render_share_one_absolute_timeout_budget(self):
+        output = self.root / "budget.mp4"
+        calls = []
+
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0, b"ok", b"")
+
+        with mock.patch.object(
+            renderer.time, "monotonic", side_effect=(100.0, 100.0, 178.0),
+        ):
+            with self.assertRaisesRegex(renderer.RenderError, "渲染超时"):
+                renderer.render(
+                    self.plan(), self.images, output, timeout=77, runner=runner,
+                )
+        self.assertEqual(1, len(calls))
+        self.assertIn("check", calls[0][0])
 
     def test_render_rejects_codec_audio_and_duration_contracts(self):
         output = self.root / "bad.mp4"
@@ -262,6 +340,29 @@ class ScriptVideoRenderTests(unittest.TestCase):
                 with mock.patch.object(renderer.media, "probe_media", return_value=report):
                     with self.assertRaisesRegex(renderer.RenderError, message):
                         renderer.render(self.plan(), self.images, output, runner=runner)
+
+    def test_long_render_cannot_hide_a_truncated_closing_scene_in_tolerance(self):
+        output = self.root / "truncated.mp4"
+        plan = self.plan()
+        plan["duration_seconds"] = 90
+        for index, scene in enumerate(plan["scenes"]):
+            scene["start_seconds"] = index * 30
+            scene["duration_seconds"] = 30
+
+        def runner(command, **_kwargs):
+            if "render" in command:
+                pathlib.Path(command[command.index("--output") + 1]).write_bytes(b"bad")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        with mock.patch.object(renderer.media, "probe_media", return_value={
+            "duration_ms": 86100,
+            "video_codec": "h264",
+            "has_audio": True,
+            "width": 1920,
+            "height": 1080,
+        }):
+            with self.assertRaisesRegex(renderer.RenderError, "时长"):
+                renderer.render(plan, self.images, output, runner=runner)
 
     def test_public_render_error_never_includes_runtime_paths(self):
         output = self.root / "private-output.mp4"

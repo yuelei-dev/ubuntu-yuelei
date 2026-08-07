@@ -6,9 +6,7 @@
   <title>黄雀 AI · 文案智能成片</title>
   <script src="assets/vendor/gsap.min.js"></script>
   <style>
-    @font-face{font-family:"Noto Sans SC";src:url("assets/fonts/noto-sans-sc-400.woff2") format("woff2");font-weight:400}
-    @font-face{font-family:"Noto Sans SC";src:url("assets/fonts/noto-sans-sc-700.woff2") format("woff2");font-weight:700}
-    @font-face{font-family:"Noto Sans SC";src:url("assets/fonts/noto-sans-sc-900.woff2") format("woff2");font-weight:900}
+    @font-face{font-family:"Noto Sans SC";src:url("assets/fonts/noto-sans-sc-variable.ttf") format("truetype");font-style:normal;font-weight:100 900;font-display:block}
     @font-face{font-family:"JetBrains Mono";src:url("assets/fonts/jetbrains-mono-600.woff2") format("woff2");font-weight:600}
     *{box-sizing:border-box}
     html,body{width:__WIDTH__px;height:__HEIGHT__px;margin:0;overflow:hidden;font-family:"Noto Sans SC",sans-serif}

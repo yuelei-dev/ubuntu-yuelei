@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """一键成片：现有数字人口播 + 用户图片资产/按需生图 + FFmpeg 自动穿插。"""
 import hashlib
+import hmac
 import json
 import random
 import re
@@ -8,7 +9,7 @@ import subprocess
 import time
 import uuid
 
-from .core import OUT_DIR, adb, closing, jdb
+from .core import OUT_DIR, SMART_MONTAGE_MAX_RUNTIME, adb, closing, jdb
 
 MAX_MATERIAL_SCENES = 8
 PHOTO_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
@@ -18,6 +19,105 @@ SMART_MONTAGE_PIPELINE = "smart_montage"
 SMART_MONTAGE_PLAN_PATH = "/api/gen/script_to_video/plan"
 SMART_MONTAGE_TEMPLATE = "smart-montage-v1"
 SMART_MONTAGE_DUPLICATE_RETRIES = 2
+SMART_MONTAGE_SUBMISSION_FIELDS = {
+    "pipeline", "mode", "copy", "script", "text", "style", "ratio",
+    "voice", "plan_digest",
+}
+_PLAN_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+class SmartMontageRequestError(ValueError):
+    """A typed, user-correctable smart-montage submission error."""
+
+    def __init__(self, message, code, status=400):
+        super().__init__(message)
+        self.code = str(code)
+        self.status = int(status)
+
+
+def is_smart_montage_payload(payload):
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE
+
+
+def normalize_smart_montage_submission(payload):
+    """Canonicalize only client-controlled fields for the idempotency hash.
+
+    The derived scene plan is deliberately absent.  Replaying the same client
+    request therefore remains stable if a later deployment changes the
+    deterministic planner.
+    """
+    if not isinstance(payload, dict):
+        raise SmartMontageRequestError("请求体必须是 JSON 对象", "invalid_request")
+    unknown = sorted(set(payload) - SMART_MONTAGE_SUBMISSION_FIELDS)
+    if unknown:
+        raise SmartMontageRequestError(
+            "智能成片提交包含未支持字段: %s" % ", ".join(unknown),
+            "invalid_request",
+        )
+    pipeline = str(payload.get("pipeline") or "").strip().lower()
+    mode = str(payload.get("mode") or pipeline).strip().lower()
+    if pipeline != SMART_MONTAGE_PIPELINE or mode != SMART_MONTAGE_PIPELINE:
+        raise SmartMontageRequestError("智能成片 pipeline 格式无效", "invalid_request")
+
+    copy_field = next(
+        (field for field in ("copy", "script", "text") if field in payload),
+        None,
+    )
+    if copy_field is None:
+        raise SmartMontageRequestError("请输入成片文案", "invalid_request")
+    digest = str(payload.get("plan_digest") or "").strip()
+    if not digest:
+        raise SmartMontageRequestError(
+            "缺少已确认的成片方案摘要，请重新智能拆分",
+            "plan_digest_required",
+        )
+    if not _PLAN_DIGEST_RE.fullmatch(digest):
+        raise SmartMontageRequestError("成片方案摘要格式无效", "plan_digest_invalid")
+
+    canonical = {
+        "pipeline": SMART_MONTAGE_PIPELINE,
+        "copy": payload.get(copy_field),
+        "style": payload.get("style"),
+        "ratio": payload.get("ratio", "16:9"),
+        "plan_digest": digest.lower(),
+    }
+    if "voice" in payload:
+        canonical["voice"] = payload.get("voice")
+    return canonical
+
+
+def smart_montage_plan_response(payload):
+    """Build a preview response with an independently bound digest per style."""
+    from .script_video_montage import plan_digest, plan_script_video
+
+    planner_payload = {
+        field: payload[field]
+        for field in ("copy", "script", "text", "styles", "style", "ratio")
+        if field in payload
+    }
+    plan = plan_script_video(planner_payload)
+    response_digest = plan_digest(plan)
+    digests = {}
+    if isinstance(plan.get("styles"), list):
+        for style_plan in plan["styles"]:
+            style = style_plan["style"]
+            frozen = plan_script_video({
+                "copy": plan["copy"], "style": style, "ratio": plan["ratio"],
+            })
+            digest = plan_digest(frozen)
+            style_plan["plan_digest"] = digest
+            digests[style] = digest
+    else:
+        digest = plan_digest(plan)
+        plan["plan_digest"] = digest
+        digests[plan["style"]] = digest
+    return {
+        "plan": plan,
+        "plan_digest": response_digest,
+        "plan_digests": digests,
+    }
 
 
 def _scene_prompt(scene):
@@ -82,7 +182,9 @@ def prepare_script_to_video_payload(payload, username):
     """提交扣点前冻结素材计划，保证能一次算清总价且不发生生成到一半欠费。"""
     body = dict(payload or {})
     if str(body.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
-        from .script_video_montage import plan_script_video
+        from .script_video_montage import plan_digest, plan_script_video
+
+        body = normalize_smart_montage_submission(body)
 
         # 浏览器里的 plan 只用于用户预览；提交时由服务器重新计算，避免篡改
         # 分镜数量、时长或出图提示后少扣点/执行任意模板内容。
@@ -91,8 +193,14 @@ def prepare_script_to_video_payload(payload, username):
             "style": body.get("style"),
             "ratio": body.get("ratio"),
         })
+        expected_digest = plan_digest(frozen)
+        if not hmac.compare_digest(body["plan_digest"], expected_digest):
+            raise SmartMontageRequestError(
+                "成片规划规则已更新，请重新智能拆分后确认",
+                "plan_digest_mismatch",
+                409,
+            )
         scenes = [dict(scene) for scene in frozen["scenes"]]
-        body.pop("plan", None)
         body.update({
             "pipeline": SMART_MONTAGE_PIPELINE,
             "mode": SMART_MONTAGE_PIPELINE,
@@ -174,8 +282,7 @@ def dispatch_http(handler, method, verify_token, must_change_password):
         allowed = {"copy", "script", "text", "styles", "style", "ratio"}
         if set(body) - allowed:
             raise ValueError("请求包含未支持字段")
-        from .script_video_montage import plan_script_video
-        handler._send(200, {"plan": plan_script_video(body)})
+        handler._send(200, smart_montage_plan_response(body))
     except ValueError as exc:
         handler._send(400, {"detail": str(exc)[:220]})
     return True
@@ -317,7 +424,14 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def _smart_material_images(plan):
+def _smart_deadline_remaining(deadline, stage):
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("智能成片处理超过两小时总时限（%s）" % stage)
+    return remaining
+
+
+def _smart_material_images(plan, deadline=None):
     from . import image as image_domain
 
     materials, hashes = [], set()
@@ -325,11 +439,18 @@ def _smart_material_images(plan):
     scenes = plan.get("scenes") or []
     try:
         for position, scene in enumerate(scenes):
+            if deadline is not None:
+                _smart_deadline_remaining(deadline, "生成第 %d 幕素材前" % (position + 1))
             base_prompt = str(scene.get("image_prompt") or "").strip()
             if not base_prompt:
                 raise ValueError("第 %d 幕缺少画面提示" % (position + 1))
             accepted = None
             for attempt in range(SMART_MONTAGE_DUPLICATE_RETRIES + 1):
+                if deadline is not None:
+                    _smart_deadline_remaining(
+                        deadline,
+                        "生成第 %d 幕素材第 %d 次尝试前" % (position + 1, attempt + 1),
+                    )
                 prompt = (
                     "%s 本次成片唯一镜头编号 %02d/%02d，视觉变化版本 %d；"
                     "必须与其他镜头在主体动作、机位和构图上明显不同。"
@@ -350,6 +471,10 @@ def _smart_material_images(plan):
                         time.sleep(MATERIAL_IMAGE_RETRY_DELAY)
                         continue
                     raise
+                if deadline is not None:
+                    _smart_deadline_remaining(
+                        deadline, "生成第 %d 幕素材后" % (position + 1),
+                    )
                 rel = generated.get("file") if isinstance(generated, dict) else None
                 path = _out_file(rel, {".jpg", ".jpeg", ".png", ".webp", ".avif"})
                 if not path:
@@ -391,9 +516,11 @@ def _gen_smart_montage(username, payload):
     if not isinstance(plan, dict):
         raise ValueError("智能成片任务缺少服务端方案")
     job_id = payload.get("_job_id")
+    deadline = time.monotonic() + SMART_MONTAGE_MAX_RUNTIME
     voice = str(payload.get("voice") or "S_d21F8OR62").strip()
     materials, audio_rel, output_rel = [], None, None
     try:
+        _smart_deadline_remaining(deadline, "生成旁白前")
         _smart_phase(job_id, "generating_audio", mode=SMART_MONTAGE_PIPELINE)
         narration = _smart_voiceover_text(plan)
         audio_result = audio_domain.gen_audio({
@@ -404,6 +531,7 @@ def _gen_smart_montage(username, payload):
             "pitch": 0,
             "volume": 0,
         })
+        _smart_deadline_remaining(deadline, "生成旁白后")
         audio_rel = audio_result.get("file") if isinstance(audio_result, dict) else None
         voiceover = _out_file(audio_rel, {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"})
         if not voiceover:
@@ -416,10 +544,11 @@ def _gen_smart_montage(username, payload):
             audio_rel, voiceover, voiceover_duration,
             float(plan.get("duration_seconds") or 10),
         )
+        _smart_deadline_remaining(deadline, "处理旁白后")
         render_plan = _retime_smart_plan(plan, voiceover_duration)
 
         _smart_phase(job_id, "generating_assets", audio_file=audio_rel, voice=voice)
-        materials = _smart_material_images(render_plan)
+        materials = _smart_material_images(render_plan, deadline=deadline)
 
         output_rel = "video/script_montage_%s.mp4" % uuid.uuid4().hex
         output_path = (OUT_DIR / output_rel).resolve()
@@ -430,13 +559,18 @@ def _gen_smart_montage(username, payload):
             raise RuntimeError("智能成片素材在渲染前不可用")
 
         _smart_phase(job_id, "rendering", image_file=materials[0]["file"])
+        render_timeout = min(
+            max(600, int(render_plan["duration_seconds"] * 24)),
+            max(1, int(_smart_deadline_remaining(deadline, "开始渲染前"))),
+        )
         report = montage_renderer.render(
             render_plan,
             material_paths,
             output_path,
             voiceover=voiceover,
-            timeout=max(600, int(render_plan["duration_seconds"] * 24)),
+            timeout=render_timeout,
         )
+        _smart_deadline_remaining(deadline, "渲染后")
         _smart_phase(job_id, "verifying", video_file=output_rel)
         verified_duration = float(((report.get("output") or {}).get("duration_ms") or 0)) / 1000.0
         if verified_duration <= 0:
