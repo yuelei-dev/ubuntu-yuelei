@@ -1,4 +1,5 @@
 import importlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -253,52 +254,298 @@ class ScriptToVideoTests(unittest.TestCase):
         narration = self.script_to_video._smart_voiceover_text(plan)
         self.assertEqual(narration, copy)
 
-    def test_retime_smart_plan_keeps_contiguous_exact_timeline(self):
+    def test_scene_voiceover_texts_preserve_complete_copy_and_remove_markdown(self):
         plan = {
-            "duration_seconds": 10,
+            "copy": "欢迎体验**黄雀 AI 工作台**，让创意自然发生。",
             "scenes": [
-                {"start_seconds": 0, "duration_seconds": 3},
-                {"start_seconds": 3, "duration_seconds": 3},
-                {"start_seconds": 6, "duration_seconds": 4},
+                {"supporting_copy": "欢迎体验**黄雀 AI"},
+                {"supporting_copy": "工作台**"},
+                {"supporting_copy": "让创意自然发生"},
             ],
         }
-        retimed = self.script_to_video._retime_smart_plan(plan, 9.2)
-        self.assertEqual(retimed["duration_seconds"], 10.0)
+        texts = self.script_to_video._smart_scene_voiceover_texts(plan)
+        self.assertEqual(len(texts), 3)
+        self.assertTrue(all("*" not in text for text in texts))
+        self.assertEqual(
+            self.script_to_video._spoken_signature("".join(texts)),
+            self.script_to_video._spoken_signature(plan["copy"]),
+        )
+
+    def test_retime_smart_plan_uses_real_scene_voice_durations(self):
+        plan = {
+            "duration_seconds": 54,
+            "scenes": [
+                {"start_seconds": index * 4, "duration_seconds": 4,
+                 "headline": "第%d幕" % (index + 1), "supporting_copy": "旁白"}
+                for index in range(13)
+            ],
+        }
+        actual = [2.88, 2.96, 3.50, 2.68, 5.14, 2.76, 2.80,
+                  5.84, 3.02, 3.74, 3.86, 3.42, 2.91]
+        segments = [
+            {"text": "第%d幕，" % (index + 1), "speech_duration_seconds": duration}
+            for index, duration in enumerate(actual)
+        ]
+        retimed = self.script_to_video._retime_smart_plan(plan, segments)
+        self.assertAlmostEqual(retimed["duration_seconds"], 53.53, places=2)
+        self.assertEqual(retimed["estimated_duration_seconds"], 54.0)
         cursor = 0.0
         for scene in retimed["scenes"]:
             self.assertEqual(scene["start_seconds"], cursor)
+            self.assertGreaterEqual(scene["voiceover_start_seconds"], cursor)
+            self.assertAlmostEqual(
+                scene["voiceover_start_seconds"] - cursor,
+                self.script_to_video.SMART_MONTAGE_AUDIO_LEAD_SECONDS,
+                places=3,
+            )
+            self.assertLessEqual(
+                scene["voiceover_end_seconds"],
+                round(cursor + scene["duration_seconds"], 3),
+            )
             cursor = round(cursor + scene["duration_seconds"], 3)
         self.assertEqual(cursor, retimed["duration_seconds"])
-        with self.assertRaisesRegex(ValueError, "超过已确认方案"):
-            self.script_to_video._retime_smart_plan(plan, 9.95)
+        self.assertAlmostEqual(
+            retimed["duration_seconds"] - retimed["scenes"][-1]["voiceover_end_seconds"],
+            self.script_to_video.SMART_MONTAGE_FINAL_AUDIO_TAIL_SECONDS,
+            places=3,
+        )
 
-    def test_overlong_voiceover_is_fitted_without_changing_confirmed_plan(self):
+    def test_voiceover_master_decodes_normalizes_and_encodes_only_once(self):
         with tempfile.TemporaryDirectory() as raw:
-            old_out = self.script_to_video.OUT_DIR
-            self.script_to_video.OUT_DIR = Path(raw)
-            source = Path(raw) / "audio" / "voice.mp3"
-            source.parent.mkdir(parents=True)
-            source.write_bytes(b"voice")
+            paths = []
+            for index in range(3):
+                path = Path(raw) / ("scene-%d.mp3" % index)
+                path.write_bytes(b"voice")
+                paths.append(path)
+            segments = [
+                {
+                    "text": "第%d幕，" % (index + 1), "path": path,
+                    "speech_start_seconds": 0.2, "speech_end_seconds": 1.7,
+                    "speech_duration_seconds": 1.5,
+                }
+                for index, path in enumerate(paths)
+            ]
+            plan = self.script_to_video._retime_smart_plan({
+                "duration_seconds": 10,
+                "scenes": [
+                    {"start_seconds": index * 3, "duration_seconds": 3,
+                     "headline": "标题", "supporting_copy": "说明"}
+                    for index in range(3)
+                ],
+            }, segments)
+            output = Path(raw) / "master.mp3"
 
             def fake_run(command, **_kwargs):
-                Path(command[-1]).write_bytes(b"fitted")
+                output.write_bytes(b"master")
                 return subprocess.CompletedProcess(command, 0, b"", b"")
 
-            try:
-                with mock.patch.object(self.script_to_video.subprocess, "run", side_effect=fake_run) as run, \
-                     mock.patch.object(self.script_to_video, "_probe_media_duration", return_value=9.3):
-                    rel, path, duration = self.script_to_video._fit_voiceover_to_plan(
-                        "audio/voice.mp3", source, 12.0, 10.0,
+            with mock.patch.object(
+                self.script_to_video.subprocess, "run", side_effect=fake_run,
+            ) as run, mock.patch.object(
+                self.script_to_video, "_probe_media_duration",
+                return_value=plan["duration_seconds"],
+            ), mock.patch.object(
+                self.script_to_video, "_probe_voiceover_bounds",
+                return_value=(0.32, plan["duration_seconds"] - 0.5),
+            ):
+                self.script_to_video._build_smart_voiceover_master(
+                    segments, plan, output,
+                )
+            command = run.call_args.args[0]
+            filters = command[command.index("-filter_complex") + 1]
+            self.assertIn("aresample=48000", filters)
+            self.assertIn("atrim=start=0:end=", filters)
+            self.assertIn("asetpts=N/SR/TB", filters)
+            self.assertIn("concat=n=3:v=0:a=1", filters)
+            self.assertEqual(command.count("libmp3lame"), 1)
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"),
+        "ffmpeg and ffprobe are required",
+    )
+    def test_real_ffmpeg_caps_each_voiceover_segment_to_its_scene_slot(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "long.wav"
+            output = Path(raw) / "master.mp3"
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+                "-ac", "2", str(source),
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            segments = [{
+                "path": source, "speech_start_seconds": 0.0,
+                "speech_end_seconds": 2.0, "speech_duration_seconds": 1.0,
+            }]
+            plan = {
+                "duration_seconds": 1.5, "narration_speed_factor": 1.0,
+                "scenes": [{
+                    "start_seconds": 0.0, "duration_seconds": 1.5,
+                    "voiceover_start_seconds": 0.32,
+                    "voiceover_end_seconds": 1.32,
+                }],
+            }
+            with mock.patch.object(
+                self.script_to_video, "_probe_voiceover_bounds",
+                return_value=(0.32, 1.1),
+            ):
+                duration = self.script_to_video._build_smart_voiceover_master(
+                    segments, plan, output,
+                )
+            self.assertAlmostEqual(1.5, duration, delta=0.08)
+
+    def test_short_copy_slack_never_delays_scene_narration(self):
+        segments = [
+            {"text": "旁白", "speech_duration_seconds": 1.5}
+            for _ in range(3)
+        ]
+        retimed = self.script_to_video._retime_smart_plan({
+            "duration_seconds": 10,
+            "scenes": [
+                {"start_seconds": index * 3, "duration_seconds": 3,
+                 "headline": "标题", "supporting_copy": "旁白"}
+                for index in range(3)
+            ],
+        }, segments)
+        self.assertEqual(6.52, retimed["duration_seconds"])
+        for scene in retimed["scenes"]:
+            self.assertAlmostEqual(
+                scene["voiceover_start_seconds"] - scene["start_seconds"],
+                self.script_to_video.SMART_MONTAGE_AUDIO_LEAD_SECONDS,
+                places=3,
+            )
+            self.assertLessEqual(
+                round(
+                    scene["start_seconds"] + scene["duration_seconds"]
+                    - scene["voiceover_end_seconds"],
+                    3,
+                ),
+                0.5,
+            )
+        self.assertAlmostEqual(
+            retimed["duration_seconds"] - retimed["scenes"][-1]["voiceover_end_seconds"],
+            self.script_to_video.SMART_MONTAGE_FINAL_AUDIO_TAIL_SECONDS,
+            places=3,
+        )
+
+        shortest = self.script_to_video._retime_smart_plan({
+            "duration_seconds": 3,
+            "scenes": [
+                {"start_seconds": index, "duration_seconds": duration,
+                 "headline": "标题", "supporting_copy": "旁白"}
+                for index, duration in enumerate((2.8, 0.1, 0.1))
+            ],
+        }, [
+            {"text": "旁白", "speech_duration_seconds": 0.2}
+            for _ in range(3)
+        ])
+        self.assertEqual(3.0, shortest["duration_seconds"])
+        self.assertTrue(all(
+            scene["start_seconds"] + scene["duration_seconds"]
+            - scene["voiceover_end_seconds"] <= 0.5
+            for scene in shortest["scenes"]
+        ))
+
+    def test_voiceover_bounds_reject_all_silence_and_master_checks_real_tail(self):
+        with mock.patch(
+            "content_domains.video_compose_media.detect_silence_ranges",
+            return_value=[{"start_ms": 0, "end_ms": 5000}],
+        ):
+            self.assertEqual(
+                (0.0, 0.0),
+                self.script_to_video._probe_voiceover_bounds("silent.mp3", 5.0),
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "scene.mp3"
+            source.write_bytes(b"voice")
+            output = Path(raw) / "master.mp3"
+            segments = [{
+                "path": source, "speech_start_seconds": 0.0,
+                "speech_end_seconds": 1.0, "speech_duration_seconds": 1.0,
+            }]
+            plan = {
+                "duration_seconds": 2.0, "narration_speed_factor": 1.0,
+                "scenes": [{
+                    "start_seconds": 0.0, "duration_seconds": 2.0,
+                    "voiceover_start_seconds": 0.32,
+                    "voiceover_end_seconds": 1.32,
+                }],
+            }
+
+            def fake_run(command, **_kwargs):
+                output.write_bytes(b"master")
+                return subprocess.CompletedProcess(command, 0, b"", b"")
+
+            with mock.patch.object(
+                self.script_to_video.subprocess, "run", side_effect=fake_run,
+            ), mock.patch.object(
+                self.script_to_video, "_probe_media_duration", return_value=2.0,
+            ), mock.patch.object(
+                self.script_to_video, "_probe_voiceover_bounds",
+                return_value=(0.32, 0.7),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "尾部静音异常"):
+                    self.script_to_video._build_smart_voiceover_master(
+                        segments, plan, output,
                     )
-                self.assertTrue(rel.startswith("audio/aud_fit_"))
-                self.assertEqual(path, Path(raw) / rel)
-                self.assertEqual(duration, 9.3)
-                self.assertFalse(source.exists())
-                command = run.call_args.args[0]
-                self.assertIn("-filter:a", command)
-                self.assertIn("atempo=", command[command.index("-filter:a") + 1])
-            finally:
-                self.script_to_video.OUT_DIR = old_out
+            self.assertFalse(output.exists())
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") and shutil.which("ffprobe"),
+        "ffmpeg and ffprobe are required",
+    )
+    def test_real_master_rejects_audio_hard_clipped_without_final_silence(self):
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "tone.wav"
+            output = Path(raw) / "master.mp3"
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "sine=frequency=440:sample_rate=48000:duration=2",
+                "-ac", "2", str(source),
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            with self.assertRaisesRegex(RuntimeError, "尾部静音异常"):
+                self.script_to_video._build_smart_voiceover_master([{
+                    "path": source, "speech_start_seconds": 0.0,
+                    "speech_end_seconds": 2.0, "speech_duration_seconds": 1.0,
+                }], {
+                    "duration_seconds": 1.5, "narration_speed_factor": 1.0,
+                    "scenes": [{
+                        "start_seconds": 0.0, "duration_seconds": 1.5,
+                        "voiceover_start_seconds": 0.32,
+                        "voiceover_end_seconds": 1.32,
+                    }],
+                }, output)
+            self.assertFalse(output.exists())
+
+    def test_retime_caps_narration_speed_and_solves_short_clip_floor(self):
+        plan = {
+            "duration_seconds": 90,
+            "scenes": [
+                {"start_seconds": index, "duration_seconds": 1,
+                 "headline": "标题", "supporting_copy": "旁白"}
+                for index in range(20)
+            ],
+        }
+        segments = [
+            {"text": "旁白", "speech_duration_seconds": duration}
+            for duration in ([91.0] + [0.2] * 19)
+        ]
+        retimed = self.script_to_video._retime_smart_plan(plan, segments)
+        self.assertLessEqual(
+            retimed["narration_speed_factor"],
+            self.script_to_video.SMART_MONTAGE_MAX_NARRATION_SPEED,
+        )
+        self.assertLessEqual(retimed["duration_seconds"], 90.0)
+
+        too_long = [
+            {"text": "旁白", "speech_duration_seconds": 100.0}
+            for _ in range(3)
+        ]
+        with self.assertRaisesRegex(ValueError, "缩短文案"):
+            self.script_to_video._retime_smart_plan({
+                "duration_seconds": 90,
+                "scenes": plan["scenes"][:3],
+            }, too_long)
 
     def test_smart_material_generation_retries_duplicate_hash(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -372,9 +619,10 @@ class ScriptToVideoTests(unittest.TestCase):
             self.script_to_video.OUT_DIR = Path(raw)
             image_calls = []
 
-            def fake_audio(payload):
+            def fake_audio(payload, publish=True):
+                self.assertFalse(publish)
                 (Path(raw) / "voice.mp3").write_bytes(b"voice")
-                return {"file": "voice.mp3", "duration_ms": 8200}
+                return {"file": "voice.mp3", "duration_ms": 1800}
 
             def fake_image(payload):
                 image_calls.append(payload)
@@ -386,13 +634,18 @@ class ScriptToVideoTests(unittest.TestCase):
                 Path(output_path).write_bytes(b"mp4")
                 return {
                     "template_id": "smart-montage-v1",
-                    "template_version": "1.0.1",
+                    "template_version": "1.0.2",
                     "output": {"duration_ms": int(render_plan["duration_seconds"] * 1000)},
                 }
+
+            def fake_master(_segments, render_plan, output_path, **_kwargs):
+                Path(output_path).write_bytes(b"master")
+                return render_plan["duration_seconds"]
 
             try:
                 with mock.patch("content_domains.audio.gen_audio", side_effect=fake_audio) as audio, \
                      mock.patch("content_domains.image.gen_image", side_effect=fake_image), \
+                     mock.patch.object(self.script_to_video, "_build_smart_voiceover_master", side_effect=fake_master), \
                      mock.patch("content_domains.script_video_render.render", side_effect=fake_render) as render, \
                      mock.patch.object(self.video, "public_url", return_value="/private/final.mp4") as public_url, \
                      mock.patch.object(self.script_to_video, "_smart_phase") as phase:
@@ -402,9 +655,12 @@ class ScriptToVideoTests(unittest.TestCase):
                         "pipeline": "smart_montage",
                         "smart_plan": plan,
                     })
-                audio.assert_called_once()
+                self.assertEqual(audio.call_count, plan["scene_count"])
+                self.assertTrue(all(
+                    call.kwargs == {"publish": False} for call in audio.call_args_list
+                ))
                 self.assertEqual(len(image_calls), plan["scene_count"])
-                self.assertEqual(render.call_args.kwargs["voiceover"].name, "voice.mp3")
+                self.assertTrue(render.call_args.kwargs["voiceover"].name.startswith("aud_sync_"))
                 self.assertGreaterEqual(render.call_args.kwargs["timeout"], 1)
                 self.assertLessEqual(
                     render.call_args.kwargs["timeout"],
@@ -441,7 +697,8 @@ class ScriptToVideoTests(unittest.TestCase):
             voice = Path(raw) / "voice.mp3"
             image = Path(raw) / "scene.png"
 
-            def fake_audio(_payload):
+            def fake_audio(_payload, publish=True):
+                self.assertFalse(publish)
                 voice.write_bytes(b"voice")
                 return {"file": "voice.mp3", "duration_ms": 3200}
 
@@ -454,6 +711,10 @@ class ScriptToVideoTests(unittest.TestCase):
                     "file": "scene.png",
                     "sha256": "demo",
                 }]
+
+            def fake_master(_segments, _plan, output_path, deadline=None):
+                Path(output_path).write_bytes(b"master")
+                return float(_plan["duration_seconds"])
 
             def fake_render(_plan, _materials, output_path, **_kwargs):
                 Path(output_path).write_bytes(b"mp4")
@@ -469,6 +730,12 @@ class ScriptToVideoTests(unittest.TestCase):
                 ), mock.patch.object(
                     self.script_to_video, "_smart_material_images",
                     side_effect=fake_materials,
+                ), mock.patch.object(
+                    self.script_to_video, "_probe_voiceover_bounds",
+                    return_value=(0.0, 3.2),
+                ), mock.patch.object(
+                    self.script_to_video, "_build_smart_voiceover_master",
+                    side_effect=fake_master,
                 ), mock.patch(
                     "content_domains.script_video_render.render",
                     side_effect=fake_render,
@@ -486,6 +753,9 @@ class ScriptToVideoTests(unittest.TestCase):
                         })
                 self.assertFalse(voice.exists())
                 self.assertFalse(image.exists())
+                self.assertFalse(any(
+                    (Path(raw) / "audio").glob("aud_sync_*.mp3")
+                ))
                 self.assertFalse(any((Path(raw) / "video").glob("*.mp4")))
             finally:
                 self.script_to_video.OUT_DIR = old_out

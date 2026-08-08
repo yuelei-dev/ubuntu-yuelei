@@ -84,8 +84,8 @@ class ScriptVideoRenderTests(unittest.TestCase):
 
     def test_rejects_bad_plan_bounds_and_timeline(self):
         bad = self.plan()
-        bad["duration_seconds"] = 9
-        with self.assertRaisesRegex(renderer.RenderError, "10-90"):
+        bad["duration_seconds"] = 2.9
+        with self.assertRaisesRegex(renderer.RenderError, "3-90"):
             renderer.normalize_plan(bad, self.images)
 
         bad = self.plan()
@@ -340,6 +340,31 @@ class ScriptVideoRenderTests(unittest.TestCase):
                 with mock.patch.object(renderer.media, "probe_media", return_value=report):
                     with self.assertRaisesRegex(renderer.RenderError, message):
                         renderer.render(self.plan(), self.images, output, runner=runner)
+
+    def test_render_rejects_audio_video_stream_start_or_duration_drift(self):
+        output = self.root / "desynced.mp4"
+
+        def runner(command, **_kwargs):
+            if "render" in command:
+                pathlib.Path(command[command.index("--output") + 1]).write_bytes(b"bad")
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        base = {
+            "duration_ms": 12000, "video_codec": "h264", "audio_codec": "aac",
+            "has_audio": True, "width": 1920, "height": 1080,
+            "video_start_ms": 0, "audio_start_ms": 0,
+            "video_duration_ms": 12000, "audio_duration_ms": 12000,
+        }
+        cases = (
+            ({**base, "audio_start_ms": 51}, "音画起点不同步"),
+            ({**base, "audio_duration_ms": 12081}, "音画时长不同步"),
+        )
+        for report, message in cases:
+            with self.subTest(message=message), mock.patch.object(
+                renderer.media, "probe_media", return_value=report,
+            ):
+                with self.assertRaisesRegex(renderer.RenderError, message):
+                    renderer.render(self.plan(), self.images, output, runner=runner)
 
     def test_long_render_cannot_hide_a_truncated_closing_scene_in_tolerance(self):
         output = self.root / "truncated.mp4"

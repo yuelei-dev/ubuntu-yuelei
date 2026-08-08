@@ -3,9 +3,14 @@
 import hashlib
 import hmac
 import json
+import math
+import os
+import pathlib
 import random
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -19,6 +24,14 @@ SMART_MONTAGE_PIPELINE = "smart_montage"
 SMART_MONTAGE_PLAN_PATH = "/api/gen/script_to_video/plan"
 SMART_MONTAGE_TEMPLATE = "smart-montage-v1"
 SMART_MONTAGE_DUPLICATE_RETRIES = 2
+SMART_MONTAGE_AUDIO_LEAD_SECONDS = 0.32
+SMART_MONTAGE_MAX_NARRATION_SPEED = 1.25
+SMART_MONTAGE_AUDIO_TAIL_SECONDS = 0.28
+SMART_MONTAGE_FINAL_AUDIO_TAIL_SECONDS = 0.50
+SMART_MONTAGE_MAX_DURATION_SECONDS = 90.0
+SMART_MONTAGE_MIN_DURATION_SECONDS = 3.0
+SMART_MONTAGE_MIN_TRAILING_SILENCE_SECONDS = 0.20
+SMART_MONTAGE_MAX_TRAILING_SILENCE_SECONDS = 1.0
 SMART_MONTAGE_SUBMISSION_FIELDS = {
     "pipeline", "mode", "copy", "script", "text", "style", "ratio",
     "voice", "plan_digest",
@@ -314,6 +327,38 @@ def _smart_voiceover_text(plan):
     return copy
 
 
+def _strip_voiceover_markup(value):
+    value = re.sub(r"(?<!\\)(?:\*\*|__|~~)", "", str(value or ""))
+    value = re.sub(r"(?<!\\)[*`]", "", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _spoken_signature(value):
+    return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).casefold()
+
+
+def _smart_scene_voiceover_texts(plan):
+    """Return complete, ordered narration segments for the frozen scenes."""
+    scenes = plan.get("scenes") or []
+    if not 3 <= len(scenes) <= 20:
+        raise ValueError("智能成片分镜数量无效")
+    texts = []
+    for index, scene in enumerate(scenes):
+        text = _strip_voiceover_markup(
+            scene.get("narration_text") or scene.get("supporting_copy")
+        )
+        if not text or not _spoken_signature(text):
+            raise ValueError("第%d幕旁白不能为空" % (index + 1))
+        if not re.search(r"[，,。！？!?；;：:]$", text):
+            text += "。" if index == len(scenes) - 1 else "，"
+        texts.append(text)
+    expected = _spoken_signature(_smart_voiceover_text(plan))
+    actual = _spoken_signature("".join(texts))
+    if not expected or actual != expected:
+        raise ValueError("智能成片分镜未完整覆盖原文案")
+    return texts
+
+
 def _probe_media_duration(path):
     try:
         completed = subprocess.run(
@@ -340,67 +385,303 @@ def _atempo_filter(speed_factor):
     return ",".join("atempo=%.6f" % value for value in values)
 
 
-def _fit_voiceover_to_plan(audio_rel, voiceover, duration, planned_duration):
-    """Speed up an overlong narration so the user-confirmed plan stays frozen."""
-    planned_duration = float(planned_duration or 0)
-    duration = float(duration or 0)
-    if duration <= 0 or duration <= planned_duration - 0.35:
-        return audio_rel, voiceover, duration
-    target = max(1.0, planned_duration - 0.6)
-    speed_factor = duration / target
-    fitted_rel = "audio/aud_fit_%s.mp3" % uuid.uuid4().hex
-    fitted = (OUT_DIR / fitted_rel).resolve()
-    fitted.relative_to(OUT_DIR.resolve())
-    fitted.parent.mkdir(parents=True, exist_ok=True)
+def _probe_voiceover_bounds(path, duration, fail_closed=False):
+    """Return conservative speech bounds while preserving internal pauses."""
+    duration_ms = max(1, int(round(float(duration or 0) * 1000)))
+    start_ms, end_ms = 0, duration_ms
     try:
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(voiceover), "-vn",
-                "-filter:a", _atempo_filter(speed_factor),
-                "-c:a", "libmp3lame", "-q:a", "3", str(fitted),
-            ],
-            check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        from . import video_compose_media as media
+
+        ranges = media.detect_silence_ranges(
+            path, noise_db=-45, minimum_ms=80, timeout=90,
         )
-        fitted_duration = _probe_media_duration(fitted)
-        if fitted_duration <= 0 or fitted_duration > planned_duration - 0.15:
-            raise RuntimeError("旁白时长校准结果无效")
+        if (
+            ranges
+            and int(ranges[0]["start_ms"]) <= 50
+            and int(ranges[-1]["end_ms"]) >= duration_ms - 80
+            and sum(
+                max(0, int(item["end_ms"]) - int(item["start_ms"]))
+                for item in ranges
+            ) >= duration_ms - 130
+        ):
+            return 0.0, 0.0
+        if ranges and int(ranges[0]["start_ms"]) <= 50:
+            # Keep a small safety lip so a quiet initial consonant is not cut.
+            start_ms = max(0, int(ranges[0]["end_ms"]) - 60)
+        if ranges and int(ranges[-1]["end_ms"]) >= duration_ms - 80:
+            # Retain a short natural release; the deterministic scene tail is
+            # added later by the master-track builder.
+            end_ms = min(duration_ms, int(ranges[-1]["start_ms"]) + 120)
     except Exception as exc:
-        try:
-            fitted.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise RuntimeError("旁白时长校准失败") from exc
-    _remove_out_file(audio_rel)
-    return fitted_rel, fitted, fitted_duration
+        if fail_closed:
+            raise RuntimeError("智能成片主旁白静音检测失败") from exc
+        # Silence probing is a quality enhancement.  Keeping the complete TTS
+        # segment is safer than failing a paid job or clipping real speech.
+        start_ms, end_ms = 0, duration_ms
+    if end_ms - start_ms < 200:
+        start_ms, end_ms = 0, duration_ms
+    return round(start_ms / 1000.0, 3), round(end_ms / 1000.0, 3)
 
 
-def _retime_smart_plan(plan, voiceover_duration=0):
-    frozen = json.loads(json.dumps(plan, ensure_ascii=False))
-    planned = float(frozen.get("duration_seconds") or 10)
-    voiceover_duration = max(0.0, float(voiceover_duration or 0))
-    if voiceover_duration > planned - 0.1:
-        raise ValueError("旁白时长超过已确认方案")
-    duration = round(max(10.0, min(90.0, planned)), 3)
-    scenes = frozen.get("scenes") or []
-    if not 3 <= len(scenes) <= 20:
-        raise ValueError("智能成片分镜数量无效")
-    total_ms = int(round(duration * 1000))
-    weights = [max(250, int(round(float(scene.get("duration_seconds") or 0) * 1000))) for scene in scenes]
-    weight_sum = sum(weights)
-    raw = [total_ms * weight / float(weight_sum) for weight in weights]
-    units = [int(value) for value in raw]
+def _generate_smart_voiceover_segments(
+        audio_domain, username, voice, plan, workspace, deadline):
+    texts = _smart_scene_voiceover_texts(plan)
+    workspace = pathlib.Path(workspace)
+    workspace.mkdir(parents=True, exist_ok=True)
+    segments, owned_rels = [], set()
+    try:
+        for index, text in enumerate(texts, 1):
+            _smart_deadline_remaining(deadline, "生成第%d幕旁白前" % index)
+            result = audio_domain.gen_audio({
+                "_username": username,
+                "text": text,
+                "voice": voice,
+                "speed": "normal",
+                "pitch": 0,
+                "volume": 0,
+            }, publish=False)
+            rel = result.get("file") if isinstance(result, dict) else None
+            if rel:
+                owned_rels.add(str(rel))
+            source = _out_file(
+                rel, {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"},
+            )
+            if not source:
+                raise RuntimeError("第%d幕旁白生成结果不可用" % index)
+            duration = float((result or {}).get("duration_ms") or 0) / 1000.0
+            if duration <= 0:
+                duration = _probe_media_duration(source)
+            if duration <= 0:
+                raise RuntimeError("第%d幕旁白时长无效" % index)
+            target = workspace / ("scene-%02d%s" % (index, source.suffix.lower()))
+            shutil.move(str(source), str(target))
+            owned_rels.discard(str(rel))
+            speech_start, speech_end = _probe_voiceover_bounds(target, duration)
+            speech_duration = round(speech_end - speech_start, 3)
+            if speech_duration < 0.2:
+                raise RuntimeError("第%d幕旁白有效语音过短" % index)
+            segments.append({
+                "index": index,
+                "text": text,
+                "path": target,
+                "source_duration_seconds": round(duration, 3),
+                "speech_start_seconds": speech_start,
+                "speech_end_seconds": speech_end,
+                "speech_duration_seconds": speech_duration,
+            })
+            _smart_deadline_remaining(deadline, "生成第%d幕旁白后" % index)
+        return segments
+    except Exception:
+        for rel in owned_rels:
+            _remove_out_file(rel)
+        raise
+
+
+def _allocate_exact_milliseconds(total_ms, weights):
+    if total_ms <= 0:
+        return [0] * len(weights)
+    clean = [max(1.0, float(value or 0)) for value in weights]
+    weight_sum = sum(clean)
+    raw = [total_ms * value / weight_sum for value in clean]
+    units = [int(math.floor(value)) for value in raw]
     remainder = total_ms - sum(units)
-    order = sorted(range(len(units)), key=lambda index: (-(raw[index] - units[index]), index))
+    order = sorted(
+        range(len(units)), key=lambda index: (-(raw[index] - units[index]), index)
+    )
     for index in order[:remainder]:
         units[index] += 1
+    return units
+
+
+def _retime_smart_plan(plan, voiceover_segments):
+    """Build one sample-aligned visual slot for every real narration segment."""
+    frozen = json.loads(json.dumps(plan, ensure_ascii=False))
+    scenes = frozen.get("scenes") or []
+    segments = list(voiceover_segments or [])
+    if not 3 <= len(scenes) <= 20 or len(segments) != len(scenes):
+        raise ValueError("智能成片分镜数量无效")
+
+    lead_ms = int(round(SMART_MONTAGE_AUDIO_LEAD_SECONDS * 1000))
+    tails_ms = [
+        int(round((
+            SMART_MONTAGE_FINAL_AUDIO_TAIL_SECONDS
+            if index == len(scenes) - 1 else SMART_MONTAGE_AUDIO_TAIL_SECONDS
+        ) * 1000))
+        for index in range(len(scenes))
+    ]
+    speech_ms = [
+        max(200, int(round(float(item["speech_duration_seconds"]) * 1000)))
+        for item in segments
+    ]
+    hold_ms = lead_ms * len(scenes) + sum(tails_ms)
+    # Leave half a second of global safety when the 90-second ceiling requires
+    # a uniform atempo adjustment.  No user copy is truncated.
+    available_speech_ms = max(
+        1000,
+        int(SMART_MONTAGE_MAX_DURATION_SECONDS * 1000) - hold_ms - 500,
+    )
+    def fitted_at(speed):
+        return [max(200, int(math.ceil(value / speed))) for value in speech_ms]
+
+    speed_factor = 1.0
+    fitted_speech_ms = fitted_at(speed_factor)
+    if sum(fitted_speech_ms) > available_speech_ms:
+        fastest = fitted_at(SMART_MONTAGE_MAX_NARRATION_SPEED)
+        if sum(fastest) > available_speech_ms:
+            raise ValueError("旁白实测时长超过90秒，请缩短文案后重试")
+        low, high = 1.0, SMART_MONTAGE_MAX_NARRATION_SPEED
+        # Include the per-scene 200 ms floor in the solve.  A direct ratio can
+        # otherwise reject a timeline that only needs a tiny additional speed
+        # adjustment after short clips hit that floor.
+        for _ in range(40):
+            candidate = (low + high) / 2.0
+            if sum(fitted_at(candidate)) <= available_speech_ms:
+                high = candidate
+            else:
+                low = candidate
+        speed_factor = high
+        fitted_speech_ms = fitted_at(speed_factor)
+    base_scene_ms = [
+        lead_ms + speech + tail
+        for speech, tail in zip(fitted_speech_ms, tails_ms)
+    ]
+    base_total_ms = sum(base_scene_ms)
+    target_total_ms = max(
+        int(SMART_MONTAGE_MIN_DURATION_SECONDS * 1000), base_total_ms,
+    )
+    if target_total_ms > int(SMART_MONTAGE_MAX_DURATION_SECONDS * 1000):
+        raise ValueError("旁白超过90秒且无法安全校准")
+    slack_ms = target_total_ms - base_total_ms
+    # Any small minimum-duration remainder is visual hold time, not a cue to
+    # delay speech. Keep every narration cue locked to the same scene lead and
+    # put the remainder after speech in non-final scenes. The three-second
+    # product floor avoids turning very short copy into long silent pauses.
+    extras_ms = _allocate_exact_milliseconds(
+        slack_ms, [1] * (len(scenes) - 1),
+    ) + [0]
+
     cursor = 0
-    for scene, scene_ms in zip(scenes, units):
+    for scene, segment, speech, tail, base_ms, extra_ms in zip(
+            scenes, segments, fitted_speech_ms, tails_ms, base_scene_ms, extras_ms):
+        scene_ms = base_ms + extra_ms
+        voice_start_ms = cursor + lead_ms
         scene["start_seconds"] = round(cursor / 1000.0, 3)
         scene["duration_seconds"] = round(scene_ms / 1000.0, 3)
+        scene["voiceover_start_seconds"] = round(voice_start_ms / 1000.0, 3)
+        scene["voiceover_duration_seconds"] = round(speech / 1000.0, 3)
+        scene["voiceover_end_seconds"] = round((voice_start_ms + speech) / 1000.0, 3)
+        scene["narration_text"] = segment["text"]
+        scene["headline"] = _strip_voiceover_markup(scene.get("headline"))
+        scene["supporting_copy"] = _strip_voiceover_markup(
+            scene.get("supporting_copy")
+        )
         cursor += scene_ms
-    frozen["duration_seconds"] = duration
+    frozen["estimated_duration_seconds"] = round(
+        float(frozen.get("duration_seconds") or SMART_MONTAGE_MIN_DURATION_SECONDS), 3,
+    )
+    frozen["duration_seconds"] = round(target_total_ms / 1000.0, 3)
     frozen["scene_count"] = len(scenes)
+    frozen["narration_duration_seconds"] = round(sum(fitted_speech_ms) / 1000.0, 3)
+    frozen["narration_speed_factor"] = round(speed_factor, 6)
     return frozen
+
+
+def _build_smart_voiceover_master(segments, render_plan, output_path, deadline=None):
+    scenes = render_plan.get("scenes") or []
+    if len(segments) != len(scenes):
+        raise RuntimeError("旁白分段与分镜数量不一致")
+    output_path = pathlib.Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = ["ffmpeg", "-y"]
+    for segment in segments:
+        command.extend(["-i", str(segment["path"])])
+    speed_factor = max(1.0, float(render_plan.get("narration_speed_factor") or 1.0))
+    filters, labels = [], []
+    for index, (segment, scene) in enumerate(zip(segments, scenes)):
+        local_start = max(
+            0.0,
+            float(scene["voiceover_start_seconds"]) - float(scene["start_seconds"]),
+        )
+        chain = [
+            "[%d:a]atrim=start=%.3f:end=%.3f" % (
+                index,
+                float(segment["speech_start_seconds"]),
+                float(segment["speech_end_seconds"]),
+            ),
+            "asetpts=PTS-STARTPTS",
+            "aresample=48000",
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
+        ]
+        if speed_factor > 1.000001:
+            chain.append(_atempo_filter(speed_factor))
+        delay_ms = max(0, int(round(local_start * 1000)))
+        chain.extend([
+            "adelay=%d|%d" % (delay_ms, delay_ms),
+            "apad=whole_dur=%.3f" % float(scene["duration_seconds"]),
+            "atrim=start=0:end=%.3f" % float(scene["duration_seconds"]),
+            "asetpts=N/SR/TB[a%d]" % index,
+        ])
+        filters.append(",".join(chain))
+        labels.append("[a%d]" % index)
+    filters.append(
+        "%sconcat=n=%d:v=0:a=1[voice]" % ("".join(labels), len(labels))
+    )
+    command.extend([
+        "-filter_complex", ";".join(filters), "-map", "[voice]",
+        "-ar", "48000", "-ac", "2", "-c:a", "libmp3lame", "-q:a", "2",
+        str(output_path),
+    ])
+    timeout = 300
+    if deadline is not None:
+        timeout = max(1, min(timeout, int(_smart_deadline_remaining(
+            deadline, "合成主旁白前",
+        ))))
+    try:
+        subprocess.run(
+            command, check=True, timeout=timeout,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        try:
+            output_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise RuntimeError("智能成片主旁白合成失败") from exc
+    actual_duration = _probe_media_duration(output_path)
+    expected_duration = float(render_plan["duration_seconds"])
+    if actual_duration <= 0 or abs(actual_duration - expected_duration) > 0.18:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("智能成片主旁白时长校验失败")
+    speech_start, speech_end = _probe_voiceover_bounds(
+        output_path, actual_duration, fail_closed=True,
+    )
+    if speech_end - speech_start < 0.2:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("智能成片主旁白没有检测到有效语音")
+    trailing = actual_duration - speech_end
+    if (
+        trailing < SMART_MONTAGE_MIN_TRAILING_SILENCE_SECONDS
+        or trailing > SMART_MONTAGE_MAX_TRAILING_SILENCE_SECONDS
+    ):
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError("智能成片主旁白尾部静音异常")
+    return actual_duration
+
+
+def _publish_smart_voiceover_master(source):
+    rel = "audio/aud_sync_%s.mp3" % uuid.uuid4().hex
+    target = (OUT_DIR / rel).resolve()
+    target.relative_to(OUT_DIR.resolve())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(target.name + ".part")
+    try:
+        shutil.copy2(source, partial)
+        os.replace(partial, target)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+        raise
+    return rel, target
 
 
 def _out_file(rel, suffixes=None):
@@ -529,30 +810,18 @@ def _gen_smart_montage(username, payload):
     try:
         _smart_deadline_remaining(deadline, "生成旁白前")
         _smart_phase(job_id, "generating_audio", mode=SMART_MONTAGE_PIPELINE)
-        narration = _smart_voiceover_text(plan)
-        audio_result = audio_domain.gen_audio({
-            "_username": username,
-            "text": narration,
-            "voice": voice,
-            "speed": "normal",
-            "pitch": 0,
-            "volume": 0,
-        })
-        _smart_deadline_remaining(deadline, "生成旁白后")
-        audio_rel = audio_result.get("file") if isinstance(audio_result, dict) else None
-        voiceover = _out_file(audio_rel, {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"})
-        if not voiceover:
-            raise RuntimeError("旁白生成结果不可用")
-        duration_ms = audio_result.get("duration_ms") if isinstance(audio_result, dict) else None
-        voiceover_duration = float(duration_ms or 0) / 1000.0
-        if voiceover_duration <= 0:
-            voiceover_duration = _probe_media_duration(voiceover)
-        audio_rel, voiceover, voiceover_duration = _fit_voiceover_to_plan(
-            audio_rel, voiceover, voiceover_duration,
-            float(plan.get("duration_seconds") or 10),
-        )
+        with tempfile.TemporaryDirectory(prefix="hq-smart-voice-") as raw_audio_dir:
+            audio_workspace = pathlib.Path(raw_audio_dir)
+            voiceover_segments = _generate_smart_voiceover_segments(
+                audio_domain, username, voice, plan, audio_workspace, deadline,
+            )
+            render_plan = _retime_smart_plan(plan, voiceover_segments)
+            temporary_master = audio_workspace / "voiceover-master.mp3"
+            _build_smart_voiceover_master(
+                voiceover_segments, render_plan, temporary_master, deadline=deadline,
+            )
+            audio_rel, voiceover = _publish_smart_voiceover_master(temporary_master)
         _smart_deadline_remaining(deadline, "处理旁白后")
-        render_plan = _retime_smart_plan(plan, voiceover_duration)
 
         _smart_phase(job_id, "generating_assets", audio_file=audio_rel, voice=voice)
         materials = _smart_material_images(render_plan, deadline=deadline)

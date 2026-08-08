@@ -44,6 +44,13 @@ def probe_media(path):
     audio = next((item for item in streams if item.get("codec_type") == "audio"), None)
     if not video or duration <= 0:
         raise MediaError("源文件不是有效视频")
+
+    def milliseconds(stream, key, fallback=0.0):
+        try:
+            return int(round(float(stream.get(key) or fallback) * 1000))
+        except (TypeError, ValueError):
+            return int(round(float(fallback or 0) * 1000))
+
     return {
         "duration_ms": int(round(duration * 1000)),
         "width": int(video.get("width") or 0),
@@ -51,6 +58,10 @@ def probe_media(path):
         "has_audio": bool(audio),
         "video_codec": video.get("codec_name"),
         "audio_codec": audio.get("codec_name") if audio else None,
+        "video_start_ms": milliseconds(video, "start_time"),
+        "audio_start_ms": milliseconds(audio, "start_time") if audio else None,
+        "video_duration_ms": milliseconds(video, "duration", duration),
+        "audio_duration_ms": milliseconds(audio, "duration", duration) if audio else None,
     }
 
 

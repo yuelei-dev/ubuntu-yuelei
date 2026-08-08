@@ -1,6 +1,6 @@
 {
   "template_id": "smart-montage-v1",
-  "template_version": "1.0.1",
+  "template_version": "1.0.2",
   "status": "verified",
   "verification": {
     "hyperframes_version": "0.7.96",
@@ -16,7 +16,7 @@
   "input_contract": {
     "style": ["luxe", "pop", "clinic"],
     "ratio": ["16:9", "9:16"],
-    "duration_seconds": {"min": 10, "max": 90},
+    "duration_seconds": {"min": 3, "max": 90},
     "scenes": {"min": 3, "max": 20, "one_unique_image_per_scene": true},
     "voiceover": "optional local audio",
     "bgm": "optional local audio"

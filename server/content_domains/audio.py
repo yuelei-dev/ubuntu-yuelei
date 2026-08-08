@@ -926,14 +926,16 @@ def _audio_duration_ms(file_name):
         return None
 
 
-def _audio_result(file_name, voice_key, speed, pitch, volume, text):
-    return {
+def _audio_result(file_name, voice_key, speed, pitch, volume, text, publish=True):
+    result = {
         "type": "audio", "file": file_name,
-        "url": public_url(file_name, "audio/mpeg"),
         "voice": voice_key, "speed": speed, "pitch": pitch, "volume": volume,
         "text": text, "prompt": text,
         "duration_ms": _audio_duration_ms(file_name),
     }
+    if publish:
+        result["url"] = public_url(file_name, "audio/mpeg")
+    return result
 
 
 def _cosy_voice_for(provider_voice):
@@ -990,7 +992,13 @@ def validate_audio_payload(payload, username=""):
     return body
 
 
-def gen_audio(payload):
+def gen_audio(payload, publish=True):
+    """Generate one audio file.
+
+    ``publish=False`` is reserved for server-side composition intermediates so
+    per-scene TTS files are not uploaded as orphaned public assets.  Public API
+    callers keep the historical one-argument behavior.
+    """
     username = str((payload or {}).get("_username") or "").strip()
     payload = validate_audio_payload(payload, username)
     text = payload["text"]
@@ -1008,7 +1016,7 @@ def gen_audio(payload):
                                    volume=max(0, min(100, 50 + volume // 2)))
         fn = "audio/aud_%d.mp3" % int(time.time() * 1000)   # 非敏感命名 → 可走 COS 公开直链
         _out_path(fn).write_bytes(cv_audio)
-        return _audio_result(fn, voice_key, speed, pitch, volume, text)
+        return _audio_result(fn, voice_key, speed, pitch, volume, text, publish=publish)
 
     if voice_key.startswith(("S_", "vip_")) or str(voice).startswith(("S_", "vip_", "cosyvoice-")):
         raise ValueError("声音服务暂不可用，请稍后重试")
@@ -1021,6 +1029,6 @@ def gen_audio(payload):
     data = _post_bytes("/v1/audio/speech", body, "application/json")
     fn = "audio/aud_%d.mp3" % int(time.time() * 1000)
     _out_path(fn).write_bytes(data)
-    return _audio_result(fn, voice_key, speed, pitch, volume, text)
+    return _audio_result(fn, voice_key, speed, pitch, volume, text, publish=publish)
 
 HANDLERS = {"audio": gen_audio}
