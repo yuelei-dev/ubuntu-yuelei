@@ -40,7 +40,7 @@ class ScriptVideoMontageTests(unittest.TestCase):
                 set(scene),
                 {
                     "index", "start_seconds", "duration_seconds", "headline",
-                    "supporting_copy", "image_prompt",
+                    "supporting_copy", "narration_text", "image_prompt",
                 },
             )
             self.assertEqual(scene["index"], expected_index)
@@ -48,6 +48,7 @@ class ScriptVideoMontageTests(unittest.TestCase):
             self.assertGreater(scene["duration_seconds"], 0)
             self.assertTrue(scene["headline"])
             self.assertTrue(scene["supporting_copy"])
+            self.assertTrue(scene["narration_text"])
             self.assertTrue(scene["image_prompt"])
             cursor = round(cursor + scene["duration_seconds"], 1)
         self.assertTrue(math.isclose(cursor, plan["duration_seconds"], abs_tol=1e-9))
@@ -87,7 +88,7 @@ class ScriptVideoMontageTests(unittest.TestCase):
         self.assertEqual(preferred["copy"], SHORT_COPY)
 
     def test_duration_is_driven_by_copy_and_clamped(self):
-        short = self.plan(copy=SHORT_COPY)["duration_seconds"]
+        short = self.plan(copy="专业护理焕亮")["duration_seconds"]
         medium = self.plan(copy=MEDIUM_COPY * 2)["duration_seconds"]
         long_copy = ("专业护理让肌肤状态稳定而自然。" * 30)[:montage.MAX_COPY_CHARACTERS]
         long = self.plan(copy=long_copy)["duration_seconds"]
@@ -123,6 +124,53 @@ class ScriptVideoMontageTests(unittest.TestCase):
         self.assertIn("香槟金", plans["luxe"]["scenes"][0]["image_prompt"])
         self.assertIn("高饱和", plans["pop"]["scenes"][0]["image_prompt"])
         self.assertIn("医疗蓝", plans["clinic"]["scenes"][0]["image_prompt"])
+
+    def test_narration_segments_preserve_copy_order_punctuation_and_strip_markdown(self):
+        plan = self.plan(copy=(
+            "欢迎体验**黄雀 AI 工作台**——您的智能视频引擎！"
+            "只需输入文案，系统即可理解内容节奏，自动规划分镜与素材。"
+            "告别繁琐剪辑，让创意自然发生。"
+        ), style="clinic")
+        narration = "".join(scene["narration_text"] for scene in plan["scenes"])
+        compact = lambda value: "".join(character for character in value if not character.isspace())
+        self.assertEqual(compact(narration), compact(plan["copy"]))
+        self.assertNotIn("*", plan["copy"])
+        self.assertTrue(any(
+            scene["narration_text"].endswith(("，", "。", "！", "？"))
+            for scene in plan["scenes"]
+        ))
+        self.assertTrue(all("*" not in scene["headline"] for scene in plan["scenes"]))
+
+    def test_scene_split_keeps_latin_tokens_atomic_and_audio_nonempty(self):
+        brand = "HyperFramesProductName"
+        plan = self.plan(copy=(
+            "专业护理从" + brand + "开始让状态自然稳定并持续焕发光彩。"
+        ), style="pop")
+        narration = [scene["narration_text"] for scene in plan["scenes"]]
+        self.assertEqual(1, sum(brand in text for text in narration))
+        self.assertEqual("".join(narration), plan["copy"])
+        self.assertTrue(all(montage._speech_units(text) > 0 for text in narration))
+
+        minimal = self.plan(copy="美美美美美美。", style="pop")
+        self.assertTrue(all(
+            montage._speech_units(scene["narration_text"]) > 0
+            for scene in minimal["scenes"]
+        ))
+
+        repeated_punctuation = self.plan(
+            copy="专业评估，。温和护理！！持续管理让状态自然稳定。",
+            style="pop",
+        )
+        self.assertTrue(all(
+            montage._speech_units(scene["narration_text"]) > 0
+            for scene in repeated_punctuation["scenes"]
+        ))
+
+    def test_newlines_remain_natural_narration_pauses(self):
+        plan = self.plan(copy="第一步专业评估\n第二步温和护理\n第三步持续管理", style="clinic")
+        narration = "".join(scene["narration_text"] for scene in plan["scenes"])
+        self.assertIn("评估，第二步", narration)
+        self.assertIn("护理，第三步", narration)
 
     def test_planner_is_deterministic_and_does_not_mutate_input(self):
         payload = {"copy": MEDIUM_COPY, "styles": ["luxe", "pop"], "ratio": "16:9"}

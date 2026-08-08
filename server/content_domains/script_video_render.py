@@ -26,7 +26,7 @@ TEMPLATE_ROOT = pathlib.Path(os.environ.get(
     str(_LOCAL_TEMPLATE_ROOT if _LOCAL_TEMPLATE_ROOT.is_dir() else _DEPLOYED_TEMPLATE_ROOT),
 ))
 TEMPLATE_ID = "smart-montage-v1"
-TEMPLATE_VERSION = "1.0.1"
+TEMPLATE_VERSION = "1.0.2"
 HYPERFRAMES_VERSION = "0.7.96"
 _DEFAULT_NPX = (
     "/home/ubuntu/.local/hq-node/bin/npx"
@@ -49,6 +49,8 @@ _AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _URL_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.I)
 _MARKER_RE = re.compile(r"__[A-Z0-9_]+__")
+_MAX_AV_START_DELTA_MS = 50
+_MAX_AV_DURATION_DELTA_MS = 80
 
 
 class RenderError(ValueError):
@@ -148,8 +150,8 @@ def normalize_plan(plan, materials=None, voiceover=None, bgm=None):
     if ratio not in _RATIOS:
         raise RenderError("成片比例无效")
     duration = _number(plan.get("duration_seconds"), "成片时长")
-    if duration < 10 or duration > 90:
-        raise RenderError("成片时长超出 10-90 秒范围")
+    if duration < 3 or duration > 90:
+        raise RenderError("成片时长超出 3-90 秒范围")
     duration = round(duration, 3)
 
     raw_scenes = plan.get("scenes")
@@ -679,6 +681,21 @@ def render(
         or int(report.get("height") or 0) != data["height"]
     ):
         raise RenderError("文案成片输出画面尺寸异常")
+    video_start_ms = report.get("video_start_ms")
+    audio_start_ms = report.get("audio_start_ms")
+    if (
+        video_start_ms is not None and audio_start_ms is not None
+        and abs(int(video_start_ms) - int(audio_start_ms)) > _MAX_AV_START_DELTA_MS
+    ):
+        raise RenderError("文案成片输出音画起点不同步")
+    video_duration_ms = report.get("video_duration_ms")
+    audio_duration_ms = report.get("audio_duration_ms")
+    if (
+        video_duration_ms is not None and audio_duration_ms is not None
+        and int(video_duration_ms) > 0 and int(audio_duration_ms) > 0
+        and abs(int(video_duration_ms) - int(audio_duration_ms)) > _MAX_AV_DURATION_DELTA_MS
+    ):
+        raise RenderError("文案成片输出音画时长不同步")
     if abs(int(report.get("duration_ms") or 0) - expected_ms) > tolerance_ms:
         raise RenderError("文案成片输出时长异常")
     return {

@@ -169,6 +169,18 @@ class AudioVoiceMappingTests(unittest.TestCase):
         vid = "cosyvoice-v3.5-plus-bailian-abc"
         self.assertEqual(self.audio._cosy_voice_for(vid), vid)
 
+    def test_transient_audio_result_does_not_publish_intermediate_asset(self):
+        with unittest.mock.patch.object(
+            self.audio, "_audio_duration_ms", return_value=1234,
+        ), unittest.mock.patch.object(self.audio, "public_url") as publish:
+            result = self.audio._audio_result(
+                "audio/segment.mp3", "S_d21F8OR62", 1.0, 0, 0,
+                "逐幕旁白", publish=False,
+            )
+        publish.assert_not_called()
+        self.assertNotIn("url", result)
+        self.assertEqual(1234, result["duration_ms"])
+
     def test_old_doubao_voice_rejected_with_guidance(self):
         for old in ("vip_S_xxx", "S_notmapped"):
             with self.assertRaises(ValueError) as ctx:

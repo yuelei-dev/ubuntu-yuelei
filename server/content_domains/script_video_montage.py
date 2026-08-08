@@ -13,8 +13,8 @@ import re
 import unicodedata
 
 
-PLANNER_VERSION = "script_video_montage_v1"
-MIN_DURATION_SECONDS = 10
+PLANNER_VERSION = "script_video_montage_v2"
+MIN_DURATION_SECONDS = 3
 MAX_DURATION_SECONDS = 90
 MIN_SCENES = 3
 MAX_SCENES = 20
@@ -97,6 +97,11 @@ def _normalize_copy(value):
         if category in {"Cc", "Cs"} and character not in {"\n", "\t"}:
             raise MontagePlanError("文案包含不支持的控制字符")
     text = "".join(character for character in text if character not in _BIDI_CONTROLS)
+    # Video copy is often pasted from Markdown-capable editors. Formatting
+    # delimiters are not spoken content and must not leak into scene titles or
+    # split a phrase across two narration segments (for example ``**brand**``).
+    text = re.sub(r"(?<!\\)(?:\*\*|__|~~)", "", text)
+    text = re.sub(r"(?<!\\)[*`]", "", text)
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n+ *", "\n", text).strip()
     if not text:
@@ -184,44 +189,79 @@ def _clean_fragment(value):
     return value.strip()
 
 
+def _narration_fragment(value):
+    """Keep sentence punctuation while normalizing whitespace for TTS."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
 def _initial_fragments(copy):
+    # A newline is a real narration pause.  Keep that semantic boundary even
+    # though the sentence matcher itself excludes newlines.
+    narration_copy = re.sub(
+        r"(?<![。！？!?；;，,、：:])\n+", "，", copy,
+    ).replace("\n", "")
     fragments = []
-    for raw in _SENTENCE_RE.findall(copy):
-        sentence = _clean_fragment(raw)
+    pending_punctuation = ""
+    for raw in _SENTENCE_RE.findall(narration_copy):
+        sentence = _narration_fragment(raw)
         if not sentence:
             continue
-        # Commas make useful visual beats, but tiny clauses are kept together.
+        # Preserve every delimiter in the narration fragment.  Starting from
+        # natural clause boundaries avoids the arbitrary half-sentence splits
+        # that make per-scene TTS sound clipped and lose its original cadence.
         clauses = re.split(r"(?<=[，,、：:])", sentence)
-        buffer = ""
         for clause in clauses:
-            clause = _clean_fragment(clause)
+            clause = _narration_fragment(clause)
             if not clause:
                 continue
-            candidate = (buffer + clause).strip()
-            if buffer and _speech_units(candidate) > 28:
-                fragments.append(buffer)
-                buffer = clause
-            else:
-                buffer = candidate
-        if buffer:
-            fragments.append(buffer)
-    return fragments or [_clean_fragment(copy)]
+            if _speech_units(clause) <= 0:
+                if fragments:
+                    fragments[-1] = _narration_fragment(fragments[-1] + clause)
+                else:
+                    pending_punctuation += clause
+                continue
+            fragments.append(_narration_fragment(pending_punctuation + clause))
+            pending_punctuation = ""
+    if pending_punctuation and fragments:
+        fragments[-1] = _narration_fragment(fragments[-1] + pending_punctuation)
+    return fragments or [_narration_fragment(copy)]
 
 
 def _split_fragment(fragment):
     if len(fragment) < 2:
         return None
     midpoint = len(fragment) / 2.0
-    candidates = [
+    punctuation_candidates = [
         match.end() for match in re.finditer(r"[，,、：:]", fragment)
         if 0 < match.end() < len(fragment)
     ]
-    if candidates:
-        position = min(candidates, key=lambda value: (abs(value - midpoint), value))
-    else:
-        position = max(1, min(len(fragment) - 1, int(round(midpoint))))
-    left = _clean_fragment(fragment[:position])
-    right = _clean_fragment(fragment[position:])
+    # Never split inside one Latin/digit token (for example
+    # ``HyperFramesProductName``). Chinese remains splittable character by
+    # character when no natural punctuation exists, but every candidate must
+    # leave spoken content on both sides so a trailing ``。`` cannot become a
+    # standalone TTS scene.
+    token_character = re.compile(r"[A-Za-z0-9_'’-]")
+    safe_candidates = []
+    for position in range(1, len(fragment)):
+        if (
+            token_character.fullmatch(fragment[position - 1])
+            and token_character.fullmatch(fragment[position])
+        ):
+            continue
+        if _speech_units(fragment[:position]) <= 0:
+            continue
+        if _speech_units(fragment[position:]) <= 0:
+            continue
+        safe_candidates.append(position)
+    candidates = [
+        position for position in punctuation_candidates
+        if position in safe_candidates
+    ] or safe_candidates
+    if not candidates:
+        return None
+    position = min(candidates, key=lambda value: (abs(value - midpoint), value))
+    left = _narration_fragment(fragment[:position])
+    right = _narration_fragment(fragment[position:])
     if not left or not right:
         return None
     return left, right
@@ -231,7 +271,7 @@ def _fragments_for_scene_count(copy, scene_count):
     fragments = _initial_fragments(copy)
     while len(fragments) < scene_count:
         candidates = [
-            (len(_clean_fragment(fragment)), index)
+            (len(_narration_fragment(fragment)), index)
             for index, fragment in enumerate(fragments)
             if _split_fragment(fragment)
         ]
@@ -249,11 +289,16 @@ def _fragments_for_scene_count(copy, scene_count):
             )
             for pos in range(len(fragments) - 1)
         )
+        # The fragments are adjacent slices of the canonical copy, so direct
+        # concatenation restores the exact original punctuation and word order.
         fragments[index:index + 2] = [
-            _clean_fragment(fragments[index] + "，" + fragments[index + 1])
+            _narration_fragment(fragments[index] + fragments[index + 1])
         ]
 
-    if len(fragments) != scene_count or any(not value for value in fragments):
+    if (
+        len(fragments) != scene_count
+        or any(_speech_units(value) <= 0 for value in fragments)
+    ):
         raise MontagePlanError("文案无法拆分为有效分镜，请补充更多内容")
     return fragments
 
@@ -318,13 +363,15 @@ def _style_plan(copy, style, ratio, duration_seconds):
     cursor = 0
     scenes = []
     for index, (fragment, units) in enumerate(zip(fragments, duration_units), start=1):
+        supporting_copy = _clean_fragment(fragment) or _narration_fragment(fragment)
         scenes.append({
             "index": index,
             "start_seconds": round(cursor / 10.0, 1),
             "duration_seconds": round(units / 10.0, 1),
-            "headline": _headline(fragment, style, profile["headline_limit"]),
-            "supporting_copy": fragment,
-            "image_prompt": _image_prompt(fragment, style, ratio, index),
+            "headline": _headline(supporting_copy, style, profile["headline_limit"]),
+            "supporting_copy": supporting_copy,
+            "narration_text": fragment,
+            "image_prompt": _image_prompt(supporting_copy, style, ratio, index),
         })
         cursor += units
     return {"style": style, "scene_count": scene_count, "scenes": scenes}
