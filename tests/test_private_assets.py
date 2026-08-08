@@ -117,6 +117,13 @@ class PrivateAssetsTest(unittest.TestCase):
                 self.assertTrue(core._user_owns_output_file("alice", "video/tryon_a.mp4"))
                 self.assertFalse(core._user_owns_output_file("bob", "video/tryon_a.mp4"))
                 self.assertTrue(core._sensitive_output_file("video/tryon_a.mp4"))
+                self.assertTrue(core._sensitive_output_file("_cli_uploads/img_demo.png"))
+                self.assertTrue(core._sensitive_output_file(
+                    "_smart_materials/task_demo/scene-00.png",
+                ))
+                self.assertFalse(core._user_owns_output_file(
+                    "alice", "_smart_materials/task_demo/scene-00.png",
+                ))
 
     def test_playback_bundle_requires_project_or_board_access(self):
         with tempfile.TemporaryDirectory() as tmp:

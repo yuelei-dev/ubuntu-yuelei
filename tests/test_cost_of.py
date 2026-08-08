@@ -46,26 +46,96 @@ class CostOfTests(unittest.TestCase):
             "total": 70,
         })
 
-    def test_smart_montage_charges_fresh_images_and_one_voiceover(self):
+    def test_smart_montage_charges_only_missing_images_and_one_voiceover(self):
+        sources = ["upload", "upload"] + ["generate"] * 5
         body = {
             "pipeline": "smart_montage",
-            "material_generate_count": 7,
+            "material_plan": [
+                ({
+                    "scene_index": index,
+                    "source": "upload",
+                    "upload_id": "img_" + ("%032x" % (index + 1)),
+                    "sha256": "%064x" % (index + 1),
+                    "mime": "image/png",
+                    "extension": ".png",
+                    "width": 1280,
+                    "height": 720,
+                } if source == "upload" else {
+                    "scene_index": index,
+                    "source": "generate",
+                })
+                for index, source in enumerate(sources)
+            ],
+            "smart_plan": {"scenes": [{} for _ in sources]},
+            "smart_material_contract_version": 1,
+            # A client-controlled or stale count cannot lower the server plan.
+            "material_generate_count": 0,
             "style": "luxe",
         }
-        self.assertEqual(self.points.cost_of("script_to_video", body), 150)
+        self.assertEqual(self.points.cost_of("script_to_video", body), 110)
         self.assertEqual(body["cost_breakdown"], {
             "voiceover": 10,
-            "material_images": 140,
-            "material_generate_count": 7,
-            "material_reused_count": 0,
-            "total": 150,
+            "material_images": 100,
+            "material_generate_count": 5,
+            "material_reused_count": 2,
+            "total": 110,
         })
 
     def test_smart_montage_cost_clamps_scene_count_to_supported_range(self):
-        low = {"pipeline": "smart_montage", "material_generate_count": 0}
+        low = {
+            "pipeline": "smart_montage",
+            "material_plan": [
+                {
+                    "scene_index": index,
+                    "source": "upload",
+                    "upload_id": "img_" + ("%032x" % (index + 1)),
+                    "sha256": "%064x" % (index + 1),
+                    "mime": "image/jpeg",
+                    "extension": ".jpg",
+                    "width": 1080,
+                    "height": 1080,
+                }
+                for index in range(3)
+            ],
+            "smart_plan": {"scenes": [{}, {}, {}]},
+            "smart_material_contract_version": 1,
+        }
         high = {"pipeline": "smart_montage", "material_generate_count": 99}
-        self.assertEqual(self.points.cost_of("script_to_video", low), 70)
+        legacy_zero = {"pipeline": "smart_montage", "material_generate_count": 0}
+        self.assertEqual(self.points.cost_of("script_to_video", low), 10)
+        self.assertEqual(low["cost_breakdown"]["material_reused_count"], 3)
         self.assertEqual(self.points.cost_of("script_to_video", high), 410)
+        self.assertEqual(self.points.cost_of("script_to_video", legacy_zero), 70)
+
+    def test_smart_montage_rejects_inconsistent_material_plan(self):
+        with self.assertRaisesRegex(ValueError, "素材方案"):
+            self.points.cost_of("script_to_video", {
+                "pipeline": "smart_montage",
+                "smart_plan": {"scenes": [{}, {}]},
+                "material_plan": [{"scene_index": 0, "source": "upload"}],
+            })
+
+    def test_smart_montage_upload_discount_requires_server_v1_metadata(self):
+        base = {
+            "pipeline": "smart_montage",
+            "smart_plan": {"scenes": [{}]},
+            "material_plan": [{"scene_index": 0, "source": "upload"}],
+        }
+        with self.assertRaisesRegex(ValueError, "服务端协议"):
+            self.points.cost_of("script_to_video", dict(base))
+        malformed = dict(base, smart_material_contract_version=1)
+        with self.assertRaisesRegex(ValueError, "元数据"):
+            self.points.cost_of("script_to_video", malformed)
+
+    def test_smart_montage_legacy_pure_generate_plan_remains_compatible(self):
+        body = {
+            "pipeline": "smart_montage",
+            "material_plan": [
+                {"scene_index": index, "source": "generate"}
+                for index in range(3)
+            ],
+        }
+        self.assertEqual(self.points.cost_of("script_to_video", body), 70)
 
     def test_script_to_video_drama_aligns_with_xiaole_per_second(self):
         """剧情复用 Grok 1.0 720p 的统一价格：12 点/秒。"""

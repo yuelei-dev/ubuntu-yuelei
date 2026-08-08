@@ -11,9 +11,11 @@ from server.content_domains import cli_uploads
 
 
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl9l1sAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGOskDvBwMDAxAAGABBCAWKm3yc5AAAAAElFTkSuQmCC"
 )
-JPEG = b"\xff\xd8\xff\xe0" + b"jpeg-test"
+JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK++PcP//Z"
+)
 
 
 class CLIImageUploadTests(unittest.TestCase):
@@ -33,6 +35,9 @@ class CLIImageUploadTests(unittest.TestCase):
 
     def test_private_upload_expands_for_owner_only(self):
         uploaded = self.upload()
+        raw, meta = cli_uploads.read_image_bytes(uploaded["upload_id"], "alice", now=101)
+        self.assertEqual(PNG, raw)
+        self.assertEqual((2, 2), (meta["width"], meta["height"]))
         body = cli_uploads.expand_image_payload(
             {"provider": "openai", "image_upload_id": uploaded["upload_id"]}, "alice", now=101,
         )
@@ -41,6 +46,51 @@ class CLIImageUploadTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不存在或已失效"):
             cli_uploads.expand_image_payload(
                 {"provider": "openai", "image_upload_id": uploaded["upload_id"]}, "bob", now=101,
+            )
+
+    def test_real_decode_approval_and_owner_bound_discard(self):
+        corrupt = b"\x89PNG\r\n\x1a\n" + b"not-a-real-image"
+        with self.assertRaisesRegex(ValueError, "无法读取"):
+            self.upload(corrupt)
+        uploaded = self.upload()
+        approved = cli_uploads.approve_image(
+            uploaded["upload_id"], "alice", "smart_montage", now=101,
+        )
+        self.assertEqual("smart_montage", approved["approved_for"])
+        self.assertFalse(cli_uploads.discard_image(uploaded["upload_id"], "bob"))
+        self.assertTrue(cli_uploads.discard_image(uploaded["upload_id"], "alice"))
+        with self.assertRaisesRegex(ValueError, "不存在或已失效"):
+            cli_uploads.read_image_bytes(uploaded["upload_id"], "alice", now=102)
+
+    def test_approved_upload_can_be_hard_linked_and_leased_for_a_long_job(self):
+        uploaded = self.upload(now=100)
+        approved = cli_uploads.approve_image(
+            uploaded["upload_id"], "alice", "smart_montage", now=101,
+            lease_seconds=4 * 60 * 60,
+        )
+        self.assertEqual(101 + 4 * 60 * 60, approved["expires_at"])
+        inspected = cli_uploads.inspect_image(
+            uploaded["upload_id"], "alice", now=102,
+        )
+        destination = Path(self.temp.name) / "frozen" / "scene-00.png"
+        cli_uploads.freeze_image(
+            uploaded["upload_id"], "alice", destination, "smart_montage",
+            inspected["sha256"], now=102,
+        )
+        self.assertEqual(PNG, destination.read_bytes())
+        self.assertTrue(cli_uploads.discard_image(uploaded["upload_id"], "alice"))
+        self.assertEqual(PNG, destination.read_bytes())
+
+    def test_quiet_period_janitor_removes_expired_and_orphaned_data(self):
+        uploaded = self.upload(now=100)
+        orphan = Path(self.temp.name) / ("img_" + "a" * 32 + ".png")
+        orphan.write_bytes(PNG)
+        os.utime(orphan, (0, 0))
+        cli_uploads.cleanup_expired_uploads(now=100 + cli_uploads.TTL + 1)
+        self.assertFalse(orphan.exists())
+        with self.assertRaisesRegex(ValueError, "不存在或已失效"):
+            cli_uploads.inspect_image(
+                uploaded["upload_id"], "alice", now=100 + cli_uploads.TTL + 1,
             )
 
     def test_multi_reference_and_png_mask_contract(self):
