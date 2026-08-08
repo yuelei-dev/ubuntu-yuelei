@@ -73,6 +73,17 @@ class ScriptVideoRenderTests(unittest.TestCase):
             "body.ratio-portrait.style-neon .clinical-bars{left:6%;bottom:8%",
             template,
         )
+        self.assertIn(
+            "body.ratio-portrait.style-wellness .content{left:8%;right:8%;"
+            "top:64%;bottom:9%",
+            template,
+        )
+        self.assertIn(
+            ".style-neon .metric{display:flex;right:5%;bottom:12%;"
+            "padding:14px 18px;background:rgba(7,17,29,.94);"
+            "border:2px solid #29d3ff",
+            template,
+        )
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

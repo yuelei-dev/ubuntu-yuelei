@@ -102,7 +102,7 @@
     .style-neon .ordinal{right:2%;top:8%;font-size:220px}
     .style-neon .accent-orb{left:-9%;bottom:-17%}
     .style-neon .decor-line{right:5%;top:10%;width:310px;height:6px}
-    .style-neon .metric{display:flex;right:5%;bottom:12%;text-shadow:0 0 20px rgba(199,255,56,.42)}
+    .style-neon .metric{display:flex;right:5%;bottom:12%;padding:14px 18px;background:rgba(7,17,29,.94);border:2px solid #29d3ff;text-shadow:0 0 20px rgba(199,255,56,.42)}
     .style-neon .clinical-bars{display:flex;left:5%;bottom:7%;width:245px}
     .style-neon .clinical-bars i:nth-child(2){background:#29d3ff}.style-neon .clinical-bars i:nth-child(3){background:#ff3ea5}
     .style-neon h1{text-transform:uppercase;text-shadow:0 0 28px rgba(41,211,255,.22)}
@@ -159,7 +159,7 @@
     body.ratio-portrait.style-clinic .clinical-bars{right:7%;bottom:5%;width:230px}
     body.ratio-portrait.style-clinic .badge{left:auto;right:7%;top:4%}
     body.ratio-portrait.style-wellness .photo-stage{left:8%;right:8%;top:7%;height:55%}
-    body.ratio-portrait.style-wellness .content{left:8%;right:8%;top:60%;bottom:9%}
+    body.ratio-portrait.style-wellness .content{left:8%;right:8%;top:64%;bottom:9%}
     body.ratio-portrait.style-wellness .decor-line{left:8%;bottom:7%}
     body.ratio-portrait.style-neon .photo-stage{left:4%;right:4%;top:7%;height:58%}
     body.ratio-portrait.style-neon .content{left:6%;right:6%;top:58%;bottom:auto;min-height:31%}
