@@ -3858,6 +3858,114 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
         ret["image_url"] = public_url(cover, "image/jpeg")
     return ret
 
+
+def _lifecycle_notify(lifecycle, event, data):
+    callback = (lifecycle or {}).get(event)
+    if callback is not None:
+        callback(dict(data or {}))
+
+
+def _definitive_heygen_create_rejection(error):
+    if isinstance(error, HeyGenRateLimited):
+        return True
+    cause = getattr(error, "__cause__", None)
+    return isinstance(cause, urllib.error.HTTPError) and 400 <= int(cause.code) < 500
+
+
+def generate_heygen_video_recoverable(
+        image_file, audio_file, resolution, ratio, motion, lifecycle):
+    """Provider-neutral paid create boundary for resumable script videos.
+
+    This path deliberately performs at most one create POST.  Once the
+    provider-submitting phase is durable, an exception is treated as ambiguous
+    rather than falling back to another route or creating a second paid task.
+    """
+    state = dict((lifecycle or {}).get("state") or {})
+    provider_id = str(state.get("provider_video_id") or "").strip()
+    provider = str(state.get("provider") or "").strip()
+    image_asset_id = str(state.get("image_asset_id") or "").strip()
+    audio_asset_id = str(state.get("audio_asset_id") or "").strip()
+    if provider_id:
+        if provider not in {"heygen_direct", "heygen_relay"}:
+            raise RuntimeError("已受理的口播任务缺少供应商通道")
+        direct = provider == "heygen_direct"
+    else:
+        image_fp = _resolve_out_file(image_file)
+        audio_fp = _resolve_out_file(audio_file)
+        if not image_fp or not audio_fp:
+            raise ValueError("视频素材文件不存在")
+        audio_fp = _ensure_heygen_audio_mp3(audio_fp)
+        direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
+        provider = "heygen_direct" if direct else "heygen_relay"
+        image_asset_id = _upload_heygen_image_asset(
+            image_fp, "口播传图", direct=direct,
+        )
+        audio_asset_id = _heygen_retry_net(
+            lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播传音",
+        )
+        _lifecycle_notify(lifecycle, "on_submitting", {
+            "provider": provider,
+            "image_asset_id": image_asset_id,
+            "audio_asset_id": audio_asset_id,
+        })
+        # Do not retry or cross-route here.  A connection loss after this POST
+        # cannot prove whether the provider accepted and billed the task.
+        try:
+            provider_id = _heygen_create_video(
+                image_asset_id, audio_asset_id, resolution, ratio, motion,
+                direct=direct,
+            )
+        except Exception as exc:
+            if _definitive_heygen_create_rejection(exc):
+                _lifecycle_notify(lifecycle, "on_rejected", {
+                    "provider": provider,
+                })
+            raise
+        try:
+            _lifecycle_notify(lifecycle, "on_submitted", {
+                "provider": provider,
+                "provider_video_id": provider_id,
+                "image_asset_id": image_asset_id,
+                "audio_asset_id": audio_asset_id,
+            })
+        except BaseException as exc:
+            raise HeyGenBilledError(
+                "口播已受理但恢复编号落盘失败(video_id=%s): %s"
+                % (provider_id, str(exc)[:160])
+            ) from exc
+
+    with heygen_slot("口播恢复轮询"):
+        try:
+            info = _heygen_poll_video(
+                provider_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
+            )
+            video_file = (
+                _download_video_file_direct(info["video_url"], "heygen")
+                if direct else _download_video_file(info["video_url"], "heygen")
+            )
+            cover = _extract_first_frame_cover(video_file)
+        except Exception as exc:
+            raise HeyGenBilledError(
+                "口播已提交 HeyGen(video_id=%s，已计费)，后续失败: %s"
+                % (provider_id, str(exc)[:180])
+            ) from exc
+    ret = {
+        "video_id": provider_id,
+        "video_file": video_file,
+        "video_url": _file_url(video_file),
+        "image_asset_id": image_asset_id,
+        "audio_asset_id": audio_asset_id,
+        "source_video_url": info.get("video_url"),
+        "thumbnail_url": info.get("thumbnail_url"),
+        "duration": info.get("duration"),
+        "provider": provider,
+    }
+    if cover:
+        ret["image_file"] = cover
+        ret["image_url"] = public_url(cover, "image/jpeg")
+    _lifecycle_notify(lifecycle, "on_completed", ret)
+    return ret
+
 # ============ F4 · 口播视频自动字幕（whisper 时间轴 + libass 烧录） ============
 # 仅 text/audio 口播模式生效；motion 动作模仿不做字幕（多无语音，价值低）。
 # whisper 吃 CPU，用信号量把同时转写数限到 WHISPER_MAX_CONCURRENCY（默认 1），避免打满核。
@@ -4126,7 +4234,7 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
             except Exception:
                 pass
 
-def gen_video(payload):
+def gen_video(payload, provider_lifecycle=None):
     job_id = payload.get("_job_id")
     mode = (payload.get("mode") or "text").strip()
     if mode not in {"text", "audio"}:
@@ -4150,21 +4258,29 @@ def gen_video(payload):
     reference_video_file = None
     bgm_file = (_save_data_file(payload.get("bgm_data"), "video_bgm", [".mp3", ".wav", ".m4a"])
                 if payload.get("bgm_data") else None)
+    resume_state = dict((provider_lifecycle or {}).get("state") or {})
+    resume_audio = str(resume_state.get("audio_file") or "").strip()
+    if resume_audio and not _resolve_out_file(resume_audio):
+        raise RuntimeError("文案成片恢复音频不存在")
     if mode == "text":
         if not text:
             raise ValueError("请先输入口播文案")
         if not voice:
             raise ValueError("请先选择音色")
-        audio_result = gen_audio({
-            "_username": (payload.get("_username") or "").strip(),
-            "text": text,
-            "voice": voice,
-            "speed": payload.get("speed", 1.0),
-            "pitch": payload.get("pitch", 0),
-            "volume": payload.get("volume", 0),
-        })
-        audio_file = audio_result.get("file")
-        audio_url = audio_result.get("url")
+        if resume_audio:
+            audio_file = resume_audio
+            audio_url = _file_url(audio_file)
+        else:
+            audio_result = gen_audio({
+                "_username": (payload.get("_username") or "").strip(),
+                "text": text,
+                "voice": voice,
+                "speed": payload.get("speed", 1.0),
+                "pitch": payload.get("pitch", 0),
+                "volume": payload.get("volume", 0),
+            })
+            audio_file = audio_result.get("file")
+            audio_url = audio_result.get("url")
         if not audio_file:
             raise ValueError("口播音频生成失败")
     else:
@@ -4185,7 +4301,18 @@ def gen_video(payload):
     if motion not in {"low", "medium", "high"}:
         motion = "medium"
     created_avatar = None
-    video_result = generate_heygen_video(image_file, audio_file, resolution, ratio, motion)
+    if provider_lifecycle is not None:
+        _lifecycle_notify(provider_lifecycle, "on_prepared", {
+            "audio_file": audio_file, "image_file": image_file,
+        })
+        video_result = generate_heygen_video_recoverable(
+            image_file, audio_file, resolution, ratio, motion,
+            provider_lifecycle,
+        )
+    else:
+        video_result = generate_heygen_video(
+            image_file, audio_file, resolution, ratio, motion,
+        )
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
