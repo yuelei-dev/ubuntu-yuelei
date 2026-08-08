@@ -601,9 +601,9 @@ def _timeline_script(data):
         if style == "neon":
             lines.append(
                 _set_then_to(
-                    prefix + "-metric", (("opacity", "0"), ("y", "18")),
+                    prefix + "-metric", (("y", "18"),),
                     (
-                        ("opacity", "1"), ("y", "0"),
+                        ("y", "0"),
                         ("duration", _seconds(text_duration * .72)),
                         ("ease", '"steps(5)"'),
                     ),

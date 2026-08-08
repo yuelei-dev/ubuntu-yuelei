@@ -314,6 +314,13 @@ class ScriptVideoRenderTests(unittest.TestCase):
                         'tl.to("#scene-01-transition",{opacity:1,scale:1.65,'
                         'duration:0.580,ease:"sine.inOut"},3.420);', markup,
                     )
+                if style == "neon":
+                    self.assertIn(
+                        'tl.set("#scene-01-metric",{y:18},0.000);', markup,
+                    )
+                    self.assertNotIn(
+                        '"#scene-01-metric",{opacity:0', markup,
+                    )
                 self.assertTrue(
                     (workspace / "assets/audio/program-silence.wav").stat().st_size > 44
                 )
