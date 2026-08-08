@@ -2922,9 +2922,12 @@ class H(BaseHTTPRequestHandler):
                 if still_idem_started: _idempotency_abort(user["username"], p, idem_key)
                 return self._send(503, {"detail": blocked, "code": "upstream_exhausted", "retry_after_ms": 60000})
             is_short_drama = kind == "copy" and isinstance(body, dict) and body.get("format") == "short_drama"
-            cost = (int(smart_attempt["cost"]) if smart_attempt else
-                    (points_domain.cost_of(kind, body)
-                     if not is_short_drama and not is_still_route else None))
+            if smart_attempt:
+                cost = int(smart_attempt["cost"])
+            elif not is_short_drama and not is_still_route:
+                cost = points_domain.cost_of(kind, body)
+            else:
+                cost = None
             if kind == "canvas_agent" and body.get("quoted_cost") != cost:
                 return self._send(400, {"detail": "画布 Agent 价格已变化，请重新报价"})
             if (not smart_attempt and cli_gateway.reject_changed_cost(
