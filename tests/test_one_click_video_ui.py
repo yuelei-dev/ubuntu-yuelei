@@ -63,11 +63,34 @@ class OneClickVideoUiTests(unittest.TestCase):
             "JSON.stringify({copy:copy,styles:styles,ratio:ratio})",
             self.html,
         )
-        for style in ('value="luxe"', 'value="pop"', 'value="clinic"'):
+        for style in (
+            'value="luxe"', 'value="pop"', 'value="clinic"',
+            'value="wellness"', 'value="neon"', 'value="editorial"',
+        ):
             self.assertIn(style, self.html)
         self.assertIn("duration_seconds", self.html)
         self.assertIn("scene_count", self.html)
         self.assertIn("item.scenes.map(sceneHtml)", self.html)
+
+    def test_six_templates_are_named_but_only_three_are_selected_by_default(self):
+        for name in (
+            "高奢美学", "潮流快闪", "专业科技",
+            "自然疗愈", "未来霓虹", "杂志拼贴",
+        ):
+            self.assertIn(name, self.html)
+        inputs = re.findall(
+            r'<input type="checkbox" name="smartStyle" value="([a-z]+)"([^>]*)>',
+            self.html,
+        )
+        self.assertEqual(6, len(inputs))
+        selected = {style for style, attributes in inputs if "checked" in attributes}
+        self.assertEqual({"luxe", "pop", "clinic"}, selected)
+        self.assertIn("MAX_SMART_STYLES=3", self.html)
+        self.assertIn(
+            "SMART_PLANNER_VERSION='script_video_montage_v3'", self.html,
+        )
+        self.assertIn("styles.length>MAX_SMART_STYLES", self.html)
+        self.assertIn("单次最多 3 种", self.html)
 
     def test_each_style_submits_an_independent_real_job(self):
         self.assertIn("pipeline:'smart_montage'", self.html)
@@ -91,11 +114,16 @@ class OneClickVideoUiTests(unittest.TestCase):
             "saved.plan=plan",
             "function restoreBatchOnLoad()",
             "$('smartCopy').value=copy",
-            "activePlan=plan",
+            "activePlan=stalePlan?null:plan",
             "resumeBatchJobs(plan)",
             "restoreBatchOnLoad();",
         ):
             self.assertIn(marker, self.html)
+        self.assertIn(
+            "if(stalePlan&&!hasJobs)throw new Error('保存的方案规则已过期')",
+            self.html,
+        )
+        self.assertIn("已提交任务继续监控", self.html)
 
     def test_smart_polling_is_bound_to_one_batch_job_and_submission_key(self):
         for marker in (

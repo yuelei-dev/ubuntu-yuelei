@@ -26,8 +26,8 @@ TEMPLATE_ROOT = pathlib.Path(os.environ.get(
     str(_LOCAL_TEMPLATE_ROOT if _LOCAL_TEMPLATE_ROOT.is_dir() else _DEPLOYED_TEMPLATE_ROOT),
 ))
 TEMPLATE_ID = "smart-montage-v1"
-TEMPLATE_VERSION = "1.0.2"
-HYPERFRAMES_VERSION = "0.7.96"
+TEMPLATE_VERSION = "1.1.0"
+HYPERFRAMES_VERSION = "0.7.101"
 _DEFAULT_NPX = (
     "/home/ubuntu/.local/hq-node/bin/npx"
     if pathlib.Path("/home/ubuntu/.local/hq-node/bin/npx").is_file()
@@ -43,7 +43,24 @@ _STYLE_LABELS = {
     "luxe": "LUXE EDIT",
     "pop": "POP CUT",
     "clinic": "CLINIC NOTE",
+    "wellness": "WELLNESS FLOW",
+    "neon": "NEON PULSE",
+    "editorial": "EDITORIAL ISSUE",
 }
+_STYLE_EYEBROWS = {
+    "luxe": "BEAUTY STORY {ordinal}",
+    "pop": "BEAUTY STORY {ordinal}",
+    "clinic": "BEAUTY STORY {ordinal}",
+    "wellness": "WELLNESS RITUAL {ordinal}",
+    "neon": "NEON SIGNAL {ordinal}",
+    "editorial": "ISSUE {ordinal} / BEAUTY",
+}
+_STYLE_METRICS = {
+    "luxe": "FLOW", "pop": "FLOW", "clinic": "FLOW",
+    "wellness": "CALM", "neon": "SYNC", "editorial": "ISSUE",
+}
+if not set(_STYLE_LABELS) == set(_STYLE_EYEBROWS) == set(_STYLE_METRICS):
+    raise RuntimeError("smart montage style presentation metadata is incomplete")
 _IMAGE_SUFFIXES = {".avif", ".jpeg", ".jpg", ".png", ".webp"}
 _AUDIO_SUFFIXES = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -237,8 +254,8 @@ def _scene_markup(data, material_names):
         # the delivery frame holds the resolved scene instead of the bare page.
         clip_duration = scene["duration_seconds"] + (1.0 / 30.0 if index == total else 0)
         rows.append(
-            '    <section id="{p}" class="clip scene" data-start="{start}" '
-            'data-duration="{duration}" data-track-index="1">\n'
+            '    <section id="{p}" class="clip scene" data-scene-parity="{parity}" '
+            'data-start="{start}" data-duration="{duration}" data-track-index="1">\n'
             '      <div id="{p}-fill" class="scene-fill"></div>\n'
             '      <div id="{p}-atmosphere" class="atmosphere" data-layout-ignore></div>\n'
             '      <div id="{p}-orb" class="accent-orb" data-layout-ignore></div>\n'
@@ -252,14 +269,14 @@ def _scene_markup(data, material_names):
             '      </div>\n'
             '      <div id="{p}-content" class="content">\n'
             '        <div id="{p}-eyebrow" class="eyebrow"><i '
-            'id="{p}-eyebrow-rule"></i><span>BEAUTY STORY {ordinal}</span></div>\n'
+            'id="{p}-eyebrow-rule"></i><span>{eyebrow}</span></div>\n'
             '        <h1 id="{p}-headline">{headline}</h1>\n'
             '        <p id="{p}-support" class="support">{support}</p>\n'
             '      </div>\n'
             '      <div id="{p}-badge" class="badge">{label}</div>\n'
             '      <div id="{p}-decor-line" class="decor-line"></div>\n'
             '      <div id="{p}-metric" class="metric"><b>{progress:02d}</b>'
-            '<small>FLOW</small></div>\n'
+            '<small>{metric}</small></div>\n'
             '      <div id="{p}-clinical-bars" class="clinical-bars"><i></i>'
             '<i></i><i></i></div>\n'
             '      <div id="{p}-transition" class="transition-layer"></div>\n'
@@ -268,10 +285,15 @@ def _scene_markup(data, material_names):
                 start=_seconds(scene["start_seconds"]),
                 duration=_seconds(clip_duration),
                 ordinal="%02d" % index,
+                parity="odd" if index % 2 else "even",
                 src=html.escape(material_name, quote=True),
                 headline=html.escape(scene["headline"]),
                 support=html.escape(scene["supporting_copy"]),
                 label=_STYLE_LABELS[data["style"]],
+                eyebrow=_STYLE_EYEBROWS[data["style"]].format(
+                    ordinal="%02d" % index,
+                ),
+                metric=_STYLE_METRICS[data["style"]],
                 progress=progress,
             )
         )
@@ -400,7 +422,7 @@ def _timeline_script(data):
                 ("scale", "1.035"), ("x", str(-image_x)), ("rotation", "-0.6"),
                 ("duration", _seconds(duration)), ("ease", '"power1.inOut"'),
             )
-        else:
+        elif style == "clinic":
             stage_before = (("opacity", "0"), ("x", "-46"))
             stage_after = (
                 ("opacity", "1"), ("x", "0"), ("duration", _seconds(entrance)),
@@ -416,6 +438,77 @@ def _timeline_script(data):
                 ("scale", "1.075"), ("x", str(image_x // 2)), ("y", "-12"),
                 ("duration", _seconds(duration)), ("ease", '"none"'),
             )
+        elif style == "wellness":
+            stage_before = (
+                ("opacity", "0"), ("y", "30"), ("scale", ".96"),
+            )
+            stage_after = (
+                ("opacity", "1"), ("y", "0"), ("scale", "1"),
+                ("duration", _seconds(min(0.48, entrance * .72))),
+                ("ease", '"sine.out"'),
+            )
+            content_before = (("opacity", "0"), ("y", "42"))
+            content_after = (
+                ("opacity", "1"), ("y", "0"),
+                ("duration", _seconds(min(0.46, text_duration * .78))),
+                ("ease", '"power2.out"'),
+            )
+            image_before = (
+                ("scale", "1.035"), ("x", str(-image_x // 3)), ("y", "12"),
+            )
+            image_after = (
+                ("scale", "1.085"), ("x", str(image_x // 3)), ("y", "-10"),
+                ("duration", _seconds(duration)), ("ease", '"sine.inOut"'),
+            )
+        elif style == "neon":
+            stage_before = (
+                ("opacity", "0"), ("x", "108"), ("scale", "1.04"),
+            )
+            stage_after = (
+                ("opacity", "1"), ("x", "0"), ("scale", "1"),
+                ("duration", _seconds(entrance * .82)), ("ease", '"expo.out"'),
+            )
+            content_before = (
+                ("opacity", "0"), ("x", "-104"), ("scale", ".97"),
+            )
+            content_after = (
+                ("opacity", "1"), ("x", "0"), ("scale", "1"),
+                ("duration", _seconds(text_duration * .86)),
+                ("ease", '"power4.out"'),
+            )
+            image_before = (
+                ("scale", "1.18"), ("x", str(image_x * 2)), ("y", "0"),
+            )
+            image_after = (
+                ("scale", "1.04"), ("x", str(-image_x)), ("y", "-8"),
+                ("duration", _seconds(duration)), ("ease", '"none"'),
+            )
+        elif style == "editorial":
+            direction = 1 if index % 2 else -1
+            stage_before = (
+                ("opacity", "0"), ("x", str(110 * direction)),
+                ("rotation", str(2 * direction)),
+            )
+            stage_after = (
+                ("opacity", "1"), ("x", "0"), ("rotation", "0"),
+                ("duration", _seconds(entrance)), ("ease", '"power3.out"'),
+            )
+            content_before = (
+                ("opacity", "0"), ("x", str(-82 * direction)), ("y", "22"),
+            )
+            content_after = (
+                ("opacity", "1"), ("x", "0"), ("y", "0"),
+                ("duration", _seconds(text_duration)), ("ease", '"expo.out"'),
+            )
+            image_before = (
+                ("scale", "1.08"), ("x", str(-image_x)), ("y", "5"),
+            )
+            image_after = (
+                ("scale", "1.025"), ("x", str(image_x // 3)), ("y", "-5"),
+                ("duration", _seconds(duration)), ("ease", '"power1.inOut"'),
+            )
+        else:
+            raise RenderError("成片风格缺少动效配置")
 
         lines.extend([
             _set_then_to(
@@ -493,7 +586,7 @@ def _timeline_script(data):
                 start,
             )
         )
-        if style == "clinic":
+        if style in {"clinic", "neon"}:
             lines.append(
                 _set_then_to(
                     prefix + "-clinical-bars i", (("scaleX", "0"),),
@@ -505,6 +598,19 @@ def _timeline_script(data):
                     start + lead + text_duration * 0.55,
                 )
             )
+        if style == "neon":
+            lines.append(
+                _set_then_to(
+                    prefix + "-metric", (("y", "18"),),
+                    (
+                        ("y", "0"),
+                        ("duration", _seconds(text_duration * .72)),
+                        ("ease", '"steps(5)"'),
+                    ),
+                    start,
+                    start + lead + text_duration * .62,
+                )
+            )
         if index < len(data["scenes"]):
             transition = min(0.58, max(0.12, duration * 0.18))
             at = start + duration - transition
@@ -514,13 +620,38 @@ def _timeline_script(data):
                     ("opacity", "1"), ("x", "0"), ("duration", _seconds(transition)),
                     ("ease", '"power4.in"'),
                 )
-            else:
+            elif style == "neon":
+                before = (("opacity", "1"), ("x", str(-data["width"])))
+                after = (
+                    ("opacity", "1"), ("x", "0"),
+                    ("duration", _seconds(transition * .78)),
+                    ("ease", '"expo.in"'),
+                )
+            elif style == "editorial":
+                direction = -1 if index % 2 else 1
+                before = (
+                    ("opacity", "1"), ("x", str(data["width"] * direction)),
+                )
+                after = (
+                    ("opacity", "1"), ("x", "0"),
+                    ("duration", _seconds(transition)), ("ease", '"power4.in"'),
+                )
+            elif style == "wellness":
+                before = (("opacity", "1"), ("scale", "0"))
+                after = (
+                    ("opacity", "1"), ("scale", "1.65"),
+                    ("duration", _seconds(transition)),
+                    ("ease", '"sine.inOut"'),
+                )
+            elif style in {"luxe", "clinic"}:
                 before = (("opacity", "1"), ("scaleX", "0"))
                 after = (
                     ("opacity", "1"), ("scaleX", "1"),
                     ("duration", _seconds(transition)),
                     ("ease", '"power3.in"' if style == "luxe" else '"sine.inOut"'),
                 )
+            else:
+                raise RenderError("成片风格缺少转场配置")
             lines.append(_set_then_to(prefix + "-transition", before, after, at))
     lines.append('    window.__timelines["main"] = tl;')
     return "\n".join(lines)
