@@ -135,7 +135,7 @@
     return NAV.filter(function(it){ return admin || !it.admin; }).map(function(it){
       var on=it.k===active;
       var ntxt=on?'#eaf1fa':'#94a4bb', nbg=on?'rgba(231,178,76,.08)':'transparent', nfg=on?'#e7b24c':'#94a4bb', nbar=on?'1':'0';
-      return '<a href="'+escapeAttr(safeUrl(it.k+'.html'))+'" class="hq-navitem" aria-label="'+escapeAttr(it.l)+'" data-nav-label="'+escapeAttr(it.l)+'" style="position:relative; display:flex; align-items:center; gap:12px; padding:10px 13px; border-radius:11px; cursor:pointer; color:'+ntxt+'; background:'+nbg+'; font-size:14px; font-weight:500; transition:.16s;">'+
+      return '<a href="'+escapeAttr(safeUrl(it.k+'.html'))+'" class="hq-navitem" aria-label="'+escapeAttr(it.l)+'" aria-current="'+(on?'page':'false')+'" data-nav-label="'+escapeAttr(it.l)+'" style="position:relative; display:flex; align-items:center; gap:12px; padding:10px 13px; border-radius:11px; cursor:pointer; color:'+ntxt+'; background:'+nbg+'; font-size:14px; font-weight:500; transition:.16s;">'+
         '<span class="hq-nav-active-bar" style="position:absolute; left:-12px; top:50%; transform:translateY(-50%); width:3px; height:18px; border-radius:0 3px 3px 0; background:#e7b24c; opacity:'+nbar+';"></span>'+
         '<span class="hq-nav-icon" style="display:flex; width:18px; flex:none; opacity:'+(on?'1':'.55')+'; transition:.16s;">'+iconDuo(it.i)+'</span><span class="hq-nav-label">'+escapeHtml(it.l)+'</span></a>';
     }).join('');
@@ -281,7 +281,7 @@
           '<div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;"><a href="recharge.html" style="display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:#e7b24c; cursor:pointer; font-weight:600;">去充值 <span style="display:flex; width:13px;">'+icon('arrowMini')+'</span></a><button type="button" data-points-detail="1" style="border:0;background:transparent;color:#94a4bb;cursor:pointer;font:700 12.5px inherit;padding:0;">明细</button></div></div>'+
         '<a href="bots.html" class="hq-side-bots" aria-label="Bot 在线" title="Bot 在线" style="display:flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid rgba(45,212,191,.2); border-radius:12px; background:rgba(45,212,191,.05);">'+
           '<span style="width:7px; height:7px; border-radius:50%; background:#2dd4bf; box-shadow:0 0 8px #2dd4bf; animation:hq-pulse 2s infinite;"></span>'+
-          '<span class="hq-side-bots-label" style="font-size:13px; color:#94a4bb; flex:1; white-space:nowrap;"><span class="mono" style="color:#2dd4bf; font-weight:600;">34</span> 个 Bot 在线</span>'+
+          '<span class="hq-side-bots-label" style="font-size:13px; color:#94a4bb; flex:1; white-space:nowrap;"><span class="mono" style="color:#2dd4bf; font-weight:600;">13</span> 个创作渠道</span>'+
           '<span class="hq-side-bots-arrow" style="display:flex; width:13px; color:#2dd4bf;">'+icon('arrowMini')+'</span></a>'+
         '<div id="hqUserCard"></div>'+
       '</div>';
@@ -291,14 +291,14 @@
     header.style.cssText='flex:none; display:flex; align-items:center; gap:14px; padding:14px 26px; border-bottom:1px solid rgba(148,164,187,.08); background:rgba(7,11,19,.4); backdrop-filter:blur(12px);';
     header.innerHTML=
       '<button type="button" class="hq-burger" aria-label="打开导航" aria-controls="hqSideNav" aria-expanded="false" style="display:none; width:38px; height:38px; align-items:center; justify-content:center; flex:none; color:#94a4bb; background:rgba(148,164,187,.05); border:1px solid rgba(148,164,187,.14); border-radius:11px; cursor:pointer;">'+icon('menu','18px')+'</button>'+
-      '<div class="hq-botpill" style="display:flex; align-items:center; gap:8px; padding:8px 13px; border:1px solid rgba(45,212,191,.2); border-radius:11px; background:rgba(45,212,191,.05);">'+
+      '<div class="hq-botpill" aria-label="13 个创作渠道可用" style="display:flex; align-items:center; gap:8px; padding:8px 13px; border:1px solid rgba(45,212,191,.2); border-radius:11px; background:rgba(45,212,191,.05);">'+
         '<span style="width:7px; height:7px; border-radius:50%; background:#2dd4bf; box-shadow:0 0 8px #2dd4bf; animation:hq-pulse 2s infinite;"></span>'+
-        '<span style="font-size:13px; color:#94a4bb;"><span class="mono" style="color:#2dd4bf; font-weight:600;">34</span> 个 Bot 在线</span></div>'+
-      '<div style="margin-left:auto; display:flex; align-items:center; gap:12px;">'+
-        '<a href="recharge.html" style="display:flex; align-items:center; gap:8px; padding:8px 14px; border:1px solid rgba(231,178,76,.26); border-radius:11px; background:rgba(231,178,76,.07); cursor:pointer;">'+
+        '<span style="font-size:13px; color:#94a4bb;"><span class="mono" style="color:#2dd4bf; font-weight:600;">13</span> 个创作渠道</span></div>'+
+      '<div class="hq-top-actions" style="margin-left:auto; display:flex; align-items:center; gap:12px;">'+
+        '<a href="recharge.html" class="hq-top-points" aria-label="查看剩余点数" style="display:flex; align-items:center; gap:8px; padding:8px 14px; border:1px solid rgba(231,178,76,.26); border-radius:11px; background:rgba(231,178,76,.07); cursor:pointer;">'+
           '<span style="width:16px; height:16px; border-radius:50%; background:radial-gradient(circle at 35% 30%, #f6d488, #c8902f); flex:none;"></span>'+
           '<span id="hqPointsTop" class="mono" style="font-size:14px; font-weight:700; color:#e7b24c;">—</span></a>'+
-        '<button type="button" data-points-detail="1" style="height:36px;padding:0 12px;border-radius:10px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:700;color:#94a4bb;background:rgba(148,164,187,.06);border:1px solid rgba(148,164,187,.14);">明细</button>'+
+        '<button type="button" class="hq-top-detail" data-points-detail="1" style="height:36px;padding:0 12px;border-radius:10px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:700;color:#94a4bb;background:rgba(148,164,187,.06);border:1px solid rgba(148,164,187,.14);">明细</button>'+
         '<button type="button" class="hq-friends-btn" aria-label="打开好友" title="好友" aria-expanded="false" style="position:relative; width:38px; height:38px; display:flex; align-items:center; justify-content:center; border:1px solid rgba(148,164,187,.14); border-radius:11px; cursor:pointer; color:#94a4bb; background:transparent; font:inherit; padding:0;">'+iconDuo('users','18px','#e7b24c')+'<span class="hq-friends-badge" aria-label="0 条好友申请"></span></button>'+
         '<button type="button" class="hq-notify-btn" aria-label="打开消息中心" title="消息中心" aria-expanded="false" style="position:relative; width:38px; height:38px; display:flex; align-items:center; justify-content:center; border:1px solid rgba(148,164,187,.14); border-radius:11px; cursor:pointer; color:#94a4bb; background:transparent; font:inherit; padding:0;">'+icon('bell','17px')+'<span class="hq-notify-badge" aria-label="0 条未读通知"></span></button>'+
         '<div id="hqAuthArea" style="display:flex; align-items:center; gap:8px;"></div></div>';
@@ -336,9 +336,22 @@
     function setNavOpen(next){
       open=!!next;
       aside.style.transform=open?'translateX(0)':'translateX(-100%)';
-      if(burger) burger.setAttribute('aria-expanded',open?'true':'false');
+      if(burger){
+        burger.setAttribute('aria-expanded',open?'true':'false');
+        burger.setAttribute('aria-label',open?'关闭导航':'打开导航');
+      }
+      if(open){
+        var firstNavLink=aside.querySelector('nav a');
+        if(firstNavLink) firstNavLink.focus();
+      }
     }
     burger.onclick=function(){ setNavOpen(!open); };
+    document.addEventListener('keydown',function(event){
+      if(open&&event.key==='Escape'){
+        setNavOpen(false);
+        if(burger) burger.focus();
+      }
+    });
     var friendsBtn=header.querySelector('.hq-friends-btn');
     if(friendsBtn) friendsBtn.onclick=openFriendsPanel;
     var notifyBtn=header.querySelector('.hq-notify-btn');

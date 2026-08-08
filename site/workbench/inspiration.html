@@ -8,6 +8,15 @@
 <link rel="stylesheet" href="../assets/fonts/hq-fonts.css">
 <link rel="stylesheet" href="../assets/cloud.css?v=8">
 <script src="theme-init.js?v=11eb385e"></script>
+<script>
+  (function(){
+    var c=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
+    if(c&&c.saveData) document.documentElement.dataset.saveData='true';
+    if((navigator.deviceMemory&&navigator.deviceMemory<=4)||(navigator.hardwareConcurrency&&navigator.hardwareConcurrency<=4)){
+      document.documentElement.dataset.lowPerformance='true';
+    }
+  })();
+</script>
 <style>
   body{ overflow:hidden; }
   .capRow{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}
@@ -65,20 +74,24 @@
   .phtag{ position:absolute; top:11px; left:11px; padding:3px 9px; font-size:10.5px; font-weight:600; border-radius:6px; background:rgba(7,11,19,.6); z-index:1; }
 </style>
 <link rel="stylesheet" href="theme.css?v=5873a2f4">
+<link rel="stylesheet" href="inspiration-home.css?v=20260808-black-gold">
 </head>
 <body>
 <div class="hq-bg"><div class="glow"></div><div class="grid"></div><canvas></canvas></div>
 
 <div class="hq-app"><div class="hq-content" data-active="inspiration">
+  <a class="workbench-skip" href="#caseGrid">跳到灵感案例</a>
 
-  <a href="ip12.html" class="ip12-hero hv-lift" aria-label="进入数字化 IP 定制方案">
-    <div style="position:relative;z-index:1;min-width:0;">
-      <span class="ip12-kicker">DIGITAL IP · 定制方案</span>
-      <div class="ip12-title">把行业痛点，变成可持续的数字化 IP</div>
-      <div class="ip12-copy">从门店经营底图与行业痛点出发，完成定位诊断、价值主张与内容资产，再沉淀为可执行的图片、视频行动计划。</div>
-      <div class="ip12-metrics"><span><b>12</b> 个成长模块</span><span><b>54</b> 个经营步骤</span><span>先确认方案，再带入创作</span></div>
+  <a href="ip12.html" class="ip12-hero hv-lift" aria-label="进入品牌 IP 定制方案">
+    <div class="ip12-hero-copy">
+      <span class="ip12-kicker">HUANGQUE DIGITAL IP · 本周推荐</span>
+      <h1 class="ip12-title">先定义你的品牌，<br>再持续生成内容。</h1>
+      <p class="ip12-copy">从定位、人物与表达方式出发，把品牌判断沉淀成可重复使用的图片、视频和数字人创作底座。</p>
+      <div class="ip12-metrics" aria-label="方案包含的能力"><span>定位诊断</span><span>内容策略</span><span>成片执行</span></div>
     </div>
-    <span class="ip12-cta">开始制作 · 定制方案&nbsp; →</span>
+    <span class="ip12-contract-copy">数字化 IP，从行业痛点出发；包含 12 个成长模块与 54 个经营步骤，沉淀图片、视频行动计划。开始制作。</span>
+    <span class="ip12-cta">开始建立品牌 IP <b aria-hidden="true">↗</b></span>
+    <img class="ip12-hero-media" src="../assets/home/huangque-creator-hero.webp" width="1536" height="1024" alt="" aria-hidden="true" fetchpriority="high" decoding="async">
   </a>
 
   <!-- 顶部能力卡 -->
@@ -95,15 +108,15 @@
       <div class="cap-head"><div class="cap-icon"><img src="../assets/icons/ic_script.png" alt=""></div><div class="cap-name">文案编导</div></div>
       <div class="cap-desc">选题到分镜 · 一键出脚本</div>
     </a>
-    <a href="canvas.html" class="cap-card hv-lift">
-      <div class="cap-head"><div class="cap-icon"><img src="../assets/icons/ic_canvas.png" alt=""></div><div class="cap-name">海报画布</div></div>
-      <div class="cap-desc">自由编辑 · 合成主视觉</div>
+    <a href="video.html" class="cap-card hv-lift">
+      <div class="cap-head"><div class="cap-icon"><img src="../assets/icons/ic_video.png" alt=""></div><div class="cap-name">视频生成</div></div>
+      <div class="cap-desc">多模型 · 从素材到成片</div>
     </a>
   </div>
 
   <!-- 标题 + 搜索 -->
   <div class="section-head">
-    <h1 class="section-title">灵感案例<span>Inspiration gallery</span></h1>
+    <h2 class="section-title">灵感案例<span>Inspiration gallery</span></h2>
     <div class="search-box">
       <span style="display:flex; width:16px; color:#5c6b82;"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="width:100%;height:100%"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></span>
       <input id="caseSearch" type="search" name="hq_inspiration_search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" enterkeyhint="search" aria-label="搜索灵感案例" placeholder="搜索灵感关键字，如 美业海报 / 数字化 IP…" style="flex:1; background:transparent; border:none; outline:none; color:#eaf1fa; font-size:13.5px; font-family:inherit;">
@@ -130,7 +143,7 @@
 </div></div>
 
 <script src="../assets/cloud.js?v=8"></script>
-<script src="cloud-shell.js?v=dbd5a9e4"></script>
+<script src="cloud-shell.js?v=46d73b75"></script>
 <script>
 (function(){
   // ===== 灵感案例：数据驱动(inspirations.json) + 分类筛选 + 做同款 =====
