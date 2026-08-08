@@ -634,7 +634,7 @@ class ScriptToVideoTests(unittest.TestCase):
                 Path(output_path).write_bytes(b"mp4")
                 return {
                     "template_id": "smart-montage-v1",
-                    "template_version": "1.0.2",
+                    "template_version": "1.1.0",
                     "output": {"duration_ms": int(render_plan["duration_seconds"] * 1000)},
                 }
 

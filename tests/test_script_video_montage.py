@@ -61,6 +61,20 @@ class ScriptVideoMontageTests(unittest.TestCase):
         self.assertNotIn("styles", plan)
         self.assert_valid_timeline(plan)
 
+    def test_style_catalog_has_six_complete_profiles_and_three_selection_cap(self):
+        self.assertEqual(
+            {"luxe", "pop", "clinic", "wellness", "neon", "editorial"},
+            set(montage.STYLE_PROFILES),
+        )
+        self.assertEqual(3, montage.MAX_SELECTED_STYLES)
+        for style, profile in montage.STYLE_PROFILES.items():
+            with self.subTest(style=style):
+                self.assertGreater(profile["seconds_per_scene"], 0)
+                self.assertGreater(profile["minimum_scene_seconds"], 0)
+                self.assertGreater(profile["headline_limit"], 0)
+                self.assertTrue(profile["visual_direction"])
+                self.assertGreaterEqual(len(profile["shot_language"]), 6)
+
     def test_aggregate_contract_preserves_requested_style_order(self):
         plan = montage.plan_script_video({
             "copy": MEDIUM_COPY,
@@ -106,6 +120,13 @@ class ScriptVideoMontageTests(unittest.TestCase):
         self.assertGreater(counts["pop"], counts["clinic"])
         self.assertGreater(counts["clinic"], counts["luxe"])
 
+        new_counts = {
+            style: self.plan(copy=MEDIUM_COPY * 2, style=style)["scene_count"]
+            for style in ("wellness", "neon", "editorial")
+        }
+        self.assertGreater(new_counts["neon"], new_counts["editorial"])
+        self.assertGreater(new_counts["editorial"], new_counts["wellness"])
+
     def test_long_copy_never_exceeds_twenty_assets(self):
         copy = ("专业评估温和护理持续管理让美丽有据可循" * 30)[:montage.MAX_COPY_CHARACTERS]
         plan = self.plan(copy=copy, style="pop")
@@ -115,7 +136,10 @@ class ScriptVideoMontageTests(unittest.TestCase):
 
     def test_image_prompts_are_unique_and_style_specific(self):
         plans = {
-            style: self.plan(style=style) for style in ("luxe", "pop", "clinic")
+            style: self.plan(style=style)
+            for style in (
+                "luxe", "pop", "clinic", "wellness", "neon", "editorial",
+            )
         }
         for plan in plans.values():
             prompts = [scene["image_prompt"] for scene in plan["scenes"]]
@@ -124,6 +148,13 @@ class ScriptVideoMontageTests(unittest.TestCase):
         self.assertIn("香槟金", plans["luxe"]["scenes"][0]["image_prompt"])
         self.assertIn("高饱和", plans["pop"]["scenes"][0]["image_prompt"])
         self.assertIn("医疗蓝", plans["clinic"]["scenes"][0]["image_prompt"])
+        self.assertIn("鼠尾草绿", plans["wellness"]["scenes"][0]["image_prompt"])
+        self.assertIn("酸性青柠", plans["neon"]["scenes"][0]["image_prompt"])
+        self.assertIn("象牙纸白", plans["editorial"]["scenes"][0]["image_prompt"])
+        first_prompts = {
+            plan["scenes"][0]["image_prompt"] for plan in plans.values()
+        }
+        self.assertEqual(len(plans), len(first_prompts))
 
     def test_narration_segments_preserve_copy_order_punctuation_and_strip_markdown(self):
         plan = self.plan(copy=(
@@ -211,6 +242,7 @@ class ScriptVideoMontageTests(unittest.TestCase):
             {"copy": MEDIUM_COPY, "style": "luxe", "styles": ["pop"]},
             {"copy": MEDIUM_COPY, "styles": []},
             {"copy": MEDIUM_COPY, "styles": ["pop", "pop"]},
+            {"copy": MEDIUM_COPY, "styles": ["luxe", "pop", "clinic", "neon"]},
             {"copy": MEDIUM_COPY, "style": "luxe", "ratio": "4:3"},
             {"copy": MEDIUM_COPY, "style": "luxe", "unexpected": True},
             {"copy": "护理\x00方案更安心", "style": "luxe"},

@@ -13,11 +13,12 @@ import re
 import unicodedata
 
 
-PLANNER_VERSION = "script_video_montage_v2"
+PLANNER_VERSION = "script_video_montage_v3"
 MIN_DURATION_SECONDS = 3
 MAX_DURATION_SECONDS = 90
 MIN_SCENES = 3
 MAX_SCENES = 20
+MAX_SELECTED_STYLES = 3
 # 90 秒中文商业旁白可完整朗读的安全上限。超长输入必须显式拆单，
 # 不能在用户不知情时截掉大部分文案。
 MAX_COPY_CHARACTERS = 320
@@ -63,6 +64,50 @@ STYLE_PROFILES = {
             "稳定平视的中景", "护理步骤的手部微距", "整洁空间的广角镜头",
             "侧面四十五度人物近景", "仪器与材质的俯拍特写", "自然表情的半身镜头",
             "前后对照感的双区域构图",
+        ),
+    },
+    "wellness": {
+        "seconds_per_scene": 5.6,
+        "minimum_scene_seconds": 2.8,
+        "headline_limit": 12,
+        "visual_direction": (
+            "自然疗愈系美业广告，燕麦米白、鼠尾草绿与陶土棕配色，晨雾般柔光，"
+            "植物纹理与呼吸感留白，温暖细腻的生活方式摄影"
+        ),
+        "shot_language": (
+            "窗边自然光下的舒缓半身镜头", "植物前景环绕的护理细节近景",
+            "柔软织物与护肤品的静物特写", "水面反光映衬的侧面人物近景",
+            "由虚到实的慢节奏面部特写", "暖色空间中的安静广角镜头",
+        ),
+    },
+    "neon": {
+        "seconds_per_scene": 2.8,
+        "minimum_scene_seconds": 1.8,
+        "headline_limit": 14,
+        "visual_direction": (
+            "未来感美业视觉，午夜蓝、酸性青柠与电光洋红配色，轮廓霓虹与镜面反射，"
+            "高反差锐利质感，数字时尚大片式商业摄影"
+        ),
+        "shot_language": (
+            "斜向光轨切入的动势近景", "镜面空间中的低机位人物特写",
+            "霓虹轮廓勾勒的产品超近景", "广角透视下的未来护理场景",
+            "强侧光下的剪影半身镜头", "反射材质中的俯拍构图",
+            "中心透视的隧道式英雄镜头", "错位色光包围的正面肖像",
+        ),
+    },
+    "editorial": {
+        "seconds_per_scene": 4.6,
+        "minimum_scene_seconds": 2.5,
+        "headline_limit": 11,
+        "visual_direction": (
+            "当代美业杂志编辑摄影，象牙纸白、炭黑与朱砂红配色，硬朗棚拍光，"
+            "大胆裁切与非对称版式感，纸张印刷质感清晰"
+        ),
+        "shot_language": (
+            "偏离中心的封面式人物近景", "留出大面积文字区的横向半身镜头",
+            "硬光投影下的产品静物特写", "俯拍桌面上的编辑式平铺构图",
+            "越过画面边缘的大胆面部裁切", "黑白质感与红色道具呼应的中景",
+            "高机位观察的时装大片构图",
         ),
     },
 }
@@ -139,7 +184,7 @@ def _styles_from_payload(payload):
         return [style], False
 
     values = payload.get("styles")
-    if not isinstance(values, list) or not values or len(values) > len(STYLE_PROFILES):
+    if not isinstance(values, list) or not values or len(values) > MAX_SELECTED_STYLES:
         raise MontagePlanError("成片风格列表格式无效")
     styles = []
     for value in values:
@@ -451,7 +496,8 @@ def plan_digest(plan):
 
 
 __all__ = [
-    "MAX_DURATION_SECONDS", "MAX_SCENES", "MIN_DURATION_SECONDS", "MIN_SCENES",
+    "MAX_DURATION_SECONDS", "MAX_SCENES", "MAX_SELECTED_STYLES",
+    "MIN_DURATION_SECONDS", "MIN_SCENES",
     "MontagePlanError", "PLANNER_VERSION", "STYLE_PROFILES",
     "canonical_plan_json", "plan_digest", "plan_script_video",
 ]

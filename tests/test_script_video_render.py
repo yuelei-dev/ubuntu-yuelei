@@ -17,6 +17,7 @@ SERVER = ROOT / "server"
 if str(SERVER) not in sys.path:
     sys.path.insert(0, str(SERVER))
 
+from content_domains import script_video_montage as montage
 from content_domains import script_video_render as renderer
 
 
@@ -29,8 +30,49 @@ class ScriptVideoRenderTests(unittest.TestCase):
             ROOT
             / "site/assets/one-click/templates/smart-montage-v1/template-manifest.json"
         ).read_text(encoding="utf-8"))
+        package = json.loads((
+            ROOT / "site/assets/one-click/templates/smart-montage-v1/package.json"
+        ).read_text(encoding="utf-8"))
         self.assertEqual(meta["version"], renderer.TEMPLATE_VERSION)
         self.assertEqual(manifest["template_version"], renderer.TEMPLATE_VERSION)
+        self.assertEqual(meta["hyperframesVersion"], renderer.HYPERFRAMES_VERSION)
+        self.assertEqual(
+            manifest["verification"]["hyperframes_version"],
+            renderer.HYPERFRAMES_VERSION,
+        )
+        self.assertTrue(all(
+            "hyperframes@" + renderer.HYPERFRAMES_VERSION in command
+            for command in package["scripts"].values()
+        ))
+        expected_styles = list(montage.STYLE_PROFILES)
+        self.assertEqual(expected_styles, meta["styles"])
+        self.assertEqual(expected_styles, manifest["input_contract"]["style"])
+        self.assertEqual(set(expected_styles), set(renderer._STYLE_LABELS))
+        self.assertEqual(set(expected_styles), set(renderer._STYLE_EYEBROWS))
+        self.assertEqual(set(expected_styles), set(renderer._STYLE_METRICS))
+        self.assertEqual(3, manifest["input_contract"]["max_selected_styles"])
+        expected_variants = {
+            "%s/%s" % (style, ratio)
+            for style in expected_styles
+            for ratio in ("16:9", "9:16")
+        }
+        actual_variants = manifest["verification"]["variants"]
+        self.assertEqual(expected_variants, set(actual_variants))
+        self.assertEqual(len(expected_variants), len(actual_variants))
+        template = (
+            ROOT / "site/assets/one-click/templates/smart-montage-v1/index.template.txt"
+        ).read_text(encoding="utf-8")
+        for style in expected_styles:
+            self.assertIn("body.style-" + style, template)
+        for style in ("wellness", "neon", "editorial"):
+            self.assertIn(".style-%s .photo-stage{overflow:visible}" % style, template)
+        self.assertIn(
+            ".style-neon .badge{left:auto;right:5%;top:6%", template,
+        )
+        self.assertIn(
+            "body.ratio-portrait.style-neon .clinical-bars{left:6%;bottom:8%",
+            template,
+        )
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -81,6 +123,12 @@ class ScriptVideoRenderTests(unittest.TestCase):
         self.assertEqual(12, sum(
             scene["duration_seconds"] for scene in data["scenes"]
         ))
+        for style in montage.STYLE_PROFILES:
+            for ratio, dimensions in (("16:9", (1920, 1080)), ("9:16", (1080, 1920))):
+                with self.subTest(style=style, ratio=ratio):
+                    variant = renderer.normalize_plan(self.plan(style, ratio), self.images)
+                    self.assertEqual(style, variant["style"])
+                    self.assertEqual(dimensions, (variant["width"], variant["height"]))
 
     def test_rejects_bad_plan_bounds_and_timeline(self):
         bad = self.plan()
@@ -224,8 +272,12 @@ class ScriptVideoRenderTests(unittest.TestCase):
         expectations = {
             "luxe": ('ease:"sine.inOut"', 'scaleX:0'),
             "pop": ('ease:"back.out(1.65)"', "x:1920"),
-            "clinic": ('ease:"circ.out"', 'clinical-bars i'),
+            "clinic": ('ease:"circ.out"', '"#scene-01-clinical-bars i"'),
+            "wellness": ('scale:.96', 'scale:1.65'),
+            "neon": ('x:108', 'ease:"steps(5)"'),
+            "editorial": ('rotation:2', 'x:-1920'),
         }
+        timelines = set()
         for style, needles in expectations.items():
             with self.subTest(style=style):
                 workspace = self.root / ("project-" + style)
@@ -237,13 +289,26 @@ class ScriptVideoRenderTests(unittest.TestCase):
                 self.assertNotIn('"#scene-03-transition"', markup)
                 self.assertIn('"#scene-03-image"', markup)
                 self.assertIn(
-                    'id="scene-03" class="clip scene" data-start="8.000" '
+                    'id="scene-03" class="clip scene" data-scene-parity="odd" '
+                    'data-start="8.000" '
                     'data-duration="4.033"', markup
                 )
                 self.assertIn('window.__timelines["main"] = tl;', markup)
+                if style == "wellness":
+                    self.assertIn(
+                        'tl.to("#scene-01-photo-stage",{opacity:1,y:0,scale:1,'
+                        'duration:0.480,ease:"sine.out"},0.180);', markup,
+                    )
+                    self.assertIn(
+                        'tl.to("#scene-01-transition",{opacity:1,scale:1.65,'
+                        'duration:0.580,ease:"sine.inOut"},3.420);', markup,
+                    )
                 self.assertTrue(
                     (workspace / "assets/audio/program-silence.wav").stat().st_size > 44
                 )
+                data = renderer.normalize_plan(self.plan(style), self.images)
+                timelines.add(renderer._timeline_script(data))
+        self.assertEqual(len(expectations), len(timelines))
 
     def test_render_checks_then_renders_with_fixed_cli_and_probes_output(self):
         calls = []
@@ -274,7 +339,7 @@ class ScriptVideoRenderTests(unittest.TestCase):
         self.assertEqual("check", calls[0][0][3])
         self.assertEqual("render", calls[1][0][3])
         for command, kwargs in calls:
-            self.assertEqual("hyperframes@0.7.96", command[2])
+            self.assertEqual("hyperframes@0.7.101", command[2])
             self.assertTrue(kwargs["check"])
             if pathlib.Path(renderer._DEFAULT_NPX).is_absolute():
                 self.assertEqual(
