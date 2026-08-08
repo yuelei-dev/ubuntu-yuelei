@@ -339,6 +339,21 @@ class ScriptToVideoTests(unittest.TestCase):
                 self.script_to_video._smart_material_images(plan, deadline=100.0)
         generate.assert_not_called()
 
+    def test_smart_phase_only_propagates_required_asset_persistence_failure(self):
+        with mock.patch.object(
+            self.video, "update_video_asset_phase",
+            side_effect=RuntimeError("asset database unavailable"),
+        ):
+            self.assertFalse(
+                self.script_to_video._smart_phase(88, "rendering")
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, "asset database unavailable",
+            ):
+                self.script_to_video._smart_phase(
+                    88, "completed", strict=True, status="done",
+                )
+
     def test_smart_pipeline_generates_voice_every_scene_and_verified_mp4(self):
         request = {
             "pipeline": "smart_montage",
@@ -403,6 +418,75 @@ class ScriptToVideoTests(unittest.TestCase):
                 self.assertEqual(len({item["sha256"] for item in result["materials"]}), plan["scene_count"])
                 self.assertTrue((Path(raw) / result["video_file"]).is_file())
                 self.assertEqual(phase.call_args_list[-1].args[1], "completed")
+                self.assertIs(phase.call_args_list[-1].kwargs["strict"], True)
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
+    def test_smart_pipeline_cleans_outputs_when_required_asset_save_fails(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "先看清需求，再给出明确方案。",
+            "style": "clinic",
+            "ratio": "16:9",
+        }
+        request["plan_digest"] = self.script_to_video.smart_montage_plan_response(
+            request,
+        )["plan_digest"]
+        plan = self.script_to_video.prepare_script_to_video_payload(
+            request, "fang",
+        )["smart_plan"]
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            voice = Path(raw) / "voice.mp3"
+            image = Path(raw) / "scene.png"
+
+            def fake_audio(_payload):
+                voice.write_bytes(b"voice")
+                return {"file": "voice.mp3", "duration_ms": 3200}
+
+            def fake_materials(_plan, deadline=None):
+                image.write_bytes(b"image")
+                return [{
+                    "scene_index": 0,
+                    "prompt": "测试画面",
+                    "source": "generate",
+                    "file": "scene.png",
+                    "sha256": "demo",
+                }]
+
+            def fake_render(_plan, _materials, output_path, **_kwargs):
+                Path(output_path).write_bytes(b"mp4")
+                return {"output": {"duration_ms": 3200}}
+
+            def phase(_job_id, name, **_fields):
+                if name == "completed":
+                    raise RuntimeError("asset save failed")
+
+            try:
+                with mock.patch(
+                    "content_domains.audio.gen_audio", side_effect=fake_audio,
+                ), mock.patch.object(
+                    self.script_to_video, "_smart_material_images",
+                    side_effect=fake_materials,
+                ), mock.patch(
+                    "content_domains.script_video_render.render",
+                    side_effect=fake_render,
+                ), mock.patch.object(
+                    self.video, "public_url", return_value="/private/final.mp4",
+                ), mock.patch.object(
+                    self.script_to_video, "_smart_phase", side_effect=phase,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "asset save failed"):
+                        self.script_to_video.gen_script_to_video({
+                            "_username": "fang",
+                            "_job_id": 89,
+                            "pipeline": "smart_montage",
+                            "smart_plan": plan,
+                        })
+                self.assertFalse(voice.exists())
+                self.assertFalse(image.exists())
+                self.assertFalse(any((Path(raw) / "video").glob("*.mp4")))
             finally:
                 self.script_to_video.OUT_DIR = old_out
 

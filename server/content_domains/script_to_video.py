@@ -288,13 +288,20 @@ def dispatch_http(handler, method, verify_token, must_change_password):
     return True
 
 
-def _smart_phase(job_id, phase, **fields):
+def _smart_phase(job_id, phase, strict=False, **fields):
     try:
         from . import video as video_domain
-        video_domain.update_video_asset_phase(job_id, phase, **fields)
+        updated = video_domain.update_video_asset_phase(
+            job_id, phase, strict=strict, **fields
+        )
+        if strict and updated is False:
+            raise RuntimeError("智能成片作品保存失败")
+        return updated
     except Exception:
+        if strict:
+            raise
         # 阶段信息仅用于进度展示，不能让一次已付费生成因状态写入失败而中断。
-        pass
+        return False
 
 
 def _smart_voiceover_text(plan):
@@ -611,7 +618,7 @@ def _gen_smart_montage(username, payload):
         }
         _smart_phase(
             job_id, "completed", status="done", video_file=output_rel,
-            video_url=video_url, audio_file=audio_rel,
+            video_url=video_url, audio_file=audio_rel, strict=True,
         )
         return result
     except Exception:
