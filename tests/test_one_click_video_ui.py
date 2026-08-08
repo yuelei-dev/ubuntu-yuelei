@@ -108,21 +108,34 @@ class OneClickVideoUiTests(unittest.TestCase):
         self.assertIn("'/api/gen/job/'+encodeURIComponent(jobId)", self.html)
         self.assertIn("pendingPlans.map", self.html)
 
-    def test_smart_batch_restores_full_input_plan_and_jobs_after_refresh(self):
+    def test_smart_batch_restores_v4_input_slots_keys_and_jobs_after_refresh(self):
         for marker in (
+            "version:4",
             "saved.input={copy:",
             "saved.plan=plan",
+            "material_slots_by_style",
+            "unresolved_submissions",
             "function restoreBatchOnLoad()",
             "$('smartCopy').value=copy",
-            "activePlan=stalePlan?null:plan",
+            "originalVersion===2||originalVersion===3",
+            "originalVersion===4",
+            "smartBatch.version=4",
             "resumeBatchJobs(plan)",
             "restoreBatchOnLoad();",
         ):
             self.assertIn(marker, self.html)
-        self.assertIn(
-            "if(stalePlan&&!hasJobs)throw new Error('保存的方案规则已过期')",
-            self.html,
+        restore = self.html.split("function restoreBatchOnLoad()", 1)[1]
+        restore = restore.split("function batchJobMatches", 1)[0]
+        self.assertLess(
+            restore.index("signatureHash(currentBatchSignature())!==saved.signature"),
+            restore.index("smartBatch.version=4"),
         )
+        self.assertIn("saved.keys", restore)
+        self.assertIn("saved.jobs", restore)
+        self.assertIn("saved.unresolved_submissions", restore)
+        self.assertIn("storedMaterials(saved.input.material_uploads||[],true)", restore)
+        self.assertIn("item.expires_at<=now", restore)
+        self.assertIn("savedUnresolved?allMaterials", restore)
         self.assertIn("已提交任务继续监控", self.html)
 
     def test_smart_polling_is_bound_to_one_batch_job_and_submission_key(self):
@@ -184,6 +197,220 @@ class OneClickVideoUiTests(unittest.TestCase):
         self.assertIn("时长与素材数由文案决定", self.html)
         self.assertNotIn("固定 30 秒", self.html)
         self.assertNotIn("固定 6 张", self.html)
+
+    def test_user_material_library_enforces_count_file_and_total_byte_limits(self):
+        for marker in (
+            'id="smartMaterialInput" type="file"',
+            'accept="image/png,image/jpeg,image/webp" multiple',
+            "MAX_SMART_MATERIALS=20",
+            "MAX_SMART_MATERIAL_BYTES=10*1024*1024",
+            "MAX_SMART_TOTAL_BYTES=96*1024*1024",
+            "window.crypto.subtle.digest('SHA-256',buffer)",
+            "'/api/gen/script_to_video/material-upload'",
+            "'X-HQ-Image-SHA256':sha256",
+            "data-material-action=\"up\"",
+            "data-material-action=\"down\"",
+            "data-material-action=\"remove\"",
+            "用户素材",
+            "AI补图",
+        ):
+            self.assertIn(marker, self.html)
+
+        choose = self.html.split("function chooseMaterialFiles(fileList)", 1)[1]
+        choose = choose.split("function clearUploadFromSlots", 1)[0]
+        self.assertIn("smartUploads.length+files.length>MAX_SMART_MATERIALS", choose)
+        self.assertIn("files[i].size>MAX_SMART_MATERIAL_BYTES", choose)
+        self.assertIn("existingBytes+incomingBytes>MAX_SMART_TOTAL_BYTES", choose)
+        self.assertIn("function uploadNext(index)", choose)
+        self.assertIn("return uploadNext(index+1)", choose)
+        self.assertNotIn("Promise.all", choose)
+
+    def test_first_plan_prefills_each_template_in_library_order(self):
+        prefix = self.html.split("function prefixMaterialSlots(plan)", 1)[1]
+        prefix = prefix.split("function slotMapHasMaterials", 1)[0]
+        self.assertIn("plan.styles.forEach(function(stylePlan)", prefix)
+        self.assertIn("slots=new Array(count).fill(null)", prefix)
+        self.assertIn("slots[i]=available[i].upload_id", prefix)
+
+        build = self.html.split("function buildPlan()", 1)[1]
+        build = build.split("function restoreBatchOnLoad", 1)[0]
+        self.assertIn(":prefixMaterialSlots(plan)", build)
+        self.assertIn("previousPlan?normalizeMaterialSlots", build)
+
+    def test_each_template_scene_has_an_independent_material_selector(self):
+        for marker in (
+            'class="scene-material-select"',
+            'data-material-style="',
+            'data-material-scene="',
+            "AI 补图（自动生成）",
+            "function changeSceneMaterial(select)",
+            "map[style]",
+        ):
+            self.assertIn(marker, self.html)
+
+        normalize = self.html.split("function normalizeMaterialSlots", 1)[1]
+        normalize = normalize.split("function prefixMaterialSlots", 1)[0]
+        self.assertIn("plan.styles.forEach(function(stylePlan)", normalize)
+        self.assertIn("var used={}", normalize)
+        self.assertIn("used[uploadId]", normalize)
+        self.assertIn("result[stylePlan.style]=slots", normalize)
+        self.assertRegex(
+            normalize,
+            r"plan\.styles\.forEach\(function\(stylePlan\)\{[\s\S]*?"
+            r"var used=\{\}",
+        )
+
+        change = self.html.split("function changeSceneMaterial(select)", 1)[1]
+        change = change.split("function invalidatePlan", 1)[0]
+        self.assertIn("slots.indexOf(uploadId)", change)
+        self.assertIn("slots[cleared]=null", change)
+        self.assertIn("slots[index]=uploadId||null", change)
+        # used is recreated inside each style iteration, so an upload may be reused
+        # by another template while duplicates within one template are removed.
+        self.assertLess(
+            normalize.index("plan.styles.forEach(function(stylePlan)"),
+            normalize.index("var used={}"),
+        )
+
+    def test_submission_uses_an_immutable_exact_nullable_slot_snapshot(self):
+        slots = self.html.split(
+            "function materialSlotsForPlan(stylePlan)", 1,
+        )[1].split("function submitStyle", 1)[0]
+        self.assertIn("new Array(count).fill(null)", slots)
+        self.assertIn("smartSubmissionSlotsSnapshot", slots)
+        self.assertIn("for(var i=0;i<count;i++)slots[i]=source[i]||null", slots)
+        self.assertIn("slots.some(Boolean)?Object.freeze(slots):null", slots)
+
+        snapshot = self.html.split("function immutableSlotSnapshot(plan)", 1)[1]
+        snapshot = snapshot.split("function materialById", 1)[0]
+        self.assertIn("Object.freeze(normalized[item.style].slice())", snapshot)
+        self.assertIn("return Object.freeze(snapshot)", snapshot)
+
+        submit = self.html.split(
+            "function submitStyle(copy,ratio,stylePlan)", 1,
+        )[1].split("function generateAll()", 1)[0]
+        self.assertIn("payload.material_upload_ids=materialSlots", submit)
+        self.assertNotIn("source_url", submit)
+        self.assertNotIn("base64", submit)
+
+    def test_delete_removes_local_material_only_after_owner_bound_delete_succeeds(self):
+        delete_call = self.html.split("function deleteMaterialUpload(uploadId)", 1)[1]
+        delete_call = delete_call.split("function chooseMaterialFiles", 1)[0]
+        self.assertIn("method:'DELETE'", delete_call)
+        self.assertIn("JSON.stringify({upload_id:uploadId})", delete_call)
+
+        removal = self.html.split("function moveOrRemoveMaterial(index,action)", 1)[1]
+        removal = removal.split("function normalizeStylePlan", 1)[0]
+        self.assertLess(
+            removal.index("deleteMaterialUpload(removed.upload_id).then"),
+            removal.index("smartUploads.splice(currentIndex,1)"),
+        )
+        failure = removal.split(".catch(function(error)", 1)[1]
+        self.assertNotIn("smartUploads.splice", failure)
+
+    def test_unresolved_submission_keeps_key_and_blocks_new_batch_and_release(self):
+        self.assertIn("unresolved_submissions:{}", self.html)
+
+        generate = self.html.split("function generateAll()", 1)[1]
+        generate = generate.split("function clearBatchUi", 1)[0]
+        self.assertLess(
+            generate.index("smartBatch.unresolved_submissions[item.style]=true"),
+            generate.index("pendingPlans.map(function(item)"),
+        )
+
+        submit = self.html.split("function submitStyle(copy,ratio,stylePlan)", 1)[1]
+        submit = submit.split("function generateAll()", 1)[0]
+        self.assertIn("delete smartBatch.unresolved_submissions[style]", submit)
+        self.assertIn("smartBatch.unresolved_submissions[style]=true", submit)
+        self.assertIn("smartBatch.keys[style]=newIdempotencyKey(style)", submit)
+        success = submit.split(".catch(function(error)", 1)[0]
+        self.assertLess(
+            success.index("smartBatch.jobs[style]=data.job_id"),
+            success.index("delete smartBatch.unresolved_submissions[style]"),
+        )
+        self.assertLess(
+            success.index("delete smartBatch.unresolved_submissions[style]"),
+            success.index("persistBatch()"),
+        )
+
+        rejected = submit.split(
+            "else if(canRotateRejectedSubmission(error)){", 1,
+        )[1].split("}else if(explicitlyTerminal)", 1)[0]
+        self.assertIn("delete smartBatch.unresolved_submissions[style]", rejected)
+        self.assertIn("smartBatch.keys[style]=newIdempotencyKey(style)", rejected)
+
+        terminal = submit.split("else if(explicitlyTerminal){", 1)[1]
+        terminal = terminal.split("}else{", 1)[0]
+        self.assertIn("delete smartBatch.unresolved_submissions[style]", terminal)
+        self.assertNotIn("newIdempotencyKey", terminal)
+
+        uncertain = submit.split("}else{smartBatch.unresolved_submissions", 1)[1]
+        uncertain = uncertain.split("persistBatch()", 1)[0]
+        self.assertIn("[style]=true", uncertain)
+        self.assertNotIn("newIdempotencyKey", uncertain)
+
+        new_batch = self.html.split("function startNewBatch()", 1)[1]
+        new_batch = new_batch.split("$('smartModeTab').onclick", 1)[0]
+        self.assertLess(
+            new_batch.index("if(hasUnresolvedSubmissions())"),
+            new_batch.index("deleteMaterialUpload(item.upload_id)"),
+        )
+
+        release = self.html.split("function maybeReleaseCompletedMaterials()", 1)[1]
+        release = release.split("function completeJob", 1)[0]
+        self.assertLess(
+            release.index("hasUnresolvedSubmissions()"),
+            release.index("deleteMaterialUpload(item.upload_id)"),
+        )
+
+    def test_5xx_no_response_and_in_progress_never_rotate_submission_key(self):
+        rotate = self.html.split("function canRotateRejectedSubmission(error)", 1)[1]
+        rotate = rotate.split("function jobCardId", 1)[0]
+        self.assertIn("if(!error||!error.responseReceived)return false", rotate)
+        self.assertIn("if(!status||status>=500)return false", rotate)
+        self.assertIn("error.code==='idempotency_in_progress'", rotate)
+        self.assertIn("if(error.operationTerminal)return true", rotate)
+        self.assertIn("if(error.submissionRef||error.jobId)return false", rotate)
+        self.assertLess(
+            rotate.index("status>=500"),
+            rotate.index("status>=400&&status<500"),
+        )
+
+        submit = self.html.split("function submitStyle(copy,ratio,stylePlan)", 1)[1]
+        submit = submit.split("function generateAll()", 1)[0]
+        self.assertIn("explicitlyTerminal", submit)
+        self.assertIn("else if(explicitlyTerminal)", submit)
+        self.assertIn("else{smartBatch.unresolved_submissions[style]=true;}", submit)
+
+    def test_material_batch_v4_signature_and_legacy_migration_contract(self):
+        self.assertIn("saved.version===2||saved.version===3||saved.version===4", self.html)
+        self.assertIn("saved.version!==2&&saved.version!==3&&saved.version!==4", self.html)
+        self.assertIn("saved.version=4", self.html)
+        self.assertIn("material_uploads:serializedMaterials()", self.html)
+        self.assertIn("material_slots_by_style", self.html)
+        self.assertIn("unresolved_submissions", self.html)
+
+        serialized = self.html.split(
+            "function serializedMaterials()", 1,
+        )[1].split("function materialControlsLocked", 1)[0]
+        self.assertNotIn("smartUploadPreviews", serialized)
+        self.assertNotIn("createObjectURL", serialized)
+
+        batch_signature = self.html.split(
+            "function currentBatchSignature()", 1,
+        )[1].split("function setSmartStatus", 1)[0]
+        self.assertIn("if(!smartUploads.length)return currentSignature()", batch_signature)
+        self.assertIn("material_slots_by_style:slots", batch_signature)
+        self.assertIn("if(!slotMapHasMaterials(slots))return currentSignature()", batch_signature)
+        self.assertIn("material_upload_ids:smartUploads.map", batch_signature)
+
+        restore = self.html.split("function restoreBatchOnLoad()", 1)[1]
+        restore = restore.split("function batchJobMatches", 1)[0]
+        self.assertIn("originalVersion===2||originalVersion===3", restore)
+        self.assertIn("signatureHash(currentBatchSignature())!==saved.signature", restore)
+        self.assertIn("originalVersion===4?normalizeMaterialSlots", restore)
+        self.assertIn("saved.unresolved_submissions", restore)
+        self.assertIn("item.expires_at<=now", restore)
 
     @unittest.skipUnless(shutil.which("node"), "Node required")
     def test_inline_javascript_syntax(self):

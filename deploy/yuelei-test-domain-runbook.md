@@ -58,6 +58,47 @@ python3 deploy/render_yuelei_test_nginx.py \
    - 页面、JSON、Location 和 Cookie 不产生生产域名；
    - 六个应用服务 PID 和启动时间不变。
 
+## 一键成片用户素材发布顺序
+
+该能力的任务载荷包含 `smart_material_contract_version=1`，旧 worker 不理解用户素材。
+发布必须依次执行：
+
+1. 先安装已合并提交中的 8096 后端文件，优雅重启 `huangque-content`，确认
+   `/api/gen/health` 正常；
+2. 再安装本 runbook 渲染的 Nginx 候选，`nginx -t` 后 reload，验证未登录访问
+   `/api/gen/script_to_video/material-upload` 返回 401，而不是 404/413；
+3. 最后原子安装 `site/workbench/one-click-video.html`。前两步任一失败都不得发布页面。
+
+回滚时顺序相反：先恢复旧页面阻止新素材任务，再确认所有 v1 任务均已终态，并且
+没有尚未写入最终响应的 durable 提交，才能恢复旧后端。以下只读检查的两项都必须
+输出 `0`：
+
+```bash
+python3 - <<'PY'
+import json, sqlite3
+db = "/home/ubuntu/content-api/content_jobs.db"
+with sqlite3.connect(db) as connection:
+    rows = connection.execute(
+        "SELECT id,payload FROM jobs WHERE kind='script_to_video' "
+        "AND status IN ('pending','running')"
+    ).fetchall()
+    unfinished_attempts = connection.execute(
+        "SELECT COUNT(*) FROM submission_idempotency "
+        "WHERE endpoint='/api/gen/script_to_video' AND response_json IS NULL "
+        "AND attempt_payload_json IS NOT NULL"
+    ).fetchone()[0]
+active = [job_id for job_id, raw in rows
+          if int(json.loads(raw or "{}").get("smart_material_contract_version") or 0) == 1]
+print("active_v1_jobs=%d" % len(active))
+print("unfinished_smart_attempts=%d" % int(unfinished_attempts))
+PY
+```
+
+任一结果非零，就继续使用新后端完成恢复：`linked` 任务需运行到终态并写回响应；
+`charged` 提交需用原请求和原幂等键补建任务，或经对账后退款；`frozen` 提交必须先按
+`charge_transaction_key` 查询 Auth 账本，确认未扣款后才可清理。禁止直接回滚 worker，
+否则旧代码会忽略上传素材并全量调用生图上游，也无法恢复尚未落单的 durable 提交。
+
 ## 回滚
 
 任何验证失败时：删除 `sites-enabled/yuelei-test.conf` 软链与

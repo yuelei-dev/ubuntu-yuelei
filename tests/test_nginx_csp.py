@@ -138,6 +138,30 @@ class NginxCspTest(unittest.TestCase):
                 )
                 self.assertIn('proxy_set_header X-HQ-Internal-Token "";', block)
 
+    def test_smart_montage_material_upload_is_buffered_bounded_and_rate_limited(self):
+        for relative_path in self.CONFIGS:
+            config = self._config(relative_path)
+            with self.subTest(config=relative_path):
+                start = config.index(
+                    "location = /api/gen/script_to_video/material-upload {",
+                )
+                end = config.index("\n    }", start)
+                block = config[start:end]
+                self.assertIn("proxy_pass http://127.0.0.1:8096;", block)
+                # Buffer the complete request at nginx before the application
+                # takes its per-upload lock; slow clients must not block paid
+                # submissions waiting on that lock.
+                self.assertIn("proxy_request_buffering on;", block)
+                self.assertIn("proxy_buffering off;", block)
+                self.assertIn("client_max_body_size 10m;", block)
+                self.assertIn("client_body_timeout 20s;", block)
+                self.assertIn(
+                    "limit_req zone=hq_cli_upload_rate burst=24 nodelay;", block,
+                )
+                self.assertIn("limit_req_status 429;", block)
+                self.assertIn("limit_conn hq_cli_upload_conn 2;", block)
+                self.assertIn('proxy_set_header X-HQ-Internal-Token "";', block)
+
     def test_card_media_upload_has_a_bounded_streaming_route(self):
         config = self._config("deploy/nginx-huangquechuanmei.conf")
         start = config.index("location = /api/auth/card/media {")

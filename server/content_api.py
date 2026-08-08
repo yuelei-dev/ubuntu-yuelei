@@ -51,6 +51,11 @@ class H(DigitalPresenterH):
             return
         return super().do_GET()
 
+    def do_DELETE(self):
+        if self._dispatch_script_to_video("DELETE"):
+            return
+        return super().do_DELETE()
+
 
 def main():
     core.init_db()

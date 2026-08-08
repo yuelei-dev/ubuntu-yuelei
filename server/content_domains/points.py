@@ -138,11 +138,78 @@ def cost_of(kind, body):
         return rate * seconds
     if kind == "script_to_video":
         if str(body.get("pipeline") or "").strip().lower() == "smart_montage":
-            try:
-                generated = int(body.get("material_generate_count") or 0)
-            except (TypeError, ValueError):
-                generated = 0
-            generated = max(3, min(20, generated))
+            material_plan = body.get("material_plan")
+            if isinstance(material_plan, list):
+                if not 1 <= len(material_plan) <= 20:
+                    raise ValueError("智能成片素材方案数量无效")
+                try:
+                    material_contract = int(
+                        body.get("smart_material_contract_version") or 0
+                    )
+                except (TypeError, ValueError):
+                    raise ValueError("智能成片素材协议版本无效")
+                if material_contract not in {0, 1}:
+                    raise ValueError("智能成片素材协议版本无效")
+                smart_scenes = ((body.get("smart_plan") or {}).get("scenes")
+                                if isinstance(body.get("smart_plan"), dict) else None)
+                if isinstance(smart_scenes, list) and len(smart_scenes) != len(material_plan):
+                    raise ValueError("智能成片素材方案与分镜数量不一致")
+                sources = []
+                for index, item in enumerate(material_plan):
+                    if (not isinstance(item, dict)
+                            or item.get("scene_index") != index
+                            or item.get("source") not in {"generate", "upload"}):
+                        raise ValueError("智能成片素材方案无效")
+                    sources.append(item["source"])
+                has_uploads = "upload" in sources
+                if has_uploads:
+                    # Only the server-created v1 contract can prove that a
+                    # scene already has a validated private upload.  Refuse to
+                    # turn a loosely shaped or legacy plan into free images if
+                    # a future caller bypasses the normal preparation route.
+                    if material_contract != 1 or not isinstance(smart_scenes, list):
+                        raise ValueError("智能成片用户素材方案缺少服务端协议")
+                    mime_extensions = {
+                        "image/jpeg": ".jpg",
+                        "image/png": ".png",
+                        "image/webp": ".webp",
+                    }
+                    for item in material_plan:
+                        if item["source"] != "upload":
+                            continue
+                        upload_id = str(item.get("upload_id") or "")
+                        digest = str(item.get("sha256") or "")
+                        mime = str(item.get("mime") or "")
+                        extension = str(item.get("extension") or "")
+                        try:
+                            width = int(item.get("width") or 0)
+                            height = int(item.get("height") or 0)
+                        except (TypeError, ValueError):
+                            raise ValueError("智能成片用户素材元数据无效")
+                        if (len(upload_id) != 36 or not upload_id.startswith("img_")
+                                or any(ch not in "0123456789abcdef" for ch in upload_id[4:])
+                                or len(digest) != 64
+                                or any(ch not in "0123456789abcdef" for ch in digest)
+                                or mime_extensions.get(mime) != extension
+                                or width <= 0 or height <= 0
+                                or width * height > 40_000_000):
+                            raise ValueError("智能成片用户素材元数据无效")
+                generated = sum(1 for source in sources if source == "generate")
+                reused = len(sources) - generated
+            else:
+                # Compatibility for already accepted jobs from before the
+                # server-frozen material plan.  New requests always use plan.
+                try:
+                    generated = int(body.get("material_generate_count") or 0)
+                except (TypeError, ValueError):
+                    generated = 0
+                # Legacy/no-plan callers cannot prove that zero images are
+                # reused; preserve the historical three-image minimum.  Only
+                # a validated server-frozen plan may reduce generation to 0.
+                generated = max(3, min(20, generated))
+                reused = 0
+            body["material_generate_count"] = generated
+            body["material_reused_count"] = reused
             images = generated * cost_of("image", {
                 "provider": "openai", "quality": "standard", "count": 1,
             })
@@ -151,7 +218,7 @@ def cost_of(kind, body):
                 "voiceover": voiceover,
                 "material_images": images,
                 "material_generate_count": generated,
-                "material_reused_count": 0,
+                "material_reused_count": reused,
                 "total": voiceover + images,
             }
             return voiceover + images

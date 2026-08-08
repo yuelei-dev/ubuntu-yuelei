@@ -1,4 +1,9 @@
+import base64
+import errno
+import hashlib
 import importlib
+import io
+import os
 import shutil
 import subprocess
 import sys
@@ -8,6 +13,14 @@ from pathlib import Path
 from unittest import mock
 
 
+PNG_ONE = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGOskDvBwMDAxAAGABBCAWKm3yc5AAAAAElFTkSuQmCC"
+)
+PNG_TWO = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGOU2xLFwMDAxAAGAA3+ATB3z0T/AAAAAElFTkSuQmCC"
+)
+
+
 class ScriptToVideoTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -15,6 +28,8 @@ class ScriptToVideoTests(unittest.TestCase):
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
         cls.core = importlib.import_module("content_domains.core")
+        cls.content_api = importlib.import_module("content_api")
+        cls.cli_uploads = importlib.import_module("content_domains.cli_uploads")
         cls.script_to_video = importlib.import_module("content_domains.script_to_video")
         cls.video = importlib.import_module("content_domains.video")
 
@@ -30,6 +45,16 @@ class ScriptToVideoTests(unittest.TestCase):
         if self.orig_get_video_avatar is not None:
             self.video.get_video_avatar = self.orig_get_video_avatar
         self.script_to_video._get_first_avatar = self.orig_get_first_avatar
+
+    def _approved_upload(self, raw, username="fang"):
+        uploaded = self.cli_uploads.store_image(
+            io.BytesIO(raw), len(raw), username, "image/png",
+            hashlib.sha256(raw).hexdigest(),
+        )
+        self.cli_uploads.approve_image(
+            uploaded["upload_id"], username, "smart_montage",
+        )
+        return uploaded
 
     def test_drama_style_routes_to_grok_pipeline(self):
         calls = {}
@@ -173,6 +198,157 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertTrue(all(item["file"] is None for item in body["material_plan"]))
         self.assertEqual(body["plan_digest"], preview["plan_digest"])
 
+    def test_prepare_and_materialize_smart_montage_maps_owned_uploads_to_scenes(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "专业评估看见真实需求，温和护理改善肤质，持续管理让状态自然稳定。",
+            "style": "clinic",
+            "ratio": "9:16",
+        }
+        preview = self.script_to_video.smart_montage_plan_response(request)
+        request["plan_digest"] = preview["plan_digest"]
+        scene_count = preview["plan"]["scene_count"]
+        with tempfile.TemporaryDirectory() as raw:
+            upload_root = Path(raw) / "uploads"
+            output_root = Path(raw) / "out"
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = output_root
+            try:
+                with mock.patch.object(self.cli_uploads, "UPLOAD_ROOT", upload_root):
+                    first = self._approved_upload(PNG_ONE)
+                    second = self._approved_upload(PNG_TWO)
+                    request["material_upload_ids"] = [
+                        first["upload_id"], second["upload_id"],
+                    ] + [None] * (scene_count - 2)
+                    body = self.script_to_video.prepare_script_to_video_payload(
+                        request, "fang",
+                    )
+                    self.assertEqual(
+                        [item["scene_index"] for item in body["material_plan"]],
+                        list(range(scene_count)),
+                    )
+                    self.assertEqual(
+                        [item["source"] for item in body["material_plan"][:2]],
+                        ["upload", "upload"],
+                    )
+                    self.assertTrue(all(
+                        item["source"] == "generate"
+                        for item in body["material_plan"][2:]
+                    ))
+                    self.assertEqual(body["material_generate_count"], scene_count - 2)
+                    self.assertEqual(body["material_reused_count"], 2)
+
+                    frozen = self.script_to_video.materialize_smart_montage_uploads(
+                        body, "fang",
+                    )
+                    self.assertEqual(len(frozen), 2)
+                    self.assertTrue(all((output_root / rel).is_file() for rel in frozen))
+                    self.script_to_video.cleanup_smart_montage_uploads(body)
+                    self.assertTrue(all(not (output_root / rel).exists() for rel in frozen))
+                    # Frozen task copies are disposable; original user uploads are not.
+                    self.assertEqual(
+                        self.cli_uploads.read_image_bytes(first["upload_id"], "fang")[0],
+                        PNG_ONE,
+                    )
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
+    def test_smart_montage_upload_contract_rejects_mismatch_ownership_and_duplicates(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "先做专业评估，再定制护理方案，让状态逐步回到自然稳定。",
+            "style": "luxe",
+            "ratio": "16:9",
+        }
+        preview = self.script_to_video.smart_montage_plan_response(request)
+        request["plan_digest"] = preview["plan_digest"]
+        scene_count = preview["plan"]["scene_count"]
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            self.cli_uploads, "UPLOAD_ROOT", Path(raw),
+        ):
+            owned = self._approved_upload(PNG_ONE)
+            foreign = self._approved_upload(PNG_TWO, username="other")
+            with self.assertRaises(
+                self.script_to_video.SmartMontageRequestError,
+            ) as mismatch:
+                self.script_to_video.prepare_script_to_video_payload({
+                    **request, "material_upload_ids": [owned["upload_id"]],
+                }, "fang")
+            self.assertEqual("material_scene_mismatch", mismatch.exception.code)
+
+            with self.assertRaises(
+                self.script_to_video.SmartMontageRequestError,
+            ) as ownership:
+                self.script_to_video.prepare_script_to_video_payload({
+                    **request,
+                    "material_upload_ids": [foreign["upload_id"]]
+                    + [None] * (scene_count - 1),
+                }, "fang")
+            self.assertEqual("material_upload_unavailable", ownership.exception.code)
+
+            with self.assertRaises(
+                self.script_to_video.SmartMontageRequestError,
+            ) as duplicate_id:
+                self.script_to_video.normalize_smart_montage_submission({
+                    **request,
+                    "material_upload_ids": [owned["upload_id"], owned["upload_id"]]
+                    + [None] * (scene_count - 2),
+                })
+            self.assertEqual("duplicate_material_upload", duplicate_id.exception.code)
+
+            same_content = self._approved_upload(PNG_ONE)
+            with self.assertRaises(
+                self.script_to_video.SmartMontageRequestError,
+            ) as duplicate_content:
+                self.script_to_video.prepare_script_to_video_payload({
+                    **request,
+                    "material_upload_ids": [owned["upload_id"], same_content["upload_id"]]
+                    + [None] * (scene_count - 2),
+                }, "fang")
+            self.assertEqual("duplicate_material_content", duplicate_content.exception.code)
+
+    def test_cross_device_material_freeze_fails_before_charge_contract(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "专业评估理解需求，温和护理改善肤质，持续管理稳定状态。",
+            "style": "clinic",
+            "ratio": "9:16",
+        }
+        preview = self.script_to_video.smart_montage_plan_response(request)
+        request["plan_digest"] = preview["plan_digest"]
+        scene_count = preview["plan"]["scene_count"]
+        with tempfile.TemporaryDirectory() as raw:
+            upload_root = Path(raw) / "uploads"
+            output_root = Path(raw) / "out"
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = output_root
+            try:
+                with mock.patch.object(self.cli_uploads, "UPLOAD_ROOT", upload_root):
+                    uploaded = self._approved_upload(PNG_ONE)
+                    request["material_upload_ids"] = [uploaded["upload_id"]] + [
+                        None
+                    ] * (scene_count - 1)
+                    body = self.script_to_video.prepare_script_to_video_payload(
+                        request, "fang",
+                    )
+                    with mock.patch.object(
+                        self.cli_uploads.os, "link",
+                        side_effect=OSError(errno.EXDEV, "cross-device link"),
+                    ), self.assertRaises(
+                        self.script_to_video.SmartMontageRequestError,
+                    ) as failed:
+                        self.script_to_video.materialize_smart_montage_uploads(
+                            body, "fang",
+                        )
+                    self.assertEqual(503, failed.exception.status)
+                    self.assertEqual("material_staging_failed", failed.exception.code)
+                    self.assertFalse(any(
+                        (output_root / "_smart_materials").glob("task_*")
+                    ))
+                    self.cli_uploads.inspect_image(uploaded["upload_id"], "fang")
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
     def test_smart_montage_rejects_missing_stale_or_injected_plan_digest(self):
         request = {
             "pipeline": "smart_montage",
@@ -239,6 +415,163 @@ class ScriptToVideoTests(unittest.TestCase):
                 for item in handler.sent[1]["plan"]["styles"]
             },
         )
+
+    def test_browser_material_upload_endpoint_returns_an_owner_bound_opaque_id(self):
+        class Handler:
+            path = "/api/gen/script_to_video/material-upload"
+
+            def __init__(self, raw=PNG_ONE):
+                self.sent = None
+                self.rfile = io.BytesIO(raw)
+                self.headers = {
+                    "Content-Length": str(len(raw)),
+                    "Content-Type": "image/png",
+                    "X-HQ-Image-SHA256": hashlib.sha256(raw).hexdigest(),
+                }
+
+            def _token(self): return "token"
+            def _json_body_strict(self): return getattr(self, "body", {})
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            self.cli_uploads, "UPLOAD_ROOT", Path(raw),
+        ), mock.patch(
+            "content_domains.miniprogram_security.configured", return_value=False,
+        ):
+            handler = Handler()
+            self.assertTrue(self.script_to_video.dispatch_http(
+                handler, "POST", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            ))
+            self.assertEqual(200, handler.sent[0])
+            response = handler.sent[1]
+            self.assertRegex(response["upload_id"], r"^img_[0-9a-f]{32}$")
+            for private_key in ("file", "path", "owner_hash", "data", "base64"):
+                self.assertNotIn(private_key, response)
+            data, meta = self.cli_uploads.read_image_bytes(
+                response["upload_id"], "fang",
+            )
+            self.assertEqual(PNG_ONE, data)
+            self.assertEqual("smart_montage", meta["approved_for"])
+            self.assertGreaterEqual(response["expires_in"], 4 * 60 * 60 - 2)
+            with self.assertRaisesRegex(ValueError, "不存在或已失效"):
+                self.cli_uploads.read_image_bytes(response["upload_id"], "other")
+
+            foreign_discard = Handler()
+            foreign_discard.body = {"upload_id": response["upload_id"]}
+            self.script_to_video.dispatch_http(
+                foreign_discard, "DELETE", lambda _token: {"username": "other"},
+                lambda _user: False,
+            )
+            self.assertEqual((200, {"ok": True}), foreign_discard.sent)
+            self.assertEqual(
+                PNG_ONE,
+                self.cli_uploads.read_image_bytes(
+                    response["upload_id"], "fang",
+                )[0],
+            )
+
+            owner_discard = Handler()
+            owner_discard.body = {"upload_id": response["upload_id"]}
+            self.script_to_video.dispatch_http(
+                owner_discard, "DELETE", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            )
+            self.assertEqual((200, {"ok": True}), owner_discard.sent)
+            with self.assertRaisesRegex(ValueError, "不存在或已失效"):
+                self.cli_uploads.read_image_bytes(response["upload_id"], "fang")
+
+            unauthorized = Handler()
+            self.script_to_video.dispatch_http(
+                unauthorized, "POST", lambda _token: None, lambda _user: False,
+            )
+            self.assertEqual(401, unauthorized.sent[0])
+            wrong_method = Handler()
+            self.script_to_video.dispatch_http(
+                wrong_method, "GET", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            )
+            self.assertEqual(405, wrong_method.sent[0])
+
+    def test_content_api_dispatches_material_delete_before_legacy_handler(self):
+        class Handler:
+            called = []
+
+            def _dispatch_script_to_video(self, method):
+                self.called.append(method)
+                return True
+
+        handler = Handler()
+        self.content_api.H.do_DELETE(handler)
+        self.assertEqual(["DELETE"], handler.called)
+
+    def test_smart_material_contract_accepts_legacy_generate_only_jobs(self):
+        legacy = {
+            "_username": "fang", "pipeline": "smart_montage",
+            "material_plan": [
+                {"scene_index": 0, "source": "generate", "file": None},
+            ],
+        }
+        with mock.patch.object(
+            self.script_to_video, "_gen_smart_montage", return_value={"ok": True},
+        ) as generate:
+            self.assertEqual(
+                {"ok": True}, self.script_to_video.gen_script_to_video(legacy),
+            )
+            generate.assert_called_once()
+        with self.assertRaisesRegex(ValueError, "协议版本"):
+            self.script_to_video.gen_script_to_video({
+                **legacy,
+                "material_plan": [
+                    {"scene_index": 0, "source": "upload", "file": "x.png"},
+                ],
+            })
+        with self.assertRaisesRegex(ValueError, "协议版本"):
+            self.script_to_video.gen_script_to_video({
+                **legacy, "smart_material_contract_version": 99,
+            })
+
+    def test_smart_material_janitor_preserves_only_active_task_roots(self):
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            try:
+                root = Path(raw) / "_smart_materials"
+                orphan = root / "task_orphan"
+                active = root / "task_active"
+                orphan.mkdir(parents=True)
+                active.mkdir(parents=True)
+                (orphan / "scene-00.png").write_bytes(PNG_ONE)
+                (active / "scene-00.png").write_bytes(PNG_TWO)
+                os.utime(orphan, (0, 0))
+                os.utime(active, (0, 0))
+                removed = self.script_to_video.cleanup_orphaned_smart_montage_roots(
+                    [{"material_plan": [{
+                        "source": "upload",
+                        "file": "_smart_materials/task_active/scene-00.png",
+                    }]}],
+                    now=1000,
+                    grace=60,
+                )
+                self.assertEqual(1, removed)
+                self.assertFalse(orphan.exists())
+                self.assertTrue(active.exists())
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
+    def test_core_material_janitor_fails_closed_when_job_db_is_unavailable(self):
+        with mock.patch.object(
+            self.cli_uploads, "cleanup_expired_uploads",
+        ) as cleanup_uploads, mock.patch.object(
+            self.core, "jdb", side_effect=RuntimeError("db unavailable"),
+        ), mock.patch.object(
+            self.script_to_video, "cleanup_orphaned_smart_montage_roots",
+        ) as cleanup_smart:
+            with self.assertRaisesRegex(RuntimeError, "db unavailable"):
+                self.core._cleanup_temporary_materials()
+        cleanup_uploads.assert_called_once_with()
+        cleanup_smart.assert_not_called()
 
     def test_smart_voiceover_preserves_the_complete_confirmed_copy(self):
         copy = ("完整朗读每一段用户文案。" * 30)[:320]
@@ -577,6 +910,69 @@ class ScriptToVideoTests(unittest.TestCase):
             finally:
                 self.script_to_video.OUT_DIR = old_out
 
+    def test_smart_material_images_preserves_mixed_scene_order_and_only_fills_gaps(self):
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            private = Path(raw) / "_smart_materials" / "task_test"
+            private.mkdir(parents=True)
+            first = private / "scene-00.png"
+            third = private / "scene-02.png"
+            first.write_bytes(b"user-one")
+            third.write_bytes(b"user-three")
+            plan = {
+                "ratio": "16:9",
+                "scenes": [
+                    {"image_prompt": "第一幕"}, {"image_prompt": "第二幕"},
+                    {"image_prompt": "第三幕"}, {"image_prompt": "第四幕"},
+                ],
+            }
+            material_plan = [
+                {
+                    "scene_index": 0, "source": "upload",
+                    "file": first.relative_to(Path(raw)).as_posix(),
+                    "sha256": hashlib.sha256(b"user-one").hexdigest(),
+                    "upload_id": "img_" + "a" * 32,
+                },
+                {"scene_index": 1, "source": "generate", "file": None},
+                {
+                    "scene_index": 2, "source": "upload",
+                    "file": third.relative_to(Path(raw)).as_posix(),
+                    "sha256": hashlib.sha256(b"user-three").hexdigest(),
+                    "upload_id": "img_" + "b" * 32,
+                },
+                {"scene_index": 3, "source": "generate", "file": None},
+            ]
+            calls = []
+
+            def fake_gen_image(payload):
+                calls.append(payload)
+                rel = "generated-%d.png" % len(calls)
+                (Path(raw) / rel).write_bytes(("generated-%d" % len(calls)).encode())
+                return {"file": rel}
+
+            try:
+                with mock.patch(
+                    "content_domains.image.gen_image", side_effect=fake_gen_image,
+                ):
+                    materials = self.script_to_video._smart_material_images(
+                        plan, material_plan,
+                    )
+                self.assertEqual(len(calls), 2)
+                self.assertIn("第二幕", calls[0]["prompt"])
+                self.assertIn("第四幕", calls[1]["prompt"])
+                self.assertEqual(
+                    [item["source"] for item in materials],
+                    ["upload", "generate", "upload", "generate"],
+                )
+                self.assertEqual(
+                    [item["scene_index"] for item in materials], [0, 1, 2, 3],
+                )
+                self.assertEqual(materials[0]["file"], material_plan[0]["file"])
+                self.assertEqual(materials[2]["file"], material_plan[2]["file"])
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
     def test_smart_material_generation_honors_the_total_job_deadline(self):
         plan = {"ratio": "16:9", "scenes": [{"image_prompt": "第一幕"}]}
         with mock.patch.object(
@@ -678,6 +1074,103 @@ class ScriptToVideoTests(unittest.TestCase):
             finally:
                 self.script_to_video.OUT_DIR = old_out
 
+    def test_smart_pipeline_sanitizes_uploaded_materials_and_cleans_frozen_copy(self):
+        request = {
+            "pipeline": "smart_montage",
+            "copy": "专业评估看见真实需求，温和护理让状态逐步回到自然稳定。",
+            "style": "luxe",
+            "ratio": "16:9",
+        }
+        request["plan_digest"] = self.script_to_video.smart_montage_plan_response(
+            request,
+        )["plan_digest"]
+        prepared = self.script_to_video.prepare_script_to_video_payload(
+            request, "fang",
+        )
+        plan = prepared["smart_plan"]
+        with tempfile.TemporaryDirectory() as raw:
+            old_out = self.script_to_video.OUT_DIR
+            self.script_to_video.OUT_DIR = Path(raw)
+            private = Path(raw) / "_smart_materials" / "task_test" / "scene-00.png"
+            private.parent.mkdir(parents=True)
+            private.write_bytes(b"user-material")
+            prepared["material_plan"][0].update({
+                "source": "upload",
+                "file": private.relative_to(Path(raw)).as_posix(),
+                "sha256": hashlib.sha256(b"user-material").hexdigest(),
+                "upload_id": "img_" + "a" * 32,
+            })
+            generated = []
+            materials = [{
+                "scene_index": 0,
+                "prompt": "用户画面",
+                "source": "upload",
+                "file": prepared["material_plan"][0]["file"],
+                "sha256": prepared["material_plan"][0]["sha256"],
+                "upload_id": prepared["material_plan"][0]["upload_id"],
+            }]
+            for index in range(1, plan["scene_count"]):
+                rel = "generated-%d.png" % index
+                (Path(raw) / rel).write_bytes(("generated-%d" % index).encode())
+                generated.append(rel)
+                materials.append({
+                    "scene_index": index,
+                    "prompt": "生成画面",
+                    "source": "generate",
+                    "file": rel,
+                    "sha256": hashlib.sha256(("generated-%d" % index).encode()).hexdigest(),
+                })
+            rendered_paths = []
+
+            def fake_audio(_payload, publish=True):
+                self.assertFalse(publish)
+                (Path(raw) / "voice.mp3").write_bytes(b"voice")
+                return {"file": "voice.mp3", "duration_ms": 1800}
+
+            def fake_master(_segments, render_plan, output_path, **_kwargs):
+                Path(output_path).write_bytes(b"master")
+                return render_plan["duration_seconds"]
+
+            def fake_render(render_plan, paths, output_path, **_kwargs):
+                rendered_paths.extend(str(path) for path in paths)
+                Path(output_path).write_bytes(b"mp4")
+                return {"output": {"duration_ms": int(render_plan["duration_seconds"] * 1000)}}
+
+            try:
+                with mock.patch(
+                    "content_domains.audio.gen_audio", side_effect=fake_audio,
+                ), mock.patch.object(
+                    self.script_to_video, "_smart_material_images",
+                    return_value=materials,
+                ), mock.patch.object(
+                    self.script_to_video, "_build_smart_voiceover_master",
+                    side_effect=fake_master,
+                ), mock.patch(
+                    "content_domains.script_video_render.render", side_effect=fake_render,
+                ), mock.patch.object(
+                    self.video, "public_url", return_value="/private/final.mp4",
+                ), mock.patch.object(self.script_to_video, "_smart_phase") as phase:
+                    result = self.script_to_video.gen_script_to_video({
+                        **prepared, "_username": "fang", "_job_id": 90,
+                    })
+                self.assertIn("_smart_materials", rendered_paths[0])
+                self.assertEqual(result["material_reused_count"], 1)
+                self.assertEqual(
+                    result["material_generated_count"], plan["scene_count"] - 1,
+                )
+                uploaded_result = result["materials"][0]
+                self.assertEqual(uploaded_result["source"], "upload")
+                self.assertNotIn("file", uploaded_result)
+                self.assertNotIn("upload_id", uploaded_result)
+                self.assertFalse(private.exists())
+                self.assertTrue(all((Path(raw) / rel).exists() for rel in generated))
+                self.assertTrue(all(
+                    "_smart_materials" not in str(call)
+                    for call in phase.call_args_list
+                ))
+            finally:
+                self.script_to_video.OUT_DIR = old_out
+
     def test_smart_pipeline_cleans_outputs_when_required_asset_save_fails(self):
         request = {
             "pipeline": "smart_montage",
@@ -702,7 +1195,7 @@ class ScriptToVideoTests(unittest.TestCase):
                 voice.write_bytes(b"voice")
                 return {"file": "voice.mp3", "duration_ms": 3200}
 
-            def fake_materials(_plan, deadline=None):
+            def fake_materials(_plan, _material_plan=None, deadline=None):
                 image.write_bytes(b"image")
                 return [{
                     "scene_index": 0,

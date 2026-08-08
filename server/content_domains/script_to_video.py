@@ -17,12 +17,16 @@ import uuid
 from .core import OUT_DIR, SMART_MONTAGE_MAX_RUNTIME, adb, closing, jdb
 
 MAX_MATERIAL_SCENES = 8
+MAX_SMART_MATERIAL_SCENES = 20
 PHOTO_MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
 MATERIAL_IMAGE_RETRY_CODES = {520}
 MATERIAL_IMAGE_RETRY_DELAY = 2
 SMART_MONTAGE_PIPELINE = "smart_montage"
 SMART_MONTAGE_PLAN_PATH = "/api/gen/script_to_video/plan"
+SMART_MONTAGE_MATERIAL_UPLOAD_PATH = "/api/gen/script_to_video/material-upload"
 SMART_MONTAGE_TEMPLATE = "smart-montage-v1"
+SMART_MONTAGE_MATERIAL_CONTRACT_VERSION = 1
+SMART_MONTAGE_UPLOAD_LEASE_SECONDS = 4 * 60 * 60
 SMART_MONTAGE_DUPLICATE_RETRIES = 2
 SMART_MONTAGE_AUDIO_LEAD_SECONDS = 0.32
 SMART_MONTAGE_MAX_NARRATION_SPEED = 1.25
@@ -34,9 +38,14 @@ SMART_MONTAGE_MIN_TRAILING_SILENCE_SECONDS = 0.20
 SMART_MONTAGE_MAX_TRAILING_SILENCE_SECONDS = 1.0
 SMART_MONTAGE_SUBMISSION_FIELDS = {
     "pipeline", "mode", "copy", "script", "text", "style", "ratio",
-    "voice", "plan_digest",
+    "voice", "plan_digest", "material_upload_ids",
 }
 _PLAN_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_UPLOAD_ID_RE = re.compile(r"^img_[0-9a-f]{32}$")
+
+
+def _smart_material_root():
+    return (OUT_DIR / "_smart_materials").resolve()
 
 
 class SmartMontageRequestError(ValueError):
@@ -98,6 +107,43 @@ def normalize_smart_montage_submission(payload):
     }
     if "voice" in payload:
         canonical["voice"] = payload.get("voice")
+    if "material_upload_ids" in payload:
+        raw_ids = payload.get("material_upload_ids")
+        if not isinstance(raw_ids, list) or not 1 <= len(raw_ids) <= MAX_SMART_MATERIAL_SCENES:
+            raise SmartMontageRequestError(
+                "material_upload_ids 必须是与分镜对应的素材槽位列表",
+                "invalid_material_uploads",
+            )
+        normalized_ids = []
+        used_ids = set()
+        for item in raw_ids:
+            if item is None:
+                normalized_ids.append(None)
+                continue
+            if not isinstance(item, str):
+                raise SmartMontageRequestError(
+                    "用户素材槽位只能填写 upload_id 或留空",
+                    "invalid_material_uploads",
+                )
+            upload_id = item.strip().lower()
+            if not _UPLOAD_ID_RE.fullmatch(upload_id):
+                raise SmartMontageRequestError(
+                    "用户素材 upload_id 格式无效",
+                    "invalid_material_uploads",
+                )
+            if upload_id in used_ids:
+                raise SmartMontageRequestError(
+                    "同一张用户素材不能重复绑定多个分镜",
+                    "duplicate_material_upload",
+                )
+            used_ids.add(upload_id)
+            normalized_ids.append(upload_id)
+        if not used_ids:
+            raise SmartMontageRequestError(
+                "没有用户素材时请省略 material_upload_ids",
+                "invalid_material_uploads",
+            )
+        canonical["material_upload_ids"] = normalized_ids
     return canonical
 
 
@@ -214,6 +260,73 @@ def prepare_script_to_video_payload(payload, username):
                 409,
             )
         scenes = [dict(scene) for scene in frozen["scenes"]]
+        upload_slots = body.get("material_upload_ids")
+        if upload_slots is None:
+            upload_slots = [None] * len(scenes)
+        elif len(upload_slots) != len(scenes):
+            raise SmartMontageRequestError(
+                "用户素材槽位数量与当前分镜不一致，请重新智能拆分",
+                "material_scene_mismatch",
+                409,
+            )
+
+        upload_metadata = {}
+        content_hashes = set()
+        if any(upload_slots):
+            from . import cli_uploads
+
+            for index, upload_id in enumerate(upload_slots):
+                if upload_id is None:
+                    continue
+                try:
+                    meta = cli_uploads.inspect_image(upload_id, username)
+                except ValueError as exc:
+                    raise SmartMontageRequestError(
+                        str(exc), "material_upload_unavailable", 409,
+                    ) from exc
+                if meta.get("approved_for") != SMART_MONTAGE_PIPELINE:
+                    raise SmartMontageRequestError(
+                        "用户素材未通过智能成片上传校验，请重新上传",
+                        "material_upload_unapproved",
+                        409,
+                    )
+                digest = str(meta.get("sha256") or "")
+                if digest in content_hashes:
+                    raise SmartMontageRequestError(
+                        "用户素材内容重复，请为每个分镜选择不同图片",
+                        "duplicate_material_content",
+                    )
+                content_hashes.add(digest)
+                upload_metadata[index] = {
+                    "upload_id": upload_id,
+                    "sha256": digest,
+                    "mime": str(meta.get("mime") or ""),
+                    "extension": str(meta.get("extension") or ""),
+                    "width": int(meta.get("width") or 0),
+                    "height": int(meta.get("height") or 0),
+                }
+
+        material_plan = []
+        for index, scene in enumerate(scenes):
+            prompt = _scene_prompt({"scene": scene.get("image_prompt")})
+            if index in upload_metadata:
+                material_plan.append({
+                    "scene_index": index,
+                    "prompt": prompt,
+                    "source": "upload",
+                    "file": None,
+                    **upload_metadata[index],
+                })
+            else:
+                material_plan.append({
+                    "scene_index": index,
+                    "prompt": prompt,
+                    "source": "generate",
+                    "file": None,
+                })
+        generated_count = sum(
+            1 for item in material_plan if item["source"] == "generate"
+        )
         body.update({
             "pipeline": SMART_MONTAGE_PIPELINE,
             "mode": SMART_MONTAGE_PIPELINE,
@@ -223,16 +336,10 @@ def prepare_script_to_video_payload(payload, username):
             "duration": frozen["duration_seconds"],
             "scenes": scenes,
             "smart_plan": frozen,
-            "material_plan": [
-                {
-                    "scene_index": index,
-                    "prompt": _scene_prompt({"scene": scene.get("image_prompt")}),
-                    "source": "generate",
-                    "file": None,
-                }
-                for index, scene in enumerate(scenes)
-            ],
-            "material_generate_count": len(scenes),
+            "material_plan": material_plan,
+            "material_generate_count": generated_count,
+            "material_reused_count": len(scenes) - generated_count,
+            "smart_material_contract_version": SMART_MONTAGE_MATERIAL_CONTRACT_VERSION,
         })
         return body
     scenes = [dict(scene) for scene in (body.get("scenes") or []) if isinstance(scene, dict)]
@@ -261,10 +368,177 @@ def prepare_script_to_video_payload(payload, username):
     return body
 
 
+def _smart_material_input_file(rel):
+    """Resolve only frozen smart-montage inputs, never general output paths."""
+    try:
+        root = _smart_material_root()
+        path = (OUT_DIR / str(rel or "")).resolve()
+        path.relative_to(root)
+    except Exception:
+        return None
+    if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        return None
+    return path if path.is_file() else None
+
+
+def cleanup_smart_montage_uploads(payload_or_plan):
+    """Remove task-owned frozen copies without ever touching original uploads."""
+    if isinstance(payload_or_plan, dict):
+        plan = payload_or_plan.get("material_plan") or []
+    elif isinstance(payload_or_plan, list):
+        plan = payload_or_plan
+    else:
+        plan = []
+    root = _smart_material_root()
+    parents = set()
+    for item in plan:
+        if not isinstance(item, dict) or item.get("source") != "upload":
+            continue
+        path = _smart_material_input_file(item.get("file"))
+        if path is None:
+            continue
+        parents.add(path.parent)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        item["file"] = None
+    for parent in sorted(parents, key=lambda value: len(value.parts), reverse=True):
+        if parent == root:
+            continue
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
+
+
+def cleanup_orphaned_smart_montage_roots(active_payloads, now=None, grace=600):
+    """Remove old task roots that are not referenced by pending/running jobs."""
+    now = float(time.time() if now is None else now)
+    root = _smart_material_root()
+    protected = set()
+    for payload in active_payloads or []:
+        if not isinstance(payload, dict):
+            continue
+        for item in payload.get("material_plan") or []:
+            if not isinstance(item, dict) or item.get("source") != "upload":
+                continue
+            path = _smart_material_input_file(item.get("file"))
+            if path is not None:
+                protected.add(path.parent.resolve())
+    try:
+        candidates = list(root.glob("task_*"))
+    except OSError:
+        return 0
+    removed = 0
+    for candidate in candidates:
+        try:
+            if candidate.is_symlink():
+                if candidate.lstat().st_mtime < now - max(60, int(grace)):
+                    candidate.unlink(missing_ok=True)
+                    removed += 1
+                continue
+            resolved = candidate.resolve()
+            resolved.relative_to(root)
+            if not resolved.is_dir() or resolved in protected:
+                continue
+            if resolved.stat().st_mtime >= now - max(60, int(grace)):
+                continue
+            shutil.rmtree(resolved)
+            removed += 1
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return removed
+
+
+def materialize_smart_montage_uploads(payload, username):
+    """Freeze approved uploads into job-owned hard links immediately pre-charge."""
+    if not is_smart_montage_payload(payload):
+        return []
+    material_plan = payload.get("material_plan")
+    if not isinstance(material_plan, list):
+        raise SmartMontageRequestError(
+            "智能成片缺少服务端素材方案", "invalid_material_plan",
+        )
+    upload_items = [
+        item for item in material_plan
+        if isinstance(item, dict) and item.get("source") == "upload"
+    ]
+    if not upload_items:
+        return []
+
+    from . import cli_uploads
+
+    root = _smart_material_root()
+    task_root = (root / ("task_" + uuid.uuid4().hex)).resolve()
+    task_root.relative_to(root)
+    created = []
+    try:
+        task_root.mkdir(parents=True, mode=0o700)
+        try:
+            os.chmod(root, 0o700)
+            os.chmod(task_root, 0o700)
+        except OSError:
+            pass
+        for item in upload_items:
+            upload_id = str(item.get("upload_id") or "")
+            expected = str(item.get("sha256") or "")
+            extension = str(item.get("extension") or "")
+            scene_index = int(item.get("scene_index"))
+            destination = (task_root / ("scene-%02d%s" % (scene_index, extension))).resolve()
+            destination.relative_to(task_root)
+            try:
+                cli_uploads.freeze_image(
+                    upload_id,
+                    username,
+                    destination,
+                    SMART_MONTAGE_PIPELINE,
+                    expected,
+                )
+            except ValueError as exc:
+                destination.unlink(missing_ok=True)
+                raise SmartMontageRequestError(
+                    str(exc), "material_upload_unavailable", 409,
+                ) from exc
+            rel = destination.relative_to(OUT_DIR.resolve()).as_posix()
+            item["file"] = rel
+            created.append(rel)
+        return created
+    except SmartMontageRequestError:
+        cleanup_smart_montage_uploads(payload)
+        try:
+            task_root.rmdir()
+        except OSError:
+            pass
+        raise
+    except Exception as exc:
+        cleanup_smart_montage_uploads(payload)
+        try:
+            task_root.rmdir()
+        except OSError:
+            pass
+        raise SmartMontageRequestError(
+            "用户素材暂时无法保存，请稍后重试",
+            "material_staging_failed",
+            503,
+        ) from exc
+
+
 def gen_script_to_video(payload):
     """由 run_job 调用，走标准 job 生命周期。"""
     username = (payload.get("_username") or "").strip()
     if str(payload.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
+        material_plan = payload.get("material_plan") or []
+        has_uploaded_material = any(
+            isinstance(item, dict) and item.get("source") == "upload"
+            for item in material_plan
+        )
+        contract_version = int(payload.get("smart_material_contract_version") or 0)
+        if (has_uploaded_material
+                and contract_version != SMART_MONTAGE_MATERIAL_CONTRACT_VERSION):
+            raise ValueError("智能成片素材协议版本不受支持")
+        if contract_version not in {0, SMART_MONTAGE_MATERIAL_CONTRACT_VERSION}:
+            raise ValueError("智能成片素材协议版本不受支持")
         return _gen_smart_montage(username, payload)
     scenes = payload.get("scenes") or []
     style = (payload.get("style") or "口播").strip()
@@ -274,19 +548,106 @@ def gen_script_to_video(payload):
 
 
 def dispatch_http(handler, method, verify_token, must_change_password):
-    """Authenticated, read-only smart-montage planning endpoint."""
+    """Authenticated smart-montage planning and private material upload."""
     path = handler.path.split("?", 1)[0]
-    if path != SMART_MONTAGE_PLAN_PATH:
+    if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH}:
         return False
-    if method != "POST":
-        handler._method_not_allowed()
-        return True
     user = verify_token(handler._token())
     if not user:
         handler._send(401, {"detail": "未登录或登录已过期"})
         return True
     if must_change_password(user):
         handler._send(403, {"detail": "请先修改初始密码"})
+        return True
+    if path == SMART_MONTAGE_MATERIAL_UPLOAD_PATH:
+        from . import cli_uploads, miniprogram_security
+
+        if method == "DELETE":
+            try:
+                body = handler._json_body_strict()
+                if (not isinstance(body, dict) or set(body) != {"upload_id"}
+                        or not _UPLOAD_ID_RE.fullmatch(
+                            str(body.get("upload_id") or "").strip().lower())):
+                    raise ValueError("请求必须提供有效的 upload_id")
+                # Return a uniform acknowledgement for missing and foreign IDs
+                # so this endpoint cannot be used as an ownership oracle.
+                cli_uploads.discard_image(body["upload_id"], user["username"])
+                handler._send(200, {"ok": True})
+            except ValueError as exc:
+                handler._send(400, {
+                    "detail": str(exc)[:220], "code": "invalid_image_discard",
+                })
+            return True
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+
+        uploaded = None
+        try:
+            if handler.headers.get("Transfer-Encoding"):
+                raise ValueError("图片上传必须提供 Content-Length")
+            length = int(handler.headers.get("Content-Length") or 0)
+            content_type = (
+                handler.headers.get("Content-Type") or ""
+            ).split(";", 1)[0].strip().lower()
+            uploaded = cli_uploads.store_image(
+                handler.rfile,
+                length,
+                user["username"],
+                content_type,
+                handler.headers.get("X-HQ-Image-SHA256"),
+            )
+            data, meta = cli_uploads.read_image_bytes(
+                uploaded["upload_id"], user["username"],
+            )
+            if miniprogram_security.configured():
+                miniprogram_security.check_image(
+                    data,
+                    "smart-material%s" % meta["extension"],
+                    meta["mime"],
+                )
+            approved = cli_uploads.approve_image(
+                uploaded["upload_id"], user["username"], SMART_MONTAGE_PIPELINE,
+                lease_seconds=SMART_MONTAGE_UPLOAD_LEASE_SECONDS,
+            )
+            handler._send(200, {
+                **uploaded,
+                "expires_at": int(approved.get("expires_at") or 0),
+                "expires_in": max(
+                    0, int(approved.get("expires_at") or 0) - int(time.time()),
+                ),
+                "width": int(approved.get("width") or 0),
+                "height": int(approved.get("height") or 0),
+            })
+        except miniprogram_security.ContentRejected as exc:
+            if uploaded:
+                cli_uploads.discard_image(uploaded.get("upload_id"), user["username"])
+            handler._send(400, {
+                "detail": str(exc)[:220], "code": "content_rejected",
+            })
+        except miniprogram_security.SecurityUnavailable as exc:
+            if uploaded:
+                cli_uploads.discard_image(uploaded.get("upload_id"), user["username"])
+            handler._send(503, {
+                "detail": str(exc)[:220],
+                "code": "content_security_unavailable",
+                "retry_after_ms": 5000,
+            })
+        except (TypeError, ValueError) as exc:
+            if uploaded:
+                cli_uploads.discard_image(uploaded.get("upload_id"), user["username"])
+            handler._send(400, {
+                "detail": str(exc)[:220], "code": "invalid_image_upload",
+            })
+        except OSError:
+            if uploaded:
+                cli_uploads.discard_image(uploaded.get("upload_id"), user["username"])
+            handler._send(500, {
+                "detail": "图片暂时无法保存", "code": "image_upload_failed",
+            })
+        return True
+    if method != "POST":
+        handler._method_not_allowed()
         return True
     try:
         body = handler._json_body_strict()
@@ -719,14 +1080,54 @@ def _smart_deadline_remaining(deadline, stage):
     return remaining
 
 
-def _smart_material_images(plan, deadline=None):
+def _smart_material_images(plan, material_plan=None, deadline=None):
     from . import image as image_domain
 
     materials, hashes = [], set()
     ratio = plan.get("ratio") or "16:9"
     scenes = plan.get("scenes") or []
+    if material_plan is None:
+        # Compatibility for jobs accepted before the upload contract existed.
+        material_plan = [
+            {"scene_index": index, "source": "generate", "file": None}
+            for index in range(len(scenes))
+        ]
+    if not isinstance(material_plan, list) or len(material_plan) != len(scenes):
+        raise ValueError("智能成片素材方案与分镜数量不一致")
+
+    uploaded = {}
+    for position, raw_item in enumerate(material_plan):
+        if not isinstance(raw_item, dict) or raw_item.get("scene_index") != position:
+            raise ValueError("智能成片素材分镜顺序无效")
+        source = str(raw_item.get("source") or "")
+        if source not in {"generate", "upload"}:
+            raise ValueError("智能成片素材来源无效")
+        item = dict(raw_item)
+        if source != "upload":
+            continue
+        path = _smart_material_input_file(item.get("file"))
+        if path is None:
+            raise ValueError("第 %d 幕用户素材已失效" % (position + 1))
+        digest = _sha256_file(path)
+        expected = str(item.get("sha256") or "")
+        if not expected or not hmac.compare_digest(digest, expected):
+            raise ValueError("第 %d 幕用户素材校验失败" % (position + 1))
+        if digest in hashes:
+            raise ValueError("第 %d 幕用户素材与其他分镜重复" % (position + 1))
+        hashes.add(digest)
+        uploaded[position] = {
+            "scene_index": position,
+            "prompt": str(item.get("prompt") or ""),
+            "source": "upload",
+            "file": str(item["file"]),
+            "sha256": digest,
+            "upload_id": str(item.get("upload_id") or ""),
+        }
     try:
         for position, scene in enumerate(scenes):
+            if position in uploaded:
+                materials.append(uploaded[position])
+                continue
             if deadline is not None:
                 _smart_deadline_remaining(deadline, "生成第 %d 幕素材前" % (position + 1))
             base_prompt = str(scene.get("image_prompt") or "").strip()
@@ -824,7 +1225,9 @@ def _gen_smart_montage(username, payload):
         _smart_deadline_remaining(deadline, "处理旁白后")
 
         _smart_phase(job_id, "generating_assets", audio_file=audio_rel, voice=voice)
-        materials = _smart_material_images(render_plan, deadline=deadline)
+        materials = _smart_material_images(
+            render_plan, payload.get("material_plan"), deadline=deadline,
+        )
 
         output_rel = "video/script_montage_%s.mp4" % uuid.uuid4().hex
         output_path = (OUT_DIR / output_rel).resolve()
@@ -834,7 +1237,16 @@ def _gen_smart_montage(username, payload):
         if any(path is None for path in material_paths):
             raise RuntimeError("智能成片素材在渲染前不可用")
 
-        _smart_phase(job_id, "rendering", image_file=materials[0]["file"])
+        generated_materials = [
+            item for item in materials if item.get("source") == "generate"
+        ]
+        uploaded_count = len(materials) - len(generated_materials)
+        preview_file = generated_materials[0]["file"] if generated_materials else None
+        _smart_phase(
+            job_id,
+            "rendering",
+            **({"image_file": preview_file} if preview_file else {}),
+        )
         render_timeout = min(
             max(600, int(render_plan["duration_seconds"] * 24)),
             max(1, int(_smart_deadline_remaining(deadline, "开始渲染前"))),
@@ -854,6 +1266,17 @@ def _gen_smart_montage(username, payload):
         if verified_duration <= 0:
             raise RuntimeError("智能成片输出时长校验失败")
         video_url = video_domain.public_url(output_rel, "video/mp4", private=True)
+        public_materials = []
+        for item in materials:
+            public_item = {
+                "scene_index": int(item["scene_index"]),
+                "prompt": str(item.get("prompt") or ""),
+                "source": str(item.get("source") or ""),
+                "sha256": str(item.get("sha256") or ""),
+            }
+            if item.get("source") == "generate":
+                public_item["file"] = str(item.get("file") or "")
+            public_materials.append(public_item)
         result = {
             "type": "script_to_video",
             "pipeline": SMART_MONTAGE_PIPELINE,
@@ -863,7 +1286,7 @@ def _gen_smart_montage(username, payload):
             "video_file": output_rel,
             "video_url": video_url,
             "audio_file": str(audio_rel),
-            "image_file": materials[0]["file"],
+            "image_file": preview_file,
             "text": plan.get("copy") or "",
             "copy": plan.get("copy") or "",
             "voice": voice,
@@ -876,9 +1299,9 @@ def _gen_smart_montage(username, payload):
             "motion": "template",
             "duration": round(verified_duration, 3),
             "scene_count": len(render_plan["scenes"]),
-            "materials": materials,
-            "material_generated_count": len(materials),
-            "material_reused_count": 0,
+            "materials": public_materials,
+            "material_generated_count": len(generated_materials),
+            "material_reused_count": uploaded_count,
             "smart_plan": render_plan,
             "model": "%s@%s" % (
                 report.get("template_id") or SMART_MONTAGE_TEMPLATE,
@@ -898,6 +1321,8 @@ def _gen_smart_montage(username, payload):
             _remove_out_file(output_rel)
         _smart_phase(job_id, "failed", status="failed", error="智能成片生成失败")
         raise
+    finally:
+        cleanup_smart_montage_uploads(payload)
 
 
 def _material_images(plan):
