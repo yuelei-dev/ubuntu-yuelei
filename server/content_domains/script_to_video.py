@@ -1833,26 +1833,53 @@ def reclaim_orphaned_jobs(requeue, logger=print):
         ) from exc
     handled = 0
     held = set()
+
+    def hold(row, reason):
+        job_id = int(row["id"])
+        held.add(job_id)
+        logger(
+            "[script-to-video] recovery state %s; hold job=%s"
+            % (reason, job_id), flush=True,
+        )
+
     for row in rows:
         try:
-            payload = json.loads(row["payload"] or "{}")
+            payload = json.loads(row["payload"] or "")
         except Exception:
-            payload = {}
-        state = _state_from_payload(payload if isinstance(payload, dict) else {})
+            hold(row, "invalid-json")
+            continue
+        if not isinstance(payload, dict):
+            hold(row, "invalid-payload")
+            continue
+        raw_state = payload.get("_script_to_video_state")
+        if not isinstance(raw_state, dict):
+            hold(row, "missing-or-invalid")
+            continue
+        state = dict(raw_state)
         phase = str(state.get("phase") or "")
         provider_id = str(state.get("provider_video_id") or "").strip()
-        if phase == "provider_submitting" and not provider_id:
-            held.add(int(row["id"]))
-            logger(
-                "[script-to-video] provider create outcome unknown; hold job=%s"
-                % row["id"], flush=True,
-            )
+        if not phase:
+            hold(row, "missing-phase")
             continue
+        if phase == "provider_submitting" and not provider_id:
+            hold(row, "provider-create-unknown")
+            continue
+        if phase == "provider_submitted" and not provider_id:
+            hold(row, "provider-id-missing")
+            continue
+        if phase in {"provider_completed", "composing", "done"}:
+            provider_result = _provider_base_result(state)
+            if not provider_id and not _provider_file_exists(provider_result):
+                hold(row, "provider-result-missing")
+                continue
         safe = phase in {
-            "preparing_materials", "materials_ready", "provider_submitted",
-            "provider_completed", "composing", "done",
+            "preparing_materials", "materials_ready", "provider_submitting",
+            "provider_submitted", "provider_completed", "composing", "done",
         }
-        if safe and requeue(row["id"]):
+        if not safe:
+            hold(row, "unknown-phase")
+            continue
+        if requeue(row["id"]):
             handled += 1
     return {"handled": handled, "held": held}
 

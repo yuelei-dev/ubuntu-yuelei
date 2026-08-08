@@ -365,6 +365,54 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         self.assertEqual(result["held"], {first})
         self.assertEqual(requeued, [second])
 
+    def test_invalid_or_incomplete_recovery_payloads_are_held_fail_closed(self):
+        payloads = [
+            "{",
+            json.dumps([], ensure_ascii=False),
+            json.dumps({}, ensure_ascii=False),
+            json.dumps({"_script_to_video_state": "invalid"}, ensure_ascii=False),
+            json.dumps({"_script_to_video_state": {}}, ensure_ascii=False),
+            json.dumps({"_script_to_video_state": {"phase": "unknown"}}, ensure_ascii=False),
+            json.dumps({"_script_to_video_state": {
+                "phase": "provider_submitted",
+            }}, ensure_ascii=False),
+        ]
+        job_ids = []
+        for raw_payload in payloads:
+            job_id = self._job({}, status="running")
+            with sqlite3.connect(core.JOB_DB) as conn:
+                conn.execute("UPDATE jobs SET payload=? WHERE id=?", (raw_payload, job_id))
+            job_ids.append(job_id)
+
+        requeued = []
+        result = script_to_video.reclaim_orphaned_jobs(
+            lambda job_id: requeued.append(job_id) or True,
+            logger=lambda *_args, **_kwargs: None,
+        )
+        self.assertEqual(result["held"], set(job_ids))
+        self.assertEqual(result["handled"], 0)
+        self.assertEqual(requeued, [])
+
+    def test_startup_invalid_payload_never_refunds_or_posts_provider(self):
+        job_id = self._job({}, status="running")
+        with sqlite3.connect(core.JOB_DB) as conn:
+            conn.execute("UPDATE jobs SET payload=? WHERE id=?", ("{", job_id))
+
+        refunds = []
+        with mock.patch.object(
+                core, "_fail_job_and_schedule_refund",
+                side_effect=lambda *args, **_kwargs: refunds.append(args[0]) or True,
+             ), mock.patch.object(video, "gen_video") as provider:
+            core.reclaim_orphaned_running()
+
+        self.assertEqual(refunds, [])
+        provider.assert_not_called()
+        with sqlite3.connect(core.JOB_DB) as conn:
+            status = conn.execute(
+                "SELECT status FROM jobs WHERE id=?", (job_id,),
+            ).fetchone()[0]
+        self.assertEqual(status, "running")
+
     def test_done_handler_result_is_replayed_after_refresh_without_provider_or_compose(self):
         final = {"type": "script_to_video", "pipeline": "talking_with_materials",
                  "video_file": "video/final.mp4", "video_url": "/final"}
