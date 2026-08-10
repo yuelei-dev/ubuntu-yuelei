@@ -6,59 +6,152 @@
   <meta name="description" content="黄雀 AI：从 IP12、Agent 与无限画布，到图文音视频生产和 HQ CLI。">
   <title>黄雀 AI · 会持续生长的内容系统</title>
   <link rel="icon" href="/assets/logo_sparrow.png">
-  <link rel="stylesheet" href="/homepage.css?v=20260807-polish3">
-  <script src="/assets/home/moon3d.js?v=20260808-4k" defer></script>
+  <link rel="stylesheet" href="/homepage.css?v=20260809-particle3">
+  <script src="/assets/home/orbit-gallery.js?v=20260810-1" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到主要内容</a>
+  <div class="starfield" aria-hidden="true"></div>
+  <canvas class="page-particle-stage" data-hero-particles aria-hidden="true"></canvas>
 
   <header class="site-header">
-    <nav class="nav-shell" aria-label="主导航">
-      <a class="brand" href="#top" aria-label="黄雀 AI 首页">
-        <span class="brand-mark"><img src="/assets/logo_sparrow.png" alt=""></span>
-        <span><strong>黄雀 AI</strong><small>HUANGQUE</small></span>
-      </a>
+    <div class="nav-cluster" data-nav-cluster>
+      <nav class="nav-shell" data-liquid-glass aria-label="主导航">
+        <canvas class="nav-liquid-glass" data-nav-liquid-glass aria-hidden="true"></canvas>
+        <a class="brand" href="/" aria-label="黄雀首页">
+          <span class="brand-mark"><img src="/assets/logo_sparrow.png" alt=""></span>
+        </a>
 
-      <div class="nav-links">
-        <a href="#flow">产品链路</a>
-        <a href="#ip12">IP12</a>
-        <a href="#agent">Agent + Canvas</a>
-        <a href="#capabilities">能力地图</a>
-        <a href="#cli">CLI</a>
-      </div>
-
-      <div class="nav-actions">
-        <a href="/login">登录</a>
-        <a class="nav-primary" href="/workbench/inspiration">进入工作台 ↗</a>
-      </div>
-
-      <details class="mobile-menu">
-        <summary aria-label="打开导航菜单"><span></span><span></span></summary>
-        <div>
-          <a href="#flow" onclick="this.closest('details').open=false">产品链路</a>
-          <a href="#ip12" onclick="this.closest('details').open=false">IP12</a>
-          <a href="#agent" onclick="this.closest('details').open=false">Agent + Canvas</a>
-          <a href="#video" onclick="this.closest('details').open=false">视频生成</a>
-          <a href="#capabilities" onclick="this.closest('details').open=false">能力地图</a>
-          <a href="#cli" onclick="this.closest('details').open=false">HQ CLI</a>
-          <a href="/login">登录 / 注册</a>
+        <div class="nav-links" aria-label="产品功能">
+          <span class="nav-link-slider" data-nav-slider aria-hidden="true"><i class="nav-slider-trail"></i><i class="nav-slider-blob"></i></span>
+          <button type="button" data-nav-trigger="creation" data-nav-zh="产品链路" data-nav-en="PRODUCT" aria-controls="nav-drawer-creation" aria-expanded="false">产品链路</button>
+          <button type="button" data-nav-trigger="ip12" aria-controls="nav-drawer-ip12" aria-expanded="false">IP12</button>
+          <button type="button" data-nav-trigger="agent" aria-controls="nav-drawer-agent" aria-expanded="false">Agent + Canvas</button>
+          <button type="button" data-nav-trigger="video" data-nav-zh="视频生成" data-nav-en="VIDEO" aria-controls="nav-drawer-video" aria-expanded="false">视频生成</button>
+          <button type="button" data-nav-trigger="cli" aria-controls="nav-drawer-cli" aria-expanded="false">CLI</button>
         </div>
-      </details>
-    </nav>
+
+        <div class="nav-actions">
+          <details class="language-switcher">
+            <summary aria-label="切换语言" title="切换语言">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M3.8 12h16.4M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5S14.3 18.1 12 20.5M12 3.5C9.7 5.9 8.6 8.7 8.6 12s1.1 6.1 3.4 8.5"></path></svg>
+            </summary>
+            <div role="group" aria-label="界面语言"><button type="button" data-language="zh-CN">中文</button><button type="button" data-language="en">English</button></div>
+          </details>
+          <a href="/login" data-nav-zh="登录" data-nav-en="LOGIN">登录</a>
+          <a class="nav-primary" data-liquid-glass href="/workbench/inspiration">ENTER ↗</a>
+        </div>
+
+        <details class="mobile-menu">
+          <summary aria-label="打开导航菜单"><span></span><span></span></summary>
+          <div>
+            <details class="mobile-nav-group"><summary>产品链路</summary><div><a href="/workbench/inspiration">灵感设计</a><a href="/workbench/script">文案编导</a><a href="/workbench/banana">图片生成</a><a href="/workbench/audio">AI 配音</a></div></details>
+            <details class="mobile-nav-group"><summary>IP12</summary><div><a href="/workbench/ip12">进入 IP12</a><a href="/workbench/script?prefill=ip12">带入文案</a><a href="/workbench/video?prefill=ip12">带入视频</a></div></details>
+            <details class="mobile-nav-group"><summary>Agent + Canvas</summary><div><a href="/workbench/canvas">无限画布</a><a href="/workbench/short-drama">短剧创作</a><a href="/workbench/collect">内容爬取</a></div></details>
+            <details class="mobile-nav-group"><summary>视频生成</summary><div><a href="/workbench/video">视频生成中心</a><a href="/workbench/one-click-video">文案成片</a><a href="/workbench/one-click-video">一键成片</a><a href="/workbench/assets">视频资产</a></div></details>
+            <details class="mobile-nav-group"><summary>CLI</summary><div><a href="/downloads/hq/install.sh">安装 HQ CLI</a><a href="/workbench/device">设备授权</a></div></details>
+            <a class="mobile-login" href="/login">登录 / 注册</a>
+          </div>
+        </details>
+      </nav>
+
+      <div class="nav-drawer-layer">
+        <section class="nav-drawer" id="nav-drawer-creation" data-nav-panel="creation" aria-hidden="true" inert>
+          <div class="nav-drawer-intro"><span>CREATE</span><h2>从灵感到成品</h2><p>选择内容生产环节，直接进入对应工作台。</p></div>
+          <div class="nav-drawer-grid">
+            <a href="/workbench/inspiration"><b>灵感设计</b><span>找案例，开始一次创作</span></a>
+            <a href="/workbench/script"><b>文案编导</b><span>脚本、标题与内容结构</span></a>
+            <a href="/workbench/banana"><b>图片生成</b><span>参考图与视觉创作</span></a>
+            <a href="/workbench/audio"><b>AI 配音</b><span>音色、语速与声音资产</span></a>
+          </div>
+        </section>
+
+        <section class="nav-drawer" id="nav-drawer-ip12" data-nav-panel="ip12" aria-hidden="true" inert>
+          <div class="nav-drawer-intro"><span>IP12</span><h2>建立长期内容底座</h2><p>定位、人设、价值与故事，会继续流入后续创作。</p></div>
+          <div class="nav-drawer-grid">
+            <a href="/workbench/ip12"><b>进入 IP12</b><span>继续你的 12 模块成长档案</span></a>
+            <a href="/workbench/script?prefill=ip12"><b>带入文案</b><span>用已确认底座开始编导</span></a>
+            <a href="/workbench/video?prefill=ip12"><b>带入视频</b><span>把定位与人设交给视频工作台</span></a>
+          </div>
+        </section>
+
+        <section class="nav-drawer" id="nav-drawer-agent" data-nav-panel="agent" aria-hidden="true" inert>
+          <div class="nav-drawer-intro"><span>AGENT</span><h2>让创作成为工作流</h2><p>在画布中组织素材、节点与可执行任务。</p></div>
+          <div class="nav-drawer-grid">
+            <a href="/workbench/canvas"><b>无限画布</b><span>Agent 与节点协同生产</span></a>
+            <a href="/workbench/short-drama"><b>短剧创作</b><span>从故事、角色到分镜视频</span></a>
+            <a href="/workbench/collect"><b>内容爬取</b><span>把真实素材带入工作流</span></a>
+            <a href="/workbench/leads"><b>平台获客</b><span>从内容线索进入行动</span></a>
+          </div>
+        </section>
+
+        <section class="nav-drawer" id="nav-drawer-video" data-nav-panel="video" aria-hidden="true" inert>
+          <div class="nav-drawer-intro"><span>VIDEO</span><h2>选择视频生产方式</h2><p>黄雀引擎、果肉视频、数字化 IP 与成片工具集中在这里。</p></div>
+          <div class="nav-drawer-grid">
+            <a href="/workbench/video"><b>视频生成中心</b><span>黄雀引擎 1 / 黄雀引擎 2 / 果肉视频</span></a>
+            <a href="/workbench/video"><b>数字化 IP</b><span>口播、电影化身与换装视频</span></a>
+            <a href="/workbench/one-click-video"><b>文案成片</b><span>从文字直接生成完整视频</span></a>
+            <a href="/workbench/one-click-video"><b>一键成片</b><span>已有素材快速剪成作品</span></a>
+          </div>
+        </section>
+
+        <section class="nav-drawer" id="nav-drawer-cli" data-nav-panel="cli" aria-hidden="true" inert>
+          <div class="nav-drawer-intro"><span>HQ CLI</span><h2>把能力接入你的 Agent</h2><p>使用设备授权调用黄雀能力，不交出网页登录密码。</p></div>
+          <div class="nav-drawer-grid">
+            <a href="/downloads/hq/install.sh"><b>安装 HQ CLI</b><span>下载官方安装脚本</span></a>
+            <a href="/workbench/device"><b>设备授权</b><span>查看并确认授权范围</span></a>
+            <a href="/workbench/assets"><b>我的资产</b><span>查看 Agent 生产结果</span></a>
+          </div>
+        </section>
+      </div>
+    </div>
   </header>
 
   <main id="main">
     <section class="hero" id="top">
-      <div class="starfield" aria-hidden="true"></div>
-      <div class="hero-moon" aria-hidden="true"><img src="/assets/home/moon.webp" alt=""><canvas class="moon-3d"></canvas></div>
+      <div class="hero-media" aria-hidden="true">
+        <video class="hero-video-eye is-active" autoplay muted playsinline preload="metadata">
+          <source src="/assets/home/hero-banner-monochrome-eye.mp4" type="video/mp4">
+        </video>
+        <video class="hero-video-courtyard" muted playsinline preload="metadata">
+          <source src="/assets/home/hero-banner-ancient-courtyard.mp4" type="video/mp4">
+        </video>
+        <canvas class="hero-liquid-glass" data-hero-liquid-glass></canvas>
+      </div>
       <div class="hero-inner" data-reveal>
-        <p class="hero-badge"><i></i> 短剧顾问 · 一键成片已上线 2026</p>
-        <h1><span class="line">让你的生意，<br class="mobile-break">拥有一套</span><br><span class="line"><em>会持续生长的<br class="mobile-break">内容系统。</em></span></h1>
-        <p class="hero-lead">IP12 定义你是谁，Agent 先给计划，Canvas 把图文音视频串成可审核的生产链路。</p>
+        <h1><span class="line">Huang Que AI Hub</span></h1>
         <div class="hero-actions">
-          <a class="button button-primary" href="/workbench/inspiration">开始你的创作 →</a>
+          <a class="button button-primary" data-liquid-glass href="/workbench/inspiration">ENTER HUANGQUE <span aria-hidden="true">↗</span></a>
         </div>
       </div>
+    </section>
+
+    <section class="particle-story" data-particle-story aria-label="由滚动和鼠标驱动的粒子黄雀">
+      <article class="particle-story-beat">
+        <div class="page-shell particle-story-copy">
+          <span>01 / SCATTER → FEATHER</span>
+          <h2>每个故事，<br>最初都只是一点微光。</h2>
+          <p>继续向下滚动。移动鼠标，看看那些尚未成形的念头。</p>
+        </div>
+      </article>
+      <article class="particle-story-beat">
+        <div class="page-shell particle-story-copy">
+          <span>02 / BECOME</span>
+          <h2>被听见以后，<br>它开始拥有形状。</h2>
+        </div>
+      </article>
+      <article class="particle-story-beat">
+        <div class="page-shell particle-story-copy">
+          <span>03 / CREATE</span>
+          <h2>同一个故事，<br>开始长出不同的形态。</h2>
+        </div>
+      </article>
+      <article class="particle-story-beat">
+        <div class="page-shell particle-story-copy">
+          <span>04 / GROW</span>
+          <h2>一次表达，<br>可以生长成更多方向。</h2>
+        </div>
+      </article>
     </section>
 
     <section class="metrics" aria-label="黄雀平台数据">
@@ -84,7 +177,7 @@
     <section class="story" id="flow">
       <div class="page-shell story-intro" data-reveal>
         <p class="kicker">THE HUANGQUE FLOW</p>
-        <h2>向下滚动，<br><em>看同一条内容链路逐步长出来。</em></h2>
+        <h2>SCROLL THROUGH THE SYSTEM.<br><em>WATCH ONE IDEA BECOME A WORKFLOW.</em></h2>
         <p>不是功能卡片的堆叠。每一步的结果，都会成为下一步的输入。</p>
       </div>
 
@@ -208,7 +301,7 @@
       <div class="page-shell capability-head" data-reveal>
         <div>
           <p class="kicker">ONE CONTRACT · EVERY CAPABILITY</p>
-          <h2 id="capability-title">一个入口，<br><em>看懂整个黄雀。</em></h2>
+          <h2 id="capability-title">ONE ENTRY POINT.<br><em>THE WHOLE HUANGQUE SYSTEM.</em></h2>
         </div>
         <p>网页 Agent、外部 Agent 和人工命令行，共用同一份能力合同。每项操作都带着明确参数、账号权限、费用边界和下一步去向。</p>
       </div>
@@ -297,20 +390,47 @@
 
     <section class="samples" id="samples">
       <div class="page-shell samples-head" data-reveal>
-        <div><p class="kicker">CREATIVE OUTPUT</p><h2>不只讲机制，<br><em>也让结果被看见。</em></h2></div>
+        <div><p class="kicker">CREATIVE OUTPUT</p><h2>NOT JUST A PROCESS.<br><em>RESULTS YOU CAN SEE.</em></h2></div>
         <p>以下为黄雀创作样片，用于展示可实现的视觉方向，不作为客户案例或经营效果证明。</p>
       </div>
-      <div class="page-shell sample-grid">
-        <figure data-reveal><img src="/assets/inspirations/beauty_001.webp" alt="暖色香水产品视觉样片"><figcaption><span>01 · PRODUCT</span><strong>让质感先于卖点出现</strong></figcaption></figure>
-        <figure data-reveal><img src="/assets/inspirations/beauty_049.webp" alt="金色日落与海岸氛围视觉样片"><figcaption><span>02 · MOOD</span><strong>建立可识别的情绪</strong></figcaption></figure>
-        <figure data-reveal><img src="/assets/inspirations/beauty_011.webp" alt="水下玫瑰洁面产品视觉样片"><figcaption><span>03 · STORY</span><strong>让产品进入叙事场景</strong></figcaption></figure>
+      <div class="samples-gallery-shell" data-reveal>
+        <div
+          class="orbit-gallery"
+          data-orbit-gallery
+          data-gallery-manifest="/assets/home/orbit-gallery/gallery.json"
+          data-gallery-state="loading"
+          tabindex="0"
+          aria-label="可拖动的黄雀图片与视频环形画廊，使用左右方向键切换，按回车放大预览"
+        >
+          <div class="orbit-gallery-ambient" aria-hidden="true"></div>
+          <div class="orbit-gallery-viewport">
+            <div class="orbit-gallery-track" data-gallery-track></div>
+            <div class="orbit-gallery-focus" aria-hidden="true"></div>
+          </div>
+          <div class="orbit-gallery-fallback" data-gallery-fallback>
+            <figure><img src="/assets/home/orbit-gallery/desktop-image-01.webp" alt="黄雀创作图片样片 01"></figure>
+            <figure><img src="/assets/home/orbit-gallery/desktop-video-02.webp" alt="黄雀创作视频样片 02 的静态封面"></figure>
+            <figure><img src="/assets/home/orbit-gallery/desktop-image-04.webp" alt="黄雀创作图片样片 04"></figure>
+          </div>
+          <div class="orbit-gallery-meta">
+            <span>DRAG TO EXPLORE</span>
+            <p data-gallery-status aria-live="polite">正在载入 21 个创作样片…</p>
+            <span>← / → · ENTER</span>
+          </div>
+        </div>
       </div>
     </section>
+
+    <dialog class="orbit-preview" data-gallery-preview aria-labelledby="gallery-preview-title">
+      <button class="orbit-preview-close" type="button" data-gallery-preview-close aria-label="关闭预览">×</button>
+      <div class="orbit-preview-stage" data-gallery-preview-stage></div>
+      <p id="gallery-preview-title" data-gallery-preview-title></p>
+    </dialog>
 
     <section class="control" id="control">
       <div class="page-shell control-head" data-reveal>
         <p class="kicker">DESIGNED FOR CONTROL</p>
-        <h2>AI 可以很强，<br><em>控制权仍然属于你。</em></h2>
+        <h2>POWERFUL AI.<br><em>HUMAN CONTROL.</em></h2>
       </div>
       <div class="page-shell control-grid">
         <article data-reveal><b>01</b><h3>方案可审核</h3><p>Agent 的建议先成为草稿，不把建议伪装成已经执行。</p></article>
@@ -324,8 +444,8 @@
       <div class="page-shell cta-inner" data-reveal>
         <div class="hero-logo"><img src="/assets/logo_sparrow.png" alt=""></div>
         <p class="kicker">YOUR DIGITAL IP STARTS HERE</p>
-        <h2>先把你的故事、判断与生意，<br><em>变成一套可以继续生长的系统。</em></h2>
-        <div><a class="button button-primary" href="/workbench/ip12/">开始 IP12</a><a class="button button-secondary" href="/workbench/inspiration">进入工作台</a></div>
+        <h2>TURN YOUR STORY INTO<br><em>A SYSTEM THAT KEEPS GROWING.</em></h2>
+        <div><a class="button button-primary" data-liquid-glass href="/workbench/ip12/">START IP12</a><a class="button button-secondary" data-liquid-glass href="/workbench/inspiration">ENTER WORKSPACE</a></div>
       </div>
     </section>
   </main>
@@ -347,11 +467,28 @@
     const capabilityBranches = [...document.querySelectorAll('.capability-branch')];
     const productChannels = [...document.querySelectorAll('[data-product-channel]')];
 
+    const languageSwitcher = document.querySelector('.language-switcher');
+    const setLanguage = language => {
+      const next = language === 'en' ? 'en' : 'zh-CN';
+      document.documentElement.lang = next;
+      document.querySelectorAll('[data-nav-zh]').forEach(element => {
+        element.textContent = next === 'en' ? element.dataset.navEn : element.dataset.navZh;
+      });
+      languageSwitcher?.querySelectorAll('[data-language]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.language === next)));
+      languageSwitcher?.removeAttribute('open');
+      try { localStorage.setItem('huangque-language', next); } catch {}
+    };
+    languageSwitcher?.querySelectorAll('[data-language]').forEach(button => button.addEventListener('click', () => setLanguage(button.dataset.language)));
+    let savedLanguage = 'zh-CN';
+    try { savedLanguage = localStorage.getItem('huangque-language') || 'zh-CN'; } catch {}
+    setLanguage(savedLanguage);
+
     window.__homepageCheck = () => steps.length === 4
       && steps.every(step => panels.some(panel => panel.dataset.panel === step.dataset.story))
       && capabilityBranches.length === 6
       && productChannels.length === 13
-      && Boolean(document.querySelector('.story-stage') && document.querySelector('.story-chapters'));
+      && Boolean(document.querySelector('.story-stage') && document.querySelector('.story-chapters'))
+      && Boolean(document.querySelector('[data-hero-liquid-glass]'));
     console.assert(window.__homepageCheck(), 'Homepage story mapping is incomplete');
 
     function activateStory(id) {
@@ -382,14 +519,37 @@
 
     const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
-    const heroMoon = document.querySelector('.hero-moon');
-    const finePointer = matchMedia('(pointer: fine)');
-    const clampParallax = value => Math.max(-18, Math.min(18, value));
-    addEventListener('pointermove', event => {
-      if (!heroMoon || reducedMotion.matches || !finePointer.matches) return;
-      heroMoon.style.setProperty('--moon-parallax-x', `${clampParallax((event.clientX - innerWidth / 2) * -.03)}px`);
-      heroMoon.style.setProperty('--moon-parallax-y', `${clampParallax((event.clientY - innerHeight / 2) * -.03)}px`);
-    }, { passive: true });
+    const heroVideos = [...document.querySelectorAll('.hero-media video')];
+    let activeHeroVideo = 0;
+    const showNextHeroVideo = () => {
+      if (reducedMotion.matches || heroVideos.length < 2) return;
+      const current = heroVideos[activeHeroVideo];
+      const nextIndex = (activeHeroVideo + 1) % heroVideos.length;
+      const next = heroVideos[nextIndex];
+      next.currentTime = 0;
+      next.play().then(() => {
+        next.classList.add('is-active');
+        current.classList.remove('is-active');
+        setTimeout(() => { current.pause(); current.currentTime = 0; }, 1000);
+        activeHeroVideo = nextIndex;
+      }).catch(() => {});
+    };
+    heroVideos.forEach(video => video.addEventListener('ended', showNextHeroVideo));
+    const syncHeroVideoMotion = () => {
+      if (!heroVideos.length) return;
+      heroVideos.forEach(video => video.pause());
+      if (reducedMotion.matches) {
+        heroVideos.forEach((video, index) => {
+          video.currentTime = 0;
+          video.classList.toggle('is-active', index === 0);
+        });
+        activeHeroVideo = 0;
+        return;
+      }
+      heroVideos[activeHeroVideo].play().catch(() => {});
+    };
+    syncHeroVideoMotion();
+    reducedMotion.addEventListener?.('change', syncHeroVideoMotion);
 
     const counters = [...document.querySelectorAll('[data-count]')];
     const counterObserver = new IntersectionObserver(entries => {
@@ -451,6 +611,112 @@
     reducedMotion.addEventListener('change', scheduleStoryIntro);
     desktopStory.addEventListener('change', scheduleStoryIntro);
 
+    document.querySelectorAll('[data-liquid-glass]').forEach(element => {
+      element.addEventListener('pointermove', event => {
+        const rect = element.getBoundingClientRect();
+        element.style.setProperty('--glass-x', `${((event.clientX - rect.left) / rect.width) * 100}%`);
+        element.style.setProperty('--glass-y', `${((event.clientY - rect.top) / rect.height) * 100}%`);
+      });
+      element.addEventListener('pointerleave', () => {
+        element.style.removeProperty('--glass-x');
+        element.style.removeProperty('--glass-y');
+      });
+    });
+
+    const navCluster = document.querySelector('[data-nav-cluster]');
+    if (navCluster) {
+      const navTriggers = [...navCluster.querySelectorAll('[data-nav-trigger]')];
+      const navPanels = [...navCluster.querySelectorAll('[data-nav-panel]')];
+      const navSlider = navCluster.querySelector('[data-nav-slider]');
+      const navSliderBlob = navSlider.querySelector('.nav-slider-blob');
+      const navSliderTrail = navSlider.querySelector('.nav-slider-trail');
+      let openNav = '';
+      let selectedNav = '';
+      let sliderWidth = 0;
+      let navCloseTimer;
+
+      const moveNavSlider = name => {
+        const trigger = navCluster.querySelector(`[data-nav-trigger="${name}"]`);
+        navSlider.classList.toggle('is-visible', Boolean(trigger));
+        if (!trigger) return;
+        const nextX = trigger.offsetLeft;
+        const nextWidth = trigger.offsetWidth;
+        const firstMove = !sliderWidth;
+        const sliderRect = navSlider.getBoundingClientRect();
+        const blobRect = navSliderBlob.getBoundingClientRect();
+        const fromX = firstMove ? nextX : blobRect.left - sliderRect.left;
+        const fromWidth = firstMove ? nextWidth : blobRect.width;
+        navSliderBlob.getAnimations().forEach(animation => animation.cancel());
+        navSliderTrail.getAnimations().forEach(animation => animation.cancel());
+        navSliderBlob.style.width = `${nextWidth}px`;
+        navSliderBlob.style.transform = `translateX(${nextX}px)`;
+
+        if (!firstMove && !reducedMotion.matches && navSliderBlob.animate) {
+          const distance = nextX - fromX;
+          const direction = Math.sign(distance) || 1;
+          const overshoot = direction * Math.min(12, Math.abs(distance) * .08);
+          const left = Math.min(fromX, nextX);
+          const right = Math.max(fromX + fromWidth, nextX + nextWidth);
+          const fromClip = direction > 0 ? 'inset(20% 100% 20% 0 round 999px)' : 'inset(20% 0 20% 100% round 999px)';
+          const toClip = direction > 0 ? 'inset(20% 0 20% 100% round 999px)' : 'inset(20% 100% 20% 0 round 999px)';
+          navSliderTrail.style.left = `${left}px`;
+          navSliderTrail.style.width = `${right - left}px`;
+          navSliderTrail.animate([
+            { clipPath: fromClip, opacity: 0 },
+            { clipPath: 'inset(20% 0 20% 0 round 999px)', opacity: .72, offset: .46 },
+            { clipPath: toClip, opacity: 0 }
+          ], { duration: 520, easing: 'cubic-bezier(.2,.75,.2,1)' });
+          navSliderBlob.animate([
+            { transform: `translateX(${fromX}px) scale(1)`, width: `${fromWidth}px` },
+            { transform: `translateX(${fromX + distance * .42}px) scaleX(1.34) scaleY(.84)`, width: `${fromWidth + (nextWidth - fromWidth) * .45}px`, offset: .36 },
+            { transform: `translateX(${nextX + overshoot}px) scaleX(.9) scaleY(1.09)`, width: `${nextWidth}px`, offset: .78 },
+            { transform: `translateX(${nextX}px) scale(1)`, width: `${nextWidth}px` }
+          ], { duration: 560, easing: 'cubic-bezier(.16,.8,.24,1)' });
+        }
+        sliderWidth = nextWidth;
+      };
+
+      const setOpenNav = name => {
+        openNav = name || '';
+        moveNavSlider(openNav || selectedNav);
+        navTriggers.forEach(trigger => trigger.setAttribute('aria-expanded', String(trigger.dataset.navTrigger === openNav)));
+        navPanels.forEach(panel => {
+          const active = panel.dataset.navPanel === openNav;
+          panel.classList.toggle('is-open', active);
+          panel.setAttribute('aria-hidden', String(!active));
+          panel.inert = !active;
+        });
+      };
+
+      navTriggers.forEach(trigger => {
+        trigger.addEventListener('pointerenter', () => setOpenNav(trigger.dataset.navTrigger));
+        trigger.addEventListener('focus', () => setOpenNav(trigger.dataset.navTrigger));
+        trigger.addEventListener('click', () => {
+          selectedNav = trigger.dataset.navTrigger;
+          setOpenNav(trigger.dataset.navTrigger);
+        });
+      });
+      navCluster.addEventListener('pointerenter', () => clearTimeout(navCloseTimer));
+      navCluster.addEventListener('pointerleave', () => {
+        clearTimeout(navCloseTimer);
+        navCloseTimer = setTimeout(() => setOpenNav(''), 320);
+      });
+      navCluster.addEventListener('focusout', event => {
+        if (!navCluster.contains(event.relatedTarget)) setOpenNav('');
+      });
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && openNav) {
+          const trigger = navCluster.querySelector(`[data-nav-trigger="${openNav}"]`);
+          setOpenNav('');
+          trigger?.focus();
+        }
+      });
+      document.addEventListener('pointerdown', event => {
+        if (!navCluster.contains(event.target)) setOpenNav('');
+      });
+      addEventListener('resize', () => moveNavSlider(openNav || selectedNav));
+    }
+
     const copyButton = document.querySelector('[data-copy]');
     copyButton.addEventListener('click', async () => {
       const original = copyButton.textContent;
@@ -469,5 +735,7 @@
 
   })();
   </script>
+  <script src="/homepage-liquid-glass.js?v=20260809-optical3" defer></script>
+  <script type="module" src="/homepage-particles.js?v=20260809-pointcloud2"></script>
 </body>
 </html>
