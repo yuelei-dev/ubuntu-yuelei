@@ -3021,20 +3021,20 @@ class H(BaseHTTPRequestHandler):
             with _submission_lock:
                 # 外层停机检查与真正进入付费临界区之间仍有竞态。锁内必须再次检查，
                 # 且要早于 idempotency claim / Auth 扣点 / 本地 job 写入。
-                if (is_shutting_down() and not is_still_route
-                        and not (durable_attempt
-                                 and durable_attempt.get("state") == "linked")):
-                    if seedance_idem_reserved:
-                        video_domain.abort_xiaole_reference_submission(
-                            staged_ref_keys, user["username"], p, idem_key,
-                            lambda: _idempotency_abort(
-                                user["username"], p, idem_key,
-                            ),
-                        )
-                    return self._send(503, {
-                        "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
-                        "code": "shutting_down", "retry_after_ms": 5000,
-                    })
+                if is_shutting_down() and not is_still_route:
+                    if not (durable_attempt
+                            and durable_attempt.get("state") == "linked"):
+                        if seedance_idem_reserved:
+                            video_domain.abort_xiaole_reference_submission(
+                                staged_ref_keys, user["username"], p, idem_key,
+                                lambda: _idempotency_abort(
+                                    user["username"], p, idem_key,
+                                ),
+                            )
+                        return self._send(503, {
+                            "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
+                            "code": "shutting_down", "retry_after_ms": 5000,
+                        })
                 if (is_still_route and is_shutting_down()
                         and (not still_attempt or still_attempt.get("state") in {"accepted", "charged"})):
                     if still_idem_started and not still_attempt: _idempotency_abort(user["username"], p, idem_key)
@@ -3272,6 +3272,12 @@ class H(BaseHTTPRequestHandler):
                                     before_commit=durable_link_job,
                                 )
                             except Exception:
+                                if smart_montage_submission:
+                                    return self._send(503, {
+                                        "detail": "任务写入暂时失败，请稍后重试",
+                                        "code": "job_create_retryable",
+                                        "retry_after_ms": 1000,
+                                    })
                                 # A concurrent process may have committed the
                                 # single linked job before this transaction lost
                                 # its race.  Reload before reporting a retryable
