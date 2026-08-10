@@ -433,7 +433,7 @@
     try{ saved=JSON.parse(sessionStorage.getItem(storageKey)||'null'); }
     catch(e){ saved=_pendingSubmissionMemory[storageKey]||null; }
     if(saved&&saved.body===body&&saved.key){
-      return {storageKey:storageKey,body:body,key:saved.key};
+      return {storageKey:storageKey,body:body,key:saved.key,reused:true};
     }
     var pending={
       body:body,
@@ -441,7 +441,7 @@
     };
     _pendingSubmissionMemory[storageKey]=pending;
     try{ sessionStorage.setItem(storageKey,JSON.stringify(pending)); }catch(e){}
-    return {storageKey:storageKey,body:body,key:pending.key};
+    return {storageKey:storageKey,body:body,key:pending.key,reused:false};
   }
   function _confirmSubmission(pending){
     if(!pending) return;
@@ -1370,13 +1370,19 @@
     var mime=file.type||({jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',mp4:'video/mp4',mov:'video/quicktime',webm:'video/webm'})[ext]||'';
     var localPending=null;
     _localBusy(btn,true);
-    return durationCheck.then(_localPointsCheck).then(function(){
-      if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
-      if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
+    return durationCheck.then(function(){
       localPending=_pendingSubmission('script-breakdown-local-'+mediaType,{
         media_type:mediaType,file_name:file.name||'',file_size:Number(file.size||0),
         mime_type:mime,last_modified:Number(file.lastModified||0)
       });
+      if(localPending.reused) return;
+      return _localPointsCheck().catch(function(error){
+        _confirmSubmission(localPending);
+        throw error;
+      });
+    }).then(function(){
+      if(bdProgress)bdProgress.style.display=''; setBdPhase('extracting_frames','active');
+      if(bdLocalStatus){bdLocalStatus.textContent='正在上传…';bdLocalStatus.style.color='#a78bfa';}
       return fetch('/api/gen/breakdown/local-upload?media_type='+mediaType,{
         method:'POST',credentials:'same-origin',
         headers:{'Content-Type':mime,'X-File-Name':encodeURIComponent(file.name),'Idempotency-Key':localPending.key},body:file

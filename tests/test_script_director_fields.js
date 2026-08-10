@@ -207,10 +207,10 @@ function memoryStorage() {
   };
 }
 
-function localUploadHarness(responses) {
+function localUploadHarness(responses, pointChecks = []) {
   const env = {
     storage: memoryStorage(), pendingMemory: {}, calls: [], failures: [], polls: [],
-    responses: responses.slice(),
+    responses: responses.slice(), pointChecks: pointChecks.slice(), pointCheckCount: 0,
   };
   env.pendingSubmission = load('_pendingSubmission', {
     sessionStorage: env.storage,
@@ -234,7 +234,11 @@ function localUploadHarness(responses) {
   env.submit = load('_submitLocalReverse', {
     _localFail: (message) => env.failures.push(message),
     _videoDuration: () => Promise.resolve(10),
-    _localPointsCheck: () => Promise.resolve(),
+    _localPointsCheck: () => {
+      env.pointCheckCount++;
+      const next = env.pointChecks.length ? env.pointChecks.shift() : null;
+      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+    },
     _localBusy: () => {},
     bdProgress: { style: {} },
     setBdPhase: () => {},
@@ -280,6 +284,34 @@ asyncTest('本地上传网络失败和响应丢失后重试复用同一 key', as
   await env.submit('video', env.file, {});
   assert.equal(env.key(1), env.key(0));
   assert.equal(env.polls[0], 'job-recovered');
+});
+
+asyncTest('已扣点响应丢失后即使余额不足，图片和视频仍以原 key 恢复', async () => {
+  for (const mediaType of ['image', 'video']) {
+    const env = localUploadHarness([
+      new Error('response lost after provider accepted request'),
+      { status: 200, text: `{"job_id":"${mediaType}-recovered"}` },
+    ], [null, new Error('余额不足')]);
+    const file = mediaType === 'image'
+      ? { name: 'sample.png', type: 'image/png', size: 1024, lastModified: 45678 }
+      : env.file;
+    await env.submit(mediaType, file, {});
+    const firstKey = env.key(0);
+    assert.equal(env.pointCheckCount, 1, '新意图必须进行余额预检');
+    await env.submit(mediaType, file, {});
+    assert.equal(env.calls.length, 2, '恢复请求必须到达后端');
+    assert.equal(env.key(1), firstKey, '恢复请求必须重放同一 key');
+    assert.equal(env.pointCheckCount, 1, '已有 pending 不得再次被低余额预检阻断');
+    assert.equal(env.polls[0], `${mediaType}-recovered`);
+  }
+});
+
+asyncTest('本地上传新意图仍执行余额预检且不足时不发送请求', async () => {
+  const env = localUploadHarness([], [new Error('余额不足')]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.pointCheckCount, 1);
+  assert.equal(env.calls.length, 0);
+  assert.equal(env.storage.has(env.storageKey), false, '未发出的新意图不得留下可绕过预检的 pending key');
 });
 
 asyncTest('本地上传 200 截断 JSON 保留 key 并允许安全重试', async () => {
