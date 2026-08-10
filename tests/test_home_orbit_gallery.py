@@ -23,7 +23,7 @@ class HomeOrbitGalleryTests(unittest.TestCase):
         self.assertIn("data-gallery-preview", self.html)
         self.assertIn("data-gallery-fallback", self.html)
         self.assertNotIn('class="page-shell sample-grid"', self.html)
-        self.assertIn("orbit-gallery.js?v=20260810-1", self.html)
+        self.assertIn("orbit-gallery.js?v=20260810-concave4", self.html)
 
     def test_manifest_contains_all_requested_media(self):
         items = self.manifest["items"]
@@ -58,8 +58,17 @@ class HomeOrbitGalleryTests(unittest.TestCase):
 
     def test_orbit_uses_a_visible_concave_vertical_arc(self):
         self.assertIn("const arcLift = compact", self.js)
-        self.assertIn("Math.min(260, Math.max(180, innerWidth * 0.15))", self.js)
-        self.assertIn("const y = -curve * arcLift", self.js)
+        self.assertIn("? 168", self.js)
+        self.assertIn("Math.min(680, Math.max(470, innerWidth * 0.34))", self.js)
+        self.assertIn("Math.pow(curve, compact ? 0.68 : 0.5)", self.js)
+        self.assertIn("const y = -verticalCurve * arcLift", self.js)
+
+    def test_orbit_uses_strong_depth_perspective_and_side_wrap(self):
+        self.assertIn("Math.min(compact ? 420 : 820", self.js)
+        self.assertIn("const depthExpansion = compact ? 1.65 : 1.85", self.js)
+        self.assertIn("Math.min(82, Math.abs(angle) * (compact ? 94 : 112))", self.js)
+        self.assertIn("perspective:880px", self.css)
+        self.assertIn("perspective-origin:50% 60%", self.css)
 
     def test_low_resource_modes_keep_static_media_available(self):
         self.assertIn("connection?.saveData", self.js)

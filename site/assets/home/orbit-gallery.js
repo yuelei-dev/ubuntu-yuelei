@@ -178,14 +178,14 @@
     if (!state.items.length) return;
     normalizePosition();
     const compact = innerWidth < 720;
-    const radiusX = Math.min(compact ? innerWidth * 0.9 : innerWidth * 0.68, compact ? 520 : 860);
-    const curveDepth = Math.min(compact ? 310 : 560, Math.max(compact ? 250 : 420, innerWidth * 0.42));
-    const centerDepth = -curveDepth * (compact ? 1.05 : 1.15);
-    const depthExpansion = compact ? 1.5 : 1.7;
-    const angleStep = compact ? 0.36 : 0.3;
+    const radiusX = Math.min(compact ? innerWidth * 0.94 : innerWidth * 0.64, compact ? 540 : 800);
+    const curveDepth = Math.min(compact ? 420 : 820, Math.max(compact ? 320 : 640, innerWidth * 0.52));
+    const centerDepth = -curveDepth * (compact ? 0.92 : 0.78);
+    const depthExpansion = compact ? 1.65 : 1.85;
+    const angleStep = compact ? 0.4 : 0.34;
     const arcLift = compact
-      ? 96
-      : Math.min(260, Math.max(180, innerWidth * 0.15));
+      ? 168
+      : Math.min(680, Math.max(470, innerWidth * 0.34));
     let activeIndex = 0;
     let activeDistance = Infinity;
 
@@ -206,15 +206,18 @@
       const spacingBoost = 1 + centerWeight * 0.48;
       const x = Math.sin(angle) * radiusX * spacingBoost;
       const curve = 1 - Math.cos(angle);
+      const verticalCurve = Math.pow(curve, compact ? 0.68 : 0.5);
       const z = centerDepth + curve * curveDepth * depthExpansion;
-      const y = -curve * arcLift;
-      const rotateY = -Math.sign(angle) * Math.min(74, Math.abs(angle) * 82);
-      const scale = (compact ? 0.76 : 0.92) + centerWeight * (compact ? 0.34 : 0.24);
-      const opacity = 0.55 + centerWeight * 0.45;
+      const y = -verticalCurve * arcLift;
+      const rotateY = -Math.sign(angle) * Math.min(82, Math.abs(angle) * (compact ? 94 : 112));
+      const scale = (compact ? 0.72 : 0.86) + centerWeight * (compact ? 0.42 : 0.64);
+      const opacity = 0.28 + centerWeight * 0.72;
       entry.card.style.transform = `translate3d(calc(-50% + ${x}px), calc(-50% + ${y}px), ${z}px) rotateY(${rotateY}deg) scale(${scale})`;
       entry.card.style.opacity = String(opacity);
       entry.card.style.zIndex = String(1000 + Math.round(z));
       entry.card.style.setProperty('--depth-shade', String(1 - centerWeight));
+      entry.card.style.setProperty('--media-saturation', String(0.78 + centerWeight * 0.22));
+      entry.card.style.setProperty('--media-brightness', String(0.58 + centerWeight * 0.42));
 
       if (distance < activeDistance) {
         activeDistance = distance;
