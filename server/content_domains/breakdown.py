@@ -173,6 +173,296 @@ def validate_breakdown_payload(payload):
     return body
 
 
+def _durable_local_upload_job(core, handler, user, points_domain, *, body,
+                              request_body, idem_endpoint, idem_key, temp_path,
+                              upload_token, suffix):
+    """Resume one paid local upload without repeating its charge or job INSERT."""
+    username = user["username"]
+    attempt = None
+    job_id = 0
+    cost = None
+    points_left = None
+    bound_upload_token = upload_token
+    bound_upload_path = temp_path
+
+    state, replay = core._idempotency_lookup(
+        username, idem_endpoint, idem_key, request_body,
+    )
+    if state == "replay":
+        _remove_upload(temp_path)
+        response = dict(replay or {})
+        return handler._send(int(response.pop("_http_status", 200)), response)
+    if state == "conflict":
+        _remove_upload(temp_path)
+        return handler._send(409, {
+            "detail": "同一 Idempotency-Key 不能用于不同上传文件",
+            "code": "idempotency_conflict",
+        })
+    if state == "processing":
+        attempt = core._idempotency_attempt(
+            username, idem_endpoint, idem_key, request_body,
+        )
+        if attempt is None:
+            _remove_upload(temp_path)
+            return handler._send(409, {
+                "detail": "相同上传请求正在处理，请稍后重试",
+                "code": "idempotency_in_progress", "retry_after_ms": 1000,
+            })
+
+    if attempt is None:
+        active_jobs = core._user_active_job_count(username)
+        if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
+            _remove_upload(temp_path)
+            return handler._send(429, {
+                "detail": "当前生成任务较多，请完成后再提交",
+                "code": "active_job_cap", "active_jobs": active_jobs,
+                "max_active_jobs": core.MAX_USER_ACTIVE_JOBS,
+                "retry_after_ms": 4000,
+            })
+        cost = points_domain.cost_of("breakdown", body)
+        if core.cli_gateway.reject_changed_cost(
+                handler, cost, core.AUTH_INTERNAL_TOKEN):
+            _remove_upload(temp_path)
+            return None
+    else:
+        cost = int(attempt["cost"])
+
+    charge_key = core._durable_charge_key(
+        "breakdown-upload", username, idem_endpoint, idem_key,
+    )
+    try:
+        with core._submission_lock:
+            with closing(core.jdb()) as connection:
+                _ensure_upload_table(connection)
+                connection.commit()
+
+            if attempt is None:
+                attempt_state, attempt_value = core._idempotency_begin_attempt(
+                    username, idem_endpoint, idem_key, request_body, body, cost,
+                    charge_key,
+                )
+                if attempt_state == "replay":
+                    _remove_upload(temp_path)
+                    response = dict(attempt_value or {})
+                    return handler._send(
+                        int(response.pop("_http_status", 200)), response,
+                    )
+                if attempt_state == "conflict":
+                    _remove_upload(temp_path)
+                    return handler._send(409, {
+                        "detail": "同一 Idempotency-Key 不能用于不同上传文件",
+                        "code": "idempotency_conflict",
+                    })
+                attempt = attempt_value
+                cost = int(attempt["cost"])
+                charge_key = attempt["charge_transaction_key"]
+
+            if attempt.get("state") == "linked":
+                job_id = int(attempt["job_id"])
+                points_left = int(attempt["points_left"])
+                with closing(core.jdb()) as connection:
+                    linked = connection.execute(
+                        "SELECT kind,username,cost,status,payload,error FROM jobs WHERE id=?",
+                        (job_id,),
+                    ).fetchone()
+                if (not linked or linked["kind"] != "breakdown"
+                        or linked["username"] != username
+                        or int(linked["cost"] or 0) != cost):
+                    raise RuntimeError("durable local-upload job link is invalid")
+                linked_payload = json.loads(linked["payload"] or "{}")
+                bound_upload_token = str(
+                    linked_payload.get("upload_token") or ""
+                )
+                if not _UPLOAD_TOKEN_RE.fullmatch(bound_upload_token):
+                    raise RuntimeError("durable local-upload token is invalid")
+                bound_upload_path = str(
+                    _upload_root() / (bound_upload_token + suffix)
+                )
+                if linked_payload.get("upload_token") != upload_token:
+                    _remove_upload(temp_path)
+                linked_status = str(linked["status"] or "")
+                if linked_status == "error":
+                    tracking = core._compensation_tracking_response(
+                        job_id, cost, linked["error"], points_left=points_left,
+                    )
+                    if tracking["refund_state"] != "refunded":
+                        core._idempotency_complete(
+                            username, idem_endpoint, idem_key,
+                            dict(tracking, _http_status=202),
+                        )
+                        return handler._send(202, tracking)
+                    terminal = dict(
+                        tracking, code="submission_failed",
+                        operation_terminal=True,
+                    )
+                    core._idempotency_complete(
+                        username, idem_endpoint, idem_key,
+                        dict(terminal, _http_status=500),
+                    )
+                    return handler._send(500, terminal)
+                if linked_status == "pending":
+                    if not core.enqueue_job(
+                            job_id, "breakdown", "reverse_prompt"):
+                        core._reject_pending_job(
+                            job_id, username, cost,
+                            "任务队列已满，请稍后再试",
+                        )
+                        _remove_trusted_upload(
+                            bound_upload_token, username, job_id,
+                            bound_upload_path,
+                        )
+                        tracking = core._compensation_tracking_response(
+                            job_id, cost, "任务队列已满，请稍后再试",
+                            points_left=points_left,
+                        )
+                        response_status = (
+                            429 if tracking["refund_state"] == "refunded"
+                            else 202
+                        )
+                        if response_status == 429:
+                            tracking.update({
+                                "code": "queue_full", "retry_after_ms": 4000,
+                                "operation_terminal": True,
+                            })
+                        core._idempotency_complete(
+                            username, idem_endpoint, idem_key,
+                            dict(tracking, _http_status=response_status),
+                        )
+                        return handler._send(response_status, tracking)
+                response = {
+                    "job_id": job_id, "cost": cost,
+                    "points_left": points_left,
+                }
+                core._idempotency_complete(
+                    username, idem_endpoint, idem_key, response,
+                )
+                return handler._send(200, response)
+
+            if attempt.get("state") not in {"frozen", "charged"}:
+                raise RuntimeError("durable local-upload charge state is invalid")
+            if attempt.get("state") == "frozen":
+                points_left = core._smart_charge_deduct(
+                    points_domain, attempt, username, cost,
+                    "job:breakdown durable local upload", charge_key,
+                )
+                core._idempotency_mark_charged(
+                    username, idem_endpoint, idem_key, charge_key, points_left,
+                )
+                attempt["state"] = "charged"
+                attempt["points_left"] = int(points_left)
+            else:
+                points_left = int(attempt["points_left"])
+
+            def record_upload_and_link(connection, created_job_id):
+                _ensure_upload_table(connection)
+                connection.execute(
+                    "INSERT INTO breakdown_uploads(token,username,suffix,job_id,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (upload_token, username, suffix, created_job_id, int(time.time())),
+                )
+                core.submission_idempotency.link_job(
+                    connection, username, idem_endpoint, idem_key, charge_key,
+                    created_job_id, points_left,
+                )
+
+            try:
+                job_id = core.jobs_store.create_job_after_charge(
+                    core.jdb, "breakdown", username, cost, body,
+                    core.SERVICE_OWNER, before_commit=record_upload_and_link,
+                )
+            except Exception:
+                recovered = core._idempotency_attempt(
+                    username, idem_endpoint, idem_key, request_body,
+                )
+                if not recovered or recovered.get("state") != "linked":
+                    _remove_upload(temp_path)
+                    return handler._send(503, {
+                        "detail": "任务写入暂时失败，请使用相同请求键重试",
+                        "code": "job_create_retryable", "retry_after_ms": 1000,
+                    })
+                job_id = int(recovered["job_id"])
+                points_left = int(recovered["points_left"])
+                with closing(core.jdb()) as connection:
+                    linked = connection.execute(
+                        "SELECT kind,username,cost,payload FROM jobs WHERE id=?",
+                        (job_id,),
+                    ).fetchone()
+                if (not linked or linked["kind"] != "breakdown"
+                        or linked["username"] != username
+                        or int(linked["cost"] or 0) != cost):
+                    raise RuntimeError("durable local-upload job link is invalid")
+                linked_payload = json.loads(linked["payload"] or "{}")
+                bound_upload_token = str(
+                    linked_payload.get("upload_token") or ""
+                )
+                if not _UPLOAD_TOKEN_RE.fullmatch(bound_upload_token):
+                    raise RuntimeError("durable local-upload token is invalid")
+                bound_upload_path = str(
+                    _upload_root() / (bound_upload_token + suffix)
+                )
+                if linked_payload.get("upload_token") != upload_token:
+                    _remove_upload(temp_path)
+            else:
+                previous_payload = attempt.get("payload") or {}
+                previous_token = str(previous_payload.get("upload_token") or "")
+                if previous_token and previous_token != upload_token:
+                    _remove_upload(str(_upload_root() / (previous_token + suffix)))
+
+            if not core.enqueue_job(job_id, "breakdown", "reverse_prompt"):
+                core._reject_pending_job(
+                    job_id, username, cost, "任务队列已满，请稍后再试",
+                )
+                _remove_trusted_upload(
+                    bound_upload_token, username, job_id, bound_upload_path,
+                )
+                tracking = core._compensation_tracking_response(
+                    job_id, cost, "任务队列已满，请稍后再试",
+                    points_left=points_left,
+                )
+                if tracking["refund_state"] != "refunded":
+                    core._idempotency_complete(
+                        username, idem_endpoint, idem_key,
+                        dict(tracking, _http_status=202),
+                    )
+                    return handler._send(202, tracking)
+                terminal = dict(
+                    tracking, code="queue_full", retry_after_ms=4000,
+                    operation_terminal=True,
+                )
+                core._idempotency_complete(
+                    username, idem_endpoint, idem_key,
+                    dict(terminal, _http_status=429),
+                )
+                return handler._send(429, terminal)
+
+            response = {
+                "job_id": job_id, "cost": cost, "points_left": points_left,
+            }
+            core._idempotency_complete(
+                username, idem_endpoint, idem_key, response,
+            )
+        return handler._send(200, response)
+    except points_domain.AuthPointsError as exc:
+        if exc.status in (402, 403):
+            core._idempotency_abort(username, idem_endpoint, idem_key)
+        _remove_upload(temp_path)
+        return handler._send(
+            exc.status if exc.status in (402, 403) else 502,
+            points_domain.public_error_body(exc, int(cost or 20)),
+        )
+    except Exception:
+        if not job_id:
+            _remove_upload(temp_path)
+            return handler._send(503, {
+                "detail": "任务受理状态暂时无法确认，请使用相同请求键重试",
+                "code": "submission_outcome_unknown", "retry_after_ms": 1000,
+            })
+        return handler._send(500, {
+            "detail": "任务已受理但响应证据不完整，请使用相同请求键重试",
+            "code": "submission_outcome_unknown",
+        })
+
+
 def handle_local_upload(handler, user):
     """Validate a raw local-media upload, charge once, and enqueue a breakdown job."""
     from . import core
@@ -246,27 +536,14 @@ def handle_local_upload(handler, user):
                 and re.fullmatch(r"[0-9a-f]{32}", str(handler.headers.get("X-HQ-QA-Run-ID") or ""))):
             body["qa_run_id"] = str(handler.headers.get("X-HQ-QA-Run-ID"))
         if idem_key:
-            state, replay = core._idempotency_begin(user["username"], idem_endpoint, idem_key, {
+            return _durable_local_upload_job(
+                core, handler, user, points_domain, body=body,
+                request_body={
                 "media_type": media_type, "content_type": content_type,
                 "content_length": content_length, "sha256": digest.hexdigest(),
-            })
-            if state == "replay":
-                _remove_upload(temp_path)
-                response = dict(replay or {})
-                return handler._send(int(response.pop("_http_status", 200)), response)
-            if state == "processing":
-                _remove_upload(temp_path)
-                return handler._send(409, {
-                    "detail": "相同上传请求正在处理，请勿重复提交",
-                    "code": "idempotency_in_progress", "retry_after_ms": 2000,
-                })
-            if state == "conflict":
-                _remove_upload(temp_path)
-                return handler._send(409, {
-                    "detail": "同一 Idempotency-Key 不能用于不同上传文件",
-                    "code": "idempotency_conflict",
-                })
-            idem_started = state == "new"
+                }, idem_endpoint=idem_endpoint, idem_key=idem_key,
+                temp_path=temp_path, upload_token=upload_token, suffix=suffix,
+            )
         active_jobs = core._user_active_job_count(user["username"])
         if active_jobs >= core.MAX_USER_ACTIVE_JOBS:
             if idem_started:

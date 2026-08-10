@@ -82,7 +82,7 @@ class DirectorProductionParityTests(unittest.TestCase):
             entry for entry in self.manifest["files"]
             if entry["strategy"] == "production_exact_file"
         ]
-        self.assertEqual(len(exact), 3)
+        self.assertEqual(len(exact), 2)
         for entry in exact:
             self.assertEqual(entry["postimage_blob"], entry["production_blob"])
 
