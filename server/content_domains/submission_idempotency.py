@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+import sqlite3
 import time
 from contextlib import closing
 
@@ -15,6 +16,35 @@ _ATTEMPT_COLUMNS = {
     "job_id": "INTEGER",
 }
 
+
+def _table_has_column(connection, name):
+    return any(
+        row[1] == name
+        for row in connection.execute(
+            "PRAGMA table_info(submission_idempotency)"
+        ).fetchall()
+    )
+
+
+def _add_column_if_missing(connection, name, declaration):
+    try:
+        connection.execute(
+            "ALTER TABLE submission_idempotency ADD COLUMN %s %s"
+            % (name, declaration)
+        )
+    except sqlite3.OperationalError as error:
+        # Another connection may have completed the same migration after our
+        # schema snapshot. Only accept SQLite's duplicate-column error after
+        # verifying that the required column is now present; all other errors
+        # remain fatal.
+        if (
+            str(error).strip().lower()
+            != ("duplicate column name: %s" % name).lower()
+            or not _table_has_column(connection, name)
+        ):
+            raise
+
+
 def ensure_table(connection):
     connection.execute("""CREATE TABLE IF NOT EXISTS submission_idempotency(
         username TEXT NOT NULL, endpoint TEXT NOT NULL, idem_key TEXT NOT NULL,
@@ -27,10 +57,7 @@ def ensure_table(connection):
     }
     for name, declaration in _ATTEMPT_COLUMNS.items():
         if name not in existing:
-            connection.execute(
-                "ALTER TABLE submission_idempotency ADD COLUMN %s %s"
-                % (name, declaration)
-            )
+            _add_column_if_missing(connection, name, declaration)
     connection.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_submission_idempotency_job "
         "ON submission_idempotency(job_id) WHERE job_id IS NOT NULL"
