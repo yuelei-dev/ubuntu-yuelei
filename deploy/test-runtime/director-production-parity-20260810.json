@@ -76,8 +76,8 @@
       "production_blob": "873118b4bfa49f3a2588601d461cd62475841188",
       "preimage_blob": "06715a917bf934f02d802fafff91a98949e92a9d",
       "preimage_sha256": "cb425ccfb266e4d1cd05d4413bcab0f6c2e1f772256746862c266f03f569bfc0",
-      "postimage_blob": "cbf3a56fba6ba611af0daa8814264ad069dc5663",
-      "postimage_sha256": "12b1217d945d889ee0b3641ef3793744e42db69e3c00097d788de424538b4462"
+      "postimage_blob": "35406a3256d5fa10ceee819bca3c10a9229c0122",
+      "postimage_sha256": "418414185e1fdd2059571af91ab2054fd6c01fa7c073a3f0b1ca2c79b0129df2"
     }
   ],
   "verified_unchanged_dependencies": [
@@ -99,7 +99,7 @@
     "all five runtime files match their postimage SHA-256 values",
     "huangque-content.service is active after one restart",
     "GET /api/gen/health returns HTTP 200",
-    "workbench/script.html contains copy, breakdown, image and video idempotency keys",
+    "workbench/script.html contains copy, link breakdown, local upload, image and video idempotency keys",
     "reverse remake offer remains grok-imagine-video with the existing duration prices",
     "no paid model request is issued during deployment verification"
   ],
