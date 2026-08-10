@@ -1,0 +1,113 @@
+{
+  "schema_version": 1,
+  "purpose": "Forward-port the production director behavior to the Yuelei test runtime without removing Yuelei-only safety features.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service"
+  },
+  "source": {
+    "repository": "tang730125633/huangque-main-site",
+    "commit": "ddb8c475a10a409e1680d917c31c34f83971ac09",
+    "tree": "1740c48e9335212d2015f09f2cfd963bae79ad19",
+    "production_public_script_blob": "873118b4bfa49f3a2588601d461cd62475841188",
+    "production_public_script_exact_match_verified": true
+  },
+  "development_base": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "commit": "81fc18e9ca9a5e8ecb74e91bb0af900bd52c1aab",
+    "tree": "2a5da8401ded2d0137a0f9dd57ee7da2f3ffa40f"
+  },
+  "deployment_policy": {
+    "fail_closed_on_preimage_mismatch": true,
+    "backup_all_targets_before_first_write": true,
+    "atomic_replace": true,
+    "restart_after_all_backend_files_match": true,
+    "rollback_all_files_as_one_unit": true,
+    "copy_environment_or_database": false,
+    "production_server_write_allowed": false
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/breakdown.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/breakdown.py",
+      "strategy": "production_file_with_durable_local_upload_idempotency",
+      "production_blob": "a41f8127c715c3d0b1526031e32412da2e9d8e3e",
+      "preimage_blob": "78a1d22c481266ca04d81f5f3ab9fcc06af3a88b",
+      "preimage_sha256": "950e3171523f0267084e9fb581d05088f00bd7646870914c7bfec2723204f263",
+      "postimage_blob": "f7aa0dcd3abc5d00c3917d0a11b85bfd256a4bdf",
+      "postimage_sha256": "add9d0c3e8a86cc28c27a24a0e749ee54a2ec8f503fe6381749136e0f8b42f24"
+    },
+    {
+      "repository_path": "server/content_domains/gemini_reverse.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/gemini_reverse.py",
+      "strategy": "production_exact_file",
+      "production_blob": "3896e777056eaa3d5b153a1cbddfff0927a22972",
+      "preimage_blob": "b36c247fa09281378821119746622f7a382ecfff",
+      "preimage_sha256": "f8df21e8883e79fa749052fa336012fee8ca7202af4e1b12801a82cdd7c5768a",
+      "postimage_blob": "3896e777056eaa3d5b153a1cbddfff0927a22972",
+      "postimage_sha256": "7b793c2b80318d5f74207c5d10734ad76af931237e3e1d06467d562b374ee751"
+    },
+    {
+      "repository_path": "server/tikhub.py",
+      "runtime_path": "/home/ubuntu/content-api/tikhub.py",
+      "strategy": "production_exact_file",
+      "production_blob": "5086a630f38de88af0ce72134cbf354e1aa58b18",
+      "preimage_blob": "8023977fc79118759c09eb1c6122b39d5aa96015",
+      "preimage_sha256": "223875db6e1f10f15f88f63f3deab8f699c78912d77bb547e31d961074656343",
+      "postimage_blob": "5086a630f38de88af0ce72134cbf354e1aa58b18",
+      "postimage_sha256": "139a3f5c88886172f6fb3196c49a05d351efc1b3336deb78c7406916f8ded4ec"
+    },
+    {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "strategy": "production_copy_idempotency_hunk_on_yuelei_safety_base",
+      "production_blob": "c1f06525c7d73f69104877ecc227e11332058f0d",
+      "preimage_blob": "32ce1cbb762531c8ccfc9ff7057f9b15109d06fa",
+      "preimage_sha256": "bb12e588c76c3f2659782c694a37f2f5d6d6ae0d375df6b508e6f62f984246a0",
+      "postimage_blob": "5abfe3457cba6a7f330ab8c70ef213b02009be2a",
+      "postimage_sha256": "ae50abdac72589b9b079b74e373e8555a8f6ca05571b4c406342a3e004f5a9c2"
+    },
+    {
+      "repository_path": "site/workbench/script.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/script.html",
+      "strategy": "production_director_hunks_on_yuelei_page",
+      "production_blob": "873118b4bfa49f3a2588601d461cd62475841188",
+      "preimage_blob": "06715a917bf934f02d802fafff91a98949e92a9d",
+      "preimage_sha256": "cb425ccfb266e4d1cd05d4413bcab0f6c2e1f772256746862c266f03f569bfc0",
+      "postimage_blob": "e52ee37f259f32c07291bd6505ffac3f7ede1272",
+      "postimage_sha256": "fb63b66486cf0af4ec3eed9992a614eb18b9c1d33832a4b92002dcd749b162a1"
+    }
+  ],
+  "verified_unchanged_dependencies": [
+    {
+      "repository_path": "server/content_domains/egress.py",
+      "blob_in_both_repositories": "bcedb7c52101b95acc238031808100b22385874e"
+    },
+    {
+      "repository_path": "server/content_domains/video_seedance.py",
+      "blob_in_both_repositories": "d8abdf130f2f5f3a995d00fe817d63ff025688e3"
+    }
+  ],
+  "preserved_yuelei_safety_files": [
+    "server/content_domains/script_to_video.py",
+    "server/content_domains/video.py",
+    "server/content_domains/feature_flags.py"
+  ],
+  "post_deploy_checks": [
+    "all five runtime files match their postimage SHA-256 values",
+    "huangque-content.service is active after one restart",
+    "GET /api/gen/health returns HTTP 200",
+    "workbench/script.html contains copy, link breakdown, local upload, image and video idempotency keys",
+    "reverse remake offer remains grok-imagine-video with the existing duration prices",
+    "no paid model request is issued during deployment verification"
+  ],
+  "rollback": {
+    "method": "restore the timestamped five-file backup as one unit and restart huangque-content.service once",
+    "verify": [
+      "all runtime files match their preimage SHA-256 values",
+      "GET /api/gen/health returns HTTP 200"
+    ]
+  }
+}

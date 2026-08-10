@@ -874,6 +874,16 @@ def _smart_charge_key(username, endpoint, idem_key):
     return "job-charge:smart:" + hashlib.sha256(raw).hexdigest()
 
 
+def _durable_charge_key(purpose, username, endpoint, idem_key):
+    """Build a bounded, non-sensitive Auth transaction key for paid retries."""
+    scope = re.sub(r"[^a-z0-9_-]+", "-", str(purpose or "job").lower())[:24]
+    raw = json.dumps(
+        [str(username or ""), str(endpoint or ""), str(idem_key or "")],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    return "job-charge:%s:%s" % (scope or "job", hashlib.sha256(raw).hexdigest())
+
+
 def _smart_charge_deduct(points_domain, attempt, username, cost, reason,
                          transaction_key):
     """Return a confirmed charge result without ever using a second key."""
@@ -2820,7 +2830,8 @@ class H(BaseHTTPRequestHandler):
             still_attempt = None
             still_access = _short_drama_canvas_access(self) if is_still_route else None
             smart_montage_submission = False
-            smart_attempt = None
+            durable_copy_submission = False
+            durable_attempt = None
             try:
                 body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent"} else self._json_body()
                 if is_still_route:
@@ -2877,16 +2888,16 @@ class H(BaseHTTPRequestHandler):
                                 "code": "idempotency_conflict",
                             })
                         if idem_state == "processing":
-                            smart_attempt = _idempotency_attempt(
+                            durable_attempt = _idempotency_attempt(
                                 user["username"], p, idem_key, request_body,
                             )
-                            if smart_attempt is None:
+                            if durable_attempt is None:
                                 return self._send(409, {
                                     "detail": "相同请求正在受理，请稍后查询",
                                     "code": "idempotency_in_progress",
                                     "retry_after_ms": 1000,
                                 })
-                            body = smart_attempt["payload"]
+                            body = durable_attempt["payload"]
                         else:
                             body = script_to_video_domain.prepare_script_to_video_payload(
                                 request_body, user["username"],
@@ -2901,6 +2912,7 @@ class H(BaseHTTPRequestHandler):
                 elif kind == "copy":
                     from . import text as text_domain
                     body = text_domain.validate_copy_payload(body)
+                    durable_copy_submission = body.get("format") != "short_drama"
                 elif kind == "canvas_agent":
                     from . import canvas_agent as canvas_agent_domain
                     body = canvas_agent_domain.validate_payload(
@@ -2921,7 +2933,33 @@ class H(BaseHTTPRequestHandler):
                     request_body = dict(body) if isinstance(body, dict) else body
                 # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
                 if not is_still_route and not smart_montage_submission:
-                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown"} else ""
+                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown", "copy"} else ""
+                durable_copy_submission = bool(durable_copy_submission and idem_key)
+                if durable_copy_submission and idem_key:
+                    idem_state, idem_response = _idempotency_lookup(
+                        user["username"], p, idem_key, request_body,
+                    )
+                    if idem_state == "replay":
+                        replay = dict(idem_response or {})
+                        return self._send(
+                            int(replay.pop("_http_status", 200)), replay,
+                        )
+                    if idem_state == "conflict":
+                        return self._send(409, {
+                            "detail": "同一个 Idempotency-Key 不能用于不同请求",
+                            "code": "idempotency_conflict",
+                        })
+                    if idem_state == "processing":
+                        durable_attempt = _idempotency_attempt(
+                            user["username"], p, idem_key, request_body,
+                        )
+                        if durable_attempt is None:
+                            return self._send(409, {
+                                "detail": "相同请求正在受理，请稍后查询",
+                                "code": "idempotency_in_progress",
+                                "retry_after_ms": 1000,
+                            })
+                        body = durable_attempt["payload"]
                 if kind == "canvas_agent" and not idem_key:
                     raise ValueError("画布 Agent 提交必须提供 Idempotency-Key")
                 if kind == "sora_video" and not idem_key: raise ValueError("Sora 视频提交必须提供 Idempotency-Key")
@@ -2948,7 +2986,11 @@ class H(BaseHTTPRequestHandler):
                     operation_terminal=is_still_route and bool(locals().get("idem_key")))
                 return
             # 停机时仅放行终态/退款恢复和 linked 回放；accepted/charged 必须保留状态等待重试。
-            shutdown_safe_attempt = still_attempt and still_attempt.get("state") in {"refund_pending", "refunded", "failed", "linked"}
+            shutdown_safe_attempt = (
+                still_attempt and still_attempt.get("state") in {
+                    "refund_pending", "refunded", "failed", "linked",
+                }
+            ) or (durable_attempt and durable_attempt.get("state") == "linked")
             if is_shutting_down():
                 if not shutdown_safe_attempt:
                     if still_idem_started and not still_attempt: _idempotency_abort(user["username"], p, idem_key)
@@ -2956,23 +2998,23 @@ class H(BaseHTTPRequestHandler):
                     return self._send(503, {"detail": detail, "code": "shutting_down", "retry_after_ms": 5000})
             # 熔断器 fail-open，检查自身异常不会阻断提交。
             from . import upstream_guard
-            blocked = None if smart_attempt else upstream_guard.exhausted_reason(kind, body)
-            if (not smart_attempt and not blocked and kind == "script_to_video"
+            blocked = None if durable_attempt else upstream_guard.exhausted_reason(kind, body)
+            if (not durable_attempt and not blocked and kind == "script_to_video"
                     and int(body.get("material_generate_count") or 0) > 0):
                 blocked = upstream_guard.exhausted_reason("image", {"provider": "openai", "quality": "standard", "count": 1})
             if blocked and not still_attempt:
                 if still_idem_started: _idempotency_abort(user["username"], p, idem_key)
                 return self._send(503, {"detail": blocked, "code": "upstream_exhausted", "retry_after_ms": 60000})
             is_short_drama = kind == "copy" and isinstance(body, dict) and body.get("format") == "short_drama"
-            if smart_attempt:
-                cost = int(smart_attempt["cost"])
+            if durable_attempt:
+                cost = int(durable_attempt["cost"])
             elif not is_short_drama and not is_still_route:
                 cost = points_domain.cost_of(kind, body)
             else:
                 cost = None
             if kind == "canvas_agent" and body.get("quoted_cost") != cost:
                 return self._send(400, {"detail": "画布 Agent 价格已变化，请重新报价"})
-            if (not smart_attempt and cli_gateway.reject_changed_cost(
+            if (not durable_attempt and cli_gateway.reject_changed_cost(
                     self, cost, AUTH_INTERNAL_TOKEN)): return
             staged_ref_keys, seedance_idem_reserved, seedance_early = video_domain.prepare_xiaole_reference_submission(kind, body, cost, user.get("points"), user["username"], idem_key, p, _submission_lock, lambda: _idempotency_begin(user["username"], p, idem_key, request_body), lambda: _idempotency_abort(user["username"], p, idem_key), lambda: _user_video_submit_limit(kind, body, user["username"], cost), lambda: _user_active_job_count(user["username"]), MAX_USER_ACTIVE_JOBS) if kind == "xiaole_video" else ([], False, None)
             if seedance_early: return self._send(*seedance_early)
@@ -2980,17 +3022,19 @@ class H(BaseHTTPRequestHandler):
                 # 外层停机检查与真正进入付费临界区之间仍有竞态。锁内必须再次检查，
                 # 且要早于 idempotency claim / Auth 扣点 / 本地 job 写入。
                 if is_shutting_down() and not is_still_route:
-                    if seedance_idem_reserved:
-                        video_domain.abort_xiaole_reference_submission(
-                            staged_ref_keys, user["username"], p, idem_key,
-                            lambda: _idempotency_abort(
-                                user["username"], p, idem_key,
-                            ),
-                        )
-                    return self._send(503, {
-                        "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
-                        "code": "shutting_down", "retry_after_ms": 5000,
-                    })
+                    if not (durable_attempt
+                            and durable_attempt.get("state") == "linked"):
+                        if seedance_idem_reserved:
+                            video_domain.abort_xiaole_reference_submission(
+                                staged_ref_keys, user["username"], p, idem_key,
+                                lambda: _idempotency_abort(
+                                    user["username"], p, idem_key,
+                                ),
+                            )
+                        return self._send(503, {
+                            "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
+                            "code": "shutting_down", "retry_after_ms": 5000,
+                        })
                 if (is_still_route and is_shutting_down()
                         and (not still_attempt or still_attempt.get("state") in {"accepted", "charged"})):
                     if still_idem_started and not still_attempt: _idempotency_abort(user["username"], p, idem_key)
@@ -3049,12 +3093,17 @@ class H(BaseHTTPRequestHandler):
                             user["username"], p, idem_key, request_body,
                         )
                         if idem_state == "processing":
-                            smart_attempt = _idempotency_attempt(
+                            durable_attempt = _idempotency_attempt(
                                 user["username"], p, idem_key, request_body,
                             )
-                            if smart_attempt is not None:
-                                body = smart_attempt["payload"]
-                                cost = int(smart_attempt["cost"])
+                            if durable_attempt is not None:
+                                body = durable_attempt["payload"]
+                                cost = int(durable_attempt["cost"])
+                    elif durable_copy_submission:
+                        # The pre-validation lookup above is authoritative.  A
+                        # missing row is created below with its frozen payload;
+                        # a processing row already loaded ``durable_attempt``.
+                        pass
                     else:
                         idem_state, idem_response = (("new", None)
                             if seedance_idem_reserved else _idempotency_begin(
@@ -3062,19 +3111,20 @@ class H(BaseHTTPRequestHandler):
                 if idem_state == "replay": replay = dict(idem_response or {}); return self._send(int(replay.pop("_http_status", 200)), replay)
                 if idem_state == "conflict": return self._send(409, {"detail": "同一个 Idempotency-Key 不能用于不同请求", "code": "idempotency_conflict"})
                 if (idem_state == "processing" and not is_still_route
-                        and (not smart_montage_submission or smart_attempt is None)):
+                        and (not (smart_montage_submission or durable_copy_submission)
+                             or durable_attempt is None)):
                     return self._send(409, {"detail": "相同请求正在受理，请稍后查询", "code": "idempotency_in_progress", "retry_after_ms": 1000})
                 if is_still_route and not still_attempt:
                     try: cost = int(prepared["quoted_cost"]); _short_drama_domain().short_drama_production.check_production_budget(jdb, user["username"], prepared["project"]["id"], cost, still_access)
                     except (LookupError, PermissionError, _short_drama_domain().PointBudgetExceeded, ValueError) as e:
                         _idempotency_abort(user["username"], p, idem_key); _short_drama_domain()._http_error(self, e, operation_terminal=True); return
-                limit_hit = (None if (still_attempt or smart_attempt) else
+                limit_hit = (None if (still_attempt or durable_attempt) else
                              _user_video_submit_limit(kind, body, user["username"], cost))
                 if limit_hit:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     if is_still_route: limit_hit["operation_terminal"] = True
                     return self._send(429, limit_hit)
-                active_jobs = 0 if (still_attempt or smart_attempt) else _user_active_job_count(user["username"])
+                active_jobs = 0 if (still_attempt or durable_attempt) else _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
@@ -3092,40 +3142,47 @@ class H(BaseHTTPRequestHandler):
                             "detail": str(e), "code": "charge_attempt_in_progress",
                             "retry_after_ms": 1000,
                         })
-                smart_linked_recovery = False
-                smart_recovered_job_status = None
+                durable_linked_recovery = False
+                durable_recovered_job_status = None
                 try:
-                    if smart_montage_submission and smart_attempt is None:
-                        script_to_video_domain.materialize_smart_montage_uploads(
-                            body, user["username"],
-                        )
-                        charge_key = _smart_charge_key(
+                    if ((smart_montage_submission or durable_copy_submission)
+                            and durable_attempt is None):
+                        if smart_montage_submission:
+                            script_to_video_domain.materialize_smart_montage_uploads(
+                                body, user["username"],
+                            )
+                        charge_key = (_smart_charge_key(
                             user["username"], p, idem_key,
-                        )
+                        ) if smart_montage_submission else _durable_charge_key(
+                            "copy", user["username"], p, idem_key,
+                        ))
                         attempt_state, attempt_value = _idempotency_begin_attempt(
                             user["username"], p, idem_key, request_body,
                             body, cost, charge_key,
                         )
                         if attempt_state == "replay":
-                            script_to_video_domain.cleanup_smart_montage_uploads(body)
+                            if smart_montage_submission:
+                                script_to_video_domain.cleanup_smart_montage_uploads(body)
                             replay = dict(attempt_value or {})
                             return self._send(
                                 int(replay.pop("_http_status", 200)), replay,
                             )
                         if attempt_state == "conflict":
-                            script_to_video_domain.cleanup_smart_montage_uploads(body)
+                            if smart_montage_submission:
+                                script_to_video_domain.cleanup_smart_montage_uploads(body)
                             return self._send(409, {
                                 "detail": "同一个 Idempotency-Key 不能用于不同请求",
                                 "code": "idempotency_conflict",
                             })
                         if attempt_state == "processing":
-                            # A second process won the claim.  Its frozen files
-                            # are authoritative; discard only our unreferenced
-                            # staging root.
-                            script_to_video_domain.cleanup_smart_montage_uploads(body)
-                        smart_attempt = attempt_value
-                        body = smart_attempt["payload"]
-                        cost = int(smart_attempt["cost"])
+                            # A second process won the claim.  Its frozen payload
+                            # is authoritative; discard only smart-montage files
+                            # materialized by this losing request.
+                            if smart_montage_submission:
+                                script_to_video_domain.cleanup_smart_montage_uploads(body)
+                        durable_attempt = attempt_value
+                        body = durable_attempt["payload"]
+                        cost = int(durable_attempt["cost"])
 
                     still_association = _short_drama_domain().short_drama_production.submitted_job_callback(jdb, username=user["username"], project_id=prepared["project"]["id"], shot_id=prepared["shot"]["id"], idempotency_key=idem_key, quoted_cost=cost, quote_token=prepared["quote_token"], request_hash=prepared["request_hash"], access=still_access) if is_still_route and prepared else None
                     if is_still_route:
@@ -3151,10 +3208,10 @@ class H(BaseHTTPRequestHandler):
                         )
                         still_attempt = _short_drama_domain().short_drama_production.get_charge_attempt(
                             jdb, user["username"], idem_key)
-                    elif (smart_montage_submission
-                          and smart_attempt.get("state") == "linked"):
-                        jid = int(smart_attempt["job_id"])
-                        points_left = int(smart_attempt["points_left"])
+                    elif ((smart_montage_submission or durable_copy_submission)
+                          and durable_attempt.get("state") == "linked"):
+                        jid = int(durable_attempt["job_id"])
+                        points_left = int(durable_attempt["points_left"])
                         with closing(jdb()) as connection:
                             linked_row = connection.execute(
                                 "SELECT kind,username,cost,status FROM jobs WHERE id=?",
@@ -3164,10 +3221,10 @@ class H(BaseHTTPRequestHandler):
                                 or linked_row["username"] != user["username"]
                                 or int(linked_row["cost"] or 0) != int(cost)):
                             raise RuntimeError(
-                                "durable smart-montage job link is invalid"
+                                "durable paid job link is invalid"
                             )
-                        smart_linked_recovery = True
-                        smart_recovered_job_status = str(
+                        durable_linked_recovery = True
+                        durable_recovered_job_status = str(
                             linked_row["status"] or ""
                         )
                     else:
@@ -3178,15 +3235,15 @@ class H(BaseHTTPRequestHandler):
                                 "job-charge:%s:%s:%s" % (user["username"], p, idem_key),
                             )) if staged_ref_keys else None
                         )
-                        if smart_montage_submission:
-                            if smart_attempt.get("state") not in {"frozen", "charged"}:
+                        if smart_montage_submission or durable_copy_submission:
+                            if durable_attempt.get("state") not in {"frozen", "charged"}:
                                 raise RuntimeError(
-                                    "durable smart-montage charge state is invalid"
+                                    "durable paid charge state is invalid"
                                 )
-                            charge_key = smart_attempt["charge_transaction_key"]
-                            if smart_attempt.get("state") == "frozen":
+                            charge_key = durable_attempt["charge_transaction_key"]
+                            if durable_attempt.get("state") == "frozen":
                                 points_left = _smart_charge_deduct(
-                                    points_domain, smart_attempt,
+                                    points_domain, durable_attempt,
                                     user["username"], cost,
                                     "job:%s durable submission" % kind,
                                     charge_key,
@@ -3196,12 +3253,12 @@ class H(BaseHTTPRequestHandler):
                                     user["username"], p, idem_key, charge_key,
                                     points_left,
                                 )
-                                smart_attempt["state"] = "charged"
-                                smart_attempt["points_left"] = points_left
+                                durable_attempt["state"] = "charged"
+                                durable_attempt["points_left"] = points_left
                             else:
-                                points_left = int(smart_attempt["points_left"])
+                                points_left = int(durable_attempt["points_left"])
 
-                            def smart_link_job(connection, job_id):
+                            def durable_link_job(connection, job_id):
                                 submission_idempotency.link_job(
                                     connection, user["username"], p, idem_key,
                                     charge_key, job_id,
@@ -3212,22 +3269,50 @@ class H(BaseHTTPRequestHandler):
                                 jid = jobs_store.create_job_after_charge(
                                     jdb, kind, user["username"], cost, body,
                                     SERVICE_OWNER,
-                                    before_commit=smart_link_job,
+                                    before_commit=durable_link_job,
                                 )
                             except Exception:
-                                # Auth confirmation and the frozen payload are
-                                # already durable.  Do not refund or delete the
-                                # material root here: a retry can safely repeat
-                                # only this local INSERT+link transaction.
-                                return self._send(503, {
-                                    "detail": "任务写入暂时失败，请稍后重试",
-                                    "code": "job_create_retryable",
-                                    "retry_after_ms": 1000,
+                                if smart_montage_submission:
+                                    return self._send(503, {
+                                        "detail": "任务写入暂时失败，请稍后重试",
+                                        "code": "job_create_retryable",
+                                        "retry_after_ms": 1000,
+                                    })
+                                # A concurrent process may have committed the
+                                # single linked job before this transaction lost
+                                # its race.  Reload before reporting a retryable
+                                # local-write failure.
+                                recovered_attempt = _idempotency_attempt(
+                                    user["username"], p, idem_key, request_body,
+                                )
+                                if (not recovered_attempt
+                                        or recovered_attempt.get("state") != "linked"):
+                                    return self._send(503, {
+                                        "detail": "任务写入暂时失败，请稍后重试",
+                                        "code": "job_create_retryable",
+                                        "retry_after_ms": 1000,
+                                    })
+                                durable_attempt = recovered_attempt
+                                jid = int(durable_attempt["job_id"])
+                                points_left = int(durable_attempt["points_left"])
+                                with closing(jdb()) as connection:
+                                    linked_row = connection.execute(
+                                        "SELECT kind,username,cost,status FROM jobs WHERE id=?",
+                                        (jid,),
+                                    ).fetchone()
+                                if (not linked_row or linked_row["kind"] != kind
+                                        or linked_row["username"] != user["username"]
+                                        or int(linked_row["cost"] or 0) != int(cost)):
+                                    raise RuntimeError("durable paid job link is invalid")
+                                durable_linked_recovery = True
+                                durable_recovered_job_status = str(
+                                    linked_row["status"] or ""
+                                )
+                            else:
+                                durable_attempt.update({
+                                    "state": "linked", "job_id": int(jid),
+                                    "points_left": int(points_left),
                                 })
-                            smart_attempt.update({
-                                "state": "linked", "job_id": int(jid),
-                                "points_left": int(points_left),
-                            })
                         else:
                             jid, points_left = jobs_store.create_paid_job(
                                 jdb, points_domain.deduct_points,
@@ -3243,6 +3328,8 @@ class H(BaseHTTPRequestHandler):
                     if smart_montage_submission and e.status in (402, 403):
                         script_to_video_domain.cleanup_smart_montage_uploads(body)
                         _idempotency_abort(user["username"], p, idem_key)
+                    if durable_copy_submission and e.status in (402, 403):
+                        _idempotency_abort(user["username"], p, idem_key)
                     if staged_ref_keys and e.status in (402, 403): video_domain.cleanup_staged_seedance_references(staged_ref_keys); video_domain.release_seedance_staging_attempt(user["username"], p, idem_key)
                     if is_still_route and e.status == 402:
                         rejected = {
@@ -3255,7 +3342,7 @@ class H(BaseHTTPRequestHandler):
                         public_rejected = dict(rejected)
                         public_rejected.pop("_http_status", None)
                         return self._send(402, public_rejected)
-                    elif (not smart_montage_submission
+                    elif (not (smart_montage_submission or durable_copy_submission)
                           and not ((is_still_route or staged_ref_keys)
                                    and e.status == 502)):
                         _idempotency_abort(user["username"], p, idem_key)
@@ -3336,8 +3423,8 @@ class H(BaseHTTPRequestHandler):
                         return self._send(503, _short_drama_domain().short_drama_production.refund_pending_response())
                     return self._send(500, failed_response)
                 recover_pending_job = (
-                    not smart_linked_recovery
-                    or smart_recovered_job_status == "pending"
+                    not durable_linked_recovery
+                    or durable_recovered_job_status == "pending"
                 )
                 if (recover_pending_job
                         and kind in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"}):
@@ -3391,7 +3478,7 @@ class H(BaseHTTPRequestHandler):
                     if kind in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"}:
                         video_domain.update_video_asset_phase(jid, "failed", status="failed", error="任务队列已满，请稍后再试")
                     queue_response = {"detail": "任务队列已满，请稍后再试", "code": "queue_full", "retry_after_ms": 4000, "need": cost}
-                    if smart_montage_submission:
+                    if smart_montage_submission or durable_copy_submission:
                         tracking_response = _compensation_tracking_response(
                             jid, cost, queue_response["detail"],
                             points_left=points_left,
@@ -3418,6 +3505,35 @@ class H(BaseHTTPRequestHandler):
                     else:
                         _idempotency_complete(user["username"], p, idem_key, dict(queue_response, _http_status=429))
                     return self._send(429, queue_response)
+            if (durable_linked_recovery
+                    and durable_recovered_job_status == "error"):
+                with closing(jdb()) as connection:
+                    failed_row = connection.execute(
+                        "SELECT error FROM jobs WHERE id=?", (jid,),
+                    ).fetchone()
+                failed_detail = (
+                    str(failed_row["error"] or "任务创建失败，退款正在自动确认")
+                    if failed_row else "任务创建失败，退款正在自动确认"
+                )
+                tracking_response = _compensation_tracking_response(
+                    jid, cost, failed_detail, points_left=points_left,
+                )
+                if tracking_response["refund_state"] != "refunded":
+                    _idempotency_complete(
+                        user["username"], p, idem_key,
+                        dict(tracking_response, _http_status=202),
+                    )
+                    return self._send(202, tracking_response)
+                terminal_response = dict(
+                    tracking_response,
+                    code="submission_failed",
+                    operation_terminal=True,
+                )
+                _idempotency_complete(
+                    user["username"], p, idem_key,
+                    dict(terminal_response, _http_status=500),
+                )
+                return self._send(500, terminal_response)
             response = {"job_id": jid, "cost": cost, "points_left": points_left}
             if kind == "script_to_video" and body.get("cost_breakdown"):
                 response["cost_breakdown"] = body["cost_breakdown"]

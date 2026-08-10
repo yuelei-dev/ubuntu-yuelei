@@ -44,6 +44,16 @@ function test(name, fn) {
   }
 }
 
+const asyncTests = [];
+function asyncTest(name, fn) {
+  asyncTests.push(Promise.resolve().then(fn).then(() => {
+    process.stdout.write(`PASS ${name}\n`);
+  }).catch((error) => {
+    process.stderr.write(`FAIL ${name}\n${error.stack}\n`);
+    process.exitCode = 1;
+  }));
+}
+
 // ---- 假 DOM:编辑态分镜卡 ----
 function fakeCard(dur, scene, line) {
   return {
@@ -186,8 +196,176 @@ test('单张超 5MB 拒绝且不占用名额', () => {
   assert.ok(env.toasts.some((m) => m.includes('不能超过 5MB')));
 });
 
+// ---- 本地图片/视频反推:真实页面幂等键生命周期 ----
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+    has: (key) => values.has(key),
+  };
+}
+
+function localUploadHarness(responses, pointChecks = []) {
+  const env = {
+    storage: memoryStorage(), pendingMemory: {}, calls: [], failures: [], polls: [],
+    responses: responses.slice(), pointChecks: pointChecks.slice(), pointCheckCount: 0,
+  };
+  env.pendingSubmission = load('_pendingSubmission', {
+    sessionStorage: env.storage,
+    _pendingSubmissionMemory: env.pendingMemory,
+  });
+  env.confirmSubmission = load('_confirmSubmission', {
+    sessionStorage: env.storage,
+    _pendingSubmissionMemory: env.pendingMemory,
+  });
+  env.readApiResponse = load('_readApiResponse', {});
+  env.fetch = (url, options) => {
+    env.calls.push({ url, options });
+    const next = env.responses.shift();
+    if (next instanceof Error) return Promise.reject(next);
+    assert.ok(next, '测试必须为每次 fetch 提供响应');
+    return Promise.resolve({
+      status: next.status,
+      text: () => Promise.resolve(next.text),
+    });
+  };
+  env.submit = load('_submitLocalReverse', {
+    _localFail: (message) => env.failures.push(message),
+    _videoDuration: () => Promise.resolve(10),
+    _localPointsCheck: () => {
+      env.pointCheckCount++;
+      const next = env.pointChecks.length ? env.pointChecks.shift() : null;
+      return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
+    },
+    _localBusy: () => {},
+    bdProgress: { style: {} },
+    setBdPhase: () => {},
+    bdLocalStatus: { textContent: '', style: {} },
+    _pendingSubmission: env.pendingSubmission,
+    fetch: env.fetch,
+    _readApiResponse: env.readApiResponse,
+    _confirmSubmission: env.confirmSubmission,
+    window: {},
+    HQ: {},
+    BREAKDOWN_POINTS: 20,
+    _pollLocalReverse: (jobId) => env.polls.push(jobId),
+  });
+  env.file = {
+    name: 'sample.mp4', type: 'video/mp4', size: 4096, lastModified: 12345,
+  };
+  env.key = (index) => env.calls[index].options.headers['Idempotency-Key'];
+  env.storageKey = 'hq_pending_submit_script-breakdown-local-video';
+  return env;
+}
+
+asyncTest('本地上传正常成功发送幂等头并清理凭证；再次明确提交使用新 key', async () => {
+  const env = localUploadHarness([
+    { status: 200, text: '{"job_id":"job-1"}' },
+    { status: 200, text: '{"job_id":"job-2"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.polls[0], 'job-1');
+  assert.ok(env.key(0));
+  assert.equal(env.storage.has(env.storageKey), false);
+  await env.submit('video', env.file, {});
+  assert.equal(env.polls[1], 'job-2');
+  assert.notEqual(env.key(1), env.key(0), '成功后的新任务必须生成新 key');
+});
+
+asyncTest('本地上传网络失败和响应丢失后重试复用同一 key', async () => {
+  const env = localUploadHarness([
+    new Error('Failed to fetch'),
+    { status: 200, text: '{"job_id":"job-recovered"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.storage.has(env.storageKey), true);
+  await env.submit('video', env.file, {});
+  assert.equal(env.key(1), env.key(0));
+  assert.equal(env.polls[0], 'job-recovered');
+});
+
+asyncTest('已扣点响应丢失后即使余额不足，图片和视频仍以原 key 恢复', async () => {
+  for (const mediaType of ['image', 'video']) {
+    const env = localUploadHarness([
+      new Error('response lost after provider accepted request'),
+      { status: 200, text: `{"job_id":"${mediaType}-recovered"}` },
+    ], [null, new Error('余额不足')]);
+    const file = mediaType === 'image'
+      ? { name: 'sample.png', type: 'image/png', size: 1024, lastModified: 45678 }
+      : env.file;
+    await env.submit(mediaType, file, {});
+    const firstKey = env.key(0);
+    assert.equal(env.pointCheckCount, 1, '新意图必须进行余额预检');
+    await env.submit(mediaType, file, {});
+    assert.equal(env.calls.length, 2, '恢复请求必须到达后端');
+    assert.equal(env.key(1), firstKey, '恢复请求必须重放同一 key');
+    assert.equal(env.pointCheckCount, 1, '已有 pending 不得再次被低余额预检阻断');
+    assert.equal(env.polls[0], `${mediaType}-recovered`);
+  }
+});
+
+asyncTest('本地上传新意图仍执行余额预检且不足时不发送请求', async () => {
+  const env = localUploadHarness([], [new Error('余额不足')]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.pointCheckCount, 1);
+  assert.equal(env.calls.length, 0);
+  assert.equal(env.storage.has(env.storageKey), false, '未发出的新意图不得留下可绕过预检的 pending key');
+});
+
+asyncTest('本地上传 200 截断 JSON 保留 key 并允许安全重试', async () => {
+  const env = localUploadHarness([
+    { status: 200, text: '{"job_id":' },
+    { status: 200, text: '{"job_id":"job-after-truncated"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.storage.has(env.storageKey), true);
+  await env.submit('video', env.file, {});
+  assert.equal(env.key(1), env.key(0));
+  assert.equal(env.polls[0], 'job-after-truncated');
+});
+
+asyncTest('本地上传 202 或处理中响应保留 key', async () => {
+  const env = localUploadHarness([
+    { status: 202, text: '{"code":"idempotency_in_progress"}' },
+    { status: 200, text: '{"job_id":"job-after-202"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.storage.has(env.storageKey), true);
+  assert.ok(env.failures.some((message) => message.includes('同一凭证')));
+  await env.submit('video', env.file, {});
+  assert.equal(env.key(1), env.key(0));
+});
+
+asyncTest('本地上传同 key 文件冲突属于终态并在下次生成新 key', async () => {
+  const env = localUploadHarness([
+    { status: 409, text: '{"code":"idempotency_conflict","detail":"文件内容已变化"}' },
+    { status: 200, text: '{"job_id":"job-new-intent"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  const conflictKey = env.key(0);
+  assert.equal(env.storage.has(env.storageKey), false);
+  await env.submit('video', env.file, {});
+  assert.notEqual(env.key(1), conflictKey);
+  assert.equal(env.polls[0], 'job-new-intent');
+});
+
+asyncTest('本地上传明确终态 4xx 清理 pending key', async () => {
+  const env = localUploadHarness([
+    { status: 422, text: '{"detail":"不支持的文件"}' },
+  ]);
+  await env.submit('video', env.file, {});
+  assert.equal(env.storage.has(env.storageKey), false);
+  assert.ok(env.failures.includes('不支持的文件'));
+});
+
 test('inline application script remains valid JavaScript', () => {
   const scripts = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)];
   assert.ok(scripts.length > 0, 'script.html must contain an inline script');
   for (const script of scripts) new Function(script[1]);
+});
+
+Promise.all(asyncTests).then(() => {
+  if (process.exitCode) process.exit(process.exitCode);
 });
