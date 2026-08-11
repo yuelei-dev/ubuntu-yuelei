@@ -17,6 +17,8 @@
   const conserveResources = saveData || lowMemory;
   const allowedImages = /\.(?:avif|gif|jpe?g|png|webp)$/i;
   const allowedVideos = /\.(?:m4v|mov|mp4|webm)$/i;
+  const AUTO_ADVANCE_DELAY = 2600;
+  const AUTO_ADVANCE_IMPULSE = 0.0044;
   const DRAG_SENSITIVITY = 0.0048;
   const FRAME_INTERVAL = conserveResources ? 32 : 8;
   const VISIBLE_RANGE = conserveResources ? 4.2 : 5.2;
@@ -46,6 +48,7 @@
     lastRenderAt: 0,
     renderPending: false,
     rafId: 0,
+    autoTimerId: 0,
     previewTrigger: null,
     failedCount: 0
   };
@@ -88,6 +91,7 @@
   }
 
   function setFallbackState(message) {
+    clearAutoAdvance();
     state.ready = false;
     state.velocity = 0;
     state.tracking = false;
@@ -420,6 +424,7 @@
       focusTarget?.focus({ preventScroll: true });
     }
     syncVideoPlayback();
+    scheduleAutoAdvance();
   }
 
   function closePreview() {
@@ -444,6 +449,7 @@
 
   function openPreview(item, trigger) {
     if (!isInteractive() || !item) return;
+    clearAutoAdvance();
     state.previewTrigger = trigger?.closest?.('[data-gallery-index]') || state.cards[state.activeIndex]?.card || null;
     previewStage.replaceChildren();
     previewTitle.textContent = item.alt;
@@ -475,6 +481,7 @@
 
   function beginDrag(event) {
     if (!isInteractive() || event.button !== 0) return;
+    clearAutoAdvance();
     state.tracking = true;
     state.dragging = false;
     state.moved = false;
@@ -521,6 +528,7 @@
     if (!wasTracking) return;
     if (state.moved) state.suppressClickUntil = performance.now() + 380;
     ensureAnimationFrame();
+    if (Math.abs(state.velocity) <= 0.00002) scheduleAutoAdvance();
   }
 
   root.addEventListener('pointerdown', beginDrag);
@@ -533,6 +541,7 @@
 
   root.addEventListener('wheel', event => {
     if (!isInteractive() || preview.open || (Math.abs(event.deltaX) <= Math.abs(event.deltaY) && !event.shiftKey)) return;
+    clearAutoAdvance();
     const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
     state.position += delta * 0.0016;
     state.velocity = delta * 0.000035;
@@ -556,10 +565,12 @@
     if (!isInteractive()) return;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
+      clearAutoAdvance();
       state.velocity = 0;
       state.position += event.key === 'ArrowRight' ? 1 : -1;
       render(true);
       focusActiveCard();
+      scheduleAutoAdvance();
     } else if ((event.key === 'Enter' || event.key === ' ') && state.items[state.activeIndex]) {
       event.preventDefault();
       openPreview(state.items[state.activeIndex], state.cards[state.activeIndex]?.card);
@@ -567,6 +578,8 @@
   }
 
   root.addEventListener('keydown', handleGalleryKeydown);
+  root.addEventListener('focusin', clearAutoAdvance);
+  root.addEventListener('focusout', () => setTimeout(scheduleAutoAdvance, 0));
 
   previewClose.addEventListener('click', closePreview);
   preview.addEventListener('click', event => {
@@ -579,13 +592,45 @@
     state.rafId = 0;
   }
 
+  function autoAdvanceAllowed() {
+    return isInteractive()
+      && state.inViewport
+      && !state.tracking
+      && !root.matches(':focus-within')
+      && !preview.open
+      && document.visibilityState === 'visible'
+      && !reducedMotion.matches
+      && !conserveResources;
+  }
+
+  function clearAutoAdvance() {
+    if (state.autoTimerId) clearTimeout(state.autoTimerId);
+    state.autoTimerId = 0;
+  }
+
+  function scheduleAutoAdvance() {
+    clearAutoAdvance();
+    if (!autoAdvanceAllowed() || Math.abs(state.velocity) > 0.00002) return;
+    state.autoTimerId = setTimeout(() => {
+      state.autoTimerId = 0;
+      if (!autoAdvanceAllowed() || Math.abs(state.velocity) > 0.00002) {
+        scheduleAutoAdvance();
+        return;
+      }
+      state.velocity = AUTO_ADVANCE_IMPULSE;
+      ensureAnimationFrame();
+    }, AUTO_ADVANCE_DELAY);
+  }
+
   function handleDocumentVisibility() {
     if (document.visibilityState !== 'visible') {
+      clearAutoAdvance();
       state.velocity = 0;
       state.renderPending = false;
       stopAnimationFrame();
     } else {
       ensureAnimationFrame();
+      scheduleAutoAdvance();
     }
     syncVideoPlayback();
   }
@@ -600,12 +645,14 @@
   const visibilityObserver = new IntersectionObserver(entries => {
     state.inViewport = Boolean(entries[0]?.isIntersecting);
     if (!state.inViewport) {
+      clearAutoAdvance();
       state.velocity = 0;
       state.renderPending = false;
       stopAnimationFrame();
     } else if (isInteractive()) {
       render(true);
       ensureAnimationFrame();
+      scheduleAutoAdvance();
     }
     syncCardMediaSources();
     syncVideoPlayback();
@@ -615,11 +662,15 @@
   function advanceMotion(elapsed) {
     if (Math.abs(state.velocity) <= 0.00002) {
       state.velocity = 0;
+      scheduleAutoAdvance();
       return false;
     }
     state.position += state.velocity * elapsed;
     state.velocity *= Math.pow(0.93, elapsed / 16.67);
-    if (Math.abs(state.velocity) <= 0.00002) state.velocity = 0;
+    if (Math.abs(state.velocity) <= 0.00002) {
+      state.velocity = 0;
+      scheduleAutoAdvance();
+    }
     return true;
   }
 
@@ -671,6 +722,7 @@
       root.setAttribute('aria-roledescription', '环形画廊');
       setInstructionsHidden(false);
       render(true);
+      scheduleAutoAdvance();
     } catch (_) {
       setFallbackState('动态画廊暂不可用，已显示静态创作样片。');
     }
@@ -689,10 +741,12 @@
     if (isInteractive()) render(true);
   });
   reducedMotion.addEventListener?.('change', () => {
+    clearAutoAdvance();
     state.velocity = 0;
     state.renderPending = false;
     stopAnimationFrame();
     if (isInteractive()) render(true);
     syncVideoPlayback();
+    scheduleAutoAdvance();
   });
 })();
