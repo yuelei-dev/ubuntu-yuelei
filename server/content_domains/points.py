@@ -137,6 +137,14 @@ def cost_of(kind, body):
         seconds = max(4, min(12, seconds))
         return rate * seconds
     if kind == "script_to_video":
+        if str(body.get("pipeline") or "").strip().lower() == "digital_human_oneclick_compose":
+            body["cost_breakdown"] = {
+                "local_compose": 0,
+                "material_generate_count": 0,
+                "material_reused_count": 6,
+                "total": 0,
+            }
+            return 0
         if str(body.get("pipeline") or "").strip().lower() == "smart_montage":
             material_plan = body.get("material_plan")
             if isinstance(material_plan, list):

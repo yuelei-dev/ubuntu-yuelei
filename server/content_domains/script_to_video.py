@@ -486,6 +486,9 @@ def prepare_script_to_video_payload(payload, username):
     # Runtime recovery state is server-owned.  Never accept a client supplied
     # frozen path, provider id, or lifecycle phase.
     body.pop("_script_to_video_state", None)
+    from . import digital_human_oneclick
+    if str(body.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+        return digital_human_oneclick.prepare_compose_payload(body, username)
     if str(body.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
         from .script_video_montage import plan_digest, plan_script_video
 
@@ -777,6 +780,14 @@ def materialize_smart_montage_uploads(payload, username):
 def gen_script_to_video(payload):
     """由 run_job 调用，走标准 job 生命周期。"""
     username = (payload.get("_username") or "").strip()
+    from . import digital_human_oneclick
+    if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+        job_id = int(payload.get("_job_id") or 0)
+
+        def persist(phase, **fields):
+            return _persist_job_state(job_id, username, phase, **fields)
+
+        return digital_human_oneclick.compose(payload, persist_state=persist)
     if str(payload.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
         material_plan = payload.get("material_plan") or []
         has_uploaded_material = any(
@@ -800,7 +811,9 @@ def gen_script_to_video(payload):
 def dispatch_http(handler, method, verify_token, must_change_password):
     """Authenticated smart-montage planning and private material upload."""
     path = handler.path.split("?", 1)[0]
-    if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH}:
+    from . import digital_human_oneclick
+    if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH,
+                    digital_human_oneclick.PLAN_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -808,6 +821,15 @@ def dispatch_http(handler, method, verify_token, must_change_password):
         return True
     if must_change_password(user):
         handler._send(403, {"detail": "请先修改初始密码"})
+        return True
+    if path == digital_human_oneclick.PLAN_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_oneclick.plan_response(handler._json_body_strict()))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code})
         return True
     if path == SMART_MONTAGE_MATERIAL_UPLOAD_PATH:
         from . import cli_uploads, miniprogram_security
@@ -1625,6 +1647,13 @@ def _cleanup_material_root(job_id, state):
 
 
 def cleanup_unsubmitted_materials(job_id):
+    try:
+        payload, _ = _load_job_payload(job_id)
+        from . import digital_human_oneclick
+        if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+            return
+    except Exception:
+        pass
     state = get_recovery_state(job_id)
     if str(state.get("phase") or "") in {"preparing_materials", "materials_ready"}:
         _cleanup_material_root(job_id, state)
@@ -1836,6 +1865,10 @@ def _provider_file_exists(result):
 
 def recover_paid_job_error(job_id, error, requeue):
     """Keep a possibly billed script job recoverable instead of refunding it."""
+    payload, _ = _load_job_payload(job_id)
+    from . import digital_human_oneclick
+    if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+        return False
     state = get_recovery_state(job_id)
     phase = str(state.get("phase") or "")
     provider_id = str(state.get("provider_video_id") or "").strip()
@@ -1880,6 +1913,11 @@ def reclaim_orphaned_jobs(requeue, logger=print):
             continue
         if not isinstance(payload, dict):
             hold(row, "invalid-payload")
+            continue
+        from . import digital_human_oneclick
+        if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+            if requeue(row["id"]):
+                handled += 1
             continue
         raw_state = payload.get("_script_to_video_state")
         if not isinstance(raw_state, dict):
