@@ -1836,6 +1836,10 @@ def _provider_file_exists(result):
 
 def recover_paid_job_error(job_id, error, requeue):
     """Keep a possibly billed script job recoverable instead of refunding it."""
+    from . import video as video_domain
+
+    if isinstance(error, video_domain.HeyGenProviderFailed):
+        return False
     state = get_recovery_state(job_id)
     phase = str(state.get("phase") or "")
     provider_id = str(state.get("provider_video_id") or "").strip()
@@ -2059,7 +2063,7 @@ def _gen_talking(username, scenes, payload):
                 "ratio": payload.get("ratio") or "9:16",
                 "motion": payload.get("motion") or "medium",
                 "motion_prompt": payload.get("motion_prompt") or "",
-                "subtitle": False,
+                "subtitle": False if material_plan else want_subtitle,
             }
         try:
             result = (
@@ -2072,6 +2076,8 @@ def _gen_talking(username, scenes, payload):
                     provider_video_id=result.get("provider_video_id"),
                     provider_result=result,
                 )
+        except video_domain.HeyGenProviderFailed:
+            raise
         except BaseException as exc:
             latest = get_recovery_state(job_id) if runtime_managed else {}
             if runtime_managed and isinstance(exc, video_domain.HeyGenMediaInputError):
@@ -2091,6 +2097,8 @@ def _gen_talking(username, scenes, payload):
             provider_video_id=(result.get("provider_video_id") or result.get("video_id")),
             provider_result=result,
         )
+    result.setdefault("provider_video_file", result.get("video_file"))
+    result.setdefault("provider_video_url", result.get("video_url"))
     try:
         if materials:
             composed = _compose_materials(result.get("video_file"), scenes, materials)

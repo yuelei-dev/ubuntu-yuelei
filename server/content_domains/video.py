@@ -3894,6 +3894,10 @@ class HeyGenBilledError(RuntimeError):
     """
 
 
+class HeyGenProviderFailed(HeyGenBilledError):
+    """HeyGen 已明确返回失败终态；可以终止本次任务并按站内规则退款。"""
+
+
 # 电影化身走 HeyGen 时的轮询死线 —— 20 分钟（kongli 2026-07-14，原来跟全站的 15 分钟走）。
 #
 # 数就定在 core.CINEMATIC_GEN_DEADLINE，这里【只是引用】—— reaper 对 cinematic 的宽限
@@ -3943,7 +3947,10 @@ def _heygen_poll_video(video_id, direct=False, deadline_s=None, mcp=False):
             provider_error = str(info.get("failure_message") or info.get("error") or info.get("failure_code") or "").strip()
             if any(word in provider_error.lower() for word in ("moderation", "flagged", "content policy", "real person")):
                 provider_error = "内容审核未通过，请更换人物图片、参考视频或提示词"
-            raise RuntimeError("HeyGen视频生成失败: %s" % (provider_error[:160] or "上游未返回失败原因"))
+            raise HeyGenProviderFailed(
+                "HeyGen视频生成失败: %s"
+                % (provider_error[:160] or "上游未返回失败原因")
+            )
         time.sleep(HEYGEN_POLL_INTERVAL)
     raise TimeoutError("HeyGen视频生成超时")
 
@@ -4118,6 +4125,7 @@ def generate_heygen_video_recoverable(
     provider = str(state.get("provider") or "").strip()
     image_asset_id = str(state.get("image_asset_id") or "").strip()
     audio_asset_id = str(state.get("audio_asset_id") or "").strip()
+    creating = not provider_id
     if provider_id:
         if provider not in {"heygen_direct", "heygen_relay"}:
             raise RuntimeError("已受理的口播任务缺少供应商通道")
@@ -4134,38 +4142,43 @@ def generate_heygen_video_recoverable(
         audio_asset_id = _heygen_retry_net(
             lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播传音",
         )
-        _lifecycle_notify(lifecycle, "on_submitting", {
-            "provider": provider,
-            "image_asset_id": image_asset_id,
-            "audio_asset_id": audio_asset_id,
-        })
-        # Do not retry or cross-route here.  A connection loss after this POST
-        # cannot prove whether the provider accepted and billed the task.
-        try:
-            provider_id = _heygen_create_video(
-                image_asset_id, audio_asset_id, resolution, ratio, motion,
-                direct=direct,
-            )
-        except Exception as exc:
-            if _definitive_heygen_create_rejection(exc):
-                _lifecycle_notify(lifecycle, "on_rejected", {
-                    "provider": provider,
-                })
-            raise
-        try:
-            _lifecycle_notify(lifecycle, "on_submitted", {
+
+    with heygen_slot("口播恢复" if creating else "口播恢复轮询"):
+        if creating:
+            _lifecycle_notify(lifecycle, "on_submitting", {
                 "provider": provider,
-                "provider_video_id": provider_id,
                 "image_asset_id": image_asset_id,
                 "audio_asset_id": audio_asset_id,
             })
-        except BaseException as exc:
-            raise HeyGenBilledError(
-                "口播已受理但恢复编号落盘失败(video_id=%s): %s"
-                % (provider_id, str(exc)[:160])
-            ) from exc
-
-    with heygen_slot("口播恢复轮询"):
+            # Only an explicit 429 is documented as rejected before billing and
+            # therefore safe to retry. Network/5xx/unknown outcomes still pass
+            # through after one POST and must never switch route or re-submit.
+            try:
+                provider_id = _heygen_retry_429(
+                    lambda: _heygen_create_video(
+                        image_asset_id, audio_asset_id, resolution, ratio, motion,
+                        direct=direct,
+                    ),
+                    "口播恢复提交",
+                )
+            except Exception as exc:
+                if _definitive_heygen_create_rejection(exc):
+                    _lifecycle_notify(lifecycle, "on_rejected", {
+                        "provider": provider,
+                    })
+                raise
+            try:
+                _lifecycle_notify(lifecycle, "on_submitted", {
+                    "provider": provider,
+                    "provider_video_id": provider_id,
+                    "image_asset_id": image_asset_id,
+                    "audio_asset_id": audio_asset_id,
+                })
+            except BaseException as exc:
+                raise HeyGenBilledError(
+                    "口播已受理但恢复编号落盘失败(video_id=%s): %s"
+                    % (provider_id, str(exc)[:160])
+                ) from exc
         try:
             info = _heygen_poll_video(
                 provider_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
@@ -4175,6 +4188,8 @@ def generate_heygen_video_recoverable(
                 if direct else _download_video_file(info["video_url"], "heygen")
             )
             cover = _extract_first_frame_cover(video_file)
+        except HeyGenProviderFailed:
+            raise
         except Exception as exc:
             raise HeyGenBilledError(
                 "口播已提交 HeyGen(video_id=%s，已计费)，后续失败: %s"

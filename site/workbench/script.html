@@ -2026,7 +2026,10 @@
               +'<div style="font-size:40px;margin-bottom:10px;">✅</div>'
               +'<div style="font-size:15px;font-weight:700;color:#eaf1fa;margin-bottom:8px;">生成完成！</div>'
               +(videoUrl?'<video src="'+esc(videoUrl)+'" controls style="max-width:100%;max-height:260px;border-radius:10px;cursor:zoom-in;"></video>':'')
-              +'<div style="margin-top:14px;"><a href="assets.html" class="sc-btn" style="color:#e7b24c;">📁 查看资产库</a></div></div>';
+              +'<div style="margin-top:14px;display:flex;gap:9px;justify-content:center;">'
+              +'<a href="assets.html" class="sc-btn" style="color:#e7b24c;">📁 查看资产库</a>'
+              +(videoUrl?'<a href="'+esc(videoUrl)+'" download class="sc-btn">⬇ 下载最终成片</a>':'')
+              +'</div></div>';
             if(window.HQ&&window.HQ.refreshPoints) window.HQ.refreshPoints();
             loadHistory();
             return;
@@ -2115,7 +2118,9 @@
                 +(vurl?'<div style="margin-bottom:12px;"><video src="'+esc(vurl)+'" controls style="max-width:100%;max-height:260px;border-radius:10px;cursor:zoom-in;"></video></div>':'')
                 +'<div style="display:flex;gap:9px;justify-content:center;">'
                 +'<a href="assets.html" class="sc-btn" style="color:#e7b24c;">📁 查看资产库</a>'
-                +'<a href="video.html" class="sc-btn">📹 去视频页</a></div></div>';
+                +'<a href="video.html" class="sc-btn">📹 去视频页</a>'
+                +(vurl?'<a href="'+esc(vurl)+'" download class="sc-btn">⬇ 下载最终成片</a>':'')
+                +'</div></div>';
               // 成功后保留分镜列表：先重渲染分镜，再把成功横幅插到顶部
               if(currentMode==='breakdown'&&lastBreakdown){ renderBreakdown(lastBreakdown); scenes.insertAdjacentHTML('afterbegin',successHtml); }
               else if(lastScenes.length){ render({scenes:lastScenes},(topic&&topic.value)||'',lastStyle||'口播',pick('segDur','.sc-opt','30s')); scenes.insertAdjacentHTML('afterbegin',successHtml); }

@@ -526,6 +526,53 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         create.assert_not_called()
         self.assertEqual(len(creates), 1)
 
+    def test_provider_create_uses_shared_slot_and_only_429_retry_wrapper(self):
+        events = []
+        self._image("image/a.png")
+        self._audio("audio/a.mp3", "mp3")
+
+        class Slot:
+            def __enter__(self):
+                events.append("slot-enter")
+
+            def __exit__(self, *_args):
+                events.append("slot-exit")
+
+        def retry_429(fn, label):
+            events.append(("retry-429", label))
+            return fn()
+
+        def create(*_args, **_kwargs):
+            self.assertIn("slot-enter", events)
+            self.assertNotIn("slot-exit", events)
+            events.append("create")
+            return "vid-1"
+
+        lifecycle = {
+            "state": {},
+            "on_submitting": lambda _data: events.append("submitting"),
+            "on_submitted": lambda _data: events.append("submitted"),
+            "on_completed": lambda _data: events.append("completed"),
+        }
+        with mock.patch.object(video, "_HEYGEN_DIRECT", False), \
+             mock.patch.object(video, "_upload_heygen_image_asset", return_value="img"), \
+             mock.patch.object(video, "_heygen_upload_asset", return_value="aud"), \
+             mock.patch.object(video, "heygen_slot", return_value=Slot()), \
+             mock.patch.object(video, "_heygen_retry_429", side_effect=retry_429) as retry, \
+             mock.patch.object(video, "_heygen_create_video", side_effect=create) as create_call, \
+             mock.patch.object(video, "_heygen_poll_video", return_value={"video_url": "https://example/video"}), \
+             mock.patch.object(video, "_download_video_file", return_value="video/base.mp4"), \
+             mock.patch.object(video, "_extract_first_frame_cover", return_value=None):
+            result = video.generate_heygen_video_recoverable(
+                "image/a.png", "audio/a.mp3", "720p", "9:16", "medium", lifecycle,
+            )
+
+        self.assertEqual(result["video_id"], "vid-1")
+        create_call.assert_called_once()
+        retry.assert_called_once()
+        self.assertLess(events.index("slot-enter"), events.index("create"))
+        self.assertLess(events.index("create"), events.index("slot-exit"))
+
     def test_definitive_provider_rejection_clears_ambiguous_phase_without_fallback(self):
         self._image("image/a.png")
         self._audio("audio/a.mp3", "mp3")
@@ -758,6 +805,36 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
             else:
                 core.HANDLERS["script_to_video"] = original
         self.assertEqual(refunds, [job_id])
+
+    def test_explicit_provider_failed_terminal_refunds_once_without_requeue(self):
+        job_id = self._job({"_script_to_video_state": {
+            "phase": "provider_submitted",
+            "provider": "heygen_relay",
+            "provider_video_id": "vid-failed",
+        }}, status="pending")
+        refunds = []
+        original = core.HANDLERS.get("script_to_video")
+        core.HANDLERS["script_to_video"] = lambda _payload: (_ for _ in ()).throw(
+            video.HeyGenProviderFailed("HeyGen视频生成失败: provider rejected")
+        )
+        try:
+            with mock.patch.object(core, "_start_job_heartbeat", return_value=lambda: None), \
+                 mock.patch.object(core, "_requeue_running_job") as requeue, \
+                 mock.patch.object(core, "_fail_job_and_schedule_refund", side_effect=lambda *a, **k: refunds.append(a[0]) or True), \
+                 mock.patch.object(core, "_mark_video_asset_failed"), \
+                 mock.patch.object(core, "_recover_pending_jobs"):
+                core.run_job(job_id)
+                with sqlite3.connect(core.JOB_DB) as conn:
+                    conn.execute("UPDATE jobs SET status='error' WHERE id=?", (job_id,))
+                core.run_job(job_id)
+        finally:
+            if original is None:
+                core.HANDLERS.pop("script_to_video", None)
+            else:
+                core.HANDLERS["script_to_video"] = original
+
+        self.assertEqual(refunds, [job_id])
+        requeue.assert_not_called()
 
     def test_running_error_holds_when_recovery_state_database_is_unavailable(self):
         job_id = self._job({}, status="pending")
