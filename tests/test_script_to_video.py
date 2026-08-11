@@ -38,6 +38,13 @@ class ScriptToVideoTests(unittest.TestCase):
         self.orig_gen_xiaole_video = self.video.gen_xiaole_video
         self.orig_get_video_avatar = getattr(self.video, "get_video_avatar", None)
         self.orig_get_first_avatar = self.script_to_video._get_first_avatar
+        self.orig_preflight_image = self.video.preflight_heygen_image_file
+        self.video.preflight_heygen_image_file = lambda file_ref, category="avatar": {
+            "path": Path(str(file_ref)), "mime": "image/jpeg",
+        }
+        self.script_to_video._get_first_avatar = lambda username: {
+            "id": 1, "image_file": "image/avatar.jpg",
+        }
 
     def tearDown(self):
         self.video.gen_video = self.orig_gen_video
@@ -45,6 +52,7 @@ class ScriptToVideoTests(unittest.TestCase):
         if self.orig_get_video_avatar is not None:
             self.video.get_video_avatar = self.orig_get_video_avatar
         self.script_to_video._get_first_avatar = self.orig_get_first_avatar
+        self.video.preflight_heygen_image_file = self.orig_preflight_image
 
     def _approved_upload(self, raw, username="fang"):
         uploaded = self.cli_uploads.store_image(
@@ -100,7 +108,7 @@ class ScriptToVideoTests(unittest.TestCase):
 
         def fake_get_video_avatar(username, avatar_id):
             calls["avatar_lookup"] = (username, avatar_id)
-            return {"id": avatar_id}
+            return {"id": avatar_id, "image_file": "image/avatar.jpg"}
 
         def fake_gen_video(payload):
             calls["payload"] = payload
@@ -133,7 +141,9 @@ class ScriptToVideoTests(unittest.TestCase):
             return {"video_url": "https://example.test/talking.mp4"}
 
         self.video.gen_video = fake_gen_video
-        self.script_to_video._get_first_avatar = lambda username: {"id": 1}
+        self.script_to_video._get_first_avatar = lambda username: {
+            "id": 1, "image_file": "image/avatar.jpg",
+        }
 
         self.script_to_video.gen_script_to_video({
             "_username": "fang",
@@ -1254,7 +1264,9 @@ class ScriptToVideoTests(unittest.TestCase):
                 self.script_to_video.OUT_DIR = old_out
 
     def test_talking_material_pipeline_composes_then_burns_subtitles(self):
-        self.script_to_video._get_first_avatar = lambda username: {"id": 1}
+        self.script_to_video._get_first_avatar = lambda username: {
+            "id": 1, "image_file": "image/avatar.jpg",
+        }
         self.video.gen_video = lambda payload: {
             "video_file": "video/avatar.mp4", "video_url": "/old.mp4",
         }

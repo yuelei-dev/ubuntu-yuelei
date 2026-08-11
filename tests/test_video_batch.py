@@ -116,6 +116,8 @@ class VideoBatchValidationTests(unittest.TestCase):
             raise AssertionError("audio_file 已复用时不应再次落盘音频")
         with patch.object(video, "HEYGEN_API_KEY", "configured"), \
                 patch.object(video, "_save_data_file", side_effect=fake_save), \
+                patch.object(video, "preflight_heygen_image_file", return_value={"path": pathlib.Path("image/avatar.jpg"), "mime": "image/jpeg"}), \
+                patch.object(video, "preflight_heygen_audio_file", return_value=video.OUT_DIR / "audio" / "voice.mp3"), \
                 patch.object(video, "_resolve_out_file", return_value=video.OUT_DIR / "audio" / "voice.mp3"), \
                 patch.object(video, "_user_owns_output_file", return_value=True), \
                 patch.object(video, "generate_heygen_video", return_value={"video_file": "video/out.mp4", "duration": 12}) as generate, \
@@ -132,6 +134,8 @@ class VideoBatchValidationTests(unittest.TestCase):
                    "text": "hello", "voice": "v", "resolution": "1080p", "ratio": "9:16", "motion": "medium"}
         with patch.object(video, "HEYGEN_API_KEY", "configured"), \
                 patch.object(video, "get_video_avatar", return_value={"id": 9, "image_file": "image/avatar.jpg"}), \
+                patch.object(video, "preflight_heygen_image_file", return_value={"path": pathlib.Path("image/avatar.jpg"), "mime": "image/jpeg"}), \
+                patch.object(video, "preflight_heygen_audio_file", return_value=video.OUT_DIR / "audio" / "voice.mp3"), \
                 patch.object(video, "gen_audio", return_value={"file": "audio/voice.mp3", "url": "/audio.mp3"}), \
                 patch.object(video, "generate_heygen_video", return_value={"video_file": "video/out.mp4", "duration": 12}) as generate, \
                 patch.object(video, "public_url", return_value="https://cdn.example/out.mp4"), \

@@ -2,6 +2,7 @@
 """一键成片：现有数字人口播 + 用户图片资产/按需生图 + FFmpeg 自动穿插。"""
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -43,9 +44,6 @@ SMART_MONTAGE_SUBMISSION_FIELDS = {
 }
 _PLAN_DIGEST_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _MATERIAL_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-_MATERIAL_MAGIC = (
-    b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"RIFF",
-)
 _material_job_locks = {}
 _material_job_locks_guard = threading.Lock()
 
@@ -56,6 +54,23 @@ class ScriptToVideoRecoveryRequired(RuntimeError):
 
 class ScriptToVideoRecoveryStateUnavailable(RuntimeError):
     """Durable provider state cannot be read, so terminal handling must stop."""
+
+
+class ScriptToVideoMediaInputError(ValueError):
+    """Sanitized pre-provider failure for a frozen interstitial material."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.category = "material"
+        self.code = str(code)
+        self.stage = "media_preflight"
+
+    def audit_summary(self):
+        return {
+            "stage": self.stage,
+            "category": self.category,
+            "code": self.code,
+        }
 
 
 _UPLOAD_ID_RE = re.compile(r"^img_[0-9a-f]{32}$")
@@ -240,12 +255,18 @@ def _readable_image_path(path):
     try:
         if path.stat().st_size <= 0:
             return False
-        with path.open("rb") as stream:
-            head = stream.read(16)
-        if head.startswith(_MATERIAL_MAGIC[:2]):
-            return True
-        return head.startswith(b"RIFF") and head[8:12] == b"WEBP"
-    except OSError:
+        raw = path.read_bytes()
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as image:
+            detected = str(image.format or "").upper()
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+        # Do not trust the suffix.  A valid JPEG received as .png (or the
+        # reverse) is safe to freeze because downstream tools inspect bytes;
+        # corrupt/truncated pixel data is still rejected by verify()+load().
+        return detected in {"JPEG", "PNG", "WEBP"}
+    except Exception:
         return False
 
 
@@ -355,7 +376,10 @@ def _frozen_material_path(job_id, root, rel):
 def _copy_frozen_material(job_id, root, item, source_path):
     source_path = pathlib.Path(source_path).resolve()
     if not _readable_image_path(source_path):
-        raise RuntimeError("分镜 %d 的素材为空、不可读或格式无效" % (int(item["scene_index"]) + 1))
+        raise ScriptToVideoMediaInputError(
+            "material_invalid",
+            "第 %d 个穿插素材为空、不可读或图片已损坏" % (int(item["scene_index"]) + 1),
+        )
     target_dir = (OUT_DIR / root).resolve()
     target_dir.relative_to(OUT_DIR.resolve())
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -368,7 +392,9 @@ def _copy_frozen_material(job_id, root, item, source_path):
     try:
         shutil.copyfile(str(source_path), str(temp))
         if not _readable_image_path(temp):
-            raise RuntimeError("冻结素材复制后校验失败")
+            raise ScriptToVideoMediaInputError(
+                "material_copy_invalid", "穿插素材冻结副本校验失败",
+            )
         os.replace(str(temp), str(target))
     finally:
         try:
@@ -570,6 +596,10 @@ def prepare_script_to_video_payload(payload, username):
     body["scenes"] = scenes
     if (body.get("style") or "口播").strip() == "剧情":
         return body
+
+    # Submission validation runs before the shared charge/job transaction.
+    # Reject a stale or corrupt avatar before image generation, TTS, or HeyGen.
+    _preflight_talking_avatar(username, body.get("avatar_id"))
 
     plan = []
     for index, scene in enumerate(scenes):
@@ -1892,15 +1922,6 @@ def _gen_talking(username, scenes, payload):
         raise ValueError("脚本中没有口播文案，请先生成脚本")
     full_text = "\n\n".join(lines)
 
-    avatar_id = payload.get("avatar_id")
-    if avatar_id:
-        from .video import get_video_avatar
-        avatar = get_video_avatar(username, str(avatar_id))
-    else:
-        avatar = _get_first_avatar(username)
-    if not avatar:
-        raise ValueError("你还没有创建数字人形象。请先在视频页上传人物照片创建形象。")
-
     from . import video as video_domain
 
     want_subtitle = payload.get("subtitle", True)
@@ -1920,10 +1941,38 @@ def _gen_talking(username, scenes, payload):
             # persisted row and therefore never take this compatibility path.
             if "不存在" not in str(exc) and "no such table" not in str(exc).lower():
                 raise
-    materials = (
-        _prepare_frozen_materials(job_id, username, material_plan)
-        if runtime_managed else _material_images(material_plan)
-    )
+    try:
+        avatar = _preflight_talking_avatar(username, payload.get("avatar_id"))
+    except video_domain.HeyGenMediaInputError as exc:
+        if runtime_managed:
+            _persist_job_state(
+                job_id, username, "preparing_materials",
+                input_error=exc.audit_summary(),
+            )
+        raise
+    try:
+        materials = (
+            _prepare_frozen_materials(job_id, username, material_plan)
+            if runtime_managed else _material_images(material_plan)
+        )
+    except ScriptToVideoMediaInputError as exc:
+        if runtime_managed:
+            _persist_job_state(
+                job_id, username, "preparing_materials",
+                input_error=exc.audit_summary(),
+            )
+        raise
+    except PermissionError:
+        if runtime_managed:
+            _persist_job_state(
+                job_id, username, "preparing_materials",
+                input_error={
+                    "stage": "media_preflight",
+                    "category": "material",
+                    "code": "material_missing_or_unowned",
+                },
+            )
+        raise
     if runtime_managed:
         current_payload, _ = _load_job_payload(job_id, username)
     state = _state_from_payload(current_payload)
@@ -2025,6 +2074,12 @@ def _gen_talking(username, scenes, payload):
                 )
         except BaseException as exc:
             latest = get_recovery_state(job_id) if runtime_managed else {}
+            if runtime_managed and isinstance(exc, video_domain.HeyGenMediaInputError):
+                _persist_job_state(
+                    job_id, username,
+                    str(latest.get("phase") or "materials_ready"),
+                    input_error=exc.audit_summary(),
+                )
             if str(latest.get("phase") or "") in {
                     "provider_submitting", "provider_submitted", "provider_completed"}:
                 raise ScriptToVideoRecoveryRequired(str(exc)[:220]) from exc
@@ -2102,6 +2157,24 @@ def _get_first_avatar(username):
         return dict(row) if row else None
     except Exception:
         return None
+
+
+def _preflight_talking_avatar(username, avatar_id=None):
+    from . import video as video_domain
+
+    avatar = (
+        video_domain.get_video_avatar(username, str(avatar_id))
+        if avatar_id else _get_first_avatar(username)
+    )
+    if not avatar:
+        raise ValueError("你还没有创建数字人形象。请先在视频页上传人物照片创建形象。")
+    image_file = str(avatar.get("image_file") or "").strip()
+    if not image_file:
+        raise video_domain.HeyGenMediaInputError(
+            "avatar", "avatar_missing", "数字人形象文件不存在",
+        )
+    video_domain.preflight_heygen_image_file(image_file, "avatar")
+    return avatar
 
 
 HANDLERS = {"script_to_video": gen_script_to_video}
