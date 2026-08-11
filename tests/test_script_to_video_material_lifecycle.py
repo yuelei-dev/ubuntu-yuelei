@@ -599,6 +599,35 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         fallback.assert_not_called()
         self.assertEqual([name for name, _ in events], ["submitting", "rejected"])
 
+    def test_mcp_plan_credit_rejection_clears_submitting_without_paid_retry(self):
+        self._image("image/no-plan-credit.png")
+        self._audio("audio/no-plan-credit.mp3", "mp3")
+        events = []
+        lifecycle = {
+            "state": {},
+            "on_submitting": lambda data: events.append(("submitting", data)),
+            "on_rejected": lambda data: events.append(("rejected", data)),
+        }
+        with mock.patch.object(video, "_HEYGEN_DIRECT", False), \
+             mock.patch.object(video, "_upload_heygen_image_asset", return_value="img"), \
+             mock.patch.object(video, "_heygen_upload_asset", return_value="aud"), \
+             mock.patch.object(
+                 video, "_heygen_create_video",
+                 side_effect=video.HeyGenMCPPlanCreditsExhausted(
+                     "HeyGen 套餐额度不足，供应商未受理任务"
+                 ),
+             ) as create, \
+             mock.patch.object(video, "_heygen_poll_video") as poll:
+            with self.assertRaises(video.HeyGenMCPPlanCreditsExhausted):
+                video.generate_heygen_video_recoverable(
+                    "image/no-plan-credit.png", "audio/no-plan-credit.mp3",
+                    "720p", "9:16", "medium", lifecycle,
+                )
+
+        create.assert_called_once()
+        poll.assert_not_called()
+        self.assertEqual([name for name, _ in events], ["submitting", "rejected"])
+
     def test_missing_plan_oauth_is_refundable_and_never_posts_api_wallet_job(self):
         self._image("image/no-oauth.png")
         self._audio("audio/no-oauth.mp3", "mp3")
@@ -805,6 +834,48 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
             else:
                 core.HANDLERS["script_to_video"] = original
         self.assertEqual(refunds, [job_id])
+
+    def test_mcp_plan_credit_rejection_refunds_once_instead_of_holding_running(self):
+        job_id = self._job({}, status="pending")
+        refunds = []
+        original = core.HANDLERS.get("script_to_video")
+
+        def reject(_payload):
+            script_to_video._persist_job_state(
+                job_id, "alice", "provider_submitting",
+                provider="heygen_direct", image_asset_id="img", audio_asset_id="aud",
+            )
+            script_to_video._persist_job_state(
+                job_id, "alice", "materials_ready",
+                provider=None, provider_video_id=None,
+                image_asset_id=None, audio_asset_id=None,
+            )
+            raise video.HeyGenMCPPlanCreditsExhausted(
+                "HeyGen 套餐额度不足，供应商未受理任务"
+            )
+
+        core.HANDLERS["script_to_video"] = reject
+        try:
+            with mock.patch.object(core, "_start_job_heartbeat", return_value=lambda: None), \
+                 mock.patch.object(core, "_requeue_running_job") as requeue, \
+                 mock.patch.object(
+                     core, "_fail_job_and_schedule_refund",
+                     side_effect=lambda *args, **_kwargs: refunds.append(args[0]) or True,
+                 ), \
+                 mock.patch.object(core, "_mark_video_asset_failed"), \
+                 mock.patch.object(core, "_recover_pending_jobs"):
+                core.run_job(job_id)
+                with sqlite3.connect(core.JOB_DB) as conn:
+                    conn.execute("UPDATE jobs SET status='error' WHERE id=?", (job_id,))
+                core.run_job(job_id)
+        finally:
+            if original is None:
+                core.HANDLERS.pop("script_to_video", None)
+            else:
+                core.HANDLERS["script_to_video"] = original
+
+        self.assertEqual(refunds, [job_id])
+        requeue.assert_not_called()
 
     def test_explicit_provider_failed_terminal_refunds_once_without_requeue(self):
         job_id = self._job({"_script_to_video_state": {
