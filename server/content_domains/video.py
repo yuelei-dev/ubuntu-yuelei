@@ -2778,18 +2778,136 @@ def _ensure_heygen_audio_mp3(audio_path):
         raise ValueError("音频格式转换失败，请重新上传 mp3 音频")
     return out
 
-HEYGEN_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+HEYGEN_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+_HEYGEN_IMAGE_FORMATS = {
+    "image/jpeg": "JPEG",
+    "image/png": "PNG",
+    "image/webp": "WEBP",
+}
+_HEYGEN_MEDIA_LABELS = {
+    "avatar": "数字人形象",
+    "material": "穿插素材",
+    "tts_audio": "口播音频",
+}
 
-def _ensure_heygen_image_jpg(image_path):
+
+class HeyGenMediaInputError(ValueError):
+    """A path-free, user-correctable error for pre-provider media checks."""
+
+    def __init__(self, category, code, message):
+        super().__init__(message)
+        self.category = str(category)
+        self.code = str(code)
+        self.stage = "media_preflight"
+
+    def audit_summary(self):
+        return {
+            "stage": self.stage,
+            "category": self.category,
+            "code": self.code,
+        }
+
+
+def _heygen_media_error(category, code, detail):
+    label = _HEYGEN_MEDIA_LABELS.get(category, "媒体文件")
+    return HeyGenMediaInputError(category, code, "%s%s" % (label, detail))
+
+
+def _resolve_heygen_managed_file(file_ref, category):
+    """Resolve an exact managed reference; only bare legacy names may fallback.
+
+    Structured references such as ``image/avatar.jpg`` are server-owned and
+    must never silently resolve to another same-named file in OUT_DIR.  Old
+    rows that stored a bare filename keep the historical audio/video lookup.
+    """
+    supplied = urllib.parse.unquote(str(file_ref or ""))
+    if supplied.startswith(("/", "\\")):
+        raise _heygen_media_error(category, "%s_path_invalid" % category, "文件路径无效")
+    raw = supplied.replace("\\", "/")
+    parts = pathlib.PurePosixPath(raw).parts
+    if (not raw or not parts or any(part in {"", ".", ".."} for part in parts)
+            or ":" in parts[0]):
+        raise _heygen_media_error(category, "%s_path_invalid" % category, "文件路径无效")
+    root = pathlib.Path(OUT_DIR).resolve()
+    try:
+        exact = (root / pathlib.Path(*parts)).resolve()
+        exact.relative_to(root)
+    except (OSError, ValueError):
+        raise _heygen_media_error(category, "%s_path_invalid" % category, "文件路径无效") from None
+    if exact.is_file():
+        return exact
+    if len(parts) == 1:
+        legacy = _resolve_out_file(raw)
+        if legacy is not None:
+            try:
+                pathlib.Path(legacy).resolve().relative_to(root)
+                return pathlib.Path(legacy)
+            except (OSError, ValueError):
+                pass
+    raise _heygen_media_error(category, "%s_missing" % category, "文件不存在")
+
+
+def _preflight_heygen_image_path(image_path, category="avatar"):
+    path = pathlib.Path(image_path)
+    try:
+        if path.stat().st_size <= 0:
+            raise _heygen_media_error(category, "%s_empty" % category, "文件为空")
+        raw = path.read_bytes()
+    except HeyGenMediaInputError:
+        raise
+    except (OSError, PermissionError):
+        raise _heygen_media_error(category, "%s_unreadable" % category, "文件不可读") from None
+    mime = _detect_image_mime(raw)
+    if mime not in _HEYGEN_IMAGE_FORMATS:
+        raise _heygen_media_error(category, "%s_content_invalid" % category, "图片内容无法识别")
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as image:
+            detected_format = str(image.format or "").upper()
+            image.verify()
+        with Image.open(io.BytesIO(raw)) as image:
+            image.load()
+            # Validate that non-JPEG sources can be normalized before any TTS,
+            # material generation, or paid HeyGen request is allowed to run.
+            if mime != "image/jpeg":
+                converted = io.BytesIO()
+                image.convert("RGB").save(converted, format="JPEG")
+                if _detect_image_mime(converted.getvalue()) != "image/jpeg":
+                    raise ValueError("canonical jpeg validation failed")
+    except ImportError:
+        raise _heygen_media_error(category, "%s_validator_unavailable" % category, "完整性校验组件不可用") from None
+    except Exception:
+        raise _heygen_media_error(category, "%s_content_invalid" % category, "图片已损坏或无法完整解码") from None
+    if detected_format != _HEYGEN_IMAGE_FORMATS[mime]:
+        raise _heygen_media_error(category, "%s_content_invalid" % category, "图片内容与真实格式不一致")
+    return {"path": path, "mime": mime}
+
+
+def preflight_heygen_image_file(file_ref, category="avatar"):
+    """Validate one server-owned image without exposing its path in errors."""
+    path = _resolve_heygen_managed_file(file_ref, category)
+    return _preflight_heygen_image_path(path, category)
+
+
+def preflight_heygen_audio_file(file_ref):
+    path = _resolve_heygen_managed_file(file_ref, "tts_audio")
+    try:
+        if path.stat().st_size <= 0:
+            raise _heygen_media_error("tts_audio", "tts_audio_empty", "文件为空")
+        with path.open("rb") as stream:
+            if not stream.read(16):
+                raise _heygen_media_error("tts_audio", "tts_audio_empty", "文件为空")
+    except HeyGenMediaInputError:
+        raise
+    except (OSError, PermissionError):
+        raise _heygen_media_error("tts_audio", "tts_audio_unreadable", "文件不可读") from None
+    return path
+
+def _ensure_heygen_image_jpg(image_path, category="avatar"):
     # HeyGen 会核对真实图片字节与 Content-Type。浏览器/系统给错 MIME 时，仅改后缀仍会
     # 400；因此除已经是标准 JPEG 的文件外，一律重新解码成 canonical JPEG。
     path = pathlib.Path(image_path)
-    try:
-        detected = _detect_image_mime(path.read_bytes())
-    except OSError:
-        detected = ""
-    if not detected:
-        raise ValueError("图片内容无法识别，请重新导出后上传")
+    detected = _preflight_heygen_image_path(path, category)["mime"]
     if detected == "image/jpeg" and path.suffix.lower() in {".jpg", ".jpeg"}:
         return path
     out = path.parent / ("heygen_img_%s.jpg" % uuid.uuid4().hex)
@@ -2808,18 +2926,17 @@ def _ensure_heygen_image_jpg(image_path):
         subprocess.run(cmd, check=True, timeout=120, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
         discard_partial()
-        raise ValueError("服务器未安装 ffmpeg，无法转换图片格式")
-    except subprocess.CalledProcessError as e:
+        raise _heygen_media_error(category, "%s_converter_unavailable" % category, "格式转换组件不可用")
+    except subprocess.CalledProcessError:
         discard_partial()
-        detail = (e.stderr or b"").decode("utf-8", "replace")[:220]
-        raise ValueError("图片格式转换失败，请上传 jpg/png 格式的人物形象图" + (": " + detail if detail else ""))
+        raise _heygen_media_error(category, "%s_conversion_failed" % category, "图片格式转换失败")
     except subprocess.TimeoutExpired:
         discard_partial()
-        raise ValueError("图片格式转换超时，请上传 jpg/png 格式的人物形象图")
+        raise _heygen_media_error(category, "%s_conversion_timeout" % category, "图片格式转换超时")
     if (not out.exists() or out.stat().st_size <= 0
             or _detect_image_mime(out.read_bytes()) != "image/jpeg"):
         discard_partial()
-        raise ValueError("图片格式转换失败，请上传 jpg/png 格式的人物形象图")
+        raise _heygen_media_error(category, "%s_conversion_failed" % category, "图片格式转换失败")
     return out
 
 
@@ -2852,10 +2969,10 @@ def _unlink_owned_output(path):
         return False
 
 
-def _upload_heygen_image_asset(image_path, label, direct=False):
+def _upload_heygen_image_asset(image_path, label, direct=False, category="avatar"):
     """Normalize one image for HeyGen and remove only the derived upload file."""
     source = pathlib.Path(image_path)
-    upload = _ensure_heygen_image_jpg(source)
+    upload = _ensure_heygen_image_jpg(source, category=category)
     try:
         return _heygen_retry_net(
             lambda: _heygen_upload_asset(upload, direct=direct),
@@ -3890,15 +4007,13 @@ def generate_heygen_video_recoverable(
             raise RuntimeError("已受理的口播任务缺少供应商通道")
         direct = provider == "heygen_direct"
     else:
-        image_fp = _resolve_out_file(image_file)
-        audio_fp = _resolve_out_file(audio_file)
-        if not image_fp or not audio_fp:
-            raise ValueError("视频素材文件不存在")
+        image_fp = preflight_heygen_image_file(image_file, "avatar")["path"]
+        audio_fp = preflight_heygen_audio_file(audio_file)
         audio_fp = _ensure_heygen_audio_mp3(audio_fp)
         direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
         provider = "heygen_direct" if direct else "heygen_relay"
         image_asset_id = _upload_heygen_image_asset(
-            image_fp, "口播传图", direct=direct,
+            image_fp, "口播传图", direct=direct, category="avatar",
         )
         audio_asset_id = _heygen_retry_net(
             lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播传音",
@@ -4251,6 +4366,10 @@ def gen_video(payload, provider_lifecycle=None):
         image_file = _save_data_file(payload.get("image_data"), "vid_img", [".jpg", ".png", ".webp"])
     if not image_file:
         raise ValueError("请先上传人物形象图片")
+    # Fail before TTS and before any provider upload.  Script-to-video also
+    # performs this check before material generation; this second check keeps
+    # direct and historical video jobs safe from deletion between stages.
+    preflight_heygen_image_file(image_file, "avatar")
     text = (payload.get("text") or "").strip()
     voice = (payload.get("voice") or "").strip()
     audio_file = None
@@ -4282,7 +4401,7 @@ def gen_video(payload, provider_lifecycle=None):
             audio_file = audio_result.get("file")
             audio_url = audio_result.get("url")
         if not audio_file:
-            raise ValueError("口播音频生成失败")
+            raise _heygen_media_error("tts_audio", "tts_audio_missing", "生成失败")
     else:
         if payload.get("audio_file"):
             audio_file = _normalize_audio_file_ref(payload.get("audio_file"), username=(payload.get("_username") or "").strip() or None)
@@ -4291,6 +4410,7 @@ def gen_video(payload, provider_lifecycle=None):
         if not audio_file:
             raise ValueError("请先选择口播音频")
         audio_url = _file_url(audio_file)
+    preflight_heygen_audio_file(audio_file)
     resolution = (payload.get("resolution") or "1080p").strip()
     ratio = (payload.get("ratio") or "9:16").strip()
     motion = (payload.get("motion") or "medium").strip()

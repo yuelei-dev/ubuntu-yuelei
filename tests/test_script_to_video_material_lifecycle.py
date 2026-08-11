@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import sqlite3
@@ -10,6 +11,8 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+from PIL import Image
 
 
 if os.name == "nt":
@@ -52,7 +55,12 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         video.OUT_DIR = self.out
         video.VIDEO_OUT_DIR = self.out / "video"
         video.VIDEO_OUT_DIR.mkdir()
-        script_to_video._get_first_avatar = lambda _username: {"id": 1}
+        avatar = self.out / "image/avatar.png"
+        avatar.parent.mkdir(parents=True)
+        avatar.write_bytes(PNG)
+        script_to_video._get_first_avatar = lambda _username: {
+            "id": 1, "image_file": "image/avatar.png",
+        }
         self._init_databases()
 
     def tearDown(self):
@@ -85,6 +93,189 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         return path
+
+    @staticmethod
+    def _encoded_image(fmt, size=(8, 8), color=(34, 85, 136)):
+        output = io.BytesIO()
+        Image.new("RGB", size, color).save(output, format=fmt)
+        return output.getvalue()
+
+    def test_avatar_preflight_uses_true_bytes_for_jpeg_png_webp_and_suffix_mismatch(self):
+        cases = [
+            ("avatar-as-png.png", "JPEG", "image/jpeg"),
+            ("avatar-as-jpg.jpg", "PNG", "image/png"),
+            ("avatar-as-jpeg.jpeg", "WEBP", "image/webp"),
+        ]
+        for name, fmt, expected_mime in cases:
+            with self.subTest(name=name, fmt=fmt):
+                self._image("image/" + name, self._encoded_image(fmt))
+                checked = video.preflight_heygen_image_file(
+                    "image/" + name, "avatar",
+                )
+                self.assertEqual(expected_mime, checked["mime"])
+                self.assertEqual(self.out / "image" / name, checked["path"])
+        canonical = self._image("image/canonical.jpg", self._encoded_image("JPEG"))
+        self.assertEqual(canonical, video._ensure_heygen_image_jpg(canonical))
+
+    def test_transient_avatar_read_error_is_not_misreported_as_bad_image_content(self):
+        avatar = self._image("image/read-error.jpg", self._encoded_image("JPEG"))
+        original = Path.read_bytes
+
+        def denied(path):
+            if Path(path) == avatar:
+                raise OSError("temporary read failure")
+            return original(path)
+
+        with mock.patch.object(Path, "read_bytes", denied):
+            with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                video.preflight_heygen_image_file("image/read-error.jpg", "avatar")
+        self.assertEqual("avatar_unreadable", rejected.exception.code)
+        self.assertNotIn("read-error.jpg", str(rejected.exception))
+
+    def test_missing_generated_tts_audio_is_classified_before_provider_upload(self):
+        avatar = self._image("image/audio-check.jpg", self._encoded_image("JPEG"))
+        with mock.patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             mock.patch.object(video, "get_video_avatar", return_value={
+                 "id": 1, "image_file": avatar.relative_to(self.out).as_posix(),
+             }), \
+             mock.patch.object(video, "gen_audio", return_value={
+                 "file": "audio/missing.mp3", "url": "/missing.mp3",
+             }), \
+             mock.patch.object(video, "_upload_heygen_image_asset") as image_upload, \
+             mock.patch.object(video, "_heygen_create_video") as create:
+            with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                video.gen_video({
+                    "_username": "alice", "_job_id": 1,
+                    "mode": "text", "avatar_id": "1",
+                    "text": "介绍产品", "voice": "voice-1",
+                })
+        self.assertEqual("tts_audio_missing", rejected.exception.code)
+        self.assertEqual("tts_audio", rejected.exception.category)
+        image_upload.assert_not_called()
+        create.assert_not_called()
+
+    def test_structured_avatar_ref_never_falls_back_to_same_named_out_dir_file(self):
+        self._image("avatar.jpg", self._encoded_image("JPEG"))
+        with self.assertRaises(video.HeyGenMediaInputError) as missing:
+            video.preflight_heygen_image_file("image/avatar.jpg", "avatar")
+        self.assertEqual("avatar_missing", missing.exception.code)
+        # Bare historical rows keep the old basename lookup contract.
+        checked = video.preflight_heygen_image_file("avatar.jpg", "avatar")
+        self.assertEqual(self.out / "avatar.jpg", checked["path"])
+
+    def test_corrupt_avatar_is_rejected_before_material_generation_tts_or_heygen(self):
+        broken = self._image("image/broken.jpg", b"\xff\xd8\xfftruncated")
+        script_to_video._get_first_avatar = lambda _username: {
+            "id": 1, "image_file": broken.relative_to(self.out).as_posix(),
+        }
+        job_id = self._job({"material_plan": self._plan(None, "generate")}, status="running")
+        with mock.patch("content_domains.image.gen_image") as image_create, \
+             mock.patch.object(video, "gen_audio") as tts, \
+             mock.patch.object(video, "_heygen_create_video") as provider_create:
+            with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                script_to_video.gen_script_to_video({
+                    "_username": "alice", "_job_id": job_id,
+                    "scenes": [{"line": "介绍产品"}],
+                    "material_plan": self._plan(None, "generate"),
+                })
+        self.assertEqual("avatar_content_invalid", rejected.exception.code)
+        self.assertNotIn("broken.jpg", str(rejected.exception))
+        image_create.assert_not_called()
+        tts.assert_not_called()
+        provider_create.assert_not_called()
+        state = script_to_video.get_recovery_state(job_id)
+        self.assertEqual({
+            "stage": "media_preflight",
+            "category": "avatar",
+            "code": "avatar_content_invalid",
+        }, state["input_error"])
+
+    def test_prepare_rejects_invalid_avatar_before_charge_contract_or_asset_lookup(self):
+        self._image("image/empty.jpg", b"")
+        script_to_video._get_first_avatar = lambda _username: {
+            "id": 1, "image_file": "image/empty.jpg",
+        }
+        with mock.patch.object(script_to_video, "_match_image_asset") as asset_lookup:
+            with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                script_to_video.prepare_script_to_video_payload({
+                    "style": "口播",
+                    "scenes": [{"line": "介绍产品", "scene": "产品特写"}],
+                }, "alice")
+        self.assertEqual("avatar_empty", rejected.exception.code)
+        asset_lookup.assert_not_called()
+
+    def test_generated_material_corruption_is_classified_without_avatar_false_positive(self):
+        generated = self._image("image/generated.jpg", b"\xff\xd8\xfftruncated")
+        plan = self._plan(None, "generate")
+        job_id = self._job({"material_plan": plan}, status="running")
+        with mock.patch("content_domains.image.gen_image", return_value={
+                "file": generated.relative_to(self.out).as_posix()}), \
+             mock.patch.object(video, "gen_audio") as tts, \
+             mock.patch.object(video, "_heygen_create_video") as provider_create:
+            with self.assertRaises(script_to_video.ScriptToVideoMediaInputError):
+                script_to_video.gen_script_to_video({
+                    "_username": "alice", "_job_id": job_id,
+                    "scenes": [{"line": "介绍产品"}], "material_plan": plan,
+                })
+        tts.assert_not_called()
+        provider_create.assert_not_called()
+        state = script_to_video.get_recovery_state(job_id)
+        self.assertEqual("material", state["input_error"]["category"])
+        self.assertEqual("material_invalid", state["input_error"]["code"])
+
+    def test_valid_jpeg_avatar_and_ready_material_reach_provider_submitting_once(self):
+        avatar = self._image(
+            "image/avatar-valid.jpg",
+            self._encoded_image("JPEG", size=(128, 150)),
+        )
+        script_to_video._get_first_avatar = lambda _username: {
+            "id": 1, "image_file": avatar.relative_to(self.out).as_posix(),
+        }
+        generated = self._image("image/generated-valid.png", self._encoded_image("PNG"))
+        audio = self.out / "audio/speech.mp3"
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        audio.write_bytes(b"ID3-valid-audio")
+        base = self.out / "video/base.mp4"
+        base.write_bytes(b"video")
+        plan = self._plan(None, "generate")
+        job_id = self._job({"material_plan": plan}, status="running")
+        creates = []
+
+        def create_once(*_args, **_kwargs):
+            self.assertEqual(
+                "provider_submitting",
+                script_to_video.get_recovery_state(job_id)["phase"],
+            )
+            creates.append(1)
+            return "provider-1"
+
+        with mock.patch("content_domains.image.gen_image", return_value={
+                "file": generated.relative_to(self.out).as_posix()}), \
+             mock.patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             mock.patch.object(video, "_HEYGEN_DIRECT", False), \
+             mock.patch.object(video, "get_video_avatar", return_value={
+                 "id": 1, "image_file": avatar.relative_to(self.out).as_posix(),
+             }), \
+             mock.patch.object(video, "gen_audio", return_value={
+                 "file": "audio/speech.mp3", "url": "/speech.mp3",
+             }), \
+             mock.patch.object(video, "_upload_heygen_image_asset", return_value="image-asset"), \
+             mock.patch.object(video, "_heygen_upload_asset", return_value="audio-asset"), \
+             mock.patch.object(video, "_heygen_create_video", side_effect=create_once), \
+             mock.patch.object(video, "_heygen_poll_video", return_value={
+                 "video_url": "https://example.invalid/base.mp4",
+             }), \
+             mock.patch.object(video, "_download_video_file", return_value="video/base.mp4"), \
+             mock.patch.object(video, "_extract_first_frame_cover", return_value=None), \
+             mock.patch.object(script_to_video, "_compose_materials", return_value="video/base.mp4"):
+            result = script_to_video.gen_script_to_video({
+                "_username": "alice", "_job_id": job_id,
+                "scenes": [{"line": "介绍产品"}], "material_plan": plan,
+                "subtitle": False,
+            })
+        self.assertEqual([1], creates)
+        self.assertEqual("done", script_to_video.get_recovery_state(job_id)["phase"])
+        self.assertEqual("talking_with_materials", result["pipeline"])
 
     def _job(self, payload, username="alice", status="pending", result=None, kind="script_to_video"):
         with sqlite3.connect(core.JOB_DB) as conn:
