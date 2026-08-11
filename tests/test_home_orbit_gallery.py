@@ -1,4 +1,5 @@
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -26,7 +27,7 @@ class HomeOrbitGalleryTests(unittest.TestCase):
         self.assertIn("data-gallery-fallback", self.html)
         self.assertNotIn('class="page-shell sample-grid"', self.html)
         self.assertIn('homepage.css?v=20260810-orbitfix2', self.html)
-        self.assertIn("orbit-gallery.js?v=20260810-orbitfix2", self.html)
+        self.assertIn("orbit-gallery.js?v=20260811-autoplay1", self.html)
         self.assertIn("gallery.json?v=20260810-orbitfix2", self.html)
 
     def test_manifest_contains_all_requested_media(self):
@@ -102,6 +103,31 @@ class HomeOrbitGalleryTests(unittest.TestCase):
         self.assertIn("previewAutoplayAllowed", self.js)
         self.assertIn("!conserveResources && !reducedMotion.matches", self.js)
         self.assertNotIn("AUTO_SPEED", self.js)
+
+    def test_autoplay_advances_on_demand_and_preserves_resource_guards(self):
+        delay = re.search(r"const AUTO_ADVANCE_DELAY = (\d+);", self.js)
+        reference_ms = re.search(r"const MOTION_REFERENCE_MS = ([0-9.]+);", self.js)
+        decay = re.search(r"const MOTION_DECAY = ([0-9.]+);", self.js)
+        self.assertIsNotNone(delay)
+        self.assertIsNotNone(reference_ms)
+        self.assertIsNotNone(decay)
+        self.assertLessEqual(int(delay.group(1)), 3000)
+        impulse = -math.log(float(decay.group(1))) / float(reference_ms.group(1))
+        self.assertGreaterEqual(impulse, 0.004)
+        self.assertIn(
+            "const MOTION_DECAY_RATE = Math.log(MOTION_DECAY) / MOTION_REFERENCE_MS;",
+            self.js,
+        )
+        self.assertIn("const AUTO_ADVANCE_IMPULSE = -MOTION_DECAY_RATE;", self.js)
+        self.assertIn("function scheduleAutoAdvance()", self.js)
+        self.assertIn("function autoAdvanceAllowed()", self.js)
+        self.assertIn("state.inViewport", self.js)
+        self.assertIn("!state.tracking", self.js)
+        self.assertIn("!root.matches(':focus-within')", self.js)
+        self.assertIn("!preview.open", self.js)
+        self.assertIn("document.visibilityState === 'visible'", self.js)
+        self.assertIn("!reducedMotion.matches", self.js)
+        self.assertIn("!conserveResources", self.js)
 
     def test_idle_animation_is_demand_driven_and_media_failures_are_explicit(self):
         self.assertIn("state.rafId = requestAnimationFrame(animate)", self.js)
