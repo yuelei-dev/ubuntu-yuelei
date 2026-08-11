@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import os
+import subprocess
 import sqlite3
 import sys
 import tempfile
@@ -94,6 +95,26 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
+    def _audio(self, rel, container=None):
+        path = self.out / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=0.25",
+            "-vn", "-ac", "1", "-ar", "24000",
+        ]
+        if container == "mp3":
+            command.extend(["-c:a", "libmp3lame", "-f", "mp3"])
+        elif container == "wav":
+            command.extend(["-c:a", "pcm_s16le", "-f", "wav"])
+        elif container == "m4a":
+            command.extend(["-c:a", "aac", "-f", "mp4"])
+        command.append(str(path))
+        subprocess.run(
+            command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return path
+
     @staticmethod
     def _encoded_image(fmt, size=(8, 8), color=(34, 85, 136)):
         output = io.BytesIO()
@@ -152,6 +173,78 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         self.assertEqual("tts_audio_missing", rejected.exception.code)
         self.assertEqual("tts_audio", rejected.exception.category)
         image_upload.assert_not_called()
+        create.assert_not_called()
+
+    def test_nonempty_garbage_and_truncated_mp3_stop_before_any_provider_call(self):
+        self._image("image/audio-avatar.jpg", self._encoded_image("JPEG"))
+        valid = self._audio("audio/complete.mp3", "mp3").read_bytes()
+        cases = {
+            "audio/garbage.mp3": b"not-an-mp3-but-nonempty",
+            "audio/truncated.mp3": valid[:64],
+        }
+        for rel, contents in cases.items():
+            with self.subTest(rel=rel):
+                path = self.out / rel
+                path.write_bytes(contents)
+                with mock.patch.object(video, "_upload_heygen_image_asset") as image_upload, \
+                     mock.patch.object(video, "_heygen_upload_asset") as audio_upload, \
+                     mock.patch.object(video, "_heygen_create_video") as create:
+                    with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                        video.generate_heygen_video_recoverable(
+                            "image/audio-avatar.jpg", rel, "720p", "9:16", "medium",
+                            {"state": {}},
+                        )
+                self.assertEqual("tts_audio_content_invalid", rejected.exception.code)
+                self.assertEqual("tts_audio", rejected.exception.category)
+                self.assertNotIn(path.name, str(rejected.exception))
+                image_upload.assert_not_called()
+                audio_upload.assert_not_called()
+                create.assert_not_called()
+
+    def test_valid_mp3_wav_and_m4a_are_fully_decoded_and_canonicalized(self):
+        for container in ("mp3", "wav", "m4a"):
+            with self.subTest(container=container):
+                source = self._audio("audio/valid.%s" % container, container)
+                checked = video.preflight_heygen_audio_file(
+                    source.relative_to(self.out).as_posix(),
+                )
+                self.assertEqual(source, checked)
+                canonical = video._ensure_heygen_audio_mp3(source)
+                info = video._preflight_heygen_audio_path(canonical)
+                self.assertEqual("mp3", info["codec_name"])
+                self.assertIn("mp3", info["format_names"])
+
+    def test_mp3_suffix_cannot_disguise_wav_bytes(self):
+        wav = self._audio("audio/source.wav", "wav")
+        disguised = self.out / "audio/disguised.mp3"
+        disguised.write_bytes(wav.read_bytes())
+        canonical = video._ensure_heygen_audio_mp3(disguised)
+        self.assertNotEqual(disguised, canonical)
+        self.assertEqual("mp3", video._preflight_heygen_audio_path(canonical)["codec_name"])
+
+    def test_transient_audio_read_failure_is_sanitized_and_stops_provider(self):
+        self._image("image/read-error-avatar.jpg", self._encoded_image("JPEG"))
+        audio = self._audio("audio/read-error.mp3", "mp3")
+        original = Path.open
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == audio:
+                raise OSError("temporary read failure with private path")
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "open", denied), \
+             mock.patch.object(video, "_upload_heygen_image_asset") as image_upload, \
+             mock.patch.object(video, "_heygen_upload_asset") as audio_upload, \
+             mock.patch.object(video, "_heygen_create_video") as create:
+            with self.assertRaises(video.HeyGenMediaInputError) as rejected:
+                video.generate_heygen_video_recoverable(
+                    "image/read-error-avatar.jpg", "audio/read-error.mp3",
+                    "720p", "9:16", "medium", {"state": {}},
+                )
+        self.assertEqual("tts_audio_unreadable", rejected.exception.code)
+        self.assertNotIn("read-error.mp3", str(rejected.exception))
+        image_upload.assert_not_called()
+        audio_upload.assert_not_called()
         create.assert_not_called()
 
     def test_structured_avatar_ref_never_falls_back_to_same_named_out_dir_file(self):
@@ -232,9 +325,7 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
             "id": 1, "image_file": avatar.relative_to(self.out).as_posix(),
         }
         generated = self._image("image/generated-valid.png", self._encoded_image("PNG"))
-        audio = self.out / "audio/speech.mp3"
-        audio.parent.mkdir(parents=True, exist_ok=True)
-        audio.write_bytes(b"ID3-valid-audio")
+        self._audio("audio/speech.mp3", "mp3")
         base = self.out / "video/base.mp4"
         base.write_bytes(b"video")
         plan = self._plan(None, "generate")
@@ -407,9 +498,7 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         state = {}
         creates = []
         self._image("image/a.png")
-        audio = self.out / "audio/a.mp3"
-        audio.parent.mkdir(parents=True)
-        audio.write_bytes(b"audio")
+        self._audio("audio/a.mp3", "mp3")
 
         def submitted(data):
             state.update(data)
@@ -439,9 +528,7 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
 
     def test_definitive_provider_rejection_clears_ambiguous_phase_without_fallback(self):
         self._image("image/a.png")
-        audio = self.out / "audio/a.mp3"
-        audio.parent.mkdir(parents=True)
-        audio.write_bytes(b"audio")
+        self._audio("audio/a.mp3", "mp3")
         events = []
         lifecycle = {
             "state": {},

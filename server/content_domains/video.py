@@ -2756,7 +2756,10 @@ def _heygen_upload_asset(file_path, direct=False):
 
 def _ensure_heygen_audio_mp3(audio_path):
     path = pathlib.Path(audio_path)
-    if path.suffix.lower() == ".mp3":
+    audio_info = _preflight_heygen_audio_path(path)
+    if (path.suffix.lower() == ".mp3"
+            and audio_info["codec_name"] == "mp3"
+            and "mp3" in audio_info["format_names"]):
         return path
     out = AUDIO_OUT_DIR / ("heygen_audio_%d.mp3" % int(time.time() * 1000))
     cmd = [
@@ -2768,14 +2771,36 @@ def _ensure_heygen_audio_mp3(audio_path):
     try:
         subprocess.run(cmd, check=True, timeout=180, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except FileNotFoundError:
-        raise ValueError("服务器未安装 ffmpeg，无法转换上传音频格式")
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or b"").decode("utf-8", "replace")[:220]
-        raise ValueError("音频格式转换失败，请重新上传 mp3 音频" + (": " + detail if detail else ""))
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_converter_unavailable", "格式转换组件不可用",
+        ) from None
+    except subprocess.CalledProcessError:
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_conversion_failed", "格式转换失败",
+        ) from None
     except subprocess.TimeoutExpired:
-        raise ValueError("音频格式转换超时，请重新上传更短的 mp3 音频")
-    if not out.exists() or out.stat().st_size <= 0:
-        raise ValueError("音频格式转换失败，请重新上传 mp3 音频")
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_conversion_timeout", "格式转换超时",
+        ) from None
+    try:
+        converted = _preflight_heygen_audio_path(out)
+    except HeyGenMediaInputError:
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_conversion_failed", "格式转换失败",
+        ) from None
+    if (converted["codec_name"] != "mp3"
+            or "mp3" not in converted["format_names"]):
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_conversion_failed", "格式转换失败",
+        )
     return out
 
 HEYGEN_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -2891,17 +2916,82 @@ def preflight_heygen_image_file(file_ref, category="avatar"):
 
 def preflight_heygen_audio_file(file_ref):
     path = _resolve_heygen_managed_file(file_ref, "tts_audio")
+    _preflight_heygen_audio_path(path)
+    return path
+
+
+def _preflight_heygen_audio_path(audio_path):
+    """Decode the complete audio stream before any HeyGen asset upload.
+
+    Extension and a short header are not evidence that an MP3/WAV/M4A is
+    complete.  ffprobe identifies the real stream and ffmpeg decodes it to the
+    null sink with fatal error handling, so truncated or disguised inputs fail
+    before the paid create boundary.  Tool stderr is intentionally discarded:
+    it may contain an absolute managed path or source metadata.
+    """
+    path = pathlib.Path(audio_path)
     try:
         if path.stat().st_size <= 0:
             raise _heygen_media_error("tts_audio", "tts_audio_empty", "文件为空")
         with path.open("rb") as stream:
-            if not stream.read(16):
+            if not stream.read(32):
                 raise _heygen_media_error("tts_audio", "tts_audio_empty", "文件为空")
     except HeyGenMediaInputError:
         raise
     except (OSError, PermissionError):
         raise _heygen_media_error("tts_audio", "tts_audio_unreadable", "文件不可读") from None
-    return path
+    probe_cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name,codec_type:format=format_name",
+        "-of", "json", str(path),
+    ]
+    decode_cmd = [
+        "ffmpeg", "-v", "error", "-nostdin", "-xerror",
+        "-err_detect", "explode", "-i", str(path),
+        "-map", "0:a:0", "-vn", "-sn", "-dn", "-f", "null", "-",
+    ]
+    try:
+        probe = subprocess.run(
+            probe_cmd, check=True, timeout=30,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        parsed = json.loads((probe.stdout or b"").decode("utf-8", "strict"))
+        streams = parsed.get("streams") or []
+        stream = streams[0] if streams else {}
+        codec_name = str(stream.get("codec_name") or "").strip().lower()
+        codec_type = str(stream.get("codec_type") or "").strip().lower()
+        format_names = {
+            item.strip().lower()
+            for item in str((parsed.get("format") or {}).get("format_name") or "").split(",")
+            if item.strip()
+        }
+        if codec_type != "audio" or not codec_name or not format_names:
+            raise ValueError("missing audio stream metadata")
+        subprocess.run(
+            decode_cmd, check=True, timeout=180,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_validator_unavailable", "完整性校验组件不可用",
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_validation_timeout", "完整性校验超时",
+        ) from None
+    except (subprocess.CalledProcessError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_content_invalid", "内容已损坏或无法完整解码",
+        ) from None
+    except OSError:
+        raise _heygen_media_error(
+            "tts_audio", "tts_audio_unreadable", "文件不可读",
+        ) from None
+    return {
+        "path": path,
+        "codec_name": codec_name,
+        "format_names": format_names,
+    }
 
 def _ensure_heygen_image_jpg(image_path, category="avatar"):
     # HeyGen 会核对真实图片字节与 Content-Type。浏览器/系统给错 MIME 时，仅改后缀仍会
