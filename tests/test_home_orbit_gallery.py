@@ -1,4 +1,5 @@
 import json
+import math
 import pathlib
 import re
 import subprocess
@@ -105,11 +106,19 @@ class HomeOrbitGalleryTests(unittest.TestCase):
 
     def test_autoplay_advances_on_demand_and_preserves_resource_guards(self):
         delay = re.search(r"const AUTO_ADVANCE_DELAY = (\d+);", self.js)
-        impulse = re.search(r"const AUTO_ADVANCE_IMPULSE = ([0-9.]+);", self.js)
+        reference_ms = re.search(r"const MOTION_REFERENCE_MS = ([0-9.]+);", self.js)
+        decay = re.search(r"const MOTION_DECAY = ([0-9.]+);", self.js)
         self.assertIsNotNone(delay)
-        self.assertIsNotNone(impulse)
+        self.assertIsNotNone(reference_ms)
+        self.assertIsNotNone(decay)
         self.assertLessEqual(int(delay.group(1)), 3000)
-        self.assertGreaterEqual(float(impulse.group(1)), 0.004)
+        impulse = -math.log(float(decay.group(1))) / float(reference_ms.group(1))
+        self.assertGreaterEqual(impulse, 0.004)
+        self.assertIn(
+            "const MOTION_DECAY_RATE = Math.log(MOTION_DECAY) / MOTION_REFERENCE_MS;",
+            self.js,
+        )
+        self.assertIn("const AUTO_ADVANCE_IMPULSE = -MOTION_DECAY_RATE;", self.js)
         self.assertIn("function scheduleAutoAdvance()", self.js)
         self.assertIn("function autoAdvanceAllowed()", self.js)
         self.assertIn("state.inViewport", self.js)

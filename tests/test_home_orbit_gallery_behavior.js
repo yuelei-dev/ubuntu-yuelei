@@ -73,7 +73,7 @@ test('pointer capture starts on pointerdown and external release clears drag sta
     root,
     performance,
     isInteractive: () => true,
-    clearAutoAdvance: () => {},
+    cancelAutoAdvance: () => {},
   });
   const moveDrag = loadFunction('moveDrag', {
     state,
@@ -151,7 +151,7 @@ test('arrow navigation moves focus to the new active card', () => {
   const handleGalleryKeydown = loadFunction('handleGalleryKeydown', {
     state,
     isInteractive: () => true,
-    clearAutoAdvance: () => {},
+    cancelAutoAdvance: () => {},
     render,
     focusActiveCard,
     scheduleAutoAdvance: () => {},
@@ -221,10 +221,11 @@ test('gallery initialization waits until the section approaches the viewport', (
 });
 
 test('idle motion schedules the next auto advance without keeping RAF alive', () => {
-  const state = { position: 4, velocity: 0 };
+  const state = { position: 4, velocity: 0, autoTarget: null };
   let scheduled = 0;
   const advanceMotion = loadFunction('advanceMotion', {
     state,
+    MOTION_DECAY_RATE: Math.log(0.93) / 16.67,
     scheduleAutoAdvance: () => { scheduled += 1; },
   });
   assert.equal(advanceMotion(5000), false);
@@ -235,8 +236,8 @@ test('idle motion schedules the next auto advance without keeping RAF alive', ()
   assert.ok(state.position > 4);
 });
 
-test('auto advance timer launches one smooth impulse only when allowed', () => {
-  const state = { autoTimerId: 0, velocity: 0 };
+test('auto advance timer targets exactly one card and launches one smooth impulse', () => {
+  const state = { autoTimerId: 0, autoTarget: null, position: 4.25, velocity: 0 };
   let timerCallback = null;
   let timerDelay = 0;
   let requestedFrames = 0;
@@ -250,7 +251,7 @@ test('auto advance timer launches one smooth impulse only when allowed', () => {
       return 41;
     },
     AUTO_ADVANCE_DELAY: 2600,
-    AUTO_ADVANCE_IMPULSE: 0.0044,
+    AUTO_ADVANCE_IMPULSE: -Math.log(0.93) / 16.67,
     ensureAnimationFrame: () => { requestedFrames += 1; },
   });
 
@@ -259,8 +260,73 @@ test('auto advance timer launches one smooth impulse only when allowed', () => {
   assert.equal(timerDelay, 2600);
   timerCallback();
   assert.equal(state.autoTimerId, 0);
-  assert.equal(state.velocity, 0.0044);
+  assert.equal(state.autoTarget, 5.25);
+  assert.equal(state.velocity, -Math.log(0.93) / 16.67);
   assert.equal(requestedFrames, 1);
+});
+
+test('motion integration is stable at 16.67ms, 33.33ms, and 50ms frame intervals', () => {
+  function simulate(intervals) {
+    const state = { position: 2.5, velocity: 0.0044, autoTarget: null };
+    const advanceMotion = loadFunction('advanceMotion', {
+      state,
+      MOTION_DECAY_RATE: Math.log(0.93) / 16.67,
+      scheduleAutoAdvance: () => {},
+    });
+    intervals.forEach(elapsed => advanceMotion(elapsed));
+    return state;
+  }
+
+  const at60fps = simulate([...Array(59).fill(16.67), 16.47]);
+  const at30fps = simulate([...Array(30).fill(33.33), 0.1]);
+  const at20fps = simulate(Array(20).fill(50));
+  assert.ok(Math.abs(at60fps.position - at30fps.position) < 1e-10);
+  assert.ok(Math.abs(at30fps.position - at20fps.position) < 1e-10);
+  assert.ok(Math.abs(at60fps.velocity - at20fps.velocity) < 1e-12);
+});
+
+test('auto advance settles on exactly one card at every supported frame cadence', () => {
+  function settle(frameMs) {
+    const start = 7.25;
+    const state = {
+      position: start,
+      velocity: -Math.log(0.93) / 16.67,
+      autoTarget: start + 1,
+    };
+    let scheduled = 0;
+    const advanceMotion = loadFunction('advanceMotion', {
+      state,
+      MOTION_DECAY_RATE: Math.log(0.93) / 16.67,
+      scheduleAutoAdvance: () => { scheduled += 1; },
+    });
+    for (let frame = 0; state.velocity && frame < 1000; frame += 1) {
+      advanceMotion(frameMs);
+    }
+    return { ...state, scheduled };
+  }
+
+  [16.67, 33.33, 50].forEach(frameMs => {
+    const result = settle(frameMs);
+    assert.equal(result.position, 8.25, `${frameMs}ms cadence must move exactly one card`);
+    assert.equal(result.autoTarget, null);
+    assert.equal(result.velocity, 0);
+    assert.equal(result.scheduled, 1);
+  });
+});
+
+test('cancelling auto advance clears both the timer and pending target', () => {
+  const cleared = [];
+  const state = { autoTimerId: 19, autoTarget: 6, velocity: 0.0044 };
+  const clearAutoAdvance = loadFunction('clearAutoAdvance', {
+    state,
+    clearTimeout: id => cleared.push(id),
+  });
+  const cancelAutoAdvance = loadFunction('cancelAutoAdvance', { state, clearAutoAdvance });
+  cancelAutoAdvance();
+  assert.deepEqual(cleared, [19]);
+  assert.equal(state.autoTimerId, 0);
+  assert.equal(state.autoTarget, null);
+  assert.equal(state.velocity, 0);
 });
 
 test('auto advance is blocked offscreen, during interaction, and in reduced modes', () => {
@@ -459,7 +525,7 @@ test('fallback state removes interactive semantics and dynamic cards', () => {
   const setFallbackState = loadFunction('setFallbackState', {
     state,
     root,
-    clearAutoAdvance: () => {},
+    cancelAutoAdvance: () => {},
     cancelAnimationFrame: () => {},
     clearEntryMedia: () => {},
     track: { replaceChildren: () => { trackCleared = true; } },
