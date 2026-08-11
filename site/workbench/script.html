@@ -8,6 +8,7 @@
 <link rel="stylesheet" href="../assets/fonts/hq-fonts.css">
 <link rel="stylesheet" href="../assets/cloud.css?v=8">
 <script src="theme-init.js?v=11eb385e"></script>
+<script src="text-video-entry.js?v=78a34f51"></script>
 <style>
   body{ overflow:hidden; }
   .gScript{ display:grid; grid-template-columns:0.92fr 1.12fr; gap:18px; align-items:start; }
@@ -90,6 +91,7 @@
 
   <div id="scModeTabs" style="display:flex; gap:6px; margin-bottom:18px;">
     <button class="sc-mode-tab on" data-mode="write" type="button">✍️ AI写脚本</button>
+    <button class="sc-mode-tab" data-mode="script_to_video" type="button">🎬 文案成片</button>
     <button class="sc-mode-tab" data-mode="breakdown" type="button">🔍 拆解视频</button>
   </div>
 
@@ -382,7 +384,8 @@
       bdImageReverse=document.getElementById('bdImageReverse'), bdVideoReverse=document.getElementById('bdVideoReverse'),
       bdLocalImageName=document.getElementById('bdLocalImageName'), bdLocalVideoName=document.getElementById('bdLocalVideoName'),
       bdLocalStatus=document.getElementById('bdLocalStatus');
-  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, lastBreakdownReverse=null, currentMode='write', currentBreakdownTool='scenes', refImages=[], bdEditing=false;
+  var entryMode=window.HQTextVideoEntry?HQTextVideoEntry.modeFromSearch(location.search):'write';
+  var orig=gen.innerHTML, lastScenes=[], lastStyle='口播', lastBreakdown=null, lastBreakdownReverse=null, currentMode=entryMode, currentBreakdownTool='scenes', refImages=[], bdEditing=false;
   var initialMeta=meta?meta.innerHTML:'', initialScenes=scenes?scenes.innerHTML:'',
       initialPreviewTitle=previewTitle?previewTitle.textContent:'脚本 · 分镜预览',
       initialBatchHint=batchHint?batchHint.textContent:'';
@@ -705,7 +708,7 @@
         tab.style.borderColor='';
       }
     });
-    if(panelWrite) panelWrite.style.display=currentMode==='write'?'':'none';
+    if(panelWrite) panelWrite.style.display=currentMode==='breakdown'?'none':'';
     if(panelBreakdown) panelBreakdown.style.display=currentMode==='breakdown'?'':'none';
     if(bdIntroText) bdIntroText.textContent=reverseMode?'粘贴竞品视频链接，AI 读取关键画面与口播语境，直接反推出可复用的中文提示词':'粘贴竞品视频链接，AI 拆出分镜结构，再沿当前主线生成同款视频';
     if(bdUrlHint) bdUrlHint.textContent=reverseMode?'支持抖音、小红书公开视频链接，链接视频最大 200MB；提示词反推暂仅支持单条链接（'+BREAKDOWN_POINTS+' 点）':'支持抖音、小红书公开视频链接，链接视频最大 200MB；最多 5 条（每行一个，每个链接 '+BREAKDOWN_POINTS+' 点）';
@@ -740,7 +743,7 @@
     }
   }
   function switchMode(mode){
-    currentMode=mode==='breakdown'?'breakdown':'write';
+    currentMode=mode==='breakdown'?'breakdown':(mode==='script_to_video'?'script_to_video':'write');
     syncModeUi();
     if(currentMode==='breakdown'){
       if(isBreakdownReverseTool()){
@@ -1275,7 +1278,7 @@
   gen.onclick=function(){
     var t=(topic.value||'').trim(), s=(sell.value||'').trim();
     if(!t){ scenes.innerHTML='<div style="padding:22px;text-align:center;color:#f4708a;font-size:13px;">请先填「选题」</div>'; return; }
-    currentMode='write'; syncModeUi();
+    currentMode=window.HQTextVideoEntry?HQTextVideoEntry.keepModeAfterWrite(currentMode):'write'; syncModeUi();
     var style=pick('segStyle','.sc-opt','口播'), dur=pick('segDur','.sc-opt','30s'), plat=pick('platRow','.sc-chip','抖音');
     var pollCount=0, pollErrors=0;
     setBtn('生成中…',true);
@@ -2321,6 +2324,7 @@
     _openMediaLightbox(tag, src);
   });
   applyIP12Handoff();
+  switchMode(currentMode);
   loadHistory();
   _resumeActiveVideoJob();
 })();

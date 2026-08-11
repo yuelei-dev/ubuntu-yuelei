@@ -62,6 +62,7 @@ class Asset:
 
 ASSETS = (
     Asset("cloud-shell.js", required=True),
+    Asset("text-video-entry.js", required=False),
     Asset("theme.css", required=False),
     Asset("theme-init.js", required=False),
     Asset("short-drama-center.css", required=False),
