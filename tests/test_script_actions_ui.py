@@ -615,6 +615,11 @@ setImmediate(function(){
         """一键成片/做图成功后分镜列表保留，成功横幅插入顶部"""
         self.assertIn("scenes.insertAdjacentHTML('afterbegin',successHtml)", self.html)
 
+    def test_final_video_download_uses_final_result_in_both_completion_paths(self):
+        self.assertEqual(self.html.count("下载最终成片"), 2)
+        self.assertIn("href=\"'+esc(videoUrl)+'\" download class=\"sc-btn\"", self.html)
+        self.assertIn("href=\"'+esc(vurl)+'\" download class=\"sc-btn\"", self.html)
+
     def test_legacy_millisecond_duration_display_fixed(self):
         """存量毫秒时长显示修正（fmtDur 18320→18）"""
         self.assertIn("function fmtDur(d)", self.html)
