@@ -552,6 +552,31 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         fallback.assert_not_called()
         self.assertEqual([name for name, _ in events], ["submitting", "rejected"])
 
+    def test_missing_plan_oauth_is_refundable_and_never_posts_api_wallet_job(self):
+        self._image("image/no-oauth.png")
+        self._audio("audio/no-oauth.mp3", "mp3")
+        events = []
+        lifecycle = {
+            "state": {},
+            "on_submitting": lambda data: events.append(("submitting", data)),
+            "on_rejected": lambda data: events.append(("rejected", data)),
+        }
+        with mock.patch.object(video, "_HEYGEN_MCP_CREDENTIALS", ""), \
+             mock.patch.object(video, "_HEYGEN_ALLOW_API_WALLET", False), \
+             mock.patch.object(video, "_HEYGEN_DIRECT", True), \
+             mock.patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             mock.patch.object(video, "_upload_heygen_image_asset", return_value="img"), \
+             mock.patch.object(video, "_heygen_upload_asset", return_value="aud"), \
+             mock.patch.object(video, "_heygen_request_json") as paid_request:
+            with self.assertRaisesRegex(
+                    video.HeyGenMCPAuthError, "已阻止回退到 API 钱包"):
+                video.generate_heygen_video_recoverable(
+                    "image/no-oauth.png", "audio/no-oauth.mp3",
+                    "720p", "9:16", "medium", lifecycle,
+                )
+        paid_request.assert_not_called()
+        self.assertEqual([name for name, _ in events], ["submitting", "rejected"])
+
     def test_script_pipeline_definitive_rejection_preserves_http_error_and_consistent_phase(self):
         job_id = self._job({}, status="running")
 

@@ -149,7 +149,9 @@ class RequestBodyTests(unittest.TestCase):
             seen.update(json.loads(body))
             return {"data": {"video_id": "v1"}}
 
-        with patch.object(video, "_heygen_request_json", fake):
+        with patch.object(video, "_HEYGEN_ALLOW_API_WALLET", True), \
+             patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             patch.object(video, "_heygen_request_json", fake):
             video._heygen_create_cinematic_video(direct=True, **kw)
         return seen
 

@@ -3302,6 +3302,7 @@ def _shrink_motion_reference(reference_video_file):
     return "video/" + small.name
 
 def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion, direct=False):
+    _heygen_require_paid_route()
     title = "huangque video %d" % int(time.time())
     if _heygen_mcp_enabled():
         data = _heygen_mcp_call("create_video_from_image", {
@@ -3526,6 +3527,9 @@ DUO_MOTION_PROMPT = DUO_MOTION_PROMPT_BASE
 _HEYGEN_MCP_URL = "https://mcp.heygen.com/mcp/v1/"
 _HEYGEN_MCP_TOKEN_URL = "https://api2.heygen.com/v1/oauth/token"
 _HEYGEN_MCP_CREDENTIALS = os.environ.get("HEYGEN_MCP_CREDENTIALS", "").strip()
+_HEYGEN_ALLOW_API_WALLET = os.environ.get(
+    "HEYGEN_ALLOW_API_WALLET", "0"
+).strip().lower() in ("1", "true", "yes")
 _heygen_mcp_auth_lock = threading.Lock()
 
 
@@ -3535,6 +3539,27 @@ class HeyGenMCPAuthError(RuntimeError):
 
 def _heygen_mcp_enabled():
     return bool(_HEYGEN_MCP_CREDENTIALS)
+
+
+def _heygen_require_paid_route():
+    """Fail closed instead of silently spending the separate API wallet.
+
+    HeyGen OAuth/MCP consumes the web-plan subscription credits while an API
+    key consumes the independent API wallet.  A missing OAuth credential used
+    to change billing routes silently, which made the test environment submit
+    jobs that the API wallet could not afford.  API-wallet billing remains
+    available only as an explicit operator choice.
+    """
+    if _heygen_mcp_enabled():
+        return "mcp_oauth"
+    if _HEYGEN_ALLOW_API_WALLET:
+        if not HEYGEN_API_KEY:
+            raise ValueError("视频生成服务未配置")
+        return "api_wallet"
+    raise HeyGenMCPAuthError(
+        "HeyGen 套餐 OAuth 未配置，已阻止回退到 API 钱包；"
+        "请为当前环境配置独立的 HEYGEN_MCP_CREDENTIALS"
+    )
 
 
 def _heygen_mcp_access_token(force_refresh=False):
@@ -3642,6 +3667,7 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
 
 def _heygen_create_cinematic_video(avatar_item_id, reference_asset_id, ratio, resolution, duration,
                                    prompt=None, direct=False, enhance_prompt=False):
+    _heygen_require_paid_route()
     # avatar_id 是 1~3 个 look 的数组 —— 多个 look 会让 HeyGen 在【同一个镜头】里同时出现多个人，
     # 不是生成多条视频。所以 3 个形象仍然只扣 1 条视频的钱。
     ids = [i for i in (avatar_item_id if isinstance(avatar_item_id, (list, tuple)) else [avatar_item_id]) if i]
@@ -4073,7 +4099,7 @@ def _lifecycle_notify(lifecycle, event, data):
 
 
 def _definitive_heygen_create_rejection(error):
-    if isinstance(error, HeyGenRateLimited):
+    if isinstance(error, (HeyGenRateLimited, HeyGenMCPAuthError)):
         return True
     cause = getattr(error, "__cause__", None)
     return isinstance(cause, urllib.error.HTTPError) and 400 <= int(cause.code) < 500
