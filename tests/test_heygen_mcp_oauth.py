@@ -15,6 +15,42 @@ video = importlib.import_module("content_domains.video")
 
 
 class HeyGenMcpOAuthTests(unittest.TestCase):
+    def test_paid_create_never_silently_falls_back_to_api_wallet(self):
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", ""), \
+             patch.object(video, "_HEYGEN_ALLOW_API_WALLET", False), \
+             patch.object(video, "_heygen_request_json") as api_request, \
+             patch.object(video, "_heygen_mcp_call") as mcp_call:
+            with self.assertRaisesRegex(
+                    video.HeyGenMCPAuthError, "已阻止回退到 API 钱包"):
+                video._heygen_create_video(
+                    "image-asset", "audio-asset", "1080p", "9:16", "medium",
+                    direct=True,
+                )
+            with self.assertRaisesRegex(
+                    video.HeyGenMCPAuthError, "已阻止回退到 API 钱包"):
+                video._heygen_create_cinematic_video(
+                    ["look-1"], [], "9:16", "720p", 15, direct=True,
+                )
+        api_request.assert_not_called()
+        mcp_call.assert_not_called()
+
+    def test_api_wallet_requires_explicit_operator_opt_in(self):
+        response = {"data": {"video_id": "api-wallet-video"}}
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", ""), \
+             patch.object(video, "_HEYGEN_ALLOW_API_WALLET", True), \
+             patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             patch.object(video, "_heygen_request_json", return_value=response) as request:
+            video_id = video._heygen_create_video(
+                "image-asset", "audio-asset", "720p", "9:16", "medium",
+                direct=True,
+            )
+        self.assertEqual(video_id, "api-wallet-video")
+        request.assert_called_once()
+
+    def test_missing_oauth_is_a_definitive_pre_billing_rejection(self):
+        error = video.HeyGenMCPAuthError("套餐 OAuth 未配置")
+        self.assertTrue(video._definitive_heygen_create_rejection(error))
+
     def test_expired_oauth_refreshes_and_stays_private(self):
         requests = []
 
