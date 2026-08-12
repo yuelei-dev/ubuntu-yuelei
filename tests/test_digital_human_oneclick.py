@@ -206,7 +206,10 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "video_files": ["videos/1.mp4", "videos/2.mp4", "videos/3.mp4"],
             "material_files": ["images/%d.png" % index for index in range(11, 17)],
         }
-        with mock.patch.dict(sys.modules, {"content_domains.video": VideoDomain}):
+        package = importlib.import_module("content_domains")
+        with mock.patch.object(package, "video", VideoDomain, create=True), mock.patch.dict(
+            sys.modules, {"content_domains.video": VideoDomain},
+        ):
             result = self.domain.compose(payload)
         self.assertEqual(result["child_jobs"], {"videos": [1, 2, 3], "materials": [11, 12, 13, 14, 15, 16]})
         self.assertEqual((result["width"], result["height"]), (1080, 1920))
@@ -230,6 +233,13 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("确认方案并生成", page)
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
         self.assertNotIn("选择剪辑风格", page)
+
+    def test_recovery_preserves_idempotency_on_ambiguous_poll_failures(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        self.assertIn("terminal.terminalJob=true", page)
+        self.assertIn("if(error&&error.terminalJob)return reject(error)", page)
+        self.assertIn("if(!error||!error.terminalJob)throw error;ids[index]=0", page)
+        self.assertIn("if(!error||!error.terminalJob)throw error;state.compose_job=0", page)
 
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
