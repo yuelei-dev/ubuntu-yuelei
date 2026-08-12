@@ -110,6 +110,7 @@ jobs:
           node tests/test_digital_human_material_state.js
           node tests/test_digital_human_voice_state.js
           node tests/test_digital_human_setup_state.js
+          node tests/test_digital_human_submit.js
 
       - name: 安装设计系统依赖
         working-directory: design-system

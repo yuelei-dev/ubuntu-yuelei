@@ -1,4 +1,6 @@
 import importlib
+import base64
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -24,6 +26,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.db = self.root / "jobs.db"
+        self.consent_db = self.root / "digital-human-consent.db"
         connection = sqlite3.connect(self.db)
         connection.execute("""CREATE TABLE jobs(
             id INTEGER PRIMARY KEY, username TEXT, kind TEXT,
@@ -52,6 +55,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(self.domain, "OUT_DIR", self.root),
             mock.patch.object(self.domain, "jdb", self._connection),
+            mock.patch.object(self.domain, "CONSENT_DB", self.consent_db),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -60,6 +64,135 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         connection = sqlite3.connect(self.db)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _consent_connection(self):
+        connection = sqlite3.connect(self.consent_db)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def _consent_payload(self, **overrides):
+        payload = {
+            "confirmed": True,
+            "consent_version": self.domain.CONSENT_VERSION,
+            "purpose": self.domain.CONSENT_PURPOSE,
+            "run_id": "dh-run-test-001",
+            "plan_digest": "a" * 64,
+            "photo_sha256": hashlib.sha256(b"portrait").hexdigest(),
+            "voice_mode": "existing",
+            "voice_ref": "vip_ready_voice",
+            "voice_sha256": "",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_consent_is_persisted_without_raw_media_and_is_idempotent(self):
+        first = self.domain.create_consent(
+            self._consent_payload(), "yuelei", "test-signing-secret", now=1000,
+            db_factory=self._consent_connection,
+        )
+        second = self.domain.create_consent(
+            self._consent_payload(), "yuelei", "test-signing-secret", now=1010,
+            db_factory=self._consent_connection,
+        )
+        self.assertEqual(first["consent_token"], second["consent_token"])
+        connection = self._consent_connection()
+        try:
+            row = dict(connection.execute("SELECT * FROM digital_human_consents").fetchone())
+        finally:
+            connection.close()
+        self.assertEqual(row["username"], "yuelei")
+        self.assertEqual(row["photo_sha256"], hashlib.sha256(b"portrait").hexdigest())
+        self.assertNotIn("portrait", json.dumps(row))
+        self.assertNotIn(first["consent_token"], json.dumps(row))
+
+    def test_consent_rejects_unconfirmed_and_changed_binding(self):
+        with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "确认") as missing:
+            self.domain.create_consent(
+                self._consent_payload(confirmed=False), "yuelei", "secret",
+                db_factory=self._consent_connection,
+            )
+        self.assertEqual(missing.exception.code, "consent_required")
+        self.domain.create_consent(
+            self._consent_payload(), "yuelei", "secret",
+            db_factory=self._consent_connection,
+        )
+        with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "变化") as changed:
+            self.domain.create_consent(
+                self._consent_payload(photo_sha256="b" * 64), "yuelei", "secret",
+                db_factory=self._consent_connection,
+            )
+        self.assertEqual(changed.exception.code, "consent_binding_conflict")
+
+    def test_consent_service_requires_a_signing_secret_without_creating_db(self):
+        with self.assertRaises(self.domain.DigitalHumanRequestError) as unavailable:
+            self.domain.create_consent(
+                self._consent_payload(run_id="dh-run-no-secret-001"),
+                "yuelei", "",
+            )
+        self.assertEqual("consent_service_unavailable", unavailable.exception.code)
+        self.assertFalse(self.consent_db.exists())
+
+    def test_gesture_and_talking_submissions_require_matching_consent(self):
+        consent = self.domain.create_consent(
+            self._consent_payload(), "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        common = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": "a" * 64,
+            "digital_human_consent_token": consent["consent_token"],
+        }
+        gesture = dict(common, digital_human_stage="gesture", prompt="safe",
+                       reference_images=[base64.b64encode(b"portrait").decode("ascii")])
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            checked = self.domain.verify_child_submission(gesture, "yuelei", "image")
+            self.assertEqual(checked["digital_human_consent_id"], consent["consent_id"])
+            self.assertNotIn("digital_human_consent_token", checked)
+            with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "照片"):
+                self.domain.verify_child_submission(
+                    dict(gesture, reference_images=[base64.b64encode(b"other").decode("ascii")]),
+                    "yuelei", "image",
+                )
+            talking = dict(common, digital_human_stage="talking", voice="vip_ready_voice")
+            self.assertIn(
+                "digital_human_consent_id",
+                self.domain.verify_child_submission(talking, "yuelei", "video"),
+            )
+            with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "声音"):
+                self.domain.verify_child_submission(
+                    dict(talking, voice="vip_wrong"), "yuelei", "video",
+                )
+
+    def test_clone_consent_binds_audio_hash_and_slot(self):
+        sample = b"voice-sample"
+        consent = self.domain.create_consent(
+            self._consent_payload(
+                run_id="dh-run-clone-001", voice_mode="clone", voice_ref="slot_123",
+                voice_sha256=hashlib.sha256(sample).hexdigest(),
+            ), "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        body = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "voice_clone",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": "a" * 64,
+            "digital_human_consent_token": consent["consent_token"],
+            "slot_id": "slot_123", "audio": base64.b64encode(sample).decode("ascii"),
+        }
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            checked = self.domain.verify_clone_submission(body, "yuelei")
+            self.assertEqual(checked["digital_human_consent_id"], consent["consent_id"])
+            with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "声音样本"):
+                self.domain.verify_clone_submission(
+                    dict(body, audio=base64.b64encode(b"other").decode("ascii")), "yuelei",
+                )
+            with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "字段不完整"):
+                self.domain.verify_clone_submission({
+                    "digital_human_consent_token": consent["consent_token"],
+                    "slot_id": "slot_123", "audio": body["audio"],
+                }, "yuelei")
 
     def tearDown(self):
         for patcher in reversed(self.patches):
@@ -90,9 +223,15 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "plan_digest": planned["plan_digest"],
             "video_job_ids": [1, 2, 3],
             "material_job_ids": [11, 12, 13, 14, 15, 16],
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "compose",
+            "digital_human_run_id": "dh-run-test-001",
+            "digital_human_plan_digest": planned["plan_digest"],
+            "digital_human_consent_id": "dhc_" + "1" * 32,
         }, "yuelei")
         self.assertEqual(payload["video_files"], ["videos/1.mp4", "videos/2.mp4", "videos/3.mp4"])
         self.assertEqual(len(payload["material_files"]), 6)
+        self.assertEqual(payload["digital_human_consent_id"], "dhc_" + "1" * 32)
         self.assertNotIn("_script_to_video_state", payload)
 
     def test_prepare_rejects_digest_drift_and_foreign_job(self):
@@ -226,6 +365,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "digital-human-material-state.js?v=1",
             "digital-human-voice-state.js?v=1",
             "digital-human-setup-state.js?v=2",
+            "digital-human-submit.js?v=1",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -239,6 +379,9 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "epoch:epoch,currentEpoch:function(){return generationEpoch;}",
             "return generateImages(epoch)",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
+            "/api/gen/digital-human-oneclick/consent",
+            "digital_human_consent_token",
+            "photo_sha256", "voice_sha256", "consent_version",
         ):
             self.assertIn(marker, page)
         self.assertIn("合成本身 0 点", page)
@@ -259,6 +402,17 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("声音来源和样音已随当前任务锁定", page)
         self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase)", page)
         self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
+        self.assertIn("DigitalHumanSubmit.withSecurityRetry", page)
+        self.assertIn("DigitalHumanSubmit.describe(error)", page)
+        self.assertIn("安全检查重试 '+attempt+'/2", page)
+        self.assertIn("{gesture:'gestures',material:'materials',video:'talking'}", page)
+        self.assertIn("error.code==='voice_clone_in_progress'", page)
+        self.assertIn("尚未创建任务、未扣点", (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-submit.js").read_text(encoding="utf-8"))
+        self.assertIn('data-step-error="gestures"', page)
+        self.assertIn("scrollIntoView", page)
+        self.assertIn("提交后系统将记录本次授权时间及素材校验值", page)
+        domain = (Path(__file__).resolve().parents[1] / "server" / "content_domains" / "digital_human_oneclick.py").read_text(encoding="utf-8")
+        self.assertIn('cleaned["digital_human_consent_id"]', domain)
         self.assertNotIn("选择剪辑风格", page)
 
     def test_primary_actions_are_visible_before_long_material_fields(self):
@@ -272,6 +426,28 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         self.assertIn('body .hq-main-scroll-flush{overflow-x:hidden;overflow-y:auto}', page)
         self.assertIn('.hq-content[data-active="video"]{min-height:max-content}', page)
+
+    def test_consent_enforcement_runs_before_security_validation_and_charge(self):
+        root = Path(__file__).resolve().parents[1]
+        core = (root / "server" / "content_domains" / "core.py").read_text(
+            encoding="utf-8"
+        )
+        paid = core[core.index("if kind is not None:"):]
+        consent_at = paid.index("verify_child_submission")
+        security_at = paid.index("miniprogram_security.check_payload(body)")
+        charge_at = paid.index("points_domain.cost_of(kind, body)")
+        self.assertLess(consent_at, security_at)
+        self.assertLess(security_at, charge_at)
+        clone = core[
+            core.index('if p == "/api/gen/audio/clone-vip"'):
+            core.index('if p == "/api/gen/video/avatar-name"')
+        ]
+        self.assertLess(
+            clone.index("verify_clone_submission"),
+            clone.index("validate_clone_vip_payload"),
+        )
+        entry = (root / "server" / "content_api.py").read_text(encoding="utf-8")
+        self.assertIn("digital_human_oneclick.init_db()", entry)
 
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")

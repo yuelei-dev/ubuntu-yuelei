@@ -37,6 +37,11 @@ LEGACY_CODES = {
     "upstream_response_too_large": "HQ-UPSTREAM-001",
     "invalid_upstream_response": "HQ-UPSTREAM-001",
     "content_security_unavailable": "HQ-UPSTREAM-002",
+    "content_security_text_unavailable": "HQ-UPSTREAM-002",
+    "content_security_image_unavailable": "HQ-UPSTREAM-002",
+    "content_security_token_unavailable": "HQ-UPSTREAM-002",
+    "content_security_configuration_unavailable": "HQ-UPSTREAM-002",
+    "consent_service_unavailable": "HQ-UPSTREAM-002",
 }
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _SECRET_RE = re.compile(

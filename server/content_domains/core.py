@@ -1959,7 +1959,7 @@ class H(BaseHTTPRequestHandler):
                 except miniprogram_security.SecurityUnavailable as error:
                     return self._send(503, {
                         "detail": str(error),
-                        "code": "content_security_unavailable",
+                        "code": error.code,
                         "retry_after_ms": 5000,
                     })
                 except points_domain.AuthPointsError as error:
@@ -2134,7 +2134,7 @@ class H(BaseHTTPRequestHandler):
                     })
                 except miniprogram_security.SecurityUnavailable as error:
                     return self._send(503, {
-                        "detail": str(error), "code": "content_security_unavailable",
+                        "detail": str(error), "code": error.code,
                         "retry_after_ms": 5000,
                     })
                 except (LookupError, PermissionError, ValueError,
@@ -2341,7 +2341,7 @@ class H(BaseHTTPRequestHandler):
                 except miniprogram_security.SecurityUnavailable as error:
                     return self._send(503, {
                         "detail": str(error),
-                        "code": "content_security_unavailable",
+                        "code": error.code,
                         "retry_after_ms": 5000,
                     })
                 except (LookupError, PermissionError, ValueError,
@@ -2670,14 +2670,32 @@ class H(BaseHTTPRequestHandler):
                 feature_flags.require_enabled("audio")
             except feature_flags.FeatureDisabled as e:
                 return self._send(503, {"detail": str(e)})
+            from . import digital_human_oneclick
             try:
                 body = self._json_body_strict()
+                digital_human_submission = (
+                    isinstance(body, dict)
+                    and str(body.get("digital_human_pipeline") or "").strip().lower()
+                    == digital_human_oneclick.CONSENT_PURPOSE
+                )
+                body = digital_human_oneclick.verify_clone_submission(
+                    body, user["username"],
+                )
                 body = audio_domain.validate_clone_vip_payload(user["username"], body)
                 voice = audio_domain.mark_clone_training(user["username"], body.get("slot_id"), body.get("name"))
                 threading.Thread(target=audio_domain.clone_vip_voice_background, args=(user["username"], body), daemon=True).start()
                 return self._send(200, {"ok": True, "voice": voice})
+            except digital_human_oneclick.DigitalHumanRequestError as e:
+                return self._send(e.status, {
+                    "detail": str(e)[:220], "code": e.code,
+                })
             except audio_domain.CloneVipValidationError as e:
-                return self._send(e.status, {"detail": e.detail})
+                return self._send(e.status, {
+                    "detail": e.detail,
+                    **({"code": "voice_clone_in_progress"}
+                       if digital_human_submission and e.status == 409
+                       and "正在复刻" in str(e.detail or "") else {}),
+                })
             except ValueError as e:
                 return self._send(400, {"detail": str(e)[:220]})
             except Exception as e:
@@ -2832,6 +2850,7 @@ class H(BaseHTTPRequestHandler):
             smart_montage_submission = False
             durable_copy_submission = False
             durable_attempt = None
+            from . import digital_human_oneclick
             try:
                 body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent"} else self._json_body()
                 if is_still_route:
@@ -2839,6 +2858,9 @@ class H(BaseHTTPRequestHandler):
                     if not idem_key: raise ValueError("关键帧提交必须提供 Idempotency-Key")
                 elif kind in {"image", "xiaole_video"}:
                     body = cli_uploads.expand_image_payload(body, user["username"])
+                body = digital_human_oneclick.verify_child_submission(
+                    body, user["username"], kind,
+                )
                 # 微信内容安全必须在校验、扣点和入队前完成；服务异常时不收单。
                 miniprogram_security.check_payload(body)
                 if is_still_route:
@@ -2968,12 +2990,16 @@ class H(BaseHTTPRequestHandler):
                 if still_idem_started:
                     _idempotency_abort(user["username"], p, idem_key)
                 return self._send(503, {"detail": str(e)})
+            except digital_human_oneclick.DigitalHumanRequestError as e:
+                return self._send(int(e.status or 400), {
+                    "detail": str(e)[:220], "code": e.code,
+                })
             except miniprogram_security.ContentRejected as e:
                 terminal = is_still_route and bool(locals().get("idem_key"))
                 return self._send(400, {"detail": str(e), "code": "content_rejected",
                                         **({"operation_terminal": True} if terminal else {})})
             except miniprogram_security.SecurityUnavailable as e:
-                return self._send(503, {"detail": str(e), "code": "content_security_unavailable", "retry_after_ms": 5000})
+                return self._send(503, {"detail": str(e), "code": e.code, "retry_after_ms": 5000})
             except (video_domain.SeedanceReferenceUnavailable if isinstance(video_domain.SeedanceReferenceUnavailable, type) and issubclass(video_domain.SeedanceReferenceUnavailable, BaseException) else ()) as e: return self._send(e.status, {"detail": str(e)[:220], "code": e.code, "retry_after_ms": 60000})
             except (ValueError, LookupError, PermissionError, _short_drama_domain().RevisionConflict) as e:
                 if still_idem_started:

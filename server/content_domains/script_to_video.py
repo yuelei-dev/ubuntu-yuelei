@@ -813,7 +813,8 @@ def dispatch_http(handler, method, verify_token, must_change_password):
     path = handler.path.split("?", 1)[0]
     from . import digital_human_oneclick
     if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH,
-                    digital_human_oneclick.PLAN_PATH}:
+                    digital_human_oneclick.PLAN_PATH,
+                    digital_human_oneclick.CONSENT_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -830,6 +831,29 @@ def dispatch_http(handler, method, verify_token, must_change_password):
             handler._send(200, digital_human_oneclick.plan_response(handler._json_body_strict()))
         except digital_human_oneclick.DigitalHumanRequestError as exc:
             handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code})
+        return True
+    if path == digital_human_oneclick.CONSENT_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            body = handler._json_body_strict()
+            if str(body.get("voice_mode") or "").strip().lower() == "existing":
+                from . import audio as audio_domain
+                audio_domain.resolve_audio_provider_voice(
+                    user["username"], str(body.get("voice_ref") or "").strip(),
+                )
+            handler._send(200, digital_human_oneclick.consent_response(
+                body, user["username"],
+                os.environ.get("HQ_INTERNAL_TOKEN", ""),
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                **({"retry_after_ms": 5000} if exc.status == 503 else {}),
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
         return True
     if path == SMART_MONTAGE_MATERIAL_UPLOAD_PATH:
         from . import cli_uploads, miniprogram_security
@@ -902,7 +926,7 @@ def dispatch_http(handler, method, verify_token, must_change_password):
                 cli_uploads.discard_image(uploaded.get("upload_id"), user["username"])
             handler._send(503, {
                 "detail": str(exc)[:220],
-                "code": "content_security_unavailable",
+                "code": exc.code,
                 "retry_after_ms": 5000,
             })
         except (TypeError, ValueError) as exc:
