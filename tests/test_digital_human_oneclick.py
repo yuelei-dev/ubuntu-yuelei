@@ -225,6 +225,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=1",
             "digital-human-voice-state.js?v=1",
+            "digital-human-setup-state.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -234,6 +235,9 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "DigitalHumanMaterialState.canAnalyze(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canStart(state.phase,customerMaterialBusy,!!plan)",
             "DigitalHumanMaterialState.restoreStartButton($('start'),state.phase)",
+            "DigitalHumanSetupState.runJobs({items:items",
+            "epoch:epoch,currentEpoch:function(){return generationEpoch;}",
+            "return generateImages(epoch)",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)
@@ -249,6 +253,12 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("DigitalHumanVoiceState.loadFailed(before,error.message)", page)
         self.assertIn("if(!clone&&state.voiceKey){setStep('voice','done','已复用')", page)
         self.assertIn("重新上传样音并复刻", page)
+        self.assertIn('id="restartSetup"', page)
+        self.assertIn("放弃上次任务并重新设置", page)
+        self.assertIn("重新生成可能再次扣点", page)
+        self.assertIn("声音来源和样音已随当前任务锁定", page)
+        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase)", page)
+        self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
         self.assertNotIn("选择剪辑风格", page)
 
     def test_primary_actions_are_visible_before_long_material_fields(self):
