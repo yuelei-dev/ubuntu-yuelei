@@ -1,6 +1,8 @@
 import importlib
 import json
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -140,6 +142,74 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         with mock.patch.object(self.domain.subprocess, "run", side_effect=[audio, black]):
             with self.assertRaisesRegex(RuntimeError, "持续黑帧"):
                 self.domain._verify_final_video(video_domain, "final.mp4", 12.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "requires ffmpeg and ffprobe")
+    def test_three_presenters_and_six_materials_render_a_verified_final_video(self):
+        """Run the complete local compositor with real media, not placeholder bytes."""
+        video_dir = self.root / "videos"
+        image_dir = self.root / "images"
+        video_dir.mkdir(exist_ok=True)
+        image_dir.mkdir(exist_ok=True)
+        for index, color in enumerate(("#8B5CF6", "#0EA5E9", "#F97316"), 1):
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=%s:s=360x640:r=30:d=0.45" % color,
+                "-f", "lavfi", "-i", "sine=frequency=%d:sample_rate=48000:duration=0.45" % (320 + index * 80),
+                "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                str(video_dir / ("%d.mp4" % index)),
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for index, color in enumerate(("red", "orange", "yellow", "green", "blue", "purple"), 11):
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=%s:s=360x640" % color,
+                "-frames:v", "1", str(image_dir / ("%d.png" % index)),
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        out_dir = self.root / "rendered"
+        out_dir.mkdir()
+
+        class VideoDomain:
+            VIDEO_OUT_DIR = out_dir
+
+            @staticmethod
+            def _resolve_out_file(rel):
+                path = self.root / rel
+                return path if path.is_file() else None
+
+            @staticmethod
+            def _probe_video_size(path):
+                output = subprocess.check_output([
+                    "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                    "stream=width,height", "-of", "csv=p=0:s=x", str(path),
+                ], text=True).strip()
+                return tuple(map(int, output.split("x")))
+
+            @staticmethod
+            def _probe_video_duration(rel):
+                path = self.root / rel
+                return float(subprocess.check_output([
+                    "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                    "default=nw=1:nk=1", str(path),
+                ], text=True).strip())
+
+            @staticmethod
+            def burn_subtitle(rel, **_kwargs):
+                source = self.root / rel
+                target = out_dir / "verified-final.mp4"
+                shutil.copy2(source, target)
+                return target.relative_to(self.root).as_posix()
+
+        planned = self.domain.plan("开场说明问题。中段解释解决方案和关键价值。结尾邀请用户采取行动。")
+        payload = {
+            "_job_id": 230, "copy": planned["copy"], "segments": planned["segments"],
+            "video_job_ids": [1, 2, 3], "material_job_ids": [11, 12, 13, 14, 15, 16],
+            "video_files": ["videos/1.mp4", "videos/2.mp4", "videos/3.mp4"],
+            "material_files": ["images/%d.png" % index for index in range(11, 17)],
+        }
+        with mock.patch.dict(sys.modules, {"content_domains.video": VideoDomain}):
+            result = self.domain.compose(payload)
+        self.assertEqual(result["child_jobs"], {"videos": [1, 2, 3], "materials": [11, 12, 13, 14, 15, 16]})
+        self.assertEqual((result["width"], result["height"]), (1080, 1920))
+        self.assertTrue(result["verification"]["audio_stream"])
+        self.assertTrue((self.root / result["video_file"]).is_file())
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):

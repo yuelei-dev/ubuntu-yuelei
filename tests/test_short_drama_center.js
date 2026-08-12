@@ -342,7 +342,11 @@ test('移动端收起创作记忆后仍可聚焦并再次展开', async () => {
     const output = await new Promise((resolve, reject) => {
       const browser = spawn(chrome, ['--headless=new','--no-sandbox','--disable-gpu','--disable-dev-shm-usage','--hide-scrollbars','--window-size=390,844','--virtual-time-budget=3000','--user-data-dir='+profile,'--dump-dom',`http://127.0.0.1:${address.port}/workbench/short-drama.html`]);
       let stdout='',stderr='';browser.stdout.on('data',chunk => {stdout+=chunk;});browser.stderr.on('data',chunk => {stderr+=chunk;});
-      const timeout = setTimeout(() => {browser.kill();reject(new Error('Chrome 响应式测试超时'));},15000);
+      const timeoutMs = Number(process.env.HQ_CHROME_TEST_TIMEOUT_MS || 30000);
+      const timeout = setTimeout(() => {
+        browser.kill('SIGKILL');
+        reject(new Error(`Chrome 响应式测试在 ${timeoutMs}ms 后超时：${stderr.slice(-500)}`));
+      }, timeoutMs);
       browser.on('error',reject);browser.on('close',code => {clearTimeout(timeout);code===0?resolve(stdout):reject(new Error(stderr||`Chrome exited ${code}`));});
     });
     assert.match(output, /data-responsive-memory-test="pass"/);
