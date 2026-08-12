@@ -17,7 +17,7 @@ from .core import (
 
 import random   # 429 退避重试的抖动：不加抖动，同一批 worker 退避后又会撞在一起
 
-from .audio import gen_audio
+from .audio import gen_audio, normalize_audio_delivery
 from .image_mentions import resolve_image_mentions, validate_image_mentions
 from . import (
     pricing,
@@ -1758,6 +1758,7 @@ def validate_video_payload(payload, username=None):
     motion = (payload.get("motion") or "medium").strip().lower()
     if motion not in VALID_VIDEO_MOTIONS:
         raise ValueError("motion 仅支持 low、medium、high")
+    delivery = normalize_audio_delivery(payload.get("delivery"))
     try:
         speed = float(payload.get("speed", 1.0))
         pitch = float(payload.get("pitch", 0))
@@ -1785,6 +1786,7 @@ def validate_video_payload(payload, username=None):
     cleaned["ratio"] = ratio
     cleaned["resolution"] = resolution
     cleaned["motion"] = motion
+    cleaned["delivery"] = delivery
     cleaned["speed"] = speed
     cleaned["pitch"] = pitch
     cleaned["volume"] = volume
@@ -4575,6 +4577,7 @@ def gen_video(payload, provider_lifecycle=None):
                 "speed": payload.get("speed", 1.0),
                 "pitch": payload.get("pitch", 0),
                 "volume": payload.get("volume", 0),
+                "delivery": payload.get("delivery", "natural"),
             })
             audio_file = audio_result.get("file")
             audio_url = audio_result.get("url")

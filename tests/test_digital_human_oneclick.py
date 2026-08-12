@@ -75,6 +75,8 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertEqual(len(first["materials"]), 6)
         self.assertEqual("".join(item["text"] for item in first["segments"]), script)
         self.assertEqual(len({item["gesture_prompt"] for item in first["segments"]}), 3)
+        self.assertTrue(all("眼神稳定直视镜头" in item["gesture_prompt"] for item in first["segments"]))
+        self.assertTrue(all("嘴唇自然闭合" in item["gesture_prompt"] for item in first["segments"]))
         self.assertEqual([item["role"] for item in first["segments"]], ["hook", "explain", "cta"])
         self.assertTrue(all(item["source_policy"] == "customer_then_feishu_then_ai" for item in first["materials"]))
         self.assertTrue(all(item["material_query"] for item in first["materials"]))

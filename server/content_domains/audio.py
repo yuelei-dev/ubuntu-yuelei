@@ -18,6 +18,23 @@ VOICE_SLOT_MAX_PER_USER = 5
 VALID_VOICE_SLOT_STATUSES = ("active", "training", "ready", "failed")
 _voice_slot_purchase_lock = threading.Lock()
 
+# Only server-authored delivery profiles may reach CosyVoice instruction
+# control.  Keep these concise: CosyVoice counts CJK characters as two and
+# limits an instruction to 100 characters.
+DELIVERY_INSTRUCTIONS = {
+    "natural": "",
+    "energetic_hook": "请用有感染力的广告开场语气，情绪开心自然，重读核心词，短句间自然停顿，避免喊叫。",
+    "clear_explain": "请用自然清晰的讲解语气，语速平稳，句间适度停顿，重点词轻微强调，避免机械播报。",
+    "confident_cta": "请用亲切、自信、有行动感的收尾语气，结尾有力度，保持自然停顿，避免夸张。",
+}
+
+
+def normalize_audio_delivery(value):
+    delivery = str(value or "natural").strip().lower()
+    if delivery not in DELIVERY_INSTRUCTIONS:
+        raise ValueError("delivery 参数无效")
+    return delivery
+
 
 def voice_slot_cost():
     return pricing.get_price("audio.voice_slot")
@@ -988,7 +1005,12 @@ def validate_audio_payload(payload, username=""):
         if str(raw).strip() != str(clean) or not minimum <= clean <= maximum:
             raise ValueError("%s 超出范围" % name)
         body[name] = clean
-    body.update({"text": text, "voice": voice_key, "speed": speed})
+    body.update({
+        "text": text,
+        "voice": voice_key,
+        "speed": speed,
+        "delivery": normalize_audio_delivery(body.get("delivery")),
+    })
     return body
 
 
@@ -1005,15 +1027,21 @@ def gen_audio(payload, publish=True):
     voice_key = payload["voice"]
     voice = resolve_audio_provider_voice(username, voice_key)
     speed, pitch, volume = payload["speed"], payload["pitch"], payload["volume"]
+    delivery = payload["delivery"]
 
     # Current public and personal voices use CosyVoice. Never fall back to
     # the retired provider when the CosyVoice channel is unavailable.
     if cosyvoice.enabled():
         cv_voice = _cosy_voice_for(voice)
         # knob 的 pitch/-12~12、volume/-50~100 是豆包量纲；CosyVoice 用 pitch 0.5~2、volume 0~100。
+        # Personal one-click voices use cosyvoice-v3.5-plus, which supports
+        # free-form instruction control.  Public legacy preset voices run on
+        # cosyvoice-v1, so never send an unsupported instruction to them.
+        instruction = DELIVERY_INSTRUCTIONS[delivery] if str(cv_voice).startswith(cosyvoice.CLONE_MODEL) else ""
         cv_audio = cosyvoice.synth(cv_voice, text, rate=speed,
                                    pitch=max(0.5, min(2.0, 1.0 + pitch / 24.0)),
-                                   volume=max(0, min(100, 50 + volume // 2)))
+                                   volume=max(0, min(100, 50 + volume // 2)),
+                                   instruction=instruction)
         fn = "audio/aud_%d.mp3" % int(time.time() * 1000)   # 非敏感命名 → 可走 COS 公开直链
         _out_path(fn).write_bytes(cv_audio)
         return _audio_result(fn, voice_key, speed, pitch, volume, text, publish=publish)
