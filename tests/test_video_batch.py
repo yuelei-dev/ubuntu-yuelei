@@ -144,6 +144,26 @@ class VideoBatchValidationTests(unittest.TestCase):
         generate.assert_called_once_with("image/avatar.jpg", "audio/voice.mp3", "1080p", "9:16", "medium")
         self.assertEqual(9, result["avatar_id"])
 
+    def test_talking_delivery_reaches_tts_before_heygen(self):
+        payload = {
+            "_username": "fang", "_job_id": 8, "mode": "text",
+            "avatar_id": "9", "text": "把方案讲清楚", "voice": "vip_test",
+            "resolution": "1080p", "ratio": "9:16", "motion": "medium",
+            "speed": 0.98, "pitch": 0, "volume": 1,
+            "delivery": "clear_explain",
+        }
+        with patch.object(video, "HEYGEN_API_KEY", "configured"), \
+                patch.object(video, "get_video_avatar", return_value={"id": 9, "image_file": "image/avatar.jpg"}), \
+                patch.object(video, "preflight_heygen_image_file", return_value={"path": pathlib.Path("image/avatar.jpg"), "mime": "image/jpeg"}), \
+                patch.object(video, "preflight_heygen_audio_file", return_value=video.OUT_DIR / "audio" / "voice.mp3"), \
+                patch.object(video, "gen_audio", return_value={"file": "audio/voice.mp3", "url": "/audio.mp3"}) as tts, \
+                patch.object(video, "generate_heygen_video", return_value={"video_file": "video/out.mp4", "duration": 12}), \
+                patch.object(video, "public_url", return_value="https://cdn.example/out.mp4"), \
+                patch.object(video, "_file_url", side_effect=lambda value: "/api/gen/file/" + str(value or "")):
+            video.gen_video(payload)
+        self.assertEqual(tts.call_args.args[0]["delivery"], "clear_explain")
+        self.assertEqual(tts.call_args.args[0]["speed"], 0.98)
+
 
 class VideoBatchIntegrationGuardTests(unittest.TestCase):
     @classmethod

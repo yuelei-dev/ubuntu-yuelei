@@ -1,0 +1,341 @@
+# -*- coding: utf-8 -*-
+"""Digital-human one-click planning and local final composition.
+
+Paid image/video generation stays in the existing durable child jobs.  This
+module only plans the child jobs and combines their completed, owned outputs.
+"""
+import hashlib
+import json
+import re
+import subprocess
+
+from .core import OUT_DIR, closing, jdb
+
+PIPELINE = "digital_human_oneclick_compose"
+PLAN_PATH = "/api/gen/digital-human-oneclick/plan"
+VIDEO_COUNT = 3
+MATERIAL_COUNT = 6
+MAX_SCRIPT_CHARS = 6000
+
+
+class DigitalHumanRequestError(ValueError):
+    def __init__(self, message, code="invalid_request", status=400):
+        super().__init__(message)
+        self.code = str(code)
+        self.status = int(status)
+
+
+def _clean_script(value):
+    text = re.sub(r"[ \t\r\f\v]+", " ", str(value or ""))
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    if len(text) < 12:
+        raise DigitalHumanRequestError("口播文案太短，请至少输入 12 个字")
+    if len(text) > MAX_SCRIPT_CHARS:
+        raise DigitalHumanRequestError("口播文案最多支持 6000 个字")
+    return text
+
+
+def _sentences(text):
+    chunks = [part.strip() for part in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?", text)]
+    return [part for part in chunks if part]
+
+
+def _split_three(text):
+    chunks = _sentences(text)
+    if len(chunks) < 3:
+        size = max(1, (len(text) + 2) // 3)
+        chunks = [text[i:i + size] for i in range(0, len(text), size)]
+    if len(chunks) < 3:
+        chunks.extend([""] * (3 - len(chunks)))
+    total = sum(len(item) for item in chunks)
+    cumulative = []
+    cursor = 0
+    for item in chunks:
+        cursor += len(item)
+        cumulative.append(cursor)
+    cut_one = min(range(1, len(chunks) - 1), key=lambda value: abs(cumulative[value - 1] - total / 3.0))
+    cut_two = min(range(cut_one + 1, len(chunks)), key=lambda value: abs(cumulative[value - 1] - total * 2.0 / 3.0))
+    groups = (chunks[:cut_one], chunks[cut_one:cut_two], chunks[cut_two:])
+    return ["".join(group).strip() for group in groups]
+
+
+def _digest(plan):
+    canonical = json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def plan(script):
+    copy = _clean_script(script)
+    parts = _split_three(copy)
+    gestures = (
+        "人物保持与参考照片完全一致，竖屏半身口播照，右手自然抬起作开场讲解手势，左手放松；神态亲切有活力，眼神稳定直视镜头，嘴唇自然闭合",
+        "人物保持与参考照片完全一致，竖屏半身口播照，双手在胸前自然展开作对比说明手势；神态专注放松，眼神稳定直视镜头，嘴唇自然闭合",
+        "人物保持与参考照片完全一致，竖屏半身口播照，一手轻指前方作总结强调手势，另一手自然放松；神态自信亲切，眼神稳定直视镜头，嘴唇自然闭合",
+    )
+    segments = []
+    materials = []
+    for index, part in enumerate(parts):
+        excerpt = re.sub(r"\s+", " ", part)[:220]
+        segment = {
+            "index": index,
+            "text": part,
+            "role": ("hook", "explain", "cta")[index],
+            "speech_profile": (
+                {"speed": 1.08, "pitch": 1, "volume": 2, "motion": "high", "delivery": "energetic_hook"},
+                {"speed": 0.98, "pitch": 0, "volume": 1, "motion": "medium", "delivery": "clear_explain"},
+                {"speed": 1.04, "pitch": 1, "volume": 2, "motion": "high", "delivery": "confident_cta"},
+            )[index],
+            "gesture_prompt": gestures[index] + "。服装、发型、眼镜、面部特征和背景风格一致，双手完整可见，真实摄影，不添加文字。",
+        }
+        segments.append(segment)
+        materials.extend([
+            {
+                "index": index * 2,
+                "segment_index": index,
+                "source_policy": "customer_then_feishu_then_ai",
+                "material_query": excerpt,
+                "prompt": "为竖屏短视频制作真实电影感主画面，无人物口播框、无文字、无水印。画面准确表达：" + excerpt,
+            },
+            {
+                "index": index * 2 + 1,
+                "segment_index": index,
+                "source_policy": "customer_then_feishu_then_ai",
+                "material_query": excerpt,
+                "prompt": "为竖屏短视频制作信息补充镜头，真实商业纪录片风格，无文字、无水印。内容紧扣：" + excerpt,
+            },
+        ])
+    core = {"pipeline": PIPELINE, "copy": copy, "ratio": "9:16", "segments": segments, "materials": materials}
+    return dict(core, plan_digest=_digest(core))
+
+
+def plan_response(payload):
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    result = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
+    return {"ok": True, "plan": result}
+
+
+def _result_file(result, kind):
+    if not isinstance(result, dict):
+        return ""
+    keys = ("video_file", "file") if kind == "video" else ("file", "image_file")
+    for key in keys:
+        value = str(result.get(key) or "").strip().replace("\\", "/")
+        if value:
+            return value
+    return ""
+
+
+def _owned_completed_files(username, ids, kind):
+    if not isinstance(ids, list) or any(isinstance(item, bool) for item in ids):
+        raise DigitalHumanRequestError("子任务编号格式无效")
+    try:
+        normalized = [int(item) for item in ids]
+    except (TypeError, ValueError):
+        raise DigitalHumanRequestError("子任务编号格式无效")
+    expected = VIDEO_COUNT if kind == "video" else MATERIAL_COUNT
+    if len(normalized) != expected or len(set(normalized)) != expected:
+        raise DigitalHumanRequestError("需要 %d 个互不重复的%s任务" % (expected, "口播视频" if kind == "video" else "主画面"))
+    placeholders = ",".join("?" for _ in normalized)
+    with closing(jdb()) as connection:
+        rows = connection.execute(
+            "SELECT id,kind,status,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
+            [username] + normalized,
+        ).fetchall()
+    by_id = {int(row["id"]): row for row in rows}
+    files = []
+    for job_id in normalized:
+        row = by_id.get(job_id)
+        if not row or row["kind"] != kind or row["status"] != "done":
+            raise DigitalHumanRequestError("子任务 #%d 不存在、未完成或不属于当前账号" % job_id, "child_job_unavailable", 409)
+        try:
+            result = json.loads(row["result"] or "{}")
+        except Exception:
+            result = {}
+        rel = _result_file(result, kind)
+        try:
+            path = (OUT_DIR / rel).resolve()
+            path.relative_to(OUT_DIR.resolve())
+        except Exception:
+            path = None
+        if not path or not path.is_file() or path.stat().st_size <= 0:
+            raise DigitalHumanRequestError("子任务 #%d 的本地成片已不可用" % job_id, "child_file_unavailable", 409)
+        files.append(path.relative_to(OUT_DIR.resolve()).as_posix())
+    return normalized, files
+
+
+def prepare_compose_payload(payload, username):
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = {"pipeline", "mode", "script", "copy", "text", "plan_digest", "video_job_ids", "material_job_ids"}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("提交包含不支持字段：" + ", ".join(unknown))
+    if str(payload.get("pipeline") or "").strip().lower() != PIPELINE:
+        raise DigitalHumanRequestError("pipeline 无效")
+    frozen = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
+    if str(payload.get("plan_digest") or "").strip().lower() != frozen["plan_digest"]:
+        raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
+    video_ids, video_files = _owned_completed_files(username, payload.get("video_job_ids"), "video")
+    material_ids, material_files = _owned_completed_files(username, payload.get("material_job_ids"), "image")
+    return {
+        "pipeline": PIPELINE,
+        "mode": PIPELINE,
+        "copy": frozen["copy"],
+        "ratio": "9:16",
+        "plan_digest": frozen["plan_digest"],
+        "segments": frozen["segments"],
+        "materials": frozen["materials"],
+        "video_job_ids": video_ids,
+        "material_job_ids": material_ids,
+        "video_files": video_files,
+        "material_files": material_files,
+        "material_generate_count": 0,
+    }
+
+
+def _run(command, timeout=1200):
+    try:
+        subprocess.run(command, check=True, timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or b"").decode("utf-8", "replace")[-800:]
+        raise RuntimeError("本地视频合成失败：" + detail) from exc
+
+
+def _verify_final_video(video_domain, rel, expected_duration):
+    path = video_domain._resolve_out_file(rel)
+    if not path:
+        raise RuntimeError("最终成片文件不存在")
+    width, height = video_domain._probe_video_size(path)
+    duration = video_domain._probe_video_duration(rel)
+    if (width, height) != (1080, 1920) or duration <= 0:
+        raise RuntimeError("最终成片分辨率或时长校验未通过")
+    if abs(duration - float(expected_duration)) > max(0.75, float(expected_duration) * 0.03):
+        raise RuntimeError("最终成片音画时长不一致")
+    audio = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
+        "stream=codec_type", "-of", "default=nw=1:nk=1", str(path),
+    ], check=False, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if audio.returncode != 0 or b"audio" not in (audio.stdout or b""):
+        raise RuntimeError("最终成片缺少音轨")
+    black = subprocess.run([
+        "ffmpeg", "-hide_banner", "-i", str(path), "-vf",
+        "blackdetect=d=0.5:pix_th=0.02", "-an", "-f", "null", "-",
+    ], check=False, timeout=300, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    black_text = (black.stderr or b"").decode("utf-8", "replace")
+    black_durations = [float(value) for value in re.findall(r"black_duration:([0-9.]+)", black_text)]
+    if black_durations and max(black_durations) >= max(1.0, duration * 0.9):
+        raise RuntimeError("最终成片检测到持续黑帧")
+    return path, width, height, duration
+
+
+def compose(payload, persist_state=None):
+    from . import video as video_domain
+
+    job_id = int(payload.get("_job_id") or 0)
+    if not job_id:
+        raise RuntimeError("数字人一键生成缺少任务编号")
+    videos = [(OUT_DIR / rel).resolve() for rel in payload.get("video_files") or []]
+    images = [(OUT_DIR / rel).resolve() for rel in payload.get("material_files") or []]
+    if len(videos) != VIDEO_COUNT or len(images) != MATERIAL_COUNT:
+        raise RuntimeError("数字人一键生成子任务数量不完整")
+    for path in videos + images:
+        path.relative_to(OUT_DIR.resolve())
+        if not path.is_file() or path.stat().st_size <= 0:
+            raise RuntimeError("数字人一键生成子任务文件不可用")
+    if persist_state:
+        persist_state("composing")
+
+    out_dir = video_domain.VIDEO_OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    normalized = []
+    for index, source in enumerate(videos):
+        target = out_dir / ("digital_human_%d_part_%d.mp4" % (job_id, index + 1))
+        _run([
+            "ffmpeg", "-y", "-i", str(source), "-vf",
+            "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-c:a", "aac", "-ar", "48000",
+            "-ac", "2", "-movflags", "+faststart", str(target),
+        ])
+        normalized.append(target)
+    joined = out_dir / ("digital_human_%d_joined.mp4" % job_id)
+    concat_file = out_dir / ("digital_human_%d_concat.txt" % job_id)
+    concat_file.write_text("".join("file '%s'\n" % str(path).replace("'", "'\\''") for path in normalized), encoding="utf-8")
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(joined)])
+    duration = video_domain._probe_video_duration(joined.resolve().relative_to(OUT_DIR.resolve()).as_posix())
+    if duration <= 0:
+        raise RuntimeError("口播子片段合并后时长无效")
+
+    background = out_dir / ("digital_human_%d_background.mp4" % job_id)
+    scene_duration = duration / float(MATERIAL_COUNT)
+    command = ["ffmpeg", "-y"]
+    for image in images:
+        command.extend(["-loop", "1", "-t", "%.3f" % scene_duration, "-i", str(image)])
+    filters = []
+    labels = []
+    for index in range(MATERIAL_COUNT):
+        label = "bg%d" % index
+        labels.append("[%s]" % label)
+        filters.append(
+            "[%d:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
+            "zoompan=z='min(zoom+0.00035,1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            "d=1:s=1080x1920:fps=30,trim=duration=%.3f,setpts=PTS-STARTPTS[%s]" % (index, scene_duration, label)
+        )
+    filters.append("%sconcat=n=%d:v=1:a=0[joinedbg]" % ("".join(labels), MATERIAL_COUNT))
+    filters.append(
+        "[joinedbg]drawbox=x=44:y=44:w=356:h=58:color=black@0.68:t=fill,"
+        "drawtext=text='CONCEPT / AI FILL':fontcolor=white:fontsize=26:x=62:y=60[outv]"
+    )
+    command.extend(["-filter_complex", ";".join(filters), "-map", "[outv]", "-t", "%.3f" % duration,
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p", str(background)])
+    _run(command)
+
+    composed = out_dir / ("digital_human_%d_composed.mp4" % job_id)
+    pip_filter = (
+        "color=c=#B86B2B:s=456x456:r=30,format=rgba,"
+        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-228)*(X-228)+(Y-228)*(Y-228),50176),255,0)'[ring];"
+        "[1:v]scale=440:440:force_original_aspect_ratio=decrease,"
+        "pad=440:440:(ow-iw)/2:(oh-ih)/2:color=black@0,format=rgba,"
+        "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lte((X-220)*(X-220)+(Y-220)*(Y-220),47524),255,0)'[pip];"
+        "[0:v][ring]overlay=40:1112:format=auto[framed];"
+        "[framed][pip]overlay=48:1120:format=auto,format=yuv420p[outv]"
+    )
+    _run([
+        "ffmpeg", "-y", "-i", str(background), "-i", str(joined), "-filter_complex", pip_filter,
+        "-map", "[outv]", "-map", "1:a:0", "-t", "%.3f" % duration, "-c:v", "libx264",
+        "-preset", "fast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", "-shortest",
+        "-movflags", "+faststart", str(composed),
+    ])
+    rel = composed.resolve().relative_to(OUT_DIR.resolve()).as_posix()
+    final_rel = video_domain.burn_subtitle(
+        rel, known_text=payload.get("copy"), style_key="white", job_id=job_id, position="bottom",
+    )
+    final_path, width, height, final_duration = _verify_final_video(
+        video_domain, final_rel, duration,
+    )
+    result = {
+        "pipeline": PIPELINE,
+        "video_file": final_rel,
+        "url": "/api/gen/file/" + final_rel,
+        "duration": round(final_duration, 3),
+        "width": width,
+        "height": height,
+        "segments": payload.get("segments") or [],
+        "child_jobs": {"videos": payload.get("video_job_ids"), "materials": payload.get("material_job_ids")},
+        "verification": {
+            "resolution": "1080x1920", "frame_rate": 30, "subtitle": "whisper",
+            "audio_source": "joined_presenter", "audio_stream": True,
+            "duration_sync": True, "black_frame_check": True,
+            "material_provenance": "CONCEPT / AI FILL",
+        },
+    }
+    if persist_state:
+        persist_state("done", final_result=result)
+    for path in normalized + [concat_file, joined, background, composed]:
+        try:
+            if final_path and path.resolve() == final_path.resolve():
+                continue
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return result

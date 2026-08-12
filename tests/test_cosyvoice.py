@@ -9,6 +9,7 @@
   * 模型跟音色走：预置→cosyvoice-v1，复刻→cosyvoice-v3.5-plus
 """
 import importlib
+import json
 import sys
 import unittest
 import unittest.mock
@@ -154,6 +155,35 @@ class WebSocketFramingTests(unittest.TestCase):
         self.assertEqual((op1, pl1), (0x1, b'{"ok":1}'))
         self.assertEqual((op2, pl2), (0x2, b"AUDIO"))
 
+    def test_synth_sends_instruction_in_provider_run_task(self):
+        sent = []
+
+        class _Sock:
+            def close(self):
+                pass
+
+        def fake_send(_sock, payload):
+            sent.append(json.loads(payload))
+
+        events = iter([
+            (0x1, json.dumps({"header": {"event": "task-started"}}).encode()),
+            (0x2, b"MP3"),
+            (0x1, json.dumps({"header": {"event": "task-finished"}}).encode()),
+        ])
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")), \
+                patch.object(cosyvoice, "_ws_send", side_effect=fake_send), \
+                patch.object(cosyvoice, "_ws_frames", return_value=events):
+            result = cosyvoice.synth(
+                "cosyvoice-v3.5-plus-bailian-test", "你好",
+                instruction="请用自然清晰的讲解语气。",
+            )
+        self.assertEqual(result, b"MP3")
+        self.assertEqual(
+            sent[0]["payload"]["parameters"]["instruction"],
+            "请用自然清晰的讲解语气。",
+        )
+
 
 class AudioVoiceMappingTests(unittest.TestCase):
     """audio._cosy_voice_for：库里的 provider_voice → CosyVoice 能用的 voice。"""
@@ -168,6 +198,51 @@ class AudioVoiceMappingTests(unittest.TestCase):
     def test_clone_id_passthrough(self):
         vid = "cosyvoice-v3.5-plus-bailian-abc"
         self.assertEqual(self.audio._cosy_voice_for(vid), vid)
+
+    def test_personal_voice_delivery_reaches_cosyvoice_instruction(self):
+        captured = {}
+
+        def fake_synth(_voice, _text, **kwargs):
+            captured.update(kwargs)
+            return b"mp3"
+
+        with unittest.mock.patch.object(self.audio.cosyvoice, "enabled", return_value=True), \
+                unittest.mock.patch.object(
+                    self.audio, "resolve_audio_provider_voice",
+                    return_value="cosyvoice-v3.5-plus-bailian-test",
+                ), unittest.mock.patch.object(self.audio.cosyvoice, "synth", side_effect=fake_synth), \
+                unittest.mock.patch.object(self.audio, "_out_path") as out_path, \
+                unittest.mock.patch.object(self.audio, "_audio_result", return_value={"file": "audio/test.mp3"}):
+            out_path.return_value.write_bytes.return_value = None
+            self.audio.gen_audio({
+                "_username": "fang", "text": "讲解方案", "voice": "vip_test",
+                "delivery": "clear_explain",
+            })
+        self.assertIn("自然清晰的讲解语气", captured["instruction"])
+
+    def test_public_legacy_voice_does_not_receive_unsupported_instruction(self):
+        captured = {}
+
+        def fake_synth(_voice, _text, **kwargs):
+            captured.update(kwargs)
+            return b"mp3"
+
+        with unittest.mock.patch.object(self.audio.cosyvoice, "enabled", return_value=True), \
+                unittest.mock.patch.object(
+                    self.audio, "resolve_audio_provider_voice", return_value="S_d21F8OR62",
+                ), unittest.mock.patch.object(self.audio.cosyvoice, "synth", side_effect=fake_synth), \
+                unittest.mock.patch.object(self.audio, "_out_path") as out_path, \
+                unittest.mock.patch.object(self.audio, "_audio_result", return_value={"file": "audio/test.mp3"}):
+            out_path.return_value.write_bytes.return_value = None
+            self.audio.gen_audio({
+                "_username": "fang", "text": "开场", "voice": "S_d21F8OR62",
+                "delivery": "energetic_hook",
+            })
+        self.assertEqual(captured["instruction"], "")
+
+    def test_unknown_delivery_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "delivery"):
+            self.audio.validate_audio_payload({"text": "测试", "delivery": "free-form injection"})
 
     def test_transient_audio_result_does_not_publish_intermediate_asset(self):
         with unittest.mock.patch.object(
