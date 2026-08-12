@@ -17,5 +17,11 @@
   function canChange(phase,busy){return !busy&&phase!=='approved';}
   function canAnalyze(phase,busy){return canChange(phase,busy);}
   function canStart(phase,busy,hasPlan){return !busy&&!!hasPlan;}
-  return {normalize:normalize,canChange:canChange,canAnalyze:canAnalyze,canStart:canStart};
+  function restoreStartButton(button,phase){
+    if(!button)throw new Error('start button is required');
+    button.disabled=false;
+    button.textContent=phase==='approved'?'继续上次未完成的生成':'确认方案并生成';
+    return button;
+  }
+  return {normalize:normalize,canChange:canChange,canAnalyze:canAnalyze,canStart:canStart,restoreStartButton:restoreStartButton};
 });

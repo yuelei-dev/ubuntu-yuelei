@@ -14,6 +14,21 @@ test('approved production locks the frozen material set', () => {
   assert.equal(state.canStart('approved',false,true),true);
 });
 
+test('refresh restore exposes a clickable resume action for approved work', () => {
+  const button={disabled:true,textContent:'生成进行中'};
+  state.restoreStartButton(button,'approved');
+  assert.equal(button.disabled,false);
+  assert.equal(button.textContent,'继续上次未完成的生成');
+  assert.equal(state.canStart('approved',false,true),true);
+});
+
+test('planned restore exposes the normal confirmation action', () => {
+  const button={disabled:true,textContent:''};
+  state.restoreStartButton(button,'planned');
+  assert.equal(button.disabled,false);
+  assert.equal(button.textContent,'确认方案并生成');
+});
+
 test('restore keeps only valid unexpired private uploads', () => {
   const valid={upload_id:'img_'+'a'.repeat(32),name:'有效素材.png',sha256:'digest',expires_at:2000};
   const expired={upload_id:'img_'+'b'.repeat(32),name:'过期素材.png',expires_at:999};

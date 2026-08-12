@@ -232,6 +232,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "DigitalHumanMaterialState.canChange(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canAnalyze(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canStart(state.phase,customerMaterialBusy,!!plan)",
+            "DigitalHumanMaterialState.restoreStartButton($('start'),state.phase)",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)
