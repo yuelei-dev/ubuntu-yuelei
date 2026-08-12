@@ -244,6 +244,32 @@ class AudioVoiceMappingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "delivery"):
             self.audio.validate_audio_payload({"text": "测试", "delivery": "free-form injection"})
 
+    def test_clone_reference_upload_retries_transient_tls_failure(self):
+        tls_error = RuntimeError("SSLError: UNEXPECTED_EOF_WHILE_READING")
+        with unittest.mock.patch.object(
+            self.audio.cos, "upload", side_effect=[tls_error, "https://example/ref.mp3"],
+        ) as upload, unittest.mock.patch.object(self.audio.time, "sleep") as sleep:
+            result = self.audio._upload_clone_reference("ref.mp3", "voice/ref.mp3")
+        self.assertEqual(result, "https://example/ref.mp3")
+        self.assertEqual(upload.call_count, 2)
+        sleep.assert_called_once_with(1)
+
+    def test_clone_reference_upload_does_not_retry_validation_failure(self):
+        with unittest.mock.patch.object(
+            self.audio.cos, "upload", side_effect=ValueError("invalid object key"),
+        ) as upload, unittest.mock.patch.object(self.audio.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "invalid object key"):
+                self.audio._upload_clone_reference("ref.mp3", "bad")
+        upload.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_clone_upload_failure_is_safe_and_actionable(self):
+        message = self.audio._clone_error_message(
+            RuntimeError("HTTPSConnectionPool(host='secret.cos.example'): SSLEOFError")
+        )
+        self.assertEqual(message, "样音上传网络异常，系统重试后仍未成功，请稍后重试")
+        self.assertNotIn("secret.cos.example", message)
+
     def test_transient_audio_result_does_not_publish_intermediate_asset(self):
         with unittest.mock.patch.object(
             self.audio, "_audio_duration_ms", return_value=1234,
