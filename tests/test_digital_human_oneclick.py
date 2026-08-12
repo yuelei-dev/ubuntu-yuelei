@@ -225,7 +225,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=1",
             "digital-human-voice-state.js?v=1",
-            "digital-human-setup-state.js?v=1",
+            "digital-human-setup-state.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -235,6 +235,9 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "DigitalHumanMaterialState.canAnalyze(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canStart(state.phase,customerMaterialBusy,!!plan)",
             "DigitalHumanMaterialState.restoreStartButton($('start'),state.phase)",
+            "DigitalHumanSetupState.runJobs({items:items",
+            "epoch:epoch,currentEpoch:function(){return generationEpoch;}",
+            "return generateImages(epoch)",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)

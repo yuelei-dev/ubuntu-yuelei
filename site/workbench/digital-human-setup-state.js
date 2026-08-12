@@ -22,5 +22,32 @@
     return {changed:true,state:{phase:'input'},submit:false,charge:false,cancelRun:true};
   }
   function canContinue(runEpoch,currentEpoch){return Number(runEpoch)===Number(currentEpoch);}
-  return {view:view,applyControls:applyControls,restart:restart,canContinue:canContinue};
+  function cancelled(){var error=new Error('本次生成已被用户放弃');error.generationCancelled=true;return error;}
+  function runJobs(options){
+    var items=options.items||[],ids=(options.ids||[]).slice(),keys=(options.keys||[]).slice(),failed=(options.failed||[]).slice(),results=[];
+    function guard(){if(!canContinue(options.epoch,options.currentEpoch()))throw cancelled();}
+    function commit(){guard();options.commit({ids:ids.slice(),keys:keys.slice(),failed:failed.slice()});}
+    function launch(item,index,retry){
+      guard();
+      if(retry||!keys[index])keys[index]=options.key(index);
+      failed[index]=false;ids[index]=0;commit();
+      return options.submit(item,index,keys[index]).then(function(id){
+        guard();ids[index]=id;commit();return options.poll(id);
+      });
+    }
+    return Promise.all(items.map(function(item,index){
+      var active=Number(ids[index])||0;
+      return options.resume({
+        jobId:active,
+        retryApproved:!!failed[index],
+        poll:options.poll,
+        launch:function(retry){return launch(item,index,retry);},
+        markTerminal:function(){guard();failed[index]=true;commit();}
+      }).then(function(result){
+        guard();results[index]=result;
+        if(options.onCount)options.onCount(results.filter(Boolean).length,items.length);
+      });
+    })).then(function(){guard();commit();return {ids:ids,results:results};}).catch(function(error){guard();throw error;});
+  }
+  return {view:view,applyControls:applyControls,restart:restart,canContinue:canContinue,runJobs:runJobs};
 });
