@@ -223,10 +223,15 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         for marker in (
             'id="photo"', 'id="voice"', 'id="script"',
             'id="customerMaterials"', 'id="customerMaterialList"',
+            "digital-human-material-state.js?v=1",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
             "body.reference_upload_ids=[customerUploads[index].upload_id]",
+            "DigitalHumanMaterialState.normalize(state.customerUploads)",
+            "DigitalHumanMaterialState.canChange(state.phase,customerMaterialBusy)",
+            "DigitalHumanMaterialState.canAnalyze(state.phase,customerMaterialBusy)",
+            "DigitalHumanMaterialState.canStart(state.phase,customerMaterialBusy,!!plan)",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)
