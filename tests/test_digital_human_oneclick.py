@@ -251,6 +251,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn(".action-dock{position:sticky", page)
         self.assertIn("资料填好后，先分析并预览三段方案", page)
 
+    def test_video_flush_workspace_remains_vertically_scrollable(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        self.assertIn('body .hq-main-scroll-flush{overflow-x:hidden;overflow-y:auto}', page)
+        self.assertIn('.hq-content[data-active="video"]{min-height:max-content}', page)
+
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
         payload = domain.plan("开场先抓住注意力。接着把方案讲清楚。最后给出行动号召。")
