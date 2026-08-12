@@ -242,6 +242,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("确认方案并生成", page)
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
         self.assertIn("不上传也可以继续", page)
+        self.assertIn('id="voiceSource"', page)
+        self.assertIn("已有声音无需再次复刻", page)
+        self.assertIn("ready=(data.items||[]).filter", page)
+        self.assertIn("if(!clone&&state.voiceKey){setStep('voice','done','已复用')", page)
+        self.assertIn("重新上传样音并复刻", page)
         self.assertNotIn("选择剪辑风格", page)
 
     def test_primary_actions_are_visible_before_long_material_fields(self):

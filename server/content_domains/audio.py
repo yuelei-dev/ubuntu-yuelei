@@ -458,11 +458,39 @@ def clone_vip_voice_background(username, payload):
         if slot_id:
             try:
                 with closing(adb()) as c:
-                    c.execute("UPDATE audio_voice_slots SET status='failed', updated_at=? WHERE username=? AND slot_id=?",
-                              (int(time.time()), username, slot_id))
+                    c.execute("UPDATE audio_voice_slots SET status='failed', clone_error=?, updated_at=? WHERE username=? AND slot_id=?",
+                              (_clone_error_message(e), int(time.time()), username, slot_id))
                     c.commit()
             except Exception:
                 pass
+
+
+CLONE_COS_UPLOAD_ATTEMPTS = 3
+
+
+def _is_transient_clone_upload_error(error):
+    """Only retry connection/TLS failures; validation and provider errors fail fast."""
+    message = ("%s %s" % (error.__class__.__name__, str(error))).lower()
+    return any(token in message for token in (
+        "ssl", "tls", "eof", "timed out", "timeout", "connection reset",
+        "connection aborted", "connectionerror", "temporarily unavailable",
+    ))
+
+
+def _upload_clone_reference(local_path, key):
+    for attempt in range(CLONE_COS_UPLOAD_ATTEMPTS):
+        try:
+            return cos.upload(local_path, key)
+        except Exception as error:
+            if attempt + 1 >= CLONE_COS_UPLOAD_ATTEMPTS or not _is_transient_clone_upload_error(error):
+                raise
+            time.sleep(1 << attempt)
+
+
+def _clone_error_message(error):
+    if _is_transient_clone_upload_error(error):
+        return "样音上传网络异常，系统重试后仍未成功，请稍后重试"
+    return "声音复刻失败，请检查样音后重试"
 
 def prepare_clone_audio(audio_b64, audio_format):
     raw = base64.b64decode(audio_b64)
@@ -563,7 +591,7 @@ def _clone_via_cosyvoice(username, slot_id, name, audio_b64):
     tmp = _out_path("audio/_cvref_%d.mp3" % int(time.time() * 1000))
     tmp.write_bytes(raw)
     try:
-        cos.upload(str(tmp), key)
+        _upload_clone_reference(str(tmp), key)
         ref_url = cos.object_url(key, private=True)   # 短时效预签名，阿里同步拉取即可
     finally:
         try:
