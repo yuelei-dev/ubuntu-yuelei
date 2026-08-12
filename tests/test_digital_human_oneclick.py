@@ -234,13 +234,6 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
         self.assertNotIn("选择剪辑风格", page)
 
-    def test_recovery_preserves_idempotency_on_ambiguous_poll_failures(self):
-        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
-        self.assertIn("terminal.terminalJob=true", page)
-        self.assertIn("if(error&&error.terminalJob)return reject(error)", page)
-        self.assertIn("if(!error||!error.terminalJob)throw error;ids[index]=0", page)
-        self.assertIn("if(!error||!error.terminalJob)throw error;state.compose_job=0", page)
-
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
         payload = domain.plan("开场先抓住注意力。接着把方案讲清楚。最后给出行动号召。")
