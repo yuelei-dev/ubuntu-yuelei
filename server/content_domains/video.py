@@ -3537,6 +3537,32 @@ class HeyGenMCPAuthError(RuntimeError):
     pass
 
 
+class HeyGenMCPPlanCreditsExhausted(RuntimeError):
+    """MCP explicitly rejected a create because the web-plan has no credits.
+
+    Unlike a transport failure, this result is returned by the tool before a
+    provider video id exists.  It is therefore safe for the caller to leave the
+    ambiguous ``provider_submitting`` phase and finish the normal refund path.
+    """
+
+
+_HEYGEN_MCP_PLAN_CREDITS_RE = re.compile(
+    r"MOVIO_PAYMENT_INSUFFICIENT_CREDIT"
+    r"|insufficient\s+(?:plan\s+|premium\s+|add[- ]?on\s+|api\s+)?credits?"
+    r"|not\s+enough\s+(?:plan\s+|premium\s+|add[- ]?on\s+|api\s+)?credits?"
+    r"|out\s+of\s+(?:plan\s+|premium\s+|add[- ]?on\s+|api\s+)?credits?"
+    r"|(?:plan|premium|add[- ]?on)\s+credits?.{0,40}(?:exhausted|depleted)"
+    r"|(?:purchase|buy|top\s*up)\s+(?:more\s+)?credits?"
+    r"|套餐.{0,8}(?:额度|积分).{0,8}(?:不足|用尽)"
+    r"|(?:额度|积分|余额).{0,6}(?:不足|用尽)",
+    re.I,
+)
+
+
+def _heygen_mcp_plan_credits_exhausted(detail):
+    return bool(_HEYGEN_MCP_PLAN_CREDITS_RE.search(str(detail or "")))
+
+
 def _heygen_mcp_enabled():
     return bool(_HEYGEN_MCP_CREDENTIALS)
 
@@ -3656,6 +3682,10 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
     if result.get("isError"):
         if "429" in detail or "rate_limit" in detail.lower():
             raise HeyGenRateLimited("HeyGen MCP 限流: %s" % detail[:500])
+        if _heygen_mcp_plan_credits_exhausted(detail):
+            raise HeyGenMCPPlanCreditsExhausted(
+                "HeyGen 套餐额度不足，供应商未受理任务"
+            )
         raise RuntimeError("HeyGen MCP 工具失败: %s" % detail[:500])
     if texts:
         try:
@@ -4106,7 +4136,9 @@ def _lifecycle_notify(lifecycle, event, data):
 
 
 def _definitive_heygen_create_rejection(error):
-    if isinstance(error, (HeyGenRateLimited, HeyGenMCPAuthError)):
+    if isinstance(error, (
+            HeyGenRateLimited, HeyGenMCPAuthError,
+            HeyGenMCPPlanCreditsExhausted)):
         return True
     cause = getattr(error, "__cause__", None)
     return isinstance(cause, urllib.error.HTTPError) and 400 <= int(cause.code) < 500

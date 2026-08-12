@@ -51,6 +51,52 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         error = video.HeyGenMCPAuthError("套餐 OAuth 未配置")
         self.assertTrue(video._definitive_heygen_create_rejection(error))
 
+    def test_mcp_plan_credit_error_is_definitive_and_does_not_leak_detail(self):
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                result = {
+                    "jsonrpc": "2.0", "id": "x", "result": {
+                        "content": [{
+                            "type": "text",
+                            "text": (
+                                "MOVIO_PAYMENT_INSUFFICIENT_CREDIT: "
+                                "insufficient premium credits; internal-marker"
+                            ),
+                        }],
+                        "isError": True,
+                    },
+                }
+                return ("data: " + json.dumps(result) + "\n\n").encode()
+
+        class Opener:
+            def open(self, request, **_kwargs):
+                requests.append(request)
+                return Response()
+
+        with patch.object(video, "_heygen_mcp_access_token", return_value="token"), \
+             patch.object(video, "_heygen_direct_opener", return_value=Opener()):
+            with self.assertRaises(video.HeyGenMCPPlanCreditsExhausted) as rejected:
+                video._heygen_mcp_call("create_video_from_image", {})
+
+        self.assertTrue(video._definitive_heygen_create_rejection(rejected.exception))
+        self.assertEqual(len(requests), 1)
+        self.assertNotIn("internal-marker", str(rejected.exception))
+
+    def test_generic_mcp_tool_error_remains_ambiguous(self):
+        self.assertFalse(video._heygen_mcp_plan_credits_exhausted(
+            "Please try different images or prompts. No credits charged."
+        ))
+        error = RuntimeError("HeyGen MCP 工具失败: temporary provider timeout")
+        self.assertFalse(video._definitive_heygen_create_rejection(error))
+
     def test_expired_oauth_refreshes_and_stays_private(self):
         requests = []
 
