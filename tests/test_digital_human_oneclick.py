@@ -222,8 +222,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         for marker in (
             'id="photo"', 'id="voice"', 'id="script"',
+            'id="customerMaterials"', 'id="customerMaterialList"',
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
+            "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
+            "body.reference_upload_ids=[customerUploads[index].upload_id]",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)
@@ -232,7 +235,15 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("分析并预览方案", page)
         self.assertIn("确认方案并生成", page)
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
+        self.assertIn("不上传也可以继续", page)
         self.assertNotIn("选择剪辑风格", page)
+
+    def test_primary_actions_are_visible_before_long_material_fields(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        self.assertLess(page.index('id="analyze"'), page.index('id="photo"'))
+        self.assertLess(page.index('id="start"'), page.index('id="script"'))
+        self.assertIn(".action-dock{position:sticky", page)
+        self.assertIn("资料填好后，先分析并预览三段方案", page)
 
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
