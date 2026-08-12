@@ -225,6 +225,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=1",
             "digital-human-voice-state.js?v=1",
+            "digital-human-setup-state.js?v=1",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -253,8 +254,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("放弃上次任务并重新设置", page)
         self.assertIn("重新生成可能再次扣点", page)
         self.assertIn("声音来源和样音已随当前任务锁定", page)
-        self.assertIn("$('restartSetup').hidden=!result.locked", page)
-        self.assertIn("if(state.phase!=='approved')return", page)
+        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase)", page)
+        self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
         self.assertNotIn("选择剪辑风格", page)
 
     def test_primary_actions_are_visible_before_long_material_fields(self):
