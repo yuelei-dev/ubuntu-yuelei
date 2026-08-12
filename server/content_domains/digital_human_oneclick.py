@@ -80,6 +80,11 @@ def plan(script):
             "index": index,
             "text": part,
             "role": ("hook", "explain", "cta")[index],
+            "speech_profile": (
+                {"speed": 1.08, "pitch": 1, "volume": 2, "motion": "high", "delivery": "energetic_hook"},
+                {"speed": 0.98, "pitch": 0, "volume": 1, "motion": "medium", "delivery": "clear_explain"},
+                {"speed": 1.04, "pitch": 1, "volume": 2, "motion": "high", "delivery": "confident_cta"},
+            )[index],
             "gesture_prompt": gestures[index] + "。服装、发型、眼镜、面部特征和背景风格一致，双手完整可见，真实摄影，不添加文字。",
         }
         segments.append(segment)

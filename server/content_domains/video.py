@@ -1758,6 +1758,18 @@ def validate_video_payload(payload, username=None):
     motion = (payload.get("motion") or "medium").strip().lower()
     if motion not in VALID_VIDEO_MOTIONS:
         raise ValueError("motion 仅支持 low、medium、high")
+    try:
+        speed = float(payload.get("speed", 1.0))
+        pitch = float(payload.get("pitch", 0))
+        volume = float(payload.get("volume", 0))
+    except (TypeError, ValueError):
+        raise ValueError("speed、pitch、volume 必须是数字")
+    if not 0.5 <= speed <= 2.0:
+        raise ValueError("speed 必须是 0.5-2.0 的数字")
+    if not -12 <= pitch <= 12:
+        raise ValueError("pitch 必须是 -12-12 的数字")
+    if not -50 <= volume <= 100:
+        raise ValueError("volume 必须是 -50-100 的数字")
     bgm_data = str(payload.get("bgm_data") or "").strip()
     if bgm_data and not _is_valid_data_url(bgm_data, VALID_AUDIO_MIMES):
         raise ValueError("bgm_data 不是有效的音频文件")
@@ -1773,6 +1785,9 @@ def validate_video_payload(payload, username=None):
     cleaned["ratio"] = ratio
     cleaned["resolution"] = resolution
     cleaned["motion"] = motion
+    cleaned["speed"] = speed
+    cleaned["pitch"] = pitch
+    cleaned["volume"] = volume
     if mode == "audio":
         cleaned["audio_file"] = audio_file
         cleaned["audio_data"] = audio_data

@@ -148,7 +148,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         for marker in (
             'id="photo"', 'id="voice"', 'id="script"',
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
-            "reference_images:[photoData]", "motion:'high'", "subtitle:false",
+            "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
             "digital_human_oneclick_compose", "video_job_ids", "material_job_ids",
         ):
             self.assertIn(marker, page)
@@ -158,6 +158,14 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("确认方案并生成", page)
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
         self.assertNotIn("选择剪辑风格", page)
+
+    def test_plan_contains_distinct_delivery_profiles(self):
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        payload = domain.plan("开场先抓住注意力。接着把方案讲清楚。最后给出行动号召。")
+        profiles = [item["speech_profile"] for item in payload["segments"]]
+        self.assertEqual([item["delivery"] for item in profiles], ["energetic_hook", "clear_explain", "confident_cta"])
+        self.assertNotEqual(profiles[0]["speed"], profiles[1]["speed"])
+
 
     def test_video_page_replaces_the_old_talking_tab_instead_of_adding_a_header_link(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
