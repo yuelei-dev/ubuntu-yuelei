@@ -224,6 +224,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="photo"', 'id="voice"', 'id="script"',
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=1",
+            "digital-human-voice-state.js?v=1",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -244,7 +245,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("不上传也可以继续", page)
         self.assertIn('id="voiceSource"', page)
         self.assertIn("已有声音无需再次复刻", page)
-        self.assertIn("ready=(data.items||[]).filter", page)
+        self.assertIn("DigitalHumanVoiceState.resolveLoaded(before,data.items||[])", page)
+        self.assertIn("DigitalHumanVoiceState.loadFailed(before,error.message)", page)
         self.assertIn("if(!clone&&state.voiceKey){setStep('voice','done','已复用')", page)
         self.assertIn("重新上传样音并复刻", page)
         self.assertNotIn("选择剪辑风格", page)
