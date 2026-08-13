@@ -154,3 +154,33 @@ test('cancelling the restart confirmation preserves the epoch and lets the curre
   assert.deepEqual(result.results,[{jobId:93}]);
   assert.equal(commits.at(-1).ids[0],93);
 });
+
+test('bounded workers never exceed material concurrency and preserve item order', async () => {
+  let active=0,maxActive=0,nextJobId=100,currentEpoch=21;
+  const gates=[],commits=[],progress=[];
+  const resultPromise=setup.runJobs({
+    items:[0,1,2,3,4,5],ids:[],keys:[],failed:[],epoch:21,maxConcurrency:3,
+    currentEpoch:()=>currentEpoch,key:index=>'material-'+index,resume,
+    submit:(item)=>{
+      active++;maxActive=Math.max(maxActive,active);
+      const gate=deferred();gates.push({item,gate});
+      nextJobId++;
+      return gate.promise.then(()=>100+item);
+    },
+    poll:id=>{active--;return Promise.resolve({jobId:id});},
+    commit:value=>commits.push(value),onCount:value=>progress.push(value),
+  });
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(gates.length,3);
+  assert.equal(maxActive,3);
+  gates.slice(0,3).forEach(entry=>entry.gate.resolve());
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(gates.length,6);
+  assert.equal(maxActive,3);
+  gates.slice(3).forEach(entry=>entry.gate.resolve());
+  const result=await resultPromise;
+  assert.equal(maxActive,3);
+  assert.deepEqual(result.results.map(item=>item.jobId),[100,101,102,103,104,105]);
+  assert.deepEqual(progress,[1,2,3,4,5,6]);
+  assert.deepEqual(commits.at(-1).ids,[100,101,102,103,104,105]);
+});
