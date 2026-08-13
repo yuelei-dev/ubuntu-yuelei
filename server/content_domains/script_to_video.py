@@ -815,9 +815,12 @@ def dispatch_http(handler, method, verify_token, must_change_password):
     path = handler.path.split("?", 1)[0]
     from . import digital_human_oneclick
     if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH,
-                    digital_human_oneclick.PLAN_PATH,
-                    digital_human_oneclick.CONSENT_PATH,
-                    digital_human_oneclick.HEYGEN_PREFLIGHT_PATH}:
+                     digital_human_oneclick.PLAN_PATH,
+                     digital_human_oneclick.CONSENT_PATH,
+                     digital_human_oneclick.GESTURE_RECOVERY_PATH,
+                     digital_human_oneclick.MATERIAL_RECOVERY_PATH,
+                     digital_human_oneclick.VIDEO_RECOVERY_PATH,
+                     digital_human_oneclick.HEYGEN_PREFLIGHT_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -833,7 +836,10 @@ def dispatch_http(handler, method, verify_token, must_change_password):
         try:
             handler._send(200, digital_human_oneclick.plan_response(handler._json_body_strict()))
         except digital_human_oneclick.DigitalHumanRequestError as exc:
-            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code})
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code,
+                                      "invalid_job_ids": exc.invalid_job_ids})
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
         return True
     if path == digital_human_oneclick.CONSENT_PATH:
         if method != "POST":
@@ -855,6 +861,48 @@ def dispatch_http(handler, method, verify_token, must_change_password):
                 "detail": str(exc)[:220], "code": exc.code,
                 **({"retry_after_ms": 5000} if exc.status == 503 else {}),
             })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_oneclick.GESTURE_RECOVERY_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_oneclick.validate_gesture_recovery(
+                handler._json_body_strict(), user["username"],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code,
+                                      "invalid_job_ids": exc.invalid_job_ids})
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_oneclick.MATERIAL_RECOVERY_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_oneclick.validate_material_recovery(
+                handler._json_body_strict(), user["username"],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code,
+                                      "invalid_job_ids": exc.invalid_job_ids})
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_oneclick.VIDEO_RECOVERY_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_oneclick.validate_video_recovery(
+                handler._json_body_strict(), user["username"],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code,
+                                      "invalid_job_ids": exc.invalid_job_ids})
         except ValueError as exc:
             handler._send(400, {"detail": str(exc)[:220]})
         return True

@@ -17,6 +17,39 @@ VOICE_SLOT_COST = 50
 VOICE_SLOT_MAX_PER_USER = 5
 VALID_VOICE_SLOT_STATUSES = ("active", "training", "ready", "failed")
 _voice_slot_purchase_lock = threading.Lock()
+CLONE_ATTEMPT_LEASE_SECONDS = max(
+    30, int(os.environ.get("CLONE_ATTEMPT_LEASE_SECONDS", "120") or 120),
+)
+CLONE_ATTEMPT_HEARTBEAT_SECONDS = max(
+    1, min(30, int(os.environ.get("CLONE_ATTEMPT_HEARTBEAT_SECONDS", "10") or 10)),
+)
+_CLONE_ATTEMPT_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+
+
+class CloneAttemptError(ValueError):
+    status = 409
+
+    def __init__(self, detail, code="clone_attempt_mismatch"):
+        super().__init__(detail)
+        self.detail = detail
+        self.code = code
+
+
+def _ensure_clone_attempt_columns(connection):
+    _ensure_column(connection, "audio_voice_slots", "clone_attempt_id", "TEXT")
+    _ensure_column(connection, "audio_voice_slots", "clone_attempt_phase", "TEXT")
+    _ensure_column(connection, "audio_voice_slots", "clone_attempt_updated_at", "INTEGER")
+
+
+def _clean_clone_attempt_id(value, required=False):
+    attempt_id = str(value or "").strip()
+    if not attempt_id:
+        if required:
+            raise CloneAttemptError("声音复刻缺少本次操作标识", "clone_attempt_required")
+        return ""
+    if not _CLONE_ATTEMPT_RE.fullmatch(attempt_id):
+        raise CloneAttemptError("声音复刻操作标识格式无效", "clone_attempt_invalid")
+    return attempt_id
 
 # Only server-authored delivery profiles may reach CosyVoice instruction
 # control.  Keep these concise: CosyVoice counts CJK characters as two and
@@ -297,12 +330,17 @@ def clear_voice_preview(username, slot_id):
         c.commit()
     return removed
 
-def check_clone_status(username, slot_id):
+def check_clone_status(username, slot_id, attempt_id=None):
+    """Return only the state owned by ``attempt_id`` when one is supplied."""
     username = (username or "").strip()
     slot_id = (slot_id or "").strip()
+    expected_attempt_id = _clean_clone_attempt_id(attempt_id)
     with closing(adb()) as c:
+        _ensure_clone_attempt_columns(c)
+        c.commit()
         slot = c.execute("""SELECT id, slot_id, status, voice_id, clone_started_at, clone_upload_at, clone_error,
-                   clone_baseline_version, clone_baseline_icl_speaker_id, clone_baseline_demo_audio
+                   clone_baseline_version, clone_baseline_icl_speaker_id, clone_baseline_demo_audio,
+                   clone_attempt_id, clone_attempt_phase, clone_attempt_updated_at
             FROM audio_voice_slots
             WHERE username=? AND slot_id=?""", (username, slot_id)).fetchone()
         voice = c.execute("""SELECT display_name, provider_voice, preview_url FROM audio_voices
@@ -310,56 +348,79 @@ def check_clone_status(username, slot_id):
             (slot["voice_id"] if slot else -1, username, slot_id)).fetchone()
     if not slot:
         raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
+    current_attempt_id = str(slot["clone_attempt_id"] or "")
+    if expected_attempt_id and current_attempt_id != expected_attempt_id:
+        raise CloneAttemptError("本次声音复刻操作已被更新，请重新附加样音后重试")
+
+    def response(status, **extra):
+        result = {"status": status}
+        if current_attempt_id:
+            result["attempt_id"] = current_attempt_id
+        result.update({key: value for key, value in extra.items() if value not in (None, "")})
+        return result
+
     if (slot["status"] == "training" and slot["voice_id"] and voice
             and str(voice["provider_voice"] or "").startswith(cosyvoice.CLONE_MODEL)
             and voice["preview_url"]):
         now = int(time.time())
         with closing(adb()) as c:
-            cur = c.execute("""UPDATE audio_voice_slots SET status='ready', updated_at=?
+            _ensure_clone_attempt_columns(c)
+            cur = c.execute("""UPDATE audio_voice_slots SET status='ready', clone_attempt_phase='ready',
+                    clone_attempt_updated_at=?, updated_at=?
                 WHERE id=? AND username=? AND slot_id=? AND status='training' AND voice_id=?
+                  AND COALESCE(clone_attempt_id,'')=?
                   AND EXISTS (
                     SELECT 1 FROM audio_voices v
                     WHERE v.id=audio_voice_slots.voice_id AND v.scope='personal'
                       AND v.username=? AND v.slot_id=? AND v.provider_voice=?
                       AND v.preview_url=?
-                  )""", (now, slot["id"], username, slot_id, slot["voice_id"],
-                           username, slot_id, voice["provider_voice"], voice["preview_url"]))
+                  )""", (now, now, slot["id"], username, slot_id, slot["voice_id"],
+                           current_attempt_id, username, slot_id,
+                           voice["provider_voice"], voice["preview_url"]))
             c.commit()
         if cur.rowcount == 1:
-            return {"status": "ready", "preview_url": voice["preview_url"]}
+            return response("ready", preview_url=voice["preview_url"])
         with closing(adb()) as c:
-            current = c.execute("""SELECT s.status, s.clone_error, v.preview_url
+            _ensure_clone_attempt_columns(c)
+            current = c.execute("""SELECT s.status, s.clone_error, s.clone_attempt_id, v.preview_url
                 FROM audio_voice_slots s LEFT JOIN audio_voices v ON v.id=s.voice_id
                 WHERE s.username=? AND s.slot_id=?""", (username, slot_id)).fetchone()
-        result = {"status": (current["status"] if current else "training") or "training"}
+        if expected_attempt_id and (not current or str(current["clone_attempt_id"] or "") != expected_attempt_id):
+            raise CloneAttemptError("本次声音复刻操作已被更新，请重新附加样音后重试")
+        result = response((current["status"] if current else "training") or "training")
         if current and current["preview_url"]:
             result["preview_url"] = current["preview_url"]
         if current and current["clone_error"]:
             result["clone_error"] = current["clone_error"]
         return result
     if not cosyvoice.enabled():
-        return {"status": "failed", "clone_error": "声音复刻服务暂不可用"}
-    # CosyVoice: provider_voice is replaced with the real voice id by the
-    # background clone. Until then mark_clone_training intentionally stores the
-    # slot id as a placeholder, so polling must keep reporting "training".
+        return response("failed", clone_error="声音复刻服务暂不可用")
+    # Until the provider voice id replaces the slot placeholder, this attempt
+    # is still training and no provider status call is safe.
     provider_voice = (voice["provider_voice"] if voice else "") or ""
     if provider_voice.startswith(cosyvoice.CLONE_MODEL):
         if slot["status"] == "failed":
-            return {"status": "failed", "clone_error": slot["clone_error"] or "\u590d\u523b\u5931\u8d25"}
+            return response("failed", clone_error=slot["clone_error"] or "\u590d\u523b\u5931\u8d25")
         try:
             cv_status, _ = cosyvoice.voice_status(provider_voice)
         except Exception:
-            return {"status": slot["status"] or "training"}
+            return response(slot["status"] or "training")
         new_status = "ready" if cv_status == "OK" else ("failed" if cv_status not in ("", "OK") and "ing" not in cv_status.lower() else "training")
         if new_status != slot["status"]:
             with closing(adb()) as c:
-                c.execute("UPDATE audio_voice_slots SET status=?, updated_at=? WHERE username=? AND slot_id=?",
-                          (new_status, int(time.time()), username, slot_id))
+                _ensure_clone_attempt_columns(c)
+                now = int(time.time())
+                c.execute("""UPDATE audio_voice_slots SET status=?, clone_attempt_phase=?,
+                              clone_attempt_updated_at=?, updated_at=?
+                           WHERE username=? AND slot_id=? AND COALESCE(clone_attempt_id,'')=?""",
+                          (new_status, "ready" if new_status == "ready" else
+                           ("failed" if new_status == "failed" else "provider_training"),
+                           now, now, username, slot_id, current_attempt_id))
                 c.commit()
-        return {"status": new_status, "cosy_status": cv_status}
+        return response(new_status, cosy_status=cv_status)
     if slot["status"] == "training":
-        return {"status": "training"}
-    return {"status": "failed", "clone_error": "该音色来自已停用渠道，请重新复刻"}
+        return response("training")
+    return response("failed", clone_error="该音色来自已停用渠道，请重新复刻")
 
 ALLOWED_CLONE_AUDIO_FORMATS = {"mp3", "wav", "m4a", "aac", "ogg"}
 
@@ -413,19 +474,86 @@ def validate_clone_vip_payload(username, payload):
     checked["audio_format"] = audio_format
     return checked
 
-def mark_clone_training(username, slot_id, name):
+def clone_attempt_snapshot(username, slot_id, attempt_id, now=None):
+    """Inspect a processing claim without trusting another slot operation."""
+    attempt_id = _clean_clone_attempt_id(attempt_id, required=True)
+    with closing(adb()) as c:
+        _ensure_clone_attempt_columns(c)
+        c.commit()
+        row = c.execute("""SELECT status, voice_id, clone_error, clone_attempt_id,
+                    clone_attempt_phase, clone_attempt_updated_at
+                FROM audio_voice_slots WHERE username=? AND slot_id=?""",
+                ((username or "").strip(), (slot_id or "").strip())).fetchone()
+    if not row or str(row["clone_attempt_id"] or "") != attempt_id:
+        return {"action": "mismatch"}
+    phase = str(row["clone_attempt_phase"] or "")
+    if phase == "ready" or row["status"] == "ready":
+        return {"action": "ready", "attempt_id": attempt_id}
+    if phase == "failed" or row["status"] == "failed":
+        return {"action": "failed", "attempt_id": attempt_id,
+                "clone_error": str(row["clone_error"] or "声音复刻失败")}
+    if phase == "provider_training":
+        # The provider has already accepted this operation and its persisted
+        # voice id is authoritative. The local worker lease no longer applies:
+        # even a long provider training window must never start it again.
+        return {"action": "provider_training", "attempt_id": attempt_id,
+                "voice_id": row["voice_id"]}
+    updated_at = int(row["clone_attempt_updated_at"] or 0)
+    age = max(0, int(time.time() if now is None else now) - updated_at)
+    return {"action": "stale" if not updated_at or age > CLONE_ATTEMPT_LEASE_SECONDS else "processing",
+            "attempt_id": attempt_id, "age": age}
+
+
+def _update_clone_attempt(username, slot_id, attempt_id, phase, status=None, error=None):
+    attempt_id = _clean_clone_attempt_id(attempt_id, required=True)
+    now = int(time.time())
+    with closing(adb()) as c:
+        _ensure_clone_attempt_columns(c)
+        assignments = ["clone_attempt_phase=?", "clone_attempt_updated_at=?", "updated_at=?"]
+        values = [phase, now, now]
+        if status:
+            assignments.append("status=?")
+            values.append(status)
+        if error is not None:
+            assignments.append("clone_error=?")
+            values.append(error)
+        values.extend([(username or "").strip(), (slot_id or "").strip(), attempt_id])
+        cur = c.execute("UPDATE audio_voice_slots SET %s WHERE username=? AND slot_id=? AND clone_attempt_id=?" %
+                        ",".join(assignments), tuple(values))
+        c.commit()
+        return cur.rowcount == 1
+
+
+def mark_clone_attempt_running(username, slot_id, attempt_id):
+    return _update_clone_attempt(username, slot_id, attempt_id, "running", status="training")
+
+
+def fail_clone_attempt(username, slot_id, attempt_id, error):
+    return _update_clone_attempt(username, slot_id, attempt_id, "failed", status="failed", error=str(error or "声音复刻失败")[:220])
+
+
+def mark_clone_training(username, slot_id, name, attempt_id=None):
     username = (username or "").strip()
     slot_id = (slot_id or "").strip()
     name = (name or "\u6211\u7684VIP\u590d\u523b\u97f3\u8272").strip()[:40]
+    attempt_id = _clean_clone_attempt_id(attempt_id) or ("legacy-" + uuid.uuid4().hex)
     now = int(time.time())
     voice_key = "vip_" + re.sub(r"[^a-zA-Z0-9_\\-]", "_", slot_id)
     with closing(adb()) as c:
-        slot = c.execute("""SELECT id, status, voice_id, COALESCE(reclone_count, 0) AS reclone_count, updated_at, clone_upload_at FROM audio_voice_slots
+        _ensure_clone_attempt_columns(c)
+        c.commit()
+        slot = c.execute("""SELECT id, status, voice_id, COALESCE(reclone_count, 0) AS reclone_count,
+                    updated_at, clone_upload_at, clone_attempt_id FROM audio_voice_slots
             WHERE username=? AND slot_id=?""",
             (username, slot_id)).fetchone()
         if not slot:
             raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
         if slot["status"] == "training":
+            if str(slot["clone_attempt_id"] or "") == attempt_id:
+                return {"voice_id": slot["voice_id"], "voice_key": voice_key,
+                        "display_name": name, "status": "training",
+                        "reclone_count": int(slot["reclone_count"] or 0),
+                        "attempt_id": attempt_id}
             last_at = int(slot["clone_upload_at"] or slot["updated_at"] or 0)
             if last_at and now - last_at < 600:
                 raise ValueError("\u97f3\u8272\u6b63\u5728\u590d\u523b\u4e2d\uff0c\u8bf7\u7b49\u5f85\u5b8c\u6210")
@@ -443,26 +571,37 @@ def mark_clone_training(username, slot_id, name):
         r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
                       (username, voice_key)).fetchone()
         voice_id = r["id"] if r else None
-        c.execute("""UPDATE audio_voice_slots SET voice_id=?, status='training', reclone_count=?, clone_started_at=?, clone_upload_at=NULL, clone_error=NULL, updated_at=?
-            WHERE username=? AND slot_id=?""", (voice_id, next_reclone_count, now, now, username, slot_id))
+        c.execute("""UPDATE audio_voice_slots SET voice_id=?, status='training', reclone_count=?, clone_started_at=?,
+                clone_upload_at=NULL, clone_error=NULL, clone_attempt_id=?, clone_attempt_phase='accepted',
+                clone_attempt_updated_at=?, updated_at=? WHERE username=? AND slot_id=?""",
+                (voice_id, next_reclone_count, now, attempt_id, now, now, username, slot_id))
         c.commit()
     clear_voice_preview(username, slot_id)
-    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name, "status": "training", "reclone_count": next_reclone_count}
+    return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name,
+            "status": "training", "reclone_count": next_reclone_count,
+            "attempt_id": attempt_id}
 
 def clone_vip_voice_background(username, payload):
+    attempt_id = _clean_clone_attempt_id(payload.get("clone_attempt_id"), required=True)
+    slot_id = (payload.get("slot_id") or "").strip()
+    stop = threading.Event()
+    def heartbeat():
+        while not stop.wait(CLONE_ATTEMPT_HEARTBEAT_SECONDS):
+            if not _update_clone_attempt(username, slot_id, attempt_id, "running"):
+                return
+    heart = threading.Thread(target=heartbeat, name="clone-attempt-heartbeat", daemon=True)
+    heart.start()
     try:
         clone_vip_voice(username, payload)
     except Exception as e:
-        slot_id = (payload.get("slot_id") or "").strip()
         print("[clone_vip_voice_background] failed username=%s slot_id=%s error=%s" % (username, slot_id, str(e)[:300]), flush=True)
         if slot_id:
             try:
-                with closing(adb()) as c:
-                    c.execute("UPDATE audio_voice_slots SET status='failed', clone_error=?, updated_at=? WHERE username=? AND slot_id=?",
-                              (_clone_error_message(e), int(time.time()), username, slot_id))
-                    c.commit()
+                fail_clone_attempt(username, slot_id, attempt_id, _clone_error_message(e))
             except Exception:
                 pass
+    finally:
+        stop.set()
 
 
 CLONE_COS_UPLOAD_ATTEMPTS = 3
@@ -552,7 +691,7 @@ def _cosy_clone_preview(voice_id):
     return None, None
 
 
-def _cosy_backfill_preview_async(voice_id, username, voice_key):
+def _cosy_backfill_preview_async(voice_id, username, voice_key, attempt_id=""):
     """复刻返回后【异步】生成试听并回填，不拖慢音色「就绪」。synth 对就绪窗口重试(#602)，
     成功就 UPDATE 该音色行的 preview 并同步槽位 ready。provider_voice 必须仍匹配本次
     复刻，避免旧异步任务覆盖随后发起的新复刻。"""
@@ -569,18 +708,22 @@ def _cosy_backfill_preview_async(voice_id, username, voice_key):
                       AND (preview_url IS NULL OR preview_url='')""",
                     (pf, url, now, username, voice_key, voice_id))
                 if cur.rowcount:
-                    c.execute("""UPDATE audio_voice_slots SET status='ready', updated_at=?
+                    _ensure_clone_attempt_columns(c)
+                    c.execute("""UPDATE audio_voice_slots SET status='ready', clone_attempt_phase='ready',
+                        clone_attempt_updated_at=?, updated_at=?
                         WHERE username=? AND status='training' AND voice_id IN (
                             SELECT id FROM audio_voices
                             WHERE username=? AND scope='personal' AND voice_key=?
                               AND provider_voice=?
-                        )""", (now, username, username, voice_key, voice_id))
+                        ) AND (?='' OR clone_attempt_id=?)""",
+                        (now, now, username, username, voice_key, voice_id,
+                         attempt_id, attempt_id))
                 c.commit()
         except Exception as e:
             print("[cosyvoice] 试听回填落库失败: %s" % str(e)[:120], flush=True)
     threading.Thread(target=_run, name="cosy-preview-backfill", daemon=True).start()
 
-def _clone_via_cosyvoice(username, slot_id, name, audio_b64):
+def _clone_via_cosyvoice(username, slot_id, name, audio_b64, attempt_id):
     """CosyVoice 复刻：60s 参考音频(已由 prepare_clone_audio 标准化) → COS 预签名 URL
     → create_voice 拿 voice_id → 落库。voice_id 直接作为 provider_voice，合成时按它选复刻模型。
     坑位免费，所以不再走豆包那套付费 slot 校验；create_voice 同步返回，可用即 ready。"""
@@ -604,6 +747,13 @@ def _clone_via_cosyvoice(username, slot_id, name, audio_b64):
     now = int(time.time())
     voice_key = "vip_" + re.sub(r"[^a-zA-Z0-9_\-]", "_", slot_id)
     with closing(adb()) as c:
+        _ensure_clone_attempt_columns(c)
+        c.execute("BEGIN IMMEDIATE")
+        owner = c.execute("""SELECT clone_attempt_id FROM audio_voice_slots
+            WHERE username=? AND slot_id=?""", (username, slot_id)).fetchone()
+        if not owner or str(owner["clone_attempt_id"] or "") != attempt_id:
+            c.rollback()
+            return {"stale": True, "attempt_id": attempt_id}
         c.execute("""INSERT OR IGNORE INTO audio_voices
             (username, scope, voice_key, display_name, provider_voice, slot_id, created_at, updated_at)
             VALUES(?,?,?,?,?,?,?,?)""",
@@ -614,16 +764,23 @@ def _clone_via_cosyvoice(username, slot_id, name, audio_b64):
         r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
                       (username, voice_key)).fetchone()
         vid_row = r["id"] if r else None
-        c.execute("""UPDATE audio_voice_slots SET voice_id=?, status=?, clone_started_at=?, clone_upload_at=?,
-            clone_error=NULL, clone_upload_speaker_id=?, updated_at=? WHERE username=? AND slot_id=?""",
-            (vid_row, slot_status, now, now, voice_id, now, username, slot_id))
+        cur = c.execute("""UPDATE audio_voice_slots SET voice_id=?, status=?, clone_started_at=?, clone_upload_at=?,
+            clone_error=NULL, clone_upload_speaker_id=?, clone_attempt_phase=?, clone_attempt_updated_at=?,
+            updated_at=? WHERE username=? AND slot_id=? AND clone_attempt_id=?""",
+            (vid_row, slot_status, now, now, voice_id,
+             "ready" if slot_status == "ready" else "provider_training",
+             now, now, username, slot_id, attempt_id))
+        if cur.rowcount != 1:
+            c.rollback()
+            return {"stale": True, "attempt_id": attempt_id}
         c.commit()
     # CosyVoice 的 create_voice 不返样音，复刻后自己合成一句试听存 COS——否则前端没 preview_url
     # 就不显示试听按钮。⚠️试听【异步】生成:音色/坑位已先落 ready(用户立即可用)，试听在后台线程
     # 对就绪窗口重试后回填(#602)——不再用 slot_status 门控、也不拖慢「就绪」。
-    _cosy_backfill_preview_async(voice_id, username, voice_key)
+    _cosy_backfill_preview_async(voice_id, username, voice_key, attempt_id)
     return {"voice_id": vid_row, "voice_key": voice_key, "display_name": name,
-            "provider_voice": voice_id, "status": slot_status}
+            "provider_voice": voice_id, "status": slot_status,
+            "attempt_id": attempt_id}
 
 def clone_vip_voice(username, payload):
     username = (username or "").strip()
@@ -631,6 +788,7 @@ def clone_vip_voice(username, payload):
     name = (payload.get("name") or "\u6211\u7684VIP\u590d\u523b\u97f3\u8272").strip()[:40]
     audio_b64 = _clone_audio_b64(payload.get("audio"))
     audio_format = _clone_audio_format(payload.get("audio_format"))
+    attempt_id = _clean_clone_attempt_id(payload.get("clone_attempt_id"), required=True)
     if audio_format not in ALLOWED_CLONE_AUDIO_FORMATS:
         raise ValueError("audio_format 仅支持 mp3/wav/m4a/aac/ogg")
     if not slot_id:
@@ -640,12 +798,16 @@ def clone_vip_voice(username, payload):
     if not cosyvoice.enabled():
         raise ValueError("声音复刻服务暂不可用")
     with closing(adb()) as c:
+        _ensure_clone_attempt_columns(c)
+        c.commit()
         slot = c.execute("""SELECT id, slot_id, voice_id FROM audio_voice_slots
-            WHERE username=? AND slot_id=? AND status IN ('active','training','failed','ready')""", (username, slot_id)).fetchone()
+            WHERE username=? AND slot_id=? AND clone_attempt_id=?
+              AND status IN ('active','training','failed','ready')""",
+            (username, slot_id, attempt_id)).fetchone()
     if not slot:
         raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
     audio_b64, audio_format = prepare_clone_audio(audio_b64, audio_format)
-    return _clone_via_cosyvoice(username, slot_id, name, audio_b64)
+    return _clone_via_cosyvoice(username, slot_id, name, audio_b64, attempt_id)
 
 def ensure_audio_voice(username, voice_key):
     username = (username or "").strip()

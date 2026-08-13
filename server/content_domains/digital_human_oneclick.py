@@ -7,6 +7,7 @@ module only plans the child jobs and combines their completed, owned outputs.
 import hashlib
 import hmac
 import json
+import base64
 import os
 import pathlib
 import re
@@ -20,6 +21,9 @@ PIPELINE = "digital_human_oneclick_compose"
 PLAN_PATH = "/api/gen/digital-human-oneclick/plan"
 CONSENT_PATH = "/api/gen/digital-human-oneclick/consent"
 HEYGEN_PREFLIGHT_PATH = "/api/gen/digital-human-oneclick/heygen-preflight"
+GESTURE_RECOVERY_PATH = "/api/gen/digital-human-oneclick/gesture-recovery"
+MATERIAL_RECOVERY_PATH = "/api/gen/digital-human-oneclick/material-recovery"
+VIDEO_RECOVERY_PATH = "/api/gen/digital-human-oneclick/video-recovery"
 VIDEO_COUNT = 3
 MATERIAL_COUNT = 6
 MAX_SCRIPT_CHARS = 6000
@@ -36,6 +40,7 @@ _CONSENT_TOKEN_RE = re.compile(r"^dhc_[0-9a-f]{32}\.[0-9a-f]{64}$")
 _CONSENT_METADATA_FIELDS = {
     "digital_human_pipeline", "digital_human_stage", "digital_human_run_id",
     "digital_human_plan_digest", "digital_human_consent_token",
+    "digital_human_script", "digital_human_item_index",
 }
 _STAGE_KINDS = {
     "gesture": "image",
@@ -46,10 +51,11 @@ _STAGE_KINDS = {
 
 
 class DigitalHumanRequestError(ValueError):
-    def __init__(self, message, code="invalid_request", status=400):
+    def __init__(self, message, code="invalid_request", status=400, invalid_job_ids=None):
         super().__init__(message)
         self.code = str(code)
         self.status = int(status)
+        self.invalid_job_ids = [int(item) for item in (invalid_job_ids or [])]
 
 
 def _ensure_consent_table(connection):
@@ -135,7 +141,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = {
-        "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
+        "confirmed", "consent_version", "purpose", "run_id", "plan_digest", "script",
         "photo_sha256", "voice_mode", "voice_ref", "voice_sha256",
     }
     unknown = sorted(set(payload) - allowed)
@@ -150,7 +156,13 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     run_id = str(payload.get("run_id") or "").strip()
     if not _RUN_ID_RE.fullmatch(run_id):
         raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
+    authoritative_plan = plan(payload.get("script"))
     plan_digest = _required_sha256(payload.get("plan_digest"), "制作方案")
+    if not hmac.compare_digest(plan_digest, authoritative_plan["plan_digest"]):
+        raise DigitalHumanRequestError(
+            "制作方案与服务端文案拆分结果不一致，请重新分析方案",
+            "consent_plan_mismatch", 409,
+        )
     photo_sha256 = _required_sha256(payload.get("photo_sha256"), "人物照片")
     voice_mode = str(payload.get("voice_mode") or "").strip().lower()
     if voice_mode not in {"existing", "clone"}:
@@ -316,17 +328,58 @@ def verify_child_submission_with_record(payload, username, kind):
     if _STAGE_KINDS.get(stage) != str(kind or ""):
         raise DigitalHumanRequestError("数字人一键生成步骤与任务类型不匹配")
     cleaned, record = _verify_common_binding(payload, username)
+    authoritative_plan = plan(payload.get("digital_human_script"))
+    if not hmac.compare_digest(
+            authoritative_plan["plan_digest"], record["plan_digest"]):
+        raise DigitalHumanRequestError(
+            "子任务文案与本次授权方案不一致，请重新开始",
+            "consent_plan_mismatch", 409,
+        )
+    raw_item_index = payload.get("digital_human_item_index")
+    if isinstance(raw_item_index, bool):
+        raw_item_index = None
     if stage == "gesture":
+        try:
+            segment_index = int(raw_item_index)
+            if segment_index < 0:
+                raise IndexError
+            segment = authoritative_plan["segments"][segment_index]
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise DigitalHumanRequestError(
+                "手势照步骤编号无效", "consent_plan_mismatch", 409,
+            )
+        cleaned["prompt"] = segment["gesture_prompt"]
+        cleaned["digital_human_item_index"] = segment_index
         references = payload.get("reference_images")
-        if not isinstance(references, list) or not references:
-            raise DigitalHumanRequestError("手势照缺少已授权人物照片")
+        if not isinstance(references, list) or len(references) != 1:
+            raise DigitalHumanRequestError(
+                "手势照必须且只能使用本次授权的一张人物照片",
+                "consent_photo_mismatch", 403,
+            )
         actual = hashlib.sha256(_decode_b64_bytes(references[0], "人物照片")).hexdigest()
         if not hmac.compare_digest(actual, record["photo_sha256"]):
             raise DigitalHumanRequestError(
                 "人物照片与授权记录不一致，请重新开始并授权",
                 "consent_photo_mismatch", 403,
             )
+        cleaned["reference_images"] = [references[0]]
     elif stage == "talking":
+        try:
+            segment_index = int(raw_item_index)
+            if segment_index < 0:
+                raise IndexError
+            segment = authoritative_plan["segments"][segment_index]
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise DigitalHumanRequestError(
+                "口播步骤编号无效", "consent_plan_mismatch", 409,
+            )
+        profile = segment["speech_profile"]
+        cleaned.update({
+            "text": segment["text"], "speed": profile["speed"],
+            "pitch": profile["pitch"], "volume": profile["volume"],
+            "motion": profile["motion"], "delivery": profile["delivery"],
+            "digital_human_item_index": segment_index,
+        })
         actual_voice = str(payload.get("voice") or "").strip()
         expected_voice = (record["voice_ref"] if record["voice_mode"] == "existing"
                           else _expected_cloned_voice(record["voice_ref"]))
@@ -335,9 +388,80 @@ def verify_child_submission_with_record(payload, username, kind):
                 "口播声音与授权记录不一致，请重新开始并授权",
                 "consent_voice_mismatch", 403,
             )
+        gesture_job_id = payload.get("gesture_job_id")
+        if isinstance(gesture_job_id, bool):
+            gesture_job_id = 0
+        try:
+            gesture_job_id = int(gesture_job_id)
+        except (TypeError, ValueError):
+            gesture_job_id = 0
+        if gesture_job_id <= 0:
+            raise DigitalHumanRequestError(
+                "口播缺少本次授权的手势照任务编号",
+                "talking_gesture_binding_invalid", 409,
+            )
+        with closing(jdb()) as connection:
+            gesture_job = connection.execute(
+                "SELECT id,kind,status,payload,result FROM jobs "
+                "WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
+                (gesture_job_id, str(username or "").strip()),
+            ).fetchone()
+        if (not gesture_job or gesture_job["kind"] != "image"
+                or gesture_job["status"] != "done"):
+            raise DigitalHumanRequestError(
+                "口播手势照不存在、未完成或不属于当前账号",
+                "talking_gesture_binding_invalid", 409,
+            )
+        _child_binding(
+            gesture_job["payload"], gesture_job_id, "gesture", record,
+            segment_index,
+        )
+        try:
+            gesture_result = json.loads(gesture_job["result"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            gesture_result = {}
+        relative_file = _result_file(gesture_result, "image")
+        try:
+            gesture_path = (OUT_DIR / relative_file).resolve()
+            gesture_path.relative_to(OUT_DIR.resolve())
+        except Exception:
+            gesture_path = None
+        if (not gesture_path or not gesture_path.is_file()
+                or gesture_path.stat().st_size <= 0):
+            raise DigitalHumanRequestError(
+                "口播手势照文件已不可用，请重新生成手势照",
+                "talking_gesture_binding_invalid", 409,
+            )
+        suffix = gesture_path.suffix.lower()
+        mime = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(suffix)
+        if not mime:
+            raise DigitalHumanRequestError(
+                "口播手势照格式不受支持",
+                "talking_gesture_binding_invalid", 409,
+            )
+        cleaned["image_data"] = "data:%s;base64,%s" % (
+            mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
+        )
+        cleaned.pop("gesture_job_id", None)
     elif stage == "compose":
         if str(payload.get("plan_digest") or "").strip().lower() != record["plan_digest"]:
             raise DigitalHumanRequestError("成片方案与授权记录不一致", "consent_binding_mismatch", 403)
+    elif stage == "material":
+        try:
+            material_index = int(raw_item_index)
+            if material_index < 0:
+                raise IndexError
+            material = authoritative_plan["materials"][material_index]
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise DigitalHumanRequestError(
+                "主画面步骤编号无效", "consent_plan_mismatch", 409,
+            )
+        cleaned["prompt"] = material["prompt"]
+        cleaned["digital_human_item_index"] = material_index
+    cleaned.pop("digital_human_script", None)
     return cleaned, record
 
 
@@ -471,7 +595,8 @@ def _result_file(result, kind):
     return ""
 
 
-def _child_binding(payload_text, job_id, expected_stage, consent_record):
+def _child_binding(payload_text, job_id, expected_stage, consent_record,
+                   expected_index=None):
     try:
         payload = json.loads(payload_text or "")
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -496,6 +621,249 @@ def _child_binding(payload_text, job_id, expected_stage, consent_record):
             "子任务 #%d 不属于本次授权制作流程，请重新生成" % job_id,
             "child_consent_binding_mismatch", 409,
         )
+    if expected_index is not None:
+        raw_index = payload.get("digital_human_item_index")
+        if isinstance(raw_index, bool):
+            raw_index = None
+        try:
+            actual_index = int(raw_index)
+        except (TypeError, ValueError):
+            actual_index = -1
+        if actual_index != int(expected_index):
+            raise DigitalHumanRequestError(
+                "子任务 #%d 不属于本次方案的第 %d 个位置，请重新生成" %
+                (job_id, int(expected_index) + 1),
+                "child_consent_binding_mismatch", 409,
+            )
+
+
+def _recoverable_done_file(result_text, kind):
+    try:
+        result = json.loads(result_text or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    relative_file = _result_file(result, kind)
+    if not relative_file:
+        return False
+    try:
+        path = (OUT_DIR / relative_file).resolve()
+        path.relative_to(OUT_DIR.resolve())
+    except Exception:
+        return False
+    return path.is_file() and path.stat().st_size > 0
+
+
+def _recovery_entries(payload, field, limit, label, error_code):
+    """Parse sparse recovery entries without collapsing their plan indexes."""
+    raw_entries = payload.get(field)
+    if not isinstance(raw_entries, list) or not 1 <= len(raw_entries) <= limit:
+        raise DigitalHumanRequestError(
+            "需要 1 至 %d 个有效的%s任务" % (limit, label), error_code, 409,
+        )
+    entries = []
+    seen_indexes = set()
+    seen_job_ids = set()
+    for raw in raw_entries:
+        if not isinstance(raw, dict) or set(raw) != {"index", "job_id"}:
+            raise DigitalHumanRequestError(
+                "%s恢复项必须包含 index 和 job_id" % label,
+                error_code, 409,
+            )
+        raw_index = raw.get("index")
+        raw_job_id = raw.get("job_id")
+        if (not isinstance(raw_index, int) or isinstance(raw_index, bool)
+                or not isinstance(raw_job_id, int) or isinstance(raw_job_id, bool)):
+            raise DigitalHumanRequestError(
+                "%s恢复项格式无效" % label, error_code, 409,
+            )
+        index = raw_index
+        job_id = raw_job_id
+        if (index < 0 or index >= limit or job_id <= 0
+                or index in seen_indexes or job_id in seen_job_ids):
+            raise DigitalHumanRequestError(
+                "%s恢复项的 index 和 job_id 必须有效且互不重复" % label,
+                error_code, 409, [job_id] if job_id > 0 else [],
+            )
+        seen_indexes.add(index)
+        seen_job_ids.add(job_id)
+        entries.append({"index": index, "job_id": job_id})
+    return entries
+
+
+def validate_gesture_recovery(payload, username):
+    """Authorize portrait-free resume only for this consent's recoverable jobs."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = set(_CONSENT_METADATA_FIELDS) | {"gesture_job_ids"}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("手势照恢复提交包含不支持字段：" + ", ".join(unknown))
+    if str(payload.get("digital_human_pipeline") or "").strip().lower() != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人一键生成流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != "gesture_recovery":
+        raise DigitalHumanRequestError("手势照恢复步骤标识无效")
+    _cleaned, consent_record = _verify_common_binding(payload, username)
+    entries = _recovery_entries(
+        payload, "gesture_job_ids", 3, "手势照", "gesture_recovery_invalid",
+    )
+    job_ids = [entry["job_id"] for entry in entries]
+    placeholders = ",".join("?" for _ in job_ids)
+    with closing(jdb()) as connection:
+        rows = connection.execute(
+            "SELECT id,kind,username,status,payload,result FROM jobs "
+            "WHERE username=? AND COALESCE(deleted,0)=0 AND id IN (%s)" % placeholders,
+            [str(username or "").strip()] + job_ids,
+        ).fetchall()
+    by_id = {int(row["id"]): row for row in rows}
+    statuses = []
+    for entry in entries:
+        expected_index = entry["index"]
+        job_id = entry["job_id"]
+        row = by_id.get(job_id)
+        if (not row or row["kind"] != "image"
+                or str(row["status"] or "").strip().lower()
+                not in {"pending", "running", "done"}):
+            raise DigitalHumanRequestError(
+                "手势照任务 #%d 不存在、类型不符或已不可恢复，请重新附加原人物照片" % job_id,
+                "gesture_recovery_invalid", 409, [job_id],
+            )
+        try:
+            _child_binding(
+                row["payload"], job_id, "gesture", consent_record,
+                expected_index,
+            )
+        except DigitalHumanRequestError as exc:
+            raise DigitalHumanRequestError(
+                "手势照任务 #%d 不属于本次照片授权，请重新附加原人物照片" % job_id,
+                "gesture_recovery_invalid", 409, [job_id],
+            ) from exc
+        if (str(row["status"] or "").strip().lower() == "done"
+                and not _recoverable_done_file(row["result"], "image")):
+            raise DigitalHumanRequestError(
+                "手势照任务 #%d 的图片文件已不可用，请重新附加原人物照片" % job_id,
+                "gesture_recovery_invalid", 409, [job_id],
+            )
+        statuses.append({
+            "index": expected_index, "job_id": job_id,
+            "status": str(row["status"]).lower(),
+        })
+    return {"ok": True, "gesture_jobs": statuses}
+
+
+def validate_material_recovery(payload, username):
+    """Authorize upload-free resume only when all six material jobs are durable."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = set(_CONSENT_METADATA_FIELDS) | {"material_job_ids"}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("主画面恢复提交包含不支持字段：" + ", ".join(unknown))
+    if str(payload.get("digital_human_pipeline") or "").strip().lower() != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人一键生成流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != "material_recovery":
+        raise DigitalHumanRequestError("主画面恢复步骤标识无效")
+    _cleaned, consent_record = _verify_common_binding(payload, username)
+    entries = _recovery_entries(
+        payload, "material_job_ids", MATERIAL_COUNT,
+        "主画面", "material_recovery_invalid",
+    )
+    job_ids = [entry["job_id"] for entry in entries]
+    placeholders = ",".join("?" for _ in job_ids)
+    with closing(jdb()) as connection:
+        rows = connection.execute(
+            "SELECT id,kind,username,status,payload,result FROM jobs "
+            "WHERE username=? AND COALESCE(deleted,0)=0 AND id IN (%s)" % placeholders,
+            [str(username or "").strip()] + job_ids,
+        ).fetchall()
+    by_id = {int(row["id"]): row for row in rows}
+    statuses = []
+    for entry in entries:
+        expected_index = entry["index"]
+        job_id = entry["job_id"]
+        row = by_id.get(job_id)
+        status = str(row["status"] or "").strip().lower() if row else ""
+        if not row or row["kind"] != "image" or status not in {"pending", "running", "done"}:
+            raise DigitalHumanRequestError(
+                "主画面任务 #%d 不存在、类型不符或已不可恢复；原客户素材已失效，请放弃旧任务并重新设置" % job_id,
+                "material_recovery_invalid", 409, [job_id],
+            )
+        try:
+            _child_binding(
+                row["payload"], job_id, "material", consent_record,
+                expected_index,
+            )
+        except DigitalHumanRequestError as exc:
+            raise DigitalHumanRequestError(
+                "主画面任务 #%d 不属于本次授权制作；原客户素材已失效，请放弃旧任务并重新设置" % job_id,
+                "material_recovery_invalid", 409, [job_id],
+            ) from exc
+        if status == "done" and not _recoverable_done_file(row["result"], "image"):
+            raise DigitalHumanRequestError(
+                "主画面任务 #%d 的图片文件已不可用；原客户素材已失效，请放弃旧任务并重新设置" % job_id,
+                "material_recovery_invalid", 409, [job_id],
+            )
+        statuses.append({
+            "index": expected_index, "job_id": job_id, "status": status,
+        })
+    return {"ok": True, "material_jobs": statuses}
+
+
+def validate_video_recovery(payload, username):
+    """Authorize reuse of the three talking jobs before local composition."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = set(_CONSENT_METADATA_FIELDS) | {"video_job_ids"}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("口播恢复提交包含不支持字段：" + ", ".join(unknown))
+    if str(payload.get("digital_human_pipeline") or "").strip().lower() != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人一键生成流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != "video_recovery":
+        raise DigitalHumanRequestError("口播恢复步骤标识无效")
+    _cleaned, consent_record = _verify_common_binding(payload, username)
+    entries = _recovery_entries(
+        payload, "video_job_ids", VIDEO_COUNT,
+        "口播", "video_recovery_invalid",
+    )
+    job_ids = [entry["job_id"] for entry in entries]
+    placeholders = ",".join("?" for _ in job_ids)
+    with closing(jdb()) as connection:
+        rows = connection.execute(
+            "SELECT id,kind,username,status,payload,result FROM jobs "
+            "WHERE username=? AND COALESCE(deleted,0)=0 AND id IN (%s)" % placeholders,
+            [str(username or "").strip()] + job_ids,
+        ).fetchall()
+    by_id = {int(row["id"]): row for row in rows}
+    statuses = []
+    for entry in entries:
+        expected_index = entry["index"]
+        job_id = entry["job_id"]
+        row = by_id.get(job_id)
+        status = str(row["status"] or "").strip().lower() if row else ""
+        if not row or row["kind"] != "video" or status not in {"pending", "running", "done"}:
+            raise DigitalHumanRequestError(
+                "口播任务 #%d 不存在、类型不符或已不可恢复，请重新生成口播" % job_id,
+                "video_recovery_invalid", 409, [job_id],
+            )
+        try:
+            _child_binding(
+                row["payload"], job_id, "talking", consent_record,
+                expected_index,
+            )
+        except DigitalHumanRequestError as exc:
+            raise DigitalHumanRequestError(
+                "口播任务 #%d 不属于本次授权制作，请重新生成口播" % job_id,
+                "video_recovery_invalid", 409, [job_id],
+            ) from exc
+        if status == "done" and not _recoverable_done_file(row["result"], "video"):
+            raise DigitalHumanRequestError(
+                "口播任务 #%d 的视频文件已不可用，请重新生成口播" % job_id,
+                "video_recovery_invalid", 409, [job_id],
+            )
+        statuses.append({
+            "index": expected_index, "job_id": job_id, "status": status,
+        })
+    return {"ok": True, "video_jobs": statuses}
 
 
 def _owned_completed_files(username, ids, kind, expected_stage, consent_record):
@@ -511,16 +879,20 @@ def _owned_completed_files(username, ids, kind, expected_stage, consent_record):
     placeholders = ",".join("?" for _ in normalized)
     with closing(jdb()) as connection:
         rows = connection.execute(
-            "SELECT id,kind,status,payload,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
+            "SELECT id,kind,status,payload,result FROM jobs WHERE username=? "
+            "AND COALESCE(deleted,0)=0 AND id IN (%s)" % placeholders,
             [username] + normalized,
         ).fetchall()
     by_id = {int(row["id"]): row for row in rows}
     files = []
-    for job_id in normalized:
+    for expected_index, job_id in enumerate(normalized):
         row = by_id.get(job_id)
         if not row or row["kind"] != kind or row["status"] != "done":
             raise DigitalHumanRequestError("子任务 #%d 不存在、未完成或不属于当前账号" % job_id, "child_job_unavailable", 409)
-        _child_binding(row["payload"], job_id, expected_stage, consent_record)
+        _child_binding(
+            row["payload"], job_id, expected_stage, consent_record,
+            expected_index,
+        )
         try:
             result = json.loads(row["result"] or "{}")
         except Exception:
@@ -545,6 +917,7 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "video_job_ids", "material_job_ids", "digital_human_pipeline",
         "digital_human_stage", "digital_human_run_id",
         "digital_human_plan_digest", "digital_human_consent_id",
+        "digital_human_script", "digital_human_item_index",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:

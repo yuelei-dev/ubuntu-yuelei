@@ -30,7 +30,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         connection = sqlite3.connect(self.db)
         connection.execute("""CREATE TABLE jobs(
             id INTEGER PRIMARY KEY, username TEXT, kind TEXT,
-            status TEXT, payload TEXT, result TEXT
+            status TEXT, payload TEXT, result TEXT, deleted INTEGER DEFAULT 0
         )""")
         for job_id in range(1, 4):
             rel = "videos/%d.mp4" % job_id
@@ -38,7 +38,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"video")
             connection.execute(
-                "INSERT INTO jobs VALUES(?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,username,kind,status,payload,result) VALUES(?,?,?,?,?,?)",
                 (job_id, "yuelei", "video", "done", "{}", json.dumps({"video_file": rel})),
             )
         for job_id in range(11, 17):
@@ -47,7 +47,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"image")
             connection.execute(
-                "INSERT INTO jobs VALUES(?,?,?,?,?,?)",
+                "INSERT INTO jobs(id,username,kind,status,payload,result) VALUES(?,?,?,?,?,?)",
                 (job_id, "yuelei", "image", "done", "{}", json.dumps({"file": rel})),
             )
         connection.commit()
@@ -91,6 +91,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                     "digital_human_consent_id": record["id"],
                     "digital_human_run_id": record["run_id"],
                     "digital_human_plan_digest": record["plan_digest"],
+                    "digital_human_item_index": job_id - 1,
                 }
                 connection.execute(
                     "UPDATE jobs SET payload=? WHERE id=?",
@@ -103,6 +104,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                     "digital_human_consent_id": record["id"],
                     "digital_human_run_id": record["run_id"],
                     "digital_human_plan_digest": record["plan_digest"],
+                    "digital_human_item_index": job_id - 11,
                 }
                 connection.execute(
                     "UPDATE jobs SET payload=? WHERE id=?",
@@ -111,6 +113,55 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             connection.commit()
         finally:
             connection.close()
+
+    def _insert_gesture_jobs(self, record, statuses=None, kind="image",
+                             username="yuelei", overrides=None):
+        statuses = statuses or ["pending", "running", "done"]
+        overrides = overrides or {}
+        connection = sqlite3.connect(self.db)
+        try:
+            for offset, status in enumerate(statuses):
+                job_id = 21 + offset
+                payload = {
+                    "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+                    "digital_human_stage": "gesture",
+                    "digital_human_consent_id": record["id"],
+                    "digital_human_run_id": record["run_id"],
+                    "digital_human_plan_digest": record["plan_digest"],
+                    "digital_human_item_index": offset,
+                }
+                payload.update(overrides)
+                result = "{}"
+                if status == "done":
+                    rel = "images/gesture-%d.png" % job_id
+                    path = self.root / rel
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(b"gesture")
+                    result = json.dumps({"file": rel})
+                connection.execute(
+                    "INSERT INTO jobs(id,username,kind,status,payload,result) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (job_id, username, kind, status, json.dumps(payload), result),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        return [21, 22, 23]
+
+    def _recovery_body(self, consent, consent_payload, stage, field, ids):
+        return {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": stage,
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": consent_payload["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+            field: self._indexed_jobs(ids),
+        }
+
+    @staticmethod
+    def _indexed_jobs(ids):
+        return [{"index": index, "job_id": job_id}
+                for index, job_id in enumerate(ids)]
 
     def _compose_request(self, script, planned, record):
         return {
@@ -124,15 +175,20 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "digital_human_run_id": record["run_id"],
             "digital_human_plan_digest": record["plan_digest"],
             "digital_human_consent_id": record["id"],
+            "digital_human_script": script,
+            "digital_human_item_index": 0,
         }
 
     def _consent_payload(self, **overrides):
+        script = overrides.pop("script", "第一段介绍问题。第二段说明方案。第三段邀请行动。")
+        planned = self.domain.plan(script)
         payload = {
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
             "purpose": self.domain.CONSENT_PURPOSE,
             "run_id": "dh-run-test-001",
-            "plan_digest": "a" * 64,
+            "plan_digest": planned["plan_digest"],
+            "script": script,
             "photo_sha256": hashlib.sha256(b"portrait").hexdigest(),
             "voice_mode": "existing",
             "voice_ref": "vip_ready_voice",
@@ -189,15 +245,18 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertFalse(self.consent_db.exists())
 
     def test_gesture_and_talking_submissions_require_matching_consent(self):
+        consent_payload = self._consent_payload()
         consent = self.domain.create_consent(
-            self._consent_payload(), "yuelei", "secret", now=int(self.domain.time.time()),
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
             db_factory=self._consent_connection,
         )
         common = {
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
             "digital_human_run_id": consent["run_id"],
-            "digital_human_plan_digest": "a" * 64,
+            "digital_human_plan_digest": consent_payload["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
+            "digital_human_script": consent_payload["script"],
+            "digital_human_item_index": 0,
         }
         gesture = dict(common, digital_human_stage="gesture", prompt="safe",
                        reference_images=[base64.b64encode(b"portrait").decode("ascii")])
@@ -210,31 +269,82 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                     dict(gesture, reference_images=[base64.b64encode(b"other").decode("ascii")]),
                     "yuelei", "image",
                 )
-            talking = dict(common, digital_human_stage="talking", voice="vip_ready_voice")
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as extra_photo:
+                self.domain.verify_child_submission(
+                    dict(gesture, reference_images=[
+                        base64.b64encode(b"portrait").decode("ascii"),
+                        base64.b64encode(b"other").decode("ascii"),
+                    ]),
+                    "yuelei", "image",
+                )
+            self.assertEqual("consent_photo_mismatch", extra_photo.exception.code)
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as negative_index:
+                self.domain.verify_child_submission(
+                    dict(gesture, digital_human_item_index=-1), "yuelei", "image",
+                )
+            self.assertEqual("consent_plan_mismatch", negative_index.exception.code)
+            gesture_file = self.root / "images" / "authorized-gesture.png"
+            gesture_file.parent.mkdir(parents=True, exist_ok=True)
+            gesture_file.write_bytes(b"\x89PNG\r\n\x1a\n" + b"authorized")
+            record = self._consent_record(
+                consent_payload["plan_digest"], id=consent["consent_id"],
+            )
+            gesture_ids = self._insert_gesture_jobs(
+                record, statuses=["done", "done", "done"],
+            )
+            connection = self._connection()
+            connection.execute(
+                "UPDATE jobs SET result=? WHERE id=?",
+                (json.dumps({"file": "images/authorized-gesture.png"}), gesture_ids[0]),
+            )
+            connection.commit()
+            connection.close()
+            talking = dict(
+                common, digital_human_stage="talking", voice="vip_ready_voice",
+                gesture_job_id=gesture_ids[0],
+                image_data="data:image/png;base64," + base64.b64encode(b"other").decode("ascii"),
+            )
             self.assertIn(
                 "digital_human_consent_id",
                 self.domain.verify_child_submission(talking, "yuelei", "video"),
+            )
+            checked_talking = self.domain.verify_child_submission(
+                talking, "yuelei", "video",
+            )
+            self.assertNotIn("gesture_job_id", checked_talking)
+            self.assertEqual(
+                "data:image/png;base64," + base64.b64encode(gesture_file.read_bytes()).decode("ascii"),
+                checked_talking["image_data"],
             )
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "声音"):
                 self.domain.verify_child_submission(
                     dict(talking, voice="vip_wrong"), "yuelei", "video",
                 )
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as wrong_gesture:
+                self.domain.verify_child_submission(
+                    dict(talking, gesture_job_id=99999), "yuelei", "video",
+                )
+            self.assertEqual(
+                "talking_gesture_binding_invalid", wrong_gesture.exception.code,
+            )
 
     def test_clone_consent_binds_audio_hash_and_slot(self):
         sample = b"voice-sample"
-        consent = self.domain.create_consent(
-            self._consent_payload(
+        consent_payload = self._consent_payload(
                 run_id="dh-run-clone-001", voice_mode="clone", voice_ref="slot_123",
                 voice_sha256=hashlib.sha256(sample).hexdigest(),
-            ), "yuelei", "secret", now=int(self.domain.time.time()),
+            )
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
             db_factory=self._consent_connection,
         )
         body = {
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
             "digital_human_stage": "voice_clone",
             "digital_human_run_id": consent["run_id"],
-            "digital_human_plan_digest": "a" * 64,
+            "digital_human_plan_digest": consent_payload["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
+            "digital_human_script": consent_payload["script"],
             "slot_id": "slot_123", "audio": base64.b64encode(sample).decode("ascii"),
         }
         with mock.patch.object(self.domain, "cdb", self._consent_connection):
@@ -249,6 +359,252 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                     "digital_human_consent_token": consent["consent_token"],
                     "slot_id": "slot_123", "audio": body["audio"],
                 }, "yuelei")
+
+    def test_gesture_recovery_accepts_only_current_authorized_recoverable_jobs(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret",
+            now=int(self.domain.time.time()), db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        job_ids = self._insert_gesture_jobs(record)
+        body = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "gesture_recovery",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": consent_payload["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+            "gesture_job_ids": self._indexed_jobs(job_ids),
+        }
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            result = self.domain.validate_gesture_recovery(body, "yuelei")
+        self.assertEqual(
+            result["gesture_jobs"],
+            [
+                {"index": 0, "job_id": 21, "status": "pending"},
+                {"index": 1, "job_id": 22, "status": "running"},
+                {"index": 2, "job_id": 23, "status": "done"},
+            ],
+        )
+
+    def test_sparse_recovery_preserves_original_plan_indexes(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret",
+            now=int(self.domain.time.time()), db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        self._insert_gesture_jobs(record)
+        self._bind_child_jobs(record)
+        sparse = {
+            "gesture_recovery": ("gesture_job_ids", [
+                {"index": 0, "job_id": 21}, {"index": 2, "job_id": 23},
+            ], self.domain.validate_gesture_recovery, "gesture_jobs"),
+            "material_recovery": ("material_job_ids", [
+                {"index": 0, "job_id": 11}, {"index": 2, "job_id": 13},
+            ], self.domain.validate_material_recovery, "material_jobs"),
+            "video_recovery": ("video_job_ids", [
+                {"index": 0, "job_id": 1}, {"index": 2, "job_id": 3},
+            ], self.domain.validate_video_recovery, "video_jobs"),
+        }
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            for stage, (field, entries, validator, result_field) in sparse.items():
+                with self.subTest(stage=stage):
+                    body = self._recovery_body(
+                        consent, consent_payload, stage, field, [],
+                    )
+                    body[field] = entries
+                    result = validator(body, "yuelei")
+                    self.assertEqual(
+                        [(item["index"], item["job_id"])
+                         for item in result[result_field]],
+                        [(item["index"], item["job_id"]) for item in entries],
+                    )
+            for bad_entries in (
+                    [{"index": -1, "job_id": 21}],
+                    [{"index": 0, "job_id": 21}, {"index": 0, "job_id": 23}],
+                    [{"index": 0.5, "job_id": 21}],
+                    [{"index": 0, "job_id": "21"}]):
+                with self.subTest(bad_entries=bad_entries):
+                    body = self._recovery_body(
+                        consent, consent_payload, "gesture_recovery",
+                        "gesture_job_ids", [],
+                    )
+                    body["gesture_job_ids"] = bad_entries
+                    with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                        self.domain.validate_gesture_recovery(body, "yuelei")
+                    self.assertEqual("gesture_recovery_invalid", rejected.exception.code)
+
+    def test_gesture_recovery_rejects_old_consent_run_and_plan(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret",
+            now=int(self.domain.time.time()), db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        base = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "gesture_recovery",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": consent_payload["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+        }
+        cases = [
+            {"digital_human_consent_id": "dhc_" + "9" * 32},
+            {"digital_human_run_id": "dh-run-old-001"},
+            {"digital_human_plan_digest": "b" * 64},
+        ]
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            for overrides in cases:
+                with self.subTest(overrides=overrides):
+                    connection = sqlite3.connect(self.db)
+                    connection.execute("DELETE FROM jobs WHERE id>=21")
+                    connection.commit()
+                    connection.close()
+                    ids = self._insert_gesture_jobs(record, overrides=overrides)
+                    with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                        self.domain.validate_gesture_recovery(
+                            dict(base, gesture_job_ids=self._indexed_jobs(ids)), "yuelei",
+                        )
+                    self.assertEqual(rejected.exception.code, "gesture_recovery_invalid")
+
+    def test_gesture_recovery_rejects_wrong_owner_type_and_status(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret",
+            now=int(self.domain.time.time()), db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        body = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "gesture_recovery",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": consent_payload["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+        }
+        cases = [
+            {"username": "other"},
+            {"kind": "video"},
+            {"statuses": ["done", "failed", "done"]},
+        ]
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            for case in cases:
+                with self.subTest(case=case):
+                    connection = sqlite3.connect(self.db)
+                    connection.execute("DELETE FROM jobs WHERE id>=21")
+                    connection.commit()
+                    connection.close()
+                    ids = self._insert_gesture_jobs(record, **case)
+                    with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                        self.domain.validate_gesture_recovery(
+                            dict(body, gesture_job_ids=self._indexed_jobs(ids)), "yuelei",
+                        )
+                    self.assertEqual(rejected.exception.code, "gesture_recovery_invalid")
+
+    def test_gesture_recovery_rejects_empty_missing_and_deleted_done_files(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        body = self._recovery_body(
+            consent, consent_payload, "gesture_recovery", "gesture_job_ids", [21],
+        )
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            for result, deleted in (("{}", 0), (json.dumps({"file": "images/missing.png"}), 0),
+                                    (json.dumps({"file": "images/gesture-21.png"}), 1)):
+                with self.subTest(result=result, deleted=deleted):
+                    connection = self._connection()
+                    connection.execute("DELETE FROM jobs WHERE id>=21")
+                    connection.commit()
+                    connection.close()
+                    self._insert_gesture_jobs(record, statuses=["done"])
+                    connection = self._connection()
+                    connection.execute(
+                        "UPDATE jobs SET result=?,deleted=? WHERE id=21", (result, deleted),
+                    )
+                    connection.commit()
+                    connection.close()
+                    with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                        self.domain.validate_gesture_recovery(body, "yuelei")
+                    self.assertEqual("gesture_recovery_invalid", rejected.exception.code)
+                    self.assertEqual([21], rejected.exception.invalid_job_ids)
+
+    def test_material_and_video_recovery_validate_binding_files_and_precise_job(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        self._bind_child_jobs(record)
+        material_body = self._recovery_body(
+            consent, consent_payload, "material_recovery", "material_job_ids",
+            [11, 12, 13, 14, 15, 16],
+        )
+        video_body = self._recovery_body(
+            consent, consent_payload, "video_recovery", "video_job_ids", [1, 2, 3],
+        )
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            self.assertEqual(
+                6, len(self.domain.validate_material_recovery(material_body, "yuelei")["material_jobs"]),
+            )
+            self.assertEqual(
+                3, len(self.domain.validate_video_recovery(video_body, "yuelei")["video_jobs"]),
+            )
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as swapped_material:
+                self.domain.validate_material_recovery(
+                    dict(material_body, material_job_ids=self._indexed_jobs(
+                        [12, 11, 13, 14, 15, 16],
+                    )),
+                    "yuelei",
+                )
+            self.assertEqual("material_recovery_invalid", swapped_material.exception.code)
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as swapped_video:
+                self.domain.validate_video_recovery(
+                    dict(video_body, video_job_ids=self._indexed_jobs([2, 1, 3])),
+                    "yuelei",
+                )
+            self.assertEqual("video_recovery_invalid", swapped_video.exception.code)
+            connection = self._connection()
+            payload = json.loads(connection.execute(
+                "SELECT payload FROM jobs WHERE id=13",
+            ).fetchone()[0])
+            payload["digital_human_run_id"] = "dh-run-old-001"
+            connection.execute("UPDATE jobs SET payload=? WHERE id=13", (json.dumps(payload),))
+            connection.commit()
+            connection.close()
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as material_rejected:
+                self.domain.validate_material_recovery(material_body, "yuelei")
+            self.assertEqual("material_recovery_invalid", material_rejected.exception.code)
+            self.assertEqual([13], material_rejected.exception.invalid_job_ids)
+
+            self._bind_child_jobs(record)
+            connection = self._connection()
+            payload = json.loads(connection.execute(
+                "SELECT payload FROM jobs WHERE id=2",
+            ).fetchone()[0])
+            payload["digital_human_plan_digest"] = "b" * 64
+            connection.execute("UPDATE jobs SET payload=? WHERE id=2", (json.dumps(payload),))
+            connection.commit()
+            connection.close()
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as video_rejected:
+                self.domain.validate_video_recovery(video_body, "yuelei")
+            self.assertEqual("video_recovery_invalid", video_rejected.exception.code)
+            self.assertEqual([2], video_rejected.exception.invalid_job_ids)
 
     def tearDown(self):
         for patcher in reversed(self.patches):
@@ -361,7 +717,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)
         consent = self.domain.create_consent(
-            self._consent_payload(plan_digest=planned["plan_digest"]),
+            self._consent_payload(script=script, plan_digest=planned["plan_digest"]),
             "yuelei", "secret", now=int(self.domain.time.time()),
             db_factory=self._consent_connection,
         )
@@ -441,7 +797,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)
         consent = self.domain.create_consent(
-            self._consent_payload(plan_digest=planned["plan_digest"]),
+            self._consent_payload(script=script, plan_digest=planned["plan_digest"]),
             "yuelei", "secret", now=int(self.domain.time.time()),
             db_factory=self._consent_connection,
         )
@@ -500,6 +856,64 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             ).fetchone()[0])
         finally:
             connection.close()
+
+    def test_paid_child_queue_full_returns_queryable_refund_tracker(self):
+        core = importlib.import_module("content_domains.core")
+        request = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "gesture",
+        }
+
+        class Handler:
+            path = "/api/gen/image"
+            headers = {"Idempotency-Key": "dh-gesture-queue-full-001"}
+
+            def __init__(self):
+                self.sent = None
+
+            def _token(self):
+                return "token"
+
+            def _json_body(self):
+                return dict(request)
+
+            def _send(self, status, payload):
+                self.sent = (status, payload)
+                return self.sent
+
+        points_domain = SimpleNamespace(
+            AuthPointsError=type("AuthPointsError", (Exception,), {}),
+            cost_of=mock.Mock(return_value=5),
+            deduct_points=mock.Mock(return_value=95),
+            refund_points=mock.Mock(side_effect=RuntimeError("auth unavailable")),
+        )
+        image_stub = SimpleNamespace(validate_image_payload=lambda body: body)
+        video_stub = SimpleNamespace(SeedanceReferenceUnavailable=())
+        record = self._consent_record("a" * 64)
+        with mock.patch.object(core, "jdb", self._connection), \
+             mock.patch.dict(sys.modules, {"content_domains.image": image_stub}), \
+             mock.patch.dict(core.HANDLERS, {"image": lambda _payload: {}}), \
+             mock.patch("content_domains.core._domains", return_value=(SimpleNamespace(), points_domain, video_stub)), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei", "points": 100}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(self.domain, "verify_child_submission_with_record", return_value=(request, record)), \
+             mock.patch("content_domains.core.miniprogram_security.check_payload"), \
+             mock.patch("content_domains.core._user_video_submit_limit", return_value=None), \
+             mock.patch("content_domains.core._user_active_job_count", return_value=0), \
+             mock.patch("content_domains.jobs_store.create_paid_job", return_value=(31, 95)), \
+             mock.patch("content_domains.core._reject_pending_job"), \
+             mock.patch("content_domains.core._compensation_tracking_response", return_value={
+                 "job_id": 31, "cost": 5, "detail": "任务队列已满，请稍后再试",
+                 "refund_state": "pending", "points_left": 95,
+             }), \
+             mock.patch("content_domains.core.enqueue_job", return_value=False):
+            handler = Handler()
+            core.H.do_POST(handler)
+        self.assertEqual(202, handler.sent[0], handler.sent)
+        self.assertEqual("pending", handler.sent[1]["refund_state"])
+        self.assertGreater(handler.sent[1]["job_id"], 0)
 
     def test_local_compose_has_zero_additional_points(self):
         body = {"pipeline": self.domain.PIPELINE}
@@ -609,15 +1023,22 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         for marker in (
             'id="photo"', 'id="voice"', 'id="script"',
             'id="customerMaterials"', 'id="customerMaterialList"',
-            "digital-human-material-state.js?v=1",
-            "digital-human-voice-state.js?v=1",
-            "digital-human-setup-state.js?v=3",
+            "digital-human-material-state.js?v=2",
+            "digital-human-voice-state.js?v=2",
+            "digital-human-setup-state.js?v=4",
+            "digital-human-oneclick-state.js?v=2",
             "digital-human-submit.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
+            "/api/gen/digital-human-oneclick/gesture-recovery",
+            "/api/gen/digital-human-oneclick/material-recovery",
+            "/api/gen/digital-human-oneclick/video-recovery",
             "/api/gen/script_to_video/material-upload",
-            "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
+            "reference_images:photoData?[photoData]:[]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
             "body.reference_upload_ids=[customerUploads[index].upload_id]",
-            "DigitalHumanMaterialState.normalize(state.customerUploads)",
+            "DigitalHumanMaterialState.restore(state.customerUploads,state.phase)",
+            "DigitalHumanOneClickState.persistableMaterials(state,customerUploads,materialRecoveryValid)",
+            "resume:DigitalHumanOneClickState.resumeJob",
+            "return DigitalHumanOneClickState.resumeJob({jobId:Number(state.compose_job)||0",
             "DigitalHumanMaterialState.canChange(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canAnalyze(state.phase,customerMaterialBusy)",
             "DigitalHumanMaterialState.canStart(state.phase,customerMaterialBusy,!!plan)",
@@ -649,7 +1070,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("放弃上次任务并重新设置", page)
         self.assertIn("重新生成可能再次扣点", page)
         self.assertIn("声音来源和样音已随当前任务锁定", page)
-        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase)", page)
+        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase,state)", page)
         self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
         self.assertIn("DigitalHumanSubmit.withSecurityRetry", page)
         self.assertIn("DigitalHumanSubmit.withCapacityRetry", page)
@@ -657,7 +1078,45 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("DigitalHumanSubmit.describe(error)", page)
         self.assertIn("安全检查重试 '+attempt+'/2", page)
         self.assertIn("{gesture:'gestures',material:'materials',video:'talking'}", page)
-        self.assertIn("error.code==='voice_clone_in_progress'", page)
+        voice_state = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-voice-state.js").read_text(encoding="utf-8")
+        self.assertNotIn("error.code==='voice_clone_in_progress'", voice_state)
+        self.assertIn("throw error;", voice_state)
+        self.assertIn("DigitalHumanVoiceState.restoredCloneDecision", page)
+        self.assertIn("function restoredCloneDecision(response,markers)", voice_state)
+        self.assertIn("DigitalHumanVoiceState.runCloneRecovery", page)
+        self.assertNotIn("if(data.status==='ready')", page)
+        for step in ("plan", "voice", "gestures", "materials", "talking", "compose"):
+            self.assertIn('data-step-error="%s"' % step, page)
+        self.assertIn("DigitalHumanSetupState.validatePhotoAttachment", page)
+        self.assertIn("function validateGestureRecovery(photo,epoch)", page)
+        self.assertLess(
+            page.index("validateGestureRecovery(photo,epoch)", page.index("function start()")),
+            page.index("heygenPreflight(epoch)", page.index("function start()")),
+        )
+        self.assertIn("setStep('materials','failed','恢复失败')", page)
+        self.assertIn("setStep('gestures','failed','需重新附加')", page)
+        self.assertIn("restoreFailedSteps(photoRecovery,restoredMaterials.valid||materialJobsRecoverable)", page)
+        self.assertIn("DigitalHumanOneClickState.invalidateGestureRecovery(state,error)", page)
+        self.assertIn("上次数字人口播子任务失败，点击继续后仅重试失败项", page)
+        self.assertIn("上次成片合成任务失败，点击继续后仅重试合成", page)
+        self.assertIn("state.voiceSha256||digest!==state.voiceSha256", page)
+        self.assertIn("state.voiceCloneSubmitted=true", page)
+        self.assertIn("state.voiceCloneAccepted=true;save()", page)
+        self.assertIn("state.voiceCloneProgress=true;save()", page)
+        self.assertIn("voiceCloneKey:''", page)
+        self.assertIn("if(file&&!state.voiceCloneKey){state.voiceCloneKey=key('dh-voice-clone');save();}", page)
+        self.assertIn("headers:{'Idempotency-Key':state.voiceCloneKey}", page)
+        self.assertIn("DigitalHumanVoiceState.submitCloneWithIdempotency", page)
+        self.assertIn("function rotateFailedVoiceAttempt(response)", page)
+        self.assertIn("state.voiceCloneKey=transition.key;state.voiceCloneSubmitted=false;state.voiceCloneAccepted=false;state.voiceCloneProgress=false;save()", page)
+        self.assertIn("if(normalized.status==='failed'){if(preserveFailedClone)return response;if(rotateFailedVoiceAttempt(response))", page)
+        self.assertIn("{preserveFailedClone:true}", page)
+        self.assertIn("if(preserveFailedClone)return response", page)
+        self.assertIn("if(normalized.status==='failed'){rotateFailedVoiceAttempt(response);decision={action:'reattach'", page)
+        self.assertIn("if(error&&error.voiceAttemptRotated)throw error", page)
+        self.assertIn("forceSubmit:!!file&&(!hadSubmitted||!hadAccepted)", page)
+        self.assertIn("state.phase==='approved'&&clone&&!state.voiceCloneAccepted&&!voice", page)
+        self.assertIn("请重新附加本次授权的原声音样本后重试", page)
         self.assertIn("尚未创建任务、未扣点", (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-submit.js").read_text(encoding="utf-8"))
         self.assertIn('data-step-error="gestures"', page)
         self.assertIn("scrollIntoView", page)
@@ -707,6 +1166,164 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         )
         entry = (root / "server" / "content_api.py").read_text(encoding="utf-8")
         self.assertIn("digital_human_oneclick.init_db()", entry)
+
+    def test_clone_vip_idempotency_starts_provider_once_and_replays_lost_response(self):
+        server_dir = str(Path(__file__).resolve().parents[1] / "server")
+        if server_dir not in sys.path: sys.path.insert(0, server_dir)
+        core = importlib.import_module("content_domains.core")
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        tmp = tempfile.TemporaryDirectory()
+        db_path = Path(tmp.name) / "clone-idempotency.db"
+        def connection():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            return db
+        request = {
+            "digital_human_pipeline": domain.CONSENT_PURPOSE,
+            "slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3",
+            "clone_attempt_id": "dh-voice-clone-stable-001",
+        }
+
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            headers = {"Idempotency-Key": "dh-voice-clone-stable-001"}
+            def __init__(self): self.sent = None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(request)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+
+        validated = dict(request, digital_human_consent_id="dhc_" + "1" * 32)
+        audio = SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            validate_clone_vip_payload=mock.Mock(return_value=validated),
+            mark_clone_training=mock.Mock(return_value={"status": "training", "voice_key": "vip_slot_123"}),
+            mark_clone_attempt_running=mock.Mock(return_value=True),
+            clone_vip_voice_background=mock.Mock(),
+        )
+        started = []
+        class Thread:
+            def __init__(self, target, args, daemon): self.target, self.args = target, args
+            def start(self): started.append(self.args)
+
+        with mock.patch("content_domains.core._domains", return_value=(audio, SimpleNamespace(), SimpleNamespace())), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(domain, "verify_clone_submission", return_value=validated), \
+             mock.patch.object(core, "jdb", connection), \
+             mock.patch("content_domains.core.threading.Thread", Thread):
+            first = Handler(); core.H.do_POST(first)
+            replay = Handler(); core.H.do_POST(replay)
+
+        self.assertEqual(200, first.sent[0])
+        self.assertEqual(first.sent, replay.sent)
+        self.assertEqual(1, audio.mark_clone_training.call_count)
+        self.assertEqual(1, len(started))
+        tmp.cleanup()
+
+    def test_clone_vip_idempotency_rejects_processing_duplicate_and_payload_conflict(self):
+        server_dir = str(Path(__file__).resolve().parents[1] / "server")
+        if server_dir not in sys.path: sys.path.insert(0, server_dir)
+        core = importlib.import_module("content_domains.core")
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        tmp = tempfile.TemporaryDirectory()
+        db_path = Path(tmp.name) / "clone-idempotency.db"
+        def connection():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            return db
+        key = "dh-voice-clone-stable-002"
+        request = {"slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3"}
+        claim_body = dict(request, digital_human_consent_id="dhc_" + "2" * 32)
+        core.submission_idempotency.begin(connection, "yuelei", "/api/gen/audio/clone-vip", key, claim_body)
+
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            headers = {"Idempotency-Key": key}
+            def __init__(self, body): self.body, self.sent = body, None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(self.body)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+
+        audio = SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            validate_clone_vip_payload=mock.Mock(), mark_clone_training=mock.Mock(),
+            clone_vip_voice_background=mock.Mock(),
+        )
+        def verified(body, _username):
+            return dict(body, digital_human_consent_id="dhc_" + "2" * 32)
+        with mock.patch("content_domains.core._domains", return_value=(audio, SimpleNamespace(), SimpleNamespace())), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(domain, "verify_clone_submission", side_effect=verified), \
+             mock.patch.object(core, "jdb", connection):
+            duplicate = Handler(request); core.H.do_POST(duplicate)
+            conflict = Handler(dict(request, audio="b3RoZXI=")); core.H.do_POST(conflict)
+
+        self.assertEqual((409, "idempotency_in_progress"), (duplicate.sent[0], duplicate.sent[1]["code"]))
+        self.assertEqual((409, "idempotency_conflict"), (conflict.sent[0], conflict.sent[1]["code"]))
+        audio.validate_clone_vip_payload.assert_not_called()
+        audio.mark_clone_training.assert_not_called()
+        tmp.cleanup()
+
+    def test_clone_vip_processing_provider_training_never_restarts_provider(self):
+        server_dir = str(Path(__file__).resolve().parents[1] / "server")
+        if server_dir not in sys.path: sys.path.insert(0, server_dir)
+        core = importlib.import_module("content_domains.core")
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        tmp = tempfile.TemporaryDirectory()
+        db_path = Path(tmp.name) / "clone-provider-training.db"
+        def connection():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            return db
+        key = "dh-voice-clone-provider-training-001"
+        request = {"digital_human_pipeline": domain.CONSENT_PURPOSE,
+            "slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3",
+            "clone_attempt_id": key}
+        verified = dict(request, digital_human_consent_id="dhc_" + "3" * 32)
+        core.submission_idempotency.begin(
+            connection, "yuelei", "/api/gen/audio/clone-vip", key, verified,
+        )
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            headers = {"Idempotency-Key": key}
+            def __init__(self): self.sent = None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(request)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+        audio = SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            clone_attempt_snapshot=mock.Mock(return_value={
+                "action": "provider_training", "attempt_id": key, "age": 3600,
+            }),
+            check_clone_status=mock.Mock(return_value={
+                "status": "training", "attempt_id": key,
+            }),
+            validate_clone_vip_payload=mock.Mock(), mark_clone_training=mock.Mock(),
+            mark_clone_attempt_running=mock.Mock(), clone_vip_voice_background=mock.Mock(),
+        )
+        with mock.patch("content_domains.core._domains", return_value=(audio, SimpleNamespace(), SimpleNamespace())), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(domain, "verify_clone_submission", return_value=verified), \
+             mock.patch.object(core, "jdb", connection), \
+             mock.patch("content_domains.core.threading.Thread") as thread:
+            handler = Handler(); core.H.do_POST(handler)
+        self.assertEqual((409, "idempotency_in_progress"),
+            (handler.sent[0], handler.sent[1]["code"]))
+        audio.check_clone_status.assert_called_once_with("yuelei", "slot_123", key)
+        audio.mark_clone_training.assert_not_called()
+        thread.assert_not_called()
+        tmp.cleanup()
 
     def test_plan_contains_distinct_delivery_profiles(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
