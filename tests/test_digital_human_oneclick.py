@@ -644,6 +644,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("if(!clone&&state.voiceKey){setStep('voice','done','已复用')", page)
         self.assertIn("重新上传样音并复刻", page)
         self.assertIn('id="restartSetup"', page)
+        self.assertIn("$('restartSetup').onclick=handleRestartSetup", page)
+        self.assertNotIn("$('restartSetup').onclick=restartSetup", page)
         self.assertIn("放弃上次任务并重新设置", page)
         self.assertIn("重新生成可能再次扣点", page)
         self.assertIn("声音来源和样音已随当前任务锁定", page)
