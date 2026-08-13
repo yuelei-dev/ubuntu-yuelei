@@ -5,6 +5,7 @@ import random
 import sys
 import threading
 import unittest
+import urllib.error
 import urllib.parse
 from unittest.mock import patch
 
@@ -164,20 +165,134 @@ class MiniProgramSecurityTests(unittest.TestCase):
         review = b"bounded-review-copy"
         with patch.object(security, "_prepare_image_for_security", return_value=(review, "image/jpeg")), \
              patch.object(security, "access_token", return_value="token"), \
-             patch.object(security.urllib.request, "urlopen", return_value=Response()) as urlopen:
+             patch.object(security._DIRECT_OPENER, "open", return_value=Response()) as direct_open, \
+             patch.object(security.urllib.request, "urlopen", side_effect=AssertionError("proxy-aware urlopen used")):
             security.check_image(original, "upload.png", "image/png")
 
-        request = urlopen.call_args.args[0]
+        request = direct_open.call_args.args[0]
         self.assertIn(review, request.data)
         self.assertNotIn(original, request.data)
         self.assertIn(b'filename="upload.jpg"', request.data)
         self.assertIn(b"Content-Type: image/jpeg", request.data)
+
+    def test_json_request_uses_direct_opener_despite_proxy_environment(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"errcode": 0}'
+
+        proxy_env = {
+            "HTTP_PROXY": "http://127.0.0.1:10809",
+            "HTTPS_PROXY": "http://127.0.0.1:10809",
+            "ALL_PROXY": "socks5://127.0.0.1:7999",
+        }
+        with patch.dict(os.environ, proxy_env, clear=False), \
+             patch.object(security._DIRECT_OPENER, "open", return_value=Response()) as direct_open, \
+             patch.object(security.urllib.request, "urlopen", side_effect=AssertionError("proxy-aware urlopen used")):
+            result = security._json_request(security.API_BASE + "/health")
+
+        self.assertEqual(result, {"errcode": 0})
+        self.assertEqual(direct_open.call_count, 1)
+
+    def test_direct_opener_has_no_configured_proxy(self):
+        configured_proxies = [
+            handler for handler in security._DIRECT_OPENER.handlers
+            if isinstance(handler, urllib.request.ProxyHandler)
+            and handler.proxies
+        ]
+        self.assertEqual(configured_proxies, [])
+
+    def test_transient_network_failure_retries_once(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"errcode": 0}'
+
+        with patch.object(
+            security._DIRECT_OPENER,
+            "open",
+            side_effect=[urllib.error.URLError("temporary reset"), Response()],
+        ) as direct_open, patch.object(security.time, "sleep") as sleep:
+            result = security._json_request(security.API_BASE + "/health")
+
+        self.assertEqual(result, {"errcode": 0})
+        self.assertEqual(direct_open.call_count, 2)
+        sleep.assert_called_once_with(security._NETWORK_RETRY_DELAYS[0])
+
+    def test_network_failure_exhaustion_fails_closed_after_one_retry(self):
+        with patch.object(
+            security._DIRECT_OPENER,
+            "open",
+            side_effect=urllib.error.URLError("still unavailable"),
+        ) as direct_open, patch.object(security.time, "sleep"):
+            with self.assertRaises(security.SecurityUnavailable) as caught:
+                security._json_request(security.API_BASE + "/health")
+
+        self.assertEqual(caught.exception.stage, "text")
+        self.assertEqual(direct_open.call_count, 2)
+
+    def test_http_4xx_is_not_retried(self):
+        request = urllib.request.Request(security.API_BASE + "/health")
+        error = urllib.error.HTTPError(request.full_url, 400, "bad request", {}, None)
+        with patch.object(security._DIRECT_OPENER, "open", side_effect=error) as direct_open, \
+             patch.object(security.time, "sleep") as sleep:
+            with self.assertRaises(security.SecurityUnavailable):
+                security._json_request(request.full_url)
+
+        self.assertEqual(direct_open.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_http_5xx_retries_once(self):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"errcode": 0}'
+
+        request = urllib.request.Request(security.API_BASE + "/health")
+        error = urllib.error.HTTPError(request.full_url, 503, "busy", {}, None)
+        with patch.object(
+            security._DIRECT_OPENER, "open", side_effect=[error, Response()]
+        ) as direct_open, patch.object(security.time, "sleep"):
+            result = security._json_request(request.full_url)
+
+        self.assertEqual(result, {"errcode": 0})
+        self.assertEqual(direct_open.call_count, 2)
 
     def test_access_token_is_cached(self):
         with patch.dict(os.environ, {"WX_MP_APPID": "a", "WX_MP_APPSECRET": "s"}, clear=True), \
              patch.object(security, "_json_request", return_value={"access_token": "tok", "expires_in": 7200}) as request:
             self.assertEqual(security.access_token(), "tok")
             self.assertEqual(security.access_token(), "tok")
+        request.assert_called_once()
+
+    def test_access_token_refreshes_five_minutes_before_expiry(self):
+        now = int(security.time.time())
+        security._TOKEN_CACHE.update(
+            value="nearly-expired", expires_at=now + 299
+        )
+        with patch.dict(os.environ, {"WX_MP_APPID": "a", "WX_MP_APPSECRET": "s"}, clear=True), \
+             patch.object(
+                 security,
+                 "_json_request",
+                 return_value={"access_token": "fresh", "expires_in": 7200},
+             ) as request:
+            self.assertEqual(security.access_token(), "fresh")
+
         request.assert_called_once()
 
 

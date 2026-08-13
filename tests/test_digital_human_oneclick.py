@@ -437,6 +437,70 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             paid.index("jobs_store.create_job_after_charge("),
         )
 
+    def test_security_outage_precedes_charge_and_job_creation(self):
+        script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
+        planned = self.domain.plan(script)
+        consent = self.domain.create_consent(
+            self._consent_payload(plan_digest=planned["plan_digest"]),
+            "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            planned["plan_digest"], id=consent["consent_id"],
+        )
+        self._bind_child_jobs(record)
+        request = self._compose_request(script, planned, record)
+        request["digital_human_consent_token"] = consent["consent_token"]
+        connection = sqlite3.connect(self.db)
+        before_jobs = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        connection.close()
+
+        class Handler:
+            path = "/api/gen/script_to_video"
+            headers = {}
+
+            def __init__(self):
+                self.sent = None
+
+            def _token(self):
+                return "token"
+
+            def _json_body_strict(self):
+                return dict(request)
+
+            def _send(self, status, payload):
+                self.sent = (status, payload)
+
+        handler = Handler()
+        cost_of = mock.Mock(return_value=0)
+        points_domain = SimpleNamespace(cost_of=cost_of)
+        core_module = importlib.import_module("content_domains.core")
+        outage = core_module.miniprogram_security.SecurityUnavailable(
+            "内容安全服务令牌暂时不可用，请稍后重试", "token",
+        )
+        with mock.patch.object(self.domain, "cdb", self._consent_connection), \
+             mock.patch.object(self.domain, "jdb", self._connection), \
+             mock.patch.dict(core_module.HANDLERS, {"script_to_video": lambda _payload: {}}), \
+             mock.patch("content_domains.core._domains", return_value=(SimpleNamespace(), points_domain, SimpleNamespace())), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei", "points": 100}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch("content_domains.core.miniprogram_security.check_payload", side_effect=outage), \
+             mock.patch("content_domains.jobs_store.create_job_after_charge") as create_job:
+            core_module.H.do_POST(handler)
+
+        self.assertEqual(503, handler.sent[0])
+        self.assertEqual("content_security_token_unavailable", handler.sent[1]["code"])
+        cost_of.assert_not_called()
+        create_job.assert_not_called()
+        connection = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(before_jobs, connection.execute(
+                "SELECT COUNT(*) FROM jobs"
+            ).fetchone()[0])
+        finally:
+            connection.close()
+
     def test_local_compose_has_zero_additional_points(self):
         body = {"pipeline": self.domain.PIPELINE}
         self.assertEqual(self.points.cost_of("script_to_video", body), 0)
