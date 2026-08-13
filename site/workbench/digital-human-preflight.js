@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 function createPreflightGate({ request, onFailure }) {
   if (typeof request !== 'function') throw new TypeError('request is required');
