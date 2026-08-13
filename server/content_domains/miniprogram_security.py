@@ -52,7 +52,13 @@ class ContentRejected(ValueError):
 
 
 class SecurityUnavailable(RuntimeError):
-    pass
+    def __init__(self, message, stage="content"):
+        super().__init__(message)
+        self.stage = str(stage or "content")
+
+    @property
+    def code(self):
+        return "content_security_%s_unavailable" % self.stage
 
 
 class _TokenInvalid(Exception):
@@ -84,7 +90,7 @@ def _json_request(url, payload=None, headers=None, timeout=15):
             raw = response.read().decode("utf-8", "replace")
             return json.loads(raw or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试") from exc
+        raise SecurityUnavailable("文字安全检测暂时不可用，请稍后重试", "text") from exc
 
 
 def _fetch_token_locked(force_refresh=False):
@@ -92,15 +98,20 @@ def _fetch_token_locked(force_refresh=False):
     appid = (os.environ.get("WX_MP_APPID") or "").strip()
     secret = (os.environ.get("WX_MP_APPSECRET") or "").strip()
     if not appid or not secret:
-        raise SecurityUnavailable("内容安全服务尚未配置")
-    result = _json_request(API_BASE + "/cgi-bin/stable_token", {
-        "grant_type": "client_credential",
-        "appid": appid,
-        "secret": secret,
-        "force_refresh": bool(force_refresh),
-    })
+        raise SecurityUnavailable("内容安全服务尚未配置", "configuration")
+    try:
+        result = _json_request(API_BASE + "/cgi-bin/stable_token", {
+            "grant_type": "client_credential",
+            "appid": appid,
+            "secret": secret,
+            "force_refresh": bool(force_refresh),
+        })
+    except SecurityUnavailable as exc:
+        raise SecurityUnavailable(
+            "内容安全服务令牌暂时不可用，请稍后重试", "token",
+        ) from exc
     if result.get("errcode") or not result.get("access_token"):
-        raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试")
+        raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试", "token")
     _TOKEN_CACHE["value"] = result["access_token"]
     _TOKEN_CACHE["expires_at"] = int(time.time()) + int(result.get("expires_in") or 7200)
     return _TOKEN_CACHE["value"]
@@ -149,7 +160,7 @@ def _refresh_invalid_token(bad_token):
         # value so a later request checks the shared stable token again.
         _TOKEN_CACHE["value"] = ""
         _TOKEN_CACHE["expires_at"] = 0
-        raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试")
+        raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试", "token")
 
 
 def _with_token_retry(fn):
@@ -167,7 +178,7 @@ def _with_token_retry(fn):
         try:
             return fn(retry_token)
         except _TokenInvalid as exc:
-            raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试") from exc
+            raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试", "token") from exc
 
 
 def _check_result(result, image=False, token=""):
@@ -182,7 +193,11 @@ def _check_result(result, image=False, token=""):
         raise ContentRejected("图片无法完成安全检测，请重新导出为 JPG 或 PNG 后上传")
     if code in _TOKEN_INVALID_CODES:
         raise _TokenInvalid(token, code)
-    raise SecurityUnavailable("内容安全服务暂时不可用，请稍后重试")
+    raise SecurityUnavailable(
+        "图片安全检测暂时不可用，请稍后重试" if image
+        else "文字安全检测暂时不可用，请稍后重试",
+        "image" if image else "text",
+    )
 
 
 def check_text(text):
@@ -206,7 +221,7 @@ def _prepare_image_for_security(raw, content_type):
     if len(raw) <= _MAX_CHECK_IMAGE_BYTES:
         return raw, content_type
     if Image is None or ImageOps is None:
-        raise SecurityUnavailable("图片安全检测预处理组件不可用，请稍后重试")
+        raise SecurityUnavailable("图片安全检测预处理组件不可用，请稍后重试", "image")
 
     try:
         with Image.open(io.BytesIO(raw)) as source:
@@ -274,7 +289,7 @@ def check_image(raw, filename="upload.jpg", content_type="image/jpeg"):
             with urllib.request.urlopen(req, timeout=20) as response:
                 result = json.loads(response.read().decode("utf-8", "replace") or "{}")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-            raise SecurityUnavailable("图片安全检测暂时不可用，请稍后重试") from exc
+            raise SecurityUnavailable("图片安全检测暂时不可用，请稍后重试", "image") from exc
         _check_result(result, image=True, token=token)
 
     _with_token_retry(_do)

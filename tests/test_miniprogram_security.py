@@ -59,8 +59,16 @@ class MiniProgramSecurityTests(unittest.TestCase):
             self.assertEqual(caught.exception.token, "used-token")
 
     def test_other_wechat_error_fails_closed(self):
-        with self.assertRaises(security.SecurityUnavailable):
+        with self.assertRaises(security.SecurityUnavailable) as caught:
             security._check_result({"errcode": 40013, "errmsg": "invalid appid"})
+        self.assertEqual(caught.exception.stage, "text")
+        self.assertEqual(caught.exception.code, "content_security_text_unavailable")
+
+    def test_image_error_has_distinct_stage_and_code(self):
+        with self.assertRaises(security.SecurityUnavailable) as caught:
+            security._check_result({"errcode": 45009, "errmsg": "busy"}, image=True)
+        self.assertEqual(caught.exception.stage, "image")
+        self.assertEqual(caught.exception.code, "content_security_image_unavailable")
 
     def test_image_media_size_error_is_not_reported_as_service_outage(self):
         with self.assertRaises(security.ContentRejected):

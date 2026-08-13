@@ -30,6 +30,9 @@ class ScriptToVideoTests(unittest.TestCase):
         cls.core = importlib.import_module("content_domains.core")
         cls.content_api = importlib.import_module("content_api")
         cls.cli_uploads = importlib.import_module("content_domains.cli_uploads")
+        cls.digital_human_oneclick = importlib.import_module(
+            "content_domains.digital_human_oneclick"
+        )
         cls.script_to_video = importlib.import_module("content_domains.script_to_video")
         cls.video = importlib.import_module("content_domains.video")
 
@@ -426,6 +429,93 @@ class ScriptToVideoTests(unittest.TestCase):
                 for item in handler.sent[1]["plan"]["styles"]
             },
         )
+
+    def test_digital_human_consent_http_contract_persists_authenticated_record(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.CONSENT_PATH
+
+            def __init__(self):
+                self.sent = None
+
+            def _token(self): return "token"
+            def _json_body_strict(self):
+                return {
+                    "confirmed": True,
+                    "consent_version": domain.CONSENT_VERSION,
+                    "purpose": domain.CONSENT_PURPOSE,
+                    "run_id": "dh-run-http-001",
+                    "plan_digest": "a" * 64,
+                    "photo_sha256": hashlib.sha256(PNG_ONE).hexdigest(),
+                    "voice_mode": "existing",
+                    "voice_ref": "vip_ready_voice",
+                    "voice_sha256": "",
+                }
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(
+            domain, "CONSENT_DB", Path(raw) / "consent.db",
+        ), mock.patch.dict(os.environ, {"HQ_INTERNAL_TOKEN": "test-secret"}), \
+             mock.patch(
+                 "content_domains.audio.resolve_audio_provider_voice",
+                 return_value="cosyvoice-test",
+             ) as resolve_voice:
+            handler = Handler()
+            self.assertTrue(self.script_to_video.dispatch_http(
+                handler, "POST", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            ))
+            self.assertEqual(200, handler.sent[0])
+            consent = handler.sent[1]["consent"]
+            self.assertRegex(consent["consent_id"], r"^dhc_[0-9a-f]{32}$")
+            connection = domain.cdb()
+            try:
+                row = connection.execute(
+                    "SELECT username,run_id,photo_sha256 FROM digital_human_consents"
+                ).fetchone()
+            finally:
+                connection.close()
+            self.assertEqual("fang", row["username"])
+            self.assertEqual("dh-run-http-001", row["run_id"])
+            self.assertEqual(hashlib.sha256(PNG_ONE).hexdigest(), row["photo_sha256"])
+            resolve_voice.assert_called_once_with("fang", "vip_ready_voice")
+
+    def test_digital_human_consent_rejects_an_unowned_existing_voice(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.CONSENT_PATH
+            sent = None
+
+            def _token(self): return "token"
+            def _json_body_strict(self):
+                return {
+                    "confirmed": True,
+                    "consent_version": domain.CONSENT_VERSION,
+                    "purpose": domain.CONSENT_PURPOSE,
+                    "run_id": "dh-run-http-002",
+                    "plan_digest": "b" * 64,
+                    "photo_sha256": hashlib.sha256(PNG_TWO).hexdigest(),
+                    "voice_mode": "existing",
+                    "voice_ref": "vip_foreign_voice",
+                    "voice_sha256": "",
+                }
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        handler = Handler()
+        with mock.patch(
+            "content_domains.audio.resolve_audio_provider_voice",
+            side_effect=ValueError("个人音色不存在或不属于当前账号"),
+        ):
+            self.assertTrue(self.script_to_video.dispatch_http(
+                handler, "POST", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            ))
+        self.assertEqual(400, handler.sent[0])
+        self.assertIn("不属于当前账号", handler.sent[1]["detail"])
 
     def test_browser_material_upload_endpoint_returns_an_owner_bound_opaque_id(self):
         class Handler:

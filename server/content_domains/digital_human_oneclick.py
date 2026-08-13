@@ -5,17 +5,43 @@ Paid image/video generation stays in the existing durable child jobs.  This
 module only plans the child jobs and combines their completed, owned outputs.
 """
 import hashlib
+import hmac
 import json
+import os
+import pathlib
 import re
+import sqlite3
 import subprocess
+import time
 
 from .core import OUT_DIR, closing, jdb
 
 PIPELINE = "digital_human_oneclick_compose"
 PLAN_PATH = "/api/gen/digital-human-oneclick/plan"
+CONSENT_PATH = "/api/gen/digital-human-oneclick/consent"
 VIDEO_COUNT = 3
 MATERIAL_COUNT = 6
 MAX_SCRIPT_CHARS = 6000
+CONSENT_VERSION = "digital-human-oneclick-v1"
+CONSENT_PURPOSE = "digital_human_oneclick"
+CONSENT_TTL_SECONDS = 30 * 24 * 60 * 60
+CONSENT_DB = pathlib.Path(os.environ.get(
+    "DIGITAL_HUMAN_ONECLICK_DB",
+    str(pathlib.Path(__file__).resolve().parents[1] / "digital_human_oneclick.db"),
+))
+_HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+_CONSENT_TOKEN_RE = re.compile(r"^dhc_[0-9a-f]{32}\.[0-9a-f]{64}$")
+_CONSENT_METADATA_FIELDS = {
+    "digital_human_pipeline", "digital_human_stage", "digital_human_run_id",
+    "digital_human_plan_digest", "digital_human_consent_token",
+}
+_STAGE_KINDS = {
+    "gesture": "image",
+    "material": "image",
+    "talking": "video",
+    "compose": "script_to_video",
+}
 
 
 class DigitalHumanRequestError(ValueError):
@@ -23,6 +49,324 @@ class DigitalHumanRequestError(ValueError):
         super().__init__(message)
         self.code = str(code)
         self.status = int(status)
+
+
+def _ensure_consent_table(connection):
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS digital_human_consents(
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            consent_version TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            plan_digest TEXT NOT NULL,
+            photo_sha256 TEXT NOT NULL,
+            voice_mode TEXT NOT NULL,
+            voice_ref TEXT NOT NULL,
+            voice_sha256 TEXT NOT NULL DEFAULT '',
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_used_at INTEGER NOT NULL,
+            UNIQUE(username, run_id)
+        )"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_digital_human_consents_owner "
+        "ON digital_human_consents(username, created_at DESC)"
+    )
+
+
+def cdb():
+    CONSENT_DB.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(CONSENT_DB), timeout=10)
+    try:
+        os.chmod(CONSENT_DB, 0o600)
+    except OSError:
+        pass
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_db(db_factory=None):
+    db_factory = db_factory or cdb
+    with closing(db_factory()) as connection:
+        _ensure_consent_table(connection)
+        connection.commit()
+
+
+def _required_sha256(value, label):
+    value = str(value or "").strip().lower()
+    if not _HEX_SHA256_RE.fullmatch(value):
+        raise DigitalHumanRequestError("%s校验值无效，请重新选择素材" % label)
+    return value
+
+
+def _consent_signature(record, signing_secret):
+    secret = str(signing_secret or "").strip()
+    if not secret:
+        raise DigitalHumanRequestError(
+            "授权存证服务尚未配置，请联系管理员",
+            "consent_service_unavailable", 503,
+        )
+    canonical = "|".join(str(record[key]) for key in (
+        "id", "username", "run_id", "consent_version", "purpose",
+        "plan_digest", "photo_sha256", "voice_mode", "voice_ref",
+        "voice_sha256", "created_at", "expires_at",
+    ))
+    return hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _public_consent(record, token):
+    return {
+        "consent_id": record["id"],
+        "consent_token": token,
+        "run_id": record["run_id"],
+        "consent_version": record["consent_version"],
+        "purpose": record["purpose"],
+        "created_at": int(record["created_at"]),
+        "expires_at": int(record["expires_at"]),
+    }
+
+
+def create_consent(payload, username, signing_secret, now=None, db_factory=None):
+    """Persist an auditable one-click consent without storing raw user media."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = {
+        "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
+        "photo_sha256", "voice_mode", "voice_ref", "voice_sha256",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("授权提交包含不支持字段：" + ", ".join(unknown))
+    if payload.get("confirmed") is not True:
+        raise DigitalHumanRequestError("请先确认照片与声音授权", "consent_required", 403)
+    if str(payload.get("consent_version") or "") != CONSENT_VERSION:
+        raise DigitalHumanRequestError("授权条款版本已更新，请重新确认", "consent_version_mismatch", 409)
+    if str(payload.get("purpose") or "") != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("授权用途无效", "consent_purpose_invalid")
+    run_id = str(payload.get("run_id") or "").strip()
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
+    plan_digest = _required_sha256(payload.get("plan_digest"), "制作方案")
+    photo_sha256 = _required_sha256(payload.get("photo_sha256"), "人物照片")
+    voice_mode = str(payload.get("voice_mode") or "").strip().lower()
+    if voice_mode not in {"existing", "clone"}:
+        raise DigitalHumanRequestError("声音授权类型无效")
+    voice_ref = str(payload.get("voice_ref") or "").strip()
+    if not voice_ref or len(voice_ref) > 180:
+        raise DigitalHumanRequestError("声音资产标识无效")
+    voice_sha256 = str(payload.get("voice_sha256") or "").strip().lower()
+    if voice_mode == "clone":
+        voice_sha256 = _required_sha256(voice_sha256, "声音样本")
+    elif voice_sha256:
+        raise DigitalHumanRequestError("复用已有声音时不应上传样音校验值")
+    username = str(username or "").strip()
+    if not username:
+        raise DigitalHumanRequestError("未登录或登录已过期", "unauthorized", 401)
+    now = int(time.time() if now is None else now)
+    consent_id = "dhc_" + hmac.new(
+        str(signing_secret or "").encode("utf-8"),
+        (username + "|" + run_id).encode("utf-8"), hashlib.sha256,
+    ).hexdigest()[:32]
+    candidate = {
+        "id": consent_id, "username": username, "run_id": run_id,
+        "consent_version": CONSENT_VERSION, "purpose": CONSENT_PURPOSE,
+        "plan_digest": plan_digest, "photo_sha256": photo_sha256,
+        "voice_mode": voice_mode, "voice_ref": voice_ref,
+        "voice_sha256": voice_sha256, "created_at": now,
+        "expires_at": now + CONSENT_TTL_SECONDS,
+    }
+    _consent_signature(candidate, signing_secret)
+    db_factory = db_factory or cdb
+    init_db(db_factory)
+    with closing(db_factory()) as connection:
+        row = connection.execute(
+            "SELECT * FROM digital_human_consents WHERE username=? AND run_id=?",
+            (username, run_id),
+        ).fetchone()
+        if row:
+            existing = dict(row)
+            comparable = (
+                "consent_version", "purpose", "plan_digest", "photo_sha256",
+                "voice_mode", "voice_ref", "voice_sha256",
+            )
+            if any(str(existing[key]) != str(candidate[key]) for key in comparable):
+                raise DigitalHumanRequestError(
+                    "本次流程的照片、声音或方案已经变化，请重新开始并授权",
+                    "consent_binding_conflict", 409,
+                )
+            if int(existing["expires_at"]) <= now:
+                raise DigitalHumanRequestError(
+                    "本次授权已过期，请重新开始并授权", "consent_expired", 409,
+                )
+            candidate = existing
+        token = candidate["id"] + "." + _consent_signature(candidate, signing_secret)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if row:
+            if not hmac.compare_digest(str(candidate["token_hash"]), token_hash):
+                raise DigitalHumanRequestError(
+                    "授权存证签名已变化，请重新开始", "consent_signature_changed", 409,
+                )
+        else:
+            connection.execute(
+                """INSERT INTO digital_human_consents(
+                    id,username,run_id,consent_version,purpose,plan_digest,
+                    photo_sha256,voice_mode,voice_ref,voice_sha256,token_hash,
+                    created_at,expires_at,last_used_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    candidate["id"], candidate["username"], candidate["run_id"],
+                    candidate["consent_version"], candidate["purpose"],
+                    candidate["plan_digest"], candidate["photo_sha256"],
+                    candidate["voice_mode"], candidate["voice_ref"],
+                    candidate["voice_sha256"], token_hash,
+                    candidate["created_at"], candidate["expires_at"], now,
+                ),
+            )
+            connection.commit()
+    return _public_consent(candidate, token)
+
+
+def consent_response(payload, username, signing_secret, db_factory=None):
+    return {"ok": True, "consent": create_consent(
+        payload, username, signing_secret, db_factory=db_factory,
+    )}
+
+
+def _decode_b64_bytes(value, label):
+    import base64
+    text = str(value or "").strip()
+    if "," in text and text.lower().startswith("data:"):
+        text = text.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(text, validate=True)
+    except Exception as exc:
+        raise DigitalHumanRequestError("%s无法校验，请重新选择" % label) from exc
+    if not raw:
+        raise DigitalHumanRequestError("%s不能为空" % label)
+    return raw
+
+
+def _expected_cloned_voice(slot_id):
+    return "vip_" + re.sub(r"[^a-zA-Z0-9_-]", "_", str(slot_id or ""))
+
+
+def _load_consent(username, token, now=None, db_factory=None):
+    token = str(token or "").strip()
+    if not _CONSENT_TOKEN_RE.fullmatch(token):
+        raise DigitalHumanRequestError(
+            "缺少有效的照片与声音授权，请重新确认", "consent_required", 403,
+        )
+    now = int(time.time() if now is None else now)
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    db_factory = db_factory or cdb
+    init_db(db_factory)
+    with closing(db_factory()) as connection:
+        row = connection.execute(
+            "SELECT * FROM digital_human_consents WHERE token_hash=? AND username=?",
+            (token_hash, str(username or "").strip()),
+        ).fetchone()
+        if not row:
+            raise DigitalHumanRequestError(
+                "照片与声音授权不存在或不属于当前账号", "consent_invalid", 403,
+            )
+        record = dict(row)
+        if int(record["expires_at"]) <= now:
+            raise DigitalHumanRequestError(
+                "本次授权已过期，请重新开始并授权", "consent_expired", 409,
+            )
+        connection.execute(
+            "UPDATE digital_human_consents SET last_used_at=? WHERE id=?",
+            (now, record["id"]),
+        )
+        connection.commit()
+    return record
+
+
+def _verify_common_binding(body, username):
+    token = body.get("digital_human_consent_token")
+    record = _load_consent(username, token)
+    if str(body.get("digital_human_run_id") or "") != record["run_id"]:
+        raise DigitalHumanRequestError("授权与本次制作流程不匹配", "consent_binding_mismatch", 403)
+    digest = str(body.get("digital_human_plan_digest") or "").strip().lower()
+    if digest != record["plan_digest"]:
+        raise DigitalHumanRequestError("授权与制作方案不匹配", "consent_binding_mismatch", 403)
+    cleaned = dict(body)
+    cleaned.pop("digital_human_consent_token", None)
+    cleaned["digital_human_consent_id"] = record["id"]
+    return cleaned, record
+
+
+def verify_child_submission_with_record(payload, username, kind):
+    """Bind a paid child submission and return its authoritative consent."""
+    if not isinstance(payload, dict):
+        return payload, None
+    pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    has_fields = any(str(key).startswith("digital_human_") for key in payload)
+    if not pipeline:
+        if has_fields:
+            raise DigitalHumanRequestError("数字人一键生成授权字段不完整")
+        return payload, None
+    if pipeline != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人一键生成流程标识无效")
+    stage = str(payload.get("digital_human_stage") or "").strip().lower()
+    if _STAGE_KINDS.get(stage) != str(kind or ""):
+        raise DigitalHumanRequestError("数字人一键生成步骤与任务类型不匹配")
+    cleaned, record = _verify_common_binding(payload, username)
+    if stage == "gesture":
+        references = payload.get("reference_images")
+        if not isinstance(references, list) or not references:
+            raise DigitalHumanRequestError("手势照缺少已授权人物照片")
+        actual = hashlib.sha256(_decode_b64_bytes(references[0], "人物照片")).hexdigest()
+        if not hmac.compare_digest(actual, record["photo_sha256"]):
+            raise DigitalHumanRequestError(
+                "人物照片与授权记录不一致，请重新开始并授权",
+                "consent_photo_mismatch", 403,
+            )
+    elif stage == "talking":
+        actual_voice = str(payload.get("voice") or "").strip()
+        expected_voice = (record["voice_ref"] if record["voice_mode"] == "existing"
+                          else _expected_cloned_voice(record["voice_ref"]))
+        if actual_voice != expected_voice:
+            raise DigitalHumanRequestError(
+                "口播声音与授权记录不一致，请重新开始并授权",
+                "consent_voice_mismatch", 403,
+            )
+    elif stage == "compose":
+        if str(payload.get("plan_digest") or "").strip().lower() != record["plan_digest"]:
+            raise DigitalHumanRequestError("成片方案与授权记录不一致", "consent_binding_mismatch", 403)
+    return cleaned, record
+
+
+def verify_child_submission(payload, username, kind):
+    """Bind every one-click paid child submission to server-side consent."""
+    return verify_child_submission_with_record(payload, username, kind)[0]
+
+
+def verify_clone_submission(payload, username):
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    has_fields = any(key in payload for key in _CONSENT_METADATA_FIELDS)
+    if not pipeline:
+        if has_fields:
+            raise DigitalHumanRequestError("数字人一键生成声音授权字段不完整")
+        return payload
+    if pipeline != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人一键生成流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != "voice_clone":
+        raise DigitalHumanRequestError("声音复刻步骤标识无效")
+    cleaned, record = _verify_common_binding(payload, username)
+    if record["voice_mode"] != "clone":
+        raise DigitalHumanRequestError("当前授权未允许重新复刻声音", "consent_voice_mismatch", 403)
+    if str(payload.get("slot_id") or "").strip() != record["voice_ref"]:
+        raise DigitalHumanRequestError("音色槽位与授权记录不一致", "consent_voice_mismatch", 403)
+    actual = hashlib.sha256(_decode_b64_bytes(payload.get("audio"), "声音样本")).hexdigest()
+    if not hmac.compare_digest(actual, record["voice_sha256"]):
+        raise DigitalHumanRequestError("声音样本与授权记录不一致", "consent_voice_mismatch", 403)
+    return cleaned
 
 
 def _clean_script(value):
@@ -126,7 +470,34 @@ def _result_file(result, kind):
     return ""
 
 
-def _owned_completed_files(username, ids, kind):
+def _child_binding(payload_text, job_id, expected_stage, consent_record):
+    try:
+        payload = json.loads(payload_text or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DigitalHumanRequestError(
+            "子任务 #%d 的授权记录损坏，请重新生成" % job_id,
+            "child_consent_binding_invalid", 409,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError(
+            "子任务 #%d 缺少有效授权记录，请重新生成" % job_id,
+            "child_consent_binding_invalid", 409,
+        )
+    expected = {
+        "digital_human_pipeline": CONSENT_PURPOSE,
+        "digital_human_stage": expected_stage,
+        "digital_human_consent_id": consent_record["id"],
+        "digital_human_run_id": consent_record["run_id"],
+        "digital_human_plan_digest": consent_record["plan_digest"],
+    }
+    if any(str(payload.get(key) or "") != str(value) for key, value in expected.items()):
+        raise DigitalHumanRequestError(
+            "子任务 #%d 不属于本次授权制作流程，请重新生成" % job_id,
+            "child_consent_binding_mismatch", 409,
+        )
+
+
+def _owned_completed_files(username, ids, kind, expected_stage, consent_record):
     if not isinstance(ids, list) or any(isinstance(item, bool) for item in ids):
         raise DigitalHumanRequestError("子任务编号格式无效")
     try:
@@ -139,7 +510,7 @@ def _owned_completed_files(username, ids, kind):
     placeholders = ",".join("?" for _ in normalized)
     with closing(jdb()) as connection:
         rows = connection.execute(
-            "SELECT id,kind,status,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
+            "SELECT id,kind,status,payload,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
             [username] + normalized,
         ).fetchall()
     by_id = {int(row["id"]): row for row in rows}
@@ -148,6 +519,7 @@ def _owned_completed_files(username, ids, kind):
         row = by_id.get(job_id)
         if not row or row["kind"] != kind or row["status"] != "done":
             raise DigitalHumanRequestError("子任务 #%d 不存在、未完成或不属于当前账号" % job_id, "child_job_unavailable", 409)
+        _child_binding(row["payload"], job_id, expected_stage, consent_record)
         try:
             result = json.loads(row["result"] or "{}")
         except Exception:
@@ -164,10 +536,15 @@ def _owned_completed_files(username, ids, kind):
     return normalized, files
 
 
-def prepare_compose_payload(payload, username):
+def prepare_compose_payload(payload, username, consent_record=None):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
-    allowed = {"pipeline", "mode", "script", "copy", "text", "plan_digest", "video_job_ids", "material_job_ids"}
+    allowed = {
+        "pipeline", "mode", "script", "copy", "text", "plan_digest",
+        "video_job_ids", "material_job_ids", "digital_human_pipeline",
+        "digital_human_stage", "digital_human_run_id",
+        "digital_human_plan_digest", "digital_human_consent_id",
+    }
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise DigitalHumanRequestError("提交包含不支持字段：" + ", ".join(unknown))
@@ -176,9 +553,35 @@ def prepare_compose_payload(payload, username):
     frozen = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
     if str(payload.get("plan_digest") or "").strip().lower() != frozen["plan_digest"]:
         raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
-    video_ids, video_files = _owned_completed_files(username, payload.get("video_job_ids"), "video")
-    material_ids, material_files = _owned_completed_files(username, payload.get("material_job_ids"), "image")
-    return {
+    if not isinstance(consent_record, dict):
+        raise DigitalHumanRequestError(
+            "缺少服务端已验证的授权记录，请重新确认授权",
+            "consent_required", 403,
+        )
+    authoritative = {
+        "digital_human_pipeline": CONSENT_PURPOSE,
+        "digital_human_stage": "compose",
+        "digital_human_consent_id": str(consent_record.get("id") or ""),
+        "digital_human_run_id": str(consent_record.get("run_id") or ""),
+        "digital_human_plan_digest": str(consent_record.get("plan_digest") or "").lower(),
+    }
+    if (str(consent_record.get("username") or "") != str(username or "")
+            or str(consent_record.get("purpose") or "") != CONSENT_PURPOSE
+            or not authoritative["digital_human_consent_id"]
+            or authoritative["digital_human_plan_digest"] != frozen["plan_digest"]
+            or any(str(payload.get(key) or "") != value
+                   for key, value in authoritative.items())):
+        raise DigitalHumanRequestError(
+            "成片授权与本次制作流程不匹配，请重新确认授权",
+            "consent_binding_mismatch", 403,
+        )
+    video_ids, video_files = _owned_completed_files(
+        username, payload.get("video_job_ids"), "video", "talking", consent_record,
+    )
+    material_ids, material_files = _owned_completed_files(
+        username, payload.get("material_job_ids"), "image", "material", consent_record,
+    )
+    prepared = {
         "pipeline": PIPELINE,
         "mode": PIPELINE,
         "copy": frozen["copy"],
@@ -192,6 +595,8 @@ def prepare_compose_payload(payload, username):
         "material_files": material_files,
         "material_generate_count": 0,
     }
+    prepared.update(authoritative)
+    return prepared
 
 
 def _run(command, timeout=1200):
