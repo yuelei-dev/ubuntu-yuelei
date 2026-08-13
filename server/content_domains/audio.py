@@ -1026,6 +1026,14 @@ def validate_audio_payload(payload, username=""):
         raw = body.get(name, 0)
         if isinstance(raw, bool):
             raise ValueError("%s 必须是整数" % name)
+        if isinstance(raw, float):
+            if raw != raw or not raw.is_integer():
+                raise ValueError("%s 必须是整数" % name)
+            clean = int(raw)
+            if not minimum <= clean <= maximum:
+                raise ValueError("%s 超出范围" % name)
+            body[name] = clean
+            continue
         try:
             clean = int(raw)
         except (TypeError, ValueError):

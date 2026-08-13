@@ -113,6 +113,16 @@ class HQCLIContentTests(unittest.TestCase):
         clean = audio.validate_audio_payload({"text": " hello ", "speed": 1.2, "pitch": 0, "volume": 0})
         self.assertEqual(("hello", 1.2), (clean["text"], clean["speed"]))
 
+    def test_audio_validation_normalizes_json_integer_floats(self):
+        for pitch, volume in ((0.0, 0.0), (1.0, 2.0), (-12.0, 100.0)):
+            with self.subTest(pitch=pitch, volume=volume):
+                clean = audio.validate_audio_payload({"text": "hello", "pitch": pitch, "volume": volume})
+                self.assertEqual((int(pitch), int(volume)), (clean["pitch"], clean["volume"]))
+        for pitch in (1.5, float("nan"), "1.0"):
+            with self.subTest(pitch=pitch):
+                with self.assertRaisesRegex(ValueError, "pitch"):
+                    audio.validate_audio_payload({"text": "hello", "pitch": pitch})
+
 
 if __name__ == "__main__":
     unittest.main()

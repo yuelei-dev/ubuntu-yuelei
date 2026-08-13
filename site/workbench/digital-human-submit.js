@@ -28,6 +28,24 @@
     }
     return run();
   }
+  function isCapacityRetryable(error){
+    var message=String(error&&error.message||'');
+    return !!(error&&Number(error.status)===429&&String(error.hqCode||'')==='HQ-RATE-001'&&(/任务正在排队|完成后再提交/.test(message)));
+  }
+  function withCapacityRetry(operation,options){
+    options=options||{};
+    var delays=Array.isArray(options.delays)?options.delays:[5000,10000,20000,30000];
+    var attempt=0;
+    function run(){
+      return Promise.resolve().then(operation).catch(function(error){
+        if(!isCapacityRetryable(error)||attempt>=delays.length)throw error;
+        var delay=Math.max(0,Number(delays[attempt])||0);attempt++;
+        if(options.onRetry)options.onRetry(attempt,delay,error);
+        return wait(delay).then(run);
+      });
+    }
+    return run();
+  }
   function describe(error){
     var message=String(error&&error.message||error||'生成失败');
     if(isSecurityRetryable(error)&&message.indexOf('未扣点')<0){
@@ -37,5 +55,5 @@
     if(requestId)message+='（请求编号：'+requestId+'）';
     return message;
   }
-  return {isSecurityRetryable:isSecurityRetryable,withSecurityRetry:withSecurityRetry,describe:describe};
+  return {isSecurityRetryable:isSecurityRetryable,withSecurityRetry:withSecurityRetry,isCapacityRetryable:isCapacityRetryable,withCapacityRetry:withCapacityRetry,describe:describe};
 });

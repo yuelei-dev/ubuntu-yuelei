@@ -611,8 +611,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=1",
             "digital-human-voice-state.js?v=1",
-            "digital-human-setup-state.js?v=2",
-            "digital-human-submit.js?v=1",
+            "digital-human-setup-state.js?v=3",
+            "digital-human-submit.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/script_to_video/material-upload",
             "reference_images:[photoData]", "motion:profile.motion||'high'", "speed:Number(profile.speed||1)", "pitch:Number(profile.pitch||0)", "volume:Number(profile.volume||0)", "subtitle:false",
@@ -650,6 +650,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase)", page)
         self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
         self.assertIn("DigitalHumanSubmit.withSecurityRetry", page)
+        self.assertIn("DigitalHumanSubmit.withCapacityRetry", page)
+        self.assertIn("},3).then(function(batch)", page)
         self.assertIn("DigitalHumanSubmit.describe(error)", page)
         self.assertIn("安全检查重试 '+attempt+'/2", page)
         self.assertIn("{gesture:'gestures',material:'materials',video:'talking'}", page)
