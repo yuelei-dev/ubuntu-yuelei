@@ -480,7 +480,7 @@ def _match_image_asset(username, prompt):
     return best[1] if best else None
 
 
-def prepare_script_to_video_payload(payload, username):
+def prepare_script_to_video_payload(payload, username, digital_human_consent=None):
     """提交扣点前冻结素材计划，保证能一次算清总价且不发生生成到一半欠费。"""
     body = dict(payload or {})
     # Runtime recovery state is server-owned.  Never accept a client supplied
@@ -488,7 +488,9 @@ def prepare_script_to_video_payload(payload, username):
     body.pop("_script_to_video_state", None)
     from . import digital_human_oneclick
     if str(body.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
-        return digital_human_oneclick.prepare_compose_payload(body, username)
+        return digital_human_oneclick.prepare_compose_payload(
+            body, username, consent_record=digital_human_consent,
+        )
     if str(body.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
         from .script_video_montage import plan_digest, plan_script_video
 

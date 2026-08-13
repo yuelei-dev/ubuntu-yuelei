@@ -299,16 +299,16 @@ def _verify_common_binding(body, username):
     return cleaned, record
 
 
-def verify_child_submission(payload, username, kind):
-    """Bind every one-click paid child submission to server-side consent."""
+def verify_child_submission_with_record(payload, username, kind):
+    """Bind a paid child submission and return its authoritative consent."""
     if not isinstance(payload, dict):
-        return payload
+        return payload, None
     pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
     has_fields = any(str(key).startswith("digital_human_") for key in payload)
     if not pipeline:
         if has_fields:
             raise DigitalHumanRequestError("数字人一键生成授权字段不完整")
-        return payload
+        return payload, None
     if pipeline != CONSENT_PURPOSE:
         raise DigitalHumanRequestError("数字人一键生成流程标识无效")
     stage = str(payload.get("digital_human_stage") or "").strip().lower()
@@ -337,7 +337,12 @@ def verify_child_submission(payload, username, kind):
     elif stage == "compose":
         if str(payload.get("plan_digest") or "").strip().lower() != record["plan_digest"]:
             raise DigitalHumanRequestError("成片方案与授权记录不一致", "consent_binding_mismatch", 403)
-    return cleaned
+    return cleaned, record
+
+
+def verify_child_submission(payload, username, kind):
+    """Bind every one-click paid child submission to server-side consent."""
+    return verify_child_submission_with_record(payload, username, kind)[0]
 
 
 def verify_clone_submission(payload, username):
@@ -465,7 +470,34 @@ def _result_file(result, kind):
     return ""
 
 
-def _owned_completed_files(username, ids, kind):
+def _child_binding(payload_text, job_id, expected_stage, consent_record):
+    try:
+        payload = json.loads(payload_text or "")
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise DigitalHumanRequestError(
+            "子任务 #%d 的授权记录损坏，请重新生成" % job_id,
+            "child_consent_binding_invalid", 409,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError(
+            "子任务 #%d 缺少有效授权记录，请重新生成" % job_id,
+            "child_consent_binding_invalid", 409,
+        )
+    expected = {
+        "digital_human_pipeline": CONSENT_PURPOSE,
+        "digital_human_stage": expected_stage,
+        "digital_human_consent_id": consent_record["id"],
+        "digital_human_run_id": consent_record["run_id"],
+        "digital_human_plan_digest": consent_record["plan_digest"],
+    }
+    if any(str(payload.get(key) or "") != str(value) for key, value in expected.items()):
+        raise DigitalHumanRequestError(
+            "子任务 #%d 不属于本次授权制作流程，请重新生成" % job_id,
+            "child_consent_binding_mismatch", 409,
+        )
+
+
+def _owned_completed_files(username, ids, kind, expected_stage, consent_record):
     if not isinstance(ids, list) or any(isinstance(item, bool) for item in ids):
         raise DigitalHumanRequestError("子任务编号格式无效")
     try:
@@ -478,7 +510,7 @@ def _owned_completed_files(username, ids, kind):
     placeholders = ",".join("?" for _ in normalized)
     with closing(jdb()) as connection:
         rows = connection.execute(
-            "SELECT id,kind,status,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
+            "SELECT id,kind,status,payload,result FROM jobs WHERE username=? AND id IN (%s)" % placeholders,
             [username] + normalized,
         ).fetchall()
     by_id = {int(row["id"]): row for row in rows}
@@ -487,6 +519,7 @@ def _owned_completed_files(username, ids, kind):
         row = by_id.get(job_id)
         if not row or row["kind"] != kind or row["status"] != "done":
             raise DigitalHumanRequestError("子任务 #%d 不存在、未完成或不属于当前账号" % job_id, "child_job_unavailable", 409)
+        _child_binding(row["payload"], job_id, expected_stage, consent_record)
         try:
             result = json.loads(row["result"] or "{}")
         except Exception:
@@ -503,7 +536,7 @@ def _owned_completed_files(username, ids, kind):
     return normalized, files
 
 
-def prepare_compose_payload(payload, username):
+def prepare_compose_payload(payload, username, consent_record=None):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = {
@@ -520,8 +553,34 @@ def prepare_compose_payload(payload, username):
     frozen = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
     if str(payload.get("plan_digest") or "").strip().lower() != frozen["plan_digest"]:
         raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
-    video_ids, video_files = _owned_completed_files(username, payload.get("video_job_ids"), "video")
-    material_ids, material_files = _owned_completed_files(username, payload.get("material_job_ids"), "image")
+    if not isinstance(consent_record, dict):
+        raise DigitalHumanRequestError(
+            "缺少服务端已验证的授权记录，请重新确认授权",
+            "consent_required", 403,
+        )
+    authoritative = {
+        "digital_human_pipeline": CONSENT_PURPOSE,
+        "digital_human_stage": "compose",
+        "digital_human_consent_id": str(consent_record.get("id") or ""),
+        "digital_human_run_id": str(consent_record.get("run_id") or ""),
+        "digital_human_plan_digest": str(consent_record.get("plan_digest") or "").lower(),
+    }
+    if (str(consent_record.get("username") or "") != str(username or "")
+            or str(consent_record.get("purpose") or "") != CONSENT_PURPOSE
+            or not authoritative["digital_human_consent_id"]
+            or authoritative["digital_human_plan_digest"] != frozen["plan_digest"]
+            or any(str(payload.get(key) or "") != value
+                   for key, value in authoritative.items())):
+        raise DigitalHumanRequestError(
+            "成片授权与本次制作流程不匹配，请重新确认授权",
+            "consent_binding_mismatch", 403,
+        )
+    video_ids, video_files = _owned_completed_files(
+        username, payload.get("video_job_ids"), "video", "talking", consent_record,
+    )
+    material_ids, material_files = _owned_completed_files(
+        username, payload.get("material_job_ids"), "image", "material", consent_record,
+    )
     prepared = {
         "pipeline": PIPELINE,
         "mode": PIPELINE,
@@ -536,13 +595,7 @@ def prepare_compose_payload(payload, username):
         "material_files": material_files,
         "material_generate_count": 0,
     }
-    for key in (
-        "digital_human_pipeline", "digital_human_stage",
-        "digital_human_run_id", "digital_human_plan_digest",
-        "digital_human_consent_id",
-    ):
-        if payload.get(key):
-            prepared[key] = payload[key]
+    prepared.update(authoritative)
     return prepared
 
 

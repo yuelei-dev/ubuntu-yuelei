@@ -30,7 +30,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         connection = sqlite3.connect(self.db)
         connection.execute("""CREATE TABLE jobs(
             id INTEGER PRIMARY KEY, username TEXT, kind TEXT,
-            status TEXT, result TEXT
+            status TEXT, payload TEXT, result TEXT
         )""")
         for job_id in range(1, 4):
             rel = "videos/%d.mp4" % job_id
@@ -38,8 +38,8 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"video")
             connection.execute(
-                "INSERT INTO jobs VALUES(?,?,?,?,?)",
-                (job_id, "yuelei", "video", "done", json.dumps({"video_file": rel})),
+                "INSERT INTO jobs VALUES(?,?,?,?,?,?)",
+                (job_id, "yuelei", "video", "done", "{}", json.dumps({"video_file": rel})),
             )
         for job_id in range(11, 17):
             rel = "images/%d.png" % job_id
@@ -47,8 +47,8 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"image")
             connection.execute(
-                "INSERT INTO jobs VALUES(?,?,?,?,?)",
-                (job_id, "yuelei", "image", "done", json.dumps({"file": rel})),
+                "INSERT INTO jobs VALUES(?,?,?,?,?,?)",
+                (job_id, "yuelei", "image", "done", "{}", json.dumps({"file": rel})),
             )
         connection.commit()
         connection.close()
@@ -69,6 +69,62 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         connection = sqlite3.connect(self.consent_db)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _consent_record(self, plan_digest, **overrides):
+        record = {
+            "id": "dhc_" + "1" * 32,
+            "username": "yuelei",
+            "run_id": "dh-run-test-001",
+            "purpose": self.domain.CONSENT_PURPOSE,
+            "plan_digest": plan_digest,
+        }
+        record.update(overrides)
+        return record
+
+    def _bind_child_jobs(self, record):
+        connection = sqlite3.connect(self.db)
+        try:
+            for job_id in range(1, 4):
+                payload = {
+                    "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+                    "digital_human_stage": "talking",
+                    "digital_human_consent_id": record["id"],
+                    "digital_human_run_id": record["run_id"],
+                    "digital_human_plan_digest": record["plan_digest"],
+                }
+                connection.execute(
+                    "UPDATE jobs SET payload=? WHERE id=?",
+                    (json.dumps(payload), job_id),
+                )
+            for job_id in range(11, 17):
+                payload = {
+                    "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+                    "digital_human_stage": "material",
+                    "digital_human_consent_id": record["id"],
+                    "digital_human_run_id": record["run_id"],
+                    "digital_human_plan_digest": record["plan_digest"],
+                }
+                connection.execute(
+                    "UPDATE jobs SET payload=? WHERE id=?",
+                    (json.dumps(payload), job_id),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _compose_request(self, script, planned, record):
+        return {
+            "pipeline": self.domain.PIPELINE,
+            "script": script,
+            "plan_digest": planned["plan_digest"],
+            "video_job_ids": [1, 2, 3],
+            "material_job_ids": [11, 12, 13, 14, 15, 16],
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "compose",
+            "digital_human_run_id": record["run_id"],
+            "digital_human_plan_digest": record["plan_digest"],
+            "digital_human_consent_id": record["id"],
+        }
 
     def _consent_payload(self, **overrides):
         payload = {
@@ -217,21 +273,15 @@ class DigitalHumanOneClickTests(unittest.TestCase):
     def test_prepare_freezes_only_owned_completed_child_jobs(self):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)
-        payload = self.domain.prepare_compose_payload({
-            "pipeline": self.domain.PIPELINE,
-            "script": script,
-            "plan_digest": planned["plan_digest"],
-            "video_job_ids": [1, 2, 3],
-            "material_job_ids": [11, 12, 13, 14, 15, 16],
-            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
-            "digital_human_stage": "compose",
-            "digital_human_run_id": "dh-run-test-001",
-            "digital_human_plan_digest": planned["plan_digest"],
-            "digital_human_consent_id": "dhc_" + "1" * 32,
-        }, "yuelei")
+        record = self._consent_record(planned["plan_digest"])
+        self._bind_child_jobs(record)
+        payload = self.domain.prepare_compose_payload(
+            self._compose_request(script, planned, record),
+            "yuelei", consent_record=record,
+        )
         self.assertEqual(payload["video_files"], ["videos/1.mp4", "videos/2.mp4", "videos/3.mp4"])
         self.assertEqual(len(payload["material_files"]), 6)
-        self.assertEqual(payload["digital_human_consent_id"], "dhc_" + "1" * 32)
+        self.assertEqual(payload["digital_human_consent_id"], record["id"])
         self.assertNotIn("_script_to_video_state", payload)
 
     def test_prepare_rejects_digest_drift_and_foreign_job(self):
@@ -247,12 +297,145 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         connection.commit()
         connection.close()
         planned = self.domain.plan(script)
+        record = self._consent_record(planned["plan_digest"])
+        self._bind_child_jobs(record)
         with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "不属于当前账号"):
-            self.domain.prepare_compose_payload({
-                "pipeline": self.domain.PIPELINE, "script": script,
-                "plan_digest": planned["plan_digest"], "video_job_ids": [1, 2, 3],
-                "material_job_ids": [11, 12, 13, 14, 15, 16],
-            }, "yuelei")
+            self.domain.prepare_compose_payload(
+                self._compose_request(script, planned, record),
+                "yuelei", consent_record=record,
+            )
+
+    def test_prepare_rejects_old_consent_and_cross_run_or_plan_children(self):
+        script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
+        planned = self.domain.plan(script)
+        current = self._consent_record(planned["plan_digest"])
+        request = self._compose_request(script, planned, current)
+        cases = (
+            ("digital_human_consent_id", "dhc_" + "2" * 32),
+            ("digital_human_run_id", "dh-run-old-002"),
+            ("digital_human_plan_digest", "b" * 64),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                self._bind_child_jobs(current)
+                connection = sqlite3.connect(self.db)
+                payload = json.loads(connection.execute(
+                    "SELECT payload FROM jobs WHERE id=1"
+                ).fetchone()[0])
+                payload[field] = value
+                connection.execute(
+                    "UPDATE jobs SET payload=? WHERE id=1", (json.dumps(payload),),
+                )
+                connection.commit()
+                connection.close()
+                with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                    self.domain.prepare_compose_payload(
+                        request, "yuelei", consent_record=current,
+                    )
+                self.assertEqual("child_consent_binding_mismatch", rejected.exception.code)
+
+    def test_prepare_rejects_missing_or_corrupt_child_binding(self):
+        script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
+        planned = self.domain.plan(script)
+        record = self._consent_record(planned["plan_digest"])
+        request = self._compose_request(script, planned, record)
+        for payload_text in ("{}", "{broken-json"):
+            with self.subTest(payload=payload_text):
+                self._bind_child_jobs(record)
+                connection = sqlite3.connect(self.db)
+                connection.execute(
+                    "UPDATE jobs SET payload=? WHERE id=11", (payload_text,),
+                )
+                connection.commit()
+                connection.close()
+                with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                    self.domain.prepare_compose_payload(
+                        request, "yuelei", consent_record=record,
+                    )
+                self.assertIn(rejected.exception.code, {
+                    "child_consent_binding_invalid",
+                    "child_consent_binding_mismatch",
+                })
+
+    def test_compose_binding_rejection_precedes_charge_and_job_creation(self):
+        script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
+        planned = self.domain.plan(script)
+        consent = self.domain.create_consent(
+            self._consent_payload(plan_digest=planned["plan_digest"]),
+            "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            planned["plan_digest"], id=consent["consent_id"],
+        )
+        self._bind_child_jobs(record)
+        connection = sqlite3.connect(self.db)
+        payload = json.loads(connection.execute(
+            "SELECT payload FROM jobs WHERE id=1"
+        ).fetchone()[0])
+        payload["digital_human_consent_id"] = "dhc_" + "9" * 32
+        connection.execute(
+            "UPDATE jobs SET payload=? WHERE id=1", (json.dumps(payload),),
+        )
+        before_jobs = connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+        connection.commit()
+        connection.close()
+
+        request = self._compose_request(script, planned, record)
+        request["digital_human_consent_token"] = consent["consent_token"]
+
+        class Handler:
+            path = "/api/gen/script_to_video"
+            headers = {}
+
+            def __init__(self):
+                self.sent = None
+
+            def _token(self):
+                return "token"
+
+            def _json_body_strict(self):
+                return dict(request)
+
+            def _send(self, status, payload):
+                self.sent = (status, payload)
+
+        handler = Handler()
+        cost_of = mock.Mock(return_value=0)
+        points_domain = SimpleNamespace(cost_of=cost_of)
+        core_module = importlib.import_module("content_domains.core")
+        with mock.patch.object(self.domain, "cdb", self._consent_connection), \
+             mock.patch.object(self.domain, "jdb", self._connection), \
+             mock.patch.dict(core_module.HANDLERS, {"script_to_video": lambda _payload: {}}), \
+             mock.patch("content_domains.core._domains", return_value=(SimpleNamespace(), points_domain, SimpleNamespace())), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei", "points": 100}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch("content_domains.core.miniprogram_security.check_payload"), \
+             mock.patch("content_domains.jobs_store.create_job_after_charge") as create_job:
+            core_module.H.do_POST(handler)
+        self.assertEqual(409, handler.sent[0])
+        self.assertEqual("child_consent_binding_mismatch", handler.sent[1]["code"])
+        cost_of.assert_not_called()
+        create_job.assert_not_called()
+        connection = sqlite3.connect(self.db)
+        try:
+            self.assertEqual(before_jobs, connection.execute(
+                "SELECT COUNT(*) FROM jobs"
+            ).fetchone()[0])
+        finally:
+            connection.close()
+
+        core = (Path(__file__).resolve().parents[1] / "server" / "content_domains" / "core.py").read_text(encoding="utf-8")
+        paid = core[core.index("if kind is not None:"):]
+        self.assertLess(
+            paid.index("prepare_script_to_video_payload("),
+            paid.index("cost = points_domain.cost_of(kind, body)"),
+        )
+        self.assertLess(
+            paid.index("prepare_script_to_video_payload("),
+            paid.index("jobs_store.create_job_after_charge("),
+        )
 
     def test_local_compose_has_zero_additional_points(self):
         body = {"pipeline": self.domain.PIPELINE}

@@ -2858,7 +2858,7 @@ class H(BaseHTTPRequestHandler):
                     if not idem_key: raise ValueError("关键帧提交必须提供 Idempotency-Key")
                 elif kind in {"image", "xiaole_video"}:
                     body = cli_uploads.expand_image_payload(body, user["username"])
-                body = digital_human_oneclick.verify_child_submission(
+                body, digital_human_consent_record = digital_human_oneclick.verify_child_submission_with_record(
                     body, user["username"], kind,
                 )
                 # 微信内容安全必须在校验、扣点和入队前完成；服务异常时不收单。
@@ -2927,6 +2927,7 @@ class H(BaseHTTPRequestHandler):
                     else:
                         body = script_to_video_domain.prepare_script_to_video_payload(
                             body, user["username"],
+                            digital_human_consent=digital_human_consent_record,
                         )
                 elif kind == "breakdown":
                     from . import breakdown as breakdown_domain
