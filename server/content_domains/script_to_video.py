@@ -816,7 +816,8 @@ def dispatch_http(handler, method, verify_token, must_change_password):
     from . import digital_human_oneclick
     if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH,
                     digital_human_oneclick.PLAN_PATH,
-                    digital_human_oneclick.CONSENT_PATH}:
+                    digital_human_oneclick.CONSENT_PATH,
+                    digital_human_oneclick.HEYGEN_PREFLIGHT_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -856,6 +857,20 @@ def dispatch_http(handler, method, verify_token, must_change_password):
             })
         except ValueError as exc:
             handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_oneclick.HEYGEN_PREFLIGHT_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            from . import video as video_domain
+            handler._send(200, video_domain.heygen_upload_preflight())
+        except Exception as exc:
+            handler._send(int(getattr(exc, "status", 503) or 503), {
+                "detail": str(exc)[:220],
+                "code": str(getattr(exc, "code", "heygen_upload_unavailable")),
+                "no_charge": True,
+            })
         return True
     if path == SMART_MONTAGE_MATERIAL_UPLOAD_PATH:
         from . import cli_uploads, miniprogram_security
