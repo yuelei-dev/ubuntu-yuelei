@@ -32,8 +32,11 @@ except ImportError:  # Production installs Pillow; keep imports usable in bare d
 
 API_BASE = "https://api.weixin.qq.com"
 _LOG = logging.getLogger(__name__)
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_NETWORK_RETRY_DELAYS = (0.2,)
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_CACHE = {"value": "", "expires_at": 0}
+_TOKEN_REFRESH_SKEW_SECONDS = 300
 _TEXT_KEYS = {
     "prompt", "text", "topic", "selling_points", "style", "title", "name",
     "description", "script", "copy", "content", "negative_prompt", "batch_label",
@@ -82,11 +85,40 @@ def configured():
                 (os.environ.get("WX_MP_APPSECRET") or "").strip())
 
 
+def _open_direct(req, timeout):
+    """Open a WeChat request without inheriting process-level proxy settings.
+
+    The content service shares a process environment with providers that need
+    outbound proxies.  Routing api.weixin.qq.com through those proxies can fail
+    TLS negotiation before WeChat receives the request.  Keep the bypass local
+    to this module so no other provider's network policy changes.
+
+    Content checks and token requests are not paid generation submissions.  A
+    single retry is safe for transient transport failures and HTTP 5xx.  HTTP
+    4xx is deterministic and must surface immediately.
+    """
+    last_error = None
+    attempts = len(_NETWORK_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            return _DIRECT_OPENER.open(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if not 500 <= int(exc.code or 0) < 600:
+                raise
+            exc.close()
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last_error = exc
+        if attempt < len(_NETWORK_RETRY_DELAYS):
+            time.sleep(_NETWORK_RETRY_DELAYS[attempt])
+    raise last_error
+
+
 def _json_request(url, payload=None, headers=None, timeout=15):
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers=headers or {"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with _open_direct(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8", "replace")
             return json.loads(raw or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -120,7 +152,8 @@ def _fetch_token_locked(force_refresh=False):
 def access_token(force_refresh=False):
     now = int(time.time())
     with _TOKEN_LOCK:
-        if not force_refresh and _TOKEN_CACHE["value"] and _TOKEN_CACHE["expires_at"] > now + 60:
+        if (not force_refresh and _TOKEN_CACHE["value"]
+                and _TOKEN_CACHE["expires_at"] > now + _TOKEN_REFRESH_SKEW_SECONDS):
             return _TOKEN_CACHE["value"]
         # 稳定版 token（getStableAccessToken）：force_refresh=false 时多实例共享同一个
         # 有效 token、互不挤占；旧版 token 接口每签发一个新 token 就让其他实例的
@@ -142,7 +175,8 @@ def _refresh_invalid_token(bad_token):
     with _TOKEN_LOCK:
         now = int(time.time())
         cached = _TOKEN_CACHE["value"]
-        if cached and cached != bad_token and _TOKEN_CACHE["expires_at"] > now + 60:
+        if (cached and cached != bad_token
+                and _TOKEN_CACHE["expires_at"] > now + _TOKEN_REFRESH_SKEW_SECONDS):
             return cached
         if cached == bad_token:
             _TOKEN_CACHE["value"] = ""
@@ -286,7 +320,7 @@ def check_image(raw, filename="upload.jpg", content_type="image/jpeg"):
             headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
         )
         try:
-            with urllib.request.urlopen(req, timeout=20) as response:
+            with _open_direct(req, timeout=20) as response:
                 result = json.loads(response.read().decode("utf-8", "replace") or "{}")
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
             raise SecurityUnavailable("图片安全检测暂时不可用，请稍后重试", "image") from exc
