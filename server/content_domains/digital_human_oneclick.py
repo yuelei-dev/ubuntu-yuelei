@@ -19,6 +19,7 @@ from .core import OUT_DIR, closing, jdb
 PIPELINE = "digital_human_oneclick_compose"
 PLAN_PATH = "/api/gen/digital-human-oneclick/plan"
 CONSENT_PATH = "/api/gen/digital-human-oneclick/consent"
+HEYGEN_PREFLIGHT_PATH = "/api/gen/digital-human-oneclick/heygen-preflight"
 VIDEO_COUNT = 3
 MATERIAL_COUNT = 6
 MAX_SCRIPT_CHARS = 6000

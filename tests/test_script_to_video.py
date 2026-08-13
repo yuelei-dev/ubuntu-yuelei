@@ -67,6 +67,53 @@ class ScriptToVideoTests(unittest.TestCase):
         )
         return uploaded
 
+    def test_heygen_upload_preflight_is_no_charge_and_accepts_validation_response(self):
+        with mock.patch.object(self.video, "HEYGEN_API_KEY", "test-key"), \
+             mock.patch.object(self.video, "_HEYGEN_DIRECT", False), \
+             mock.patch.object(
+                 self.video, "_heygen_probe_upload_route",
+                 return_value={"ok": True, "status": 400},
+             ) as probe:
+            result = self.video.heygen_upload_preflight()
+        self.assertEqual(
+            {"ok": True, "channel": "relay", "no_charge": True}, result,
+        )
+        probe.assert_called_once_with(direct=False)
+
+    def test_heygen_upload_preflight_classifies_relay_forbidden_without_charge(self):
+        with mock.patch.object(self.video, "HEYGEN_API_KEY", "test-key"), \
+             mock.patch.object(self.video, "_HEYGEN_DIRECT", False), \
+             mock.patch.object(
+                 self.video, "_heygen_probe_upload_route",
+                 return_value={
+                     "ok": False, "status": 403,
+                     "code": "heygen_upload_unavailable",
+                 },
+             ):
+            with self.assertRaises(self.video.HeyGenUploadPreflightError) as caught:
+                self.video.heygen_upload_preflight()
+        self.assertEqual("heygen_upload_unavailable", caught.exception.code)
+        self.assertIn("未扣点", str(caught.exception))
+
+    def test_heygen_preflight_http_endpoint_is_authenticated_and_no_charge(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.HEYGEN_PREFLIGHT_PATH
+            def _token(self): return "token"
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        handler = Handler()
+        with mock.patch.object(
+                self.video, "heygen_upload_preflight",
+                return_value={"ok": True, "channel": "relay", "no_charge": True}):
+            self.assertTrue(self.script_to_video.dispatch_http(
+                handler, "POST", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            ))
+        self.assertEqual((200, {"ok": True, "channel": "relay", "no_charge": True}), handler.sent)
+
     def test_drama_style_routes_to_grok_pipeline(self):
         calls = {}
 

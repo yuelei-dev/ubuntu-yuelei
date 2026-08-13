@@ -2736,6 +2736,100 @@ def _heygen_request_json(method, path, body=None, headers=None, timeout=180, dir
     except Exception:
         raise RuntimeError("HeyGen返回解析失败: %s" % raw[:300].decode("utf-8", "replace"))
 
+
+class HeyGenUploadPreflightError(RuntimeError):
+    """A no-charge provider upload route check failed before any child job."""
+
+    def __init__(self, message, code="heygen_upload_unavailable", status=503):
+        super().__init__(message)
+        self.code = str(code)
+        self.status = int(status)
+
+
+def _heygen_probe_upload_route(direct=False, timeout=20):
+    """Probe the configured upload POST without sending a file or creating an asset.
+
+    HeyGen returns a client validation response for an empty upload when the
+    route and credentials are accepted.  401/403 are therefore useful,
+    actionable failures; no provider asset or video is created by this probe.
+    """
+    direct = bool(direct)
+    if direct:
+        base = _HEYGEN_DIRECT_UPLOAD + "/v1/asset"
+        body = b""
+        headers = {"X-Api-Key": HEYGEN_API_KEY,
+                   "Content-Type": "application/octet-stream",
+                   "Content-Length": "0"}
+        open_fn = _heygen_direct_opener().open
+    else:
+        boundary = "----huangque-heygen-preflight"
+        body = ("--%s--\r\n" % boundary).encode("ascii")
+        headers = {
+            "x-api-key": HEYGEN_API_KEY,
+            "Content-Type": "multipart/form-data; boundary=%s" % boundary,
+            "Content-Length": str(len(body)),
+        }
+        token = _heygen_relay_token()
+        if token:
+            headers["X-Relay-Token"] = token
+        open_fn = urllib.request.urlopen
+        base = HEYGEN_API_BASE + "/assets"
+    request = urllib.request.Request(base, data=body, headers=headers, method="POST")
+    try:
+        with open_fn(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 200) or 200)
+            response.read(256)
+        # A validation response means the authenticated POST route is usable.
+        return {"ok": 400 <= status < 500 and status not in (401, 403),
+                "status": status}
+    except urllib.error.HTTPError as exc:
+        try:
+            exc.read(256)
+        except Exception:
+            pass
+        if exc.code in (401, 403):
+            return {"ok": False, "status": int(exc.code),
+                    "code": "heygen_auth_failed" if exc.code == 401
+                    else "heygen_upload_unavailable"}
+        return {"ok": 400 <= int(exc.code) < 500,
+                "status": int(exc.code)}
+    except OSError as exc:
+        return {"ok": False, "status": 0, "network": str(exc)[:120]}
+
+
+def heygen_upload_preflight():
+    """Check the same upload channels used by talking-head generation.
+
+    This is deliberately no-charge and does not accept user media.  The
+    result is safe to call before image, voice-clone, or video child jobs.
+    """
+    if not HEYGEN_API_KEY:
+        raise HeyGenUploadPreflightError(
+            "HeyGen API 凭据未配置，暂不能开始数字人口播生成",
+            "heygen_auth_failed", 503,
+        )
+    channels = []
+    if _HEYGEN_DIRECT:
+        channels.append(("direct", True))
+    channels.append(("relay", False))
+    failures = []
+    for channel, direct in channels:
+        result = _heygen_probe_upload_route(direct=direct)
+        if result.get("ok"):
+            return {"ok": True, "channel": channel, "no_charge": True}
+        failures.append((channel, result))
+    auth_failure = any(item.get("code") == "heygen_auth_failed"
+                       for _, item in failures)
+    if auth_failure:
+        raise HeyGenUploadPreflightError(
+            "HeyGen 上传鉴权失败，请联系管理员检查 API Key 或中转凭据（未扣点）",
+            "heygen_auth_failed", 503,
+        )
+    raise HeyGenUploadPreflightError(
+        "HeyGen 素材上传通道不可用，请联系管理员检查 /v3/assets 路由（未扣点）",
+        "heygen_upload_unavailable", 503,
+    )
+
 def _heygen_upload_asset(file_path, direct=False):
     path = pathlib.Path(file_path)
     if not path.is_file():
