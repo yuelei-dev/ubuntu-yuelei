@@ -664,6 +664,14 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn('cleaned["digital_human_consent_id"]', domain)
         self.assertNotIn("选择剪辑风格", page)
 
+    def test_start_preflights_heygen_before_consent_and_child_jobs(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        preflight = page.index("function heygenPreflight(epoch)")
+        start = page.index("function start()", preflight)
+        self.assertLess(page.index("heygenPreflight(epoch)", start), page.index("prepareConsent(photo,voice,clone,epoch)", start))
+        self.assertIn("HeyGen 通道检查失败，未扣点", page)
+        self.assertNotIn("_digitalHumanOriginalStart", page)
+
     def test_primary_actions_are_visible_before_long_material_fields(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         self.assertLess(page.index('id="analyze"'), page.index('id="photo"'))
