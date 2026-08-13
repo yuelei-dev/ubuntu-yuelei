@@ -66,8 +66,8 @@
       "production_blob": "c1f06525c7d73f69104877ecc227e11332058f0d",
       "preimage_blob": "32ce1cbb762531c8ccfc9ff7057f9b15109d06fa",
       "preimage_sha256": "bb12e588c76c3f2659782c694a37f2f5d6d6ae0d375df6b508e6f62f984246a0",
-      "postimage_blob": "3b11124bd942823d42cbd0a995ac9066f3946869",
-      "postimage_sha256": "a8a7c03901d37572e311b54808e8d86f47f90861aa3c3eeda690b0ff8babaea8"
+      "postimage_blob": "09ce5407f13a9b07b02266192011851de5984deb",
+      "postimage_sha256": "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e"
     },
     {
       "repository_path": "site/workbench/script.html",

@@ -887,11 +887,13 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             deduct_points=mock.Mock(return_value=95),
             refund_points=mock.Mock(side_effect=RuntimeError("auth unavailable")),
         )
-        image_stub = SimpleNamespace(validate_image_payload=lambda body: body)
+        image_stub = SimpleNamespace(validate_image_payload=mock.Mock(return_value=request))
         video_stub = SimpleNamespace(SeedanceReferenceUnavailable=())
         record = self._consent_record("a" * 64)
         with mock.patch.object(core, "jdb", self._connection), \
              mock.patch.dict(sys.modules, {"content_domains.image": image_stub}), \
+             mock.patch.object(sys.modules["content_domains"], "image", image_stub,
+                               create=True), \
              mock.patch.dict(core.HANDLERS, {"image": lambda _payload: {}}), \
              mock.patch("content_domains.core._domains", return_value=(SimpleNamespace(), points_domain, video_stub)), \
              mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
