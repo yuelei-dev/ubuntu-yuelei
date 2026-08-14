@@ -14,6 +14,18 @@
       expires_at:Number(item.expires_at),
     };});
   }
+  function restore(items,phase,now){
+    var saved=Array.isArray(items)?items:[];
+    var normalized=normalize(saved,now);
+    var approved=phase==='approved';
+    var malformedFrozenMaterial=approved&&items!=null&&!Array.isArray(items);
+    var lostFrozenMaterial=approved&&(malformedFrozenMaterial||normalized.length!==saved.length);
+    return {
+      items:normalized,
+      valid:!lostFrozenMaterial,
+      error:lostFrozenMaterial?'已确认的客户素材已过期或无效，不能自动改为 AI 补图；请放弃旧任务并重新设置':'',
+    };
+  }
   function canChange(phase,busy){return !busy&&phase!=='approved';}
   function canAnalyze(phase,busy){return canChange(phase,busy);}
   function canStart(phase,busy,hasPlan){return !busy&&!!hasPlan;}
@@ -23,5 +35,5 @@
     button.textContent=phase==='approved'?'继续上次未完成的生成':'确认方案并生成';
     return button;
   }
-  return {normalize:normalize,canChange:canChange,canAnalyze:canAnalyze,canStart:canStart,restoreStartButton:restoreStartButton};
+  return {normalize:normalize,restore:restore,canChange:canChange,canAnalyze:canAnalyze,canStart:canStart,restoreStartButton:restoreStartButton};
 });

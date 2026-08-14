@@ -108,6 +108,9 @@ jobs:
           node tests/test_canvas_digital_presenter.js
           node tests/test_digital_human_recovery.js
           node tests/test_digital_human_material_state.js
+          node tests/test_digital_human_oneclick_state.js
+          node tests/test_digital_human_oneclick_journey.js
+          node tests/test_digital_human_error_modal.js
           node tests/test_digital_human_voice_state.js
           node tests/test_digital_human_setup_state.js
           node tests/test_digital_human_submit.js

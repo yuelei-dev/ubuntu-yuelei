@@ -592,6 +592,53 @@ class ContentDomainTests(unittest.TestCase):
             finally:
                 audio.adb = original_adb
 
+    def test_clone_attempt_lease_and_cas_reject_stale_workers(self):
+        audio = importlib.import_module("content_domains.audio")
+        original_adb = audio.adb
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "attempt.db"
+            def attempt_db():
+                c = sqlite3.connect(db_path)
+                c.row_factory = sqlite3.Row
+                return c
+            audio.adb = attempt_db
+            try:
+                with closing(attempt_db()) as c:
+                    c.execute("""CREATE TABLE audio_voice_slots(
+                        id INTEGER PRIMARY KEY, username TEXT, slot_id TEXT, status TEXT,
+                        voice_id INTEGER, reclone_count INTEGER, clone_started_at INTEGER,
+                        updated_at INTEGER, clone_upload_at INTEGER, clone_error TEXT,
+                        clone_attempt_id TEXT, clone_attempt_phase TEXT,
+                        clone_attempt_updated_at INTEGER)""")
+                    c.execute("""CREATE TABLE audio_voices(id INTEGER PRIMARY KEY,
+                        username TEXT, scope TEXT, voice_key TEXT, display_name TEXT,
+                        provider_voice TEXT, slot_id TEXT, created_at INTEGER, updated_at INTEGER,
+                        UNIQUE(username,scope,voice_key))""")
+                    c.execute("""INSERT INTO audio_voice_slots VALUES(
+                        1,'fang','S_demo','training',NULL,0,1,1,NULL,NULL,
+                        'attempt-new-001','running',100)""")
+                    c.commit()
+                self.assertEqual("mismatch", audio.clone_attempt_snapshot(
+                    "fang", "S_demo", "attempt-old-001", now=500)["action"])
+                self.assertEqual("stale", audio.clone_attempt_snapshot(
+                    "fang", "S_demo", "attempt-new-001", now=500)["action"])
+                with closing(attempt_db()) as c:
+                    c.execute("""UPDATE audio_voice_slots SET clone_attempt_phase='provider_training',
+                        clone_attempt_updated_at=1, voice_id=9 WHERE id=1""")
+                    c.commit()
+                provider = audio.clone_attempt_snapshot(
+                    "fang", "S_demo", "attempt-new-001", now=500,
+                )
+                self.assertEqual("provider_training", provider["action"])
+                self.assertEqual(9, provider["voice_id"])
+                self.assertFalse(audio.fail_clone_attempt(
+                    "fang", "S_demo", "attempt-old-001", "old failed"))
+                with closing(attempt_db()) as c:
+                    row = c.execute("SELECT status,clone_attempt_id FROM audio_voice_slots").fetchone()
+                self.assertEqual(("training", "attempt-new-001"), tuple(row))
+            finally:
+                audio.adb = original_adb
+
     def _slot_snapshot(self, adb, username, slot_id):
         with closing(adb()) as c:
             row = c.execute("""SELECT status, voice_id, reclone_count, updated_at, clone_upload_at

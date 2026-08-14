@@ -479,6 +479,8 @@ class ScriptToVideoTests(unittest.TestCase):
 
     def test_digital_human_consent_http_contract_persists_authenticated_record(self):
         domain = self.digital_human_oneclick
+        script = "开场介绍问题。中段说明方案。结尾邀请行动。"
+        planned = domain.plan(script)
 
         class Handler:
             path = domain.CONSENT_PATH
@@ -493,7 +495,8 @@ class ScriptToVideoTests(unittest.TestCase):
                     "consent_version": domain.CONSENT_VERSION,
                     "purpose": domain.CONSENT_PURPOSE,
                     "run_id": "dh-run-http-001",
-                    "plan_digest": "a" * 64,
+                    "plan_digest": planned["plan_digest"],
+                    "script": script,
                     "photo_sha256": hashlib.sha256(PNG_ONE).hexdigest(),
                     "voice_mode": "existing",
                     "voice_ref": "vip_ready_voice",
@@ -563,6 +566,54 @@ class ScriptToVideoTests(unittest.TestCase):
             ))
         self.assertEqual(400, handler.sent[0])
         self.assertIn("不属于当前账号", handler.sent[1]["detail"])
+
+    def test_digital_human_gesture_recovery_http_contract_is_authenticated(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.GESTURE_RECOVERY_PATH
+            sent = None
+
+            def _token(self): return "token"
+            def _json_body_strict(self): return {"gesture_job_ids": [1, 2, 3]}
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        authenticated = Handler()
+        expected = {"ok": True, "gesture_jobs": []}
+        with mock.patch.object(
+            domain, "validate_gesture_recovery", return_value=expected,
+        ) as validate:
+            self.assertTrue(self.script_to_video.dispatch_http(
+                authenticated, "POST", lambda _token: {"username": "fang"},
+                lambda _user: False,
+            ))
+        self.assertEqual((200, expected), authenticated.sent)
+        validate.assert_called_once_with({"gesture_job_ids": [1, 2, 3]}, "fang")
+
+        unauthorized = Handler()
+        self.script_to_video.dispatch_http(
+            unauthorized, "POST", lambda _token: None, lambda _user: False,
+        )
+        self.assertEqual(401, unauthorized.sent[0])
+
+        wrong_method = Handler()
+        self.script_to_video.dispatch_http(
+            wrong_method, "GET", lambda _token: {"username": "fang"},
+            lambda _user: False,
+        )
+        self.assertEqual(405, wrong_method.sent[0])
+
+        malformed = Handler()
+        malformed._json_body_strict = mock.Mock(
+            side_effect=ValueError("invalid JSON body"),
+        )
+        self.script_to_video.dispatch_http(
+            malformed, "POST", lambda _token: {"username": "fang"},
+            lambda _user: False,
+        )
+        self.assertEqual(400, malformed.sent[0])
+        self.assertIn("invalid JSON body", malformed.sent[1]["detail"])
 
     def test_browser_material_upload_endpoint_returns_an_owner_bound_opaque_id(self):
         class Handler:
