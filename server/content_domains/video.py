@@ -5020,11 +5020,37 @@ def gen_tryon(payload):
         "message": "换装换背景视频生成完成"
     }
 
+def _xiaole_request_routes():
+    """Return the pre-approved transports for Xiaole/Guorou requests.
+
+    The Xiaole endpoint is hosted in China, while the content service may have
+    a process-wide overseas HTTPS proxy for other providers.  Letting
+    ``urlopen`` inherit that proxy caused repeatable TLS EOF failures.  Prefer
+    an explicit direct connection and keep the configured egress proxy only as
+    a fallback for transport failures.
+
+    The caller reuses one Idempotency-Key across every route, so an ambiguous
+    response cannot create a second paid generation when the provider replays
+    the request.
+    """
+    from . import egress
+
+    routes = [("direct", egress._opener("").open)]
+    proxy = egress.preferred_proxy()
+    if proxy:
+        routes.append(("egress", egress._opener(proxy).open))
+    return routes
+
+
 def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
     if not XIAOLEVIDEO_API_KEY:
         raise ValueError("视频生成服务未配置（XIAOLEVIDEO_API_KEY）")
     url = path if path.startswith("http") else (XIAOLEVIDEO_API_BASE + path)
-    headers = {"Authorization": "Bearer " + XIAOLEVIDEO_API_KEY, "User-Agent": "huangque-content/1.0"}
+    headers = {
+        "Authorization": "Bearer " + XIAOLEVIDEO_API_KEY,
+        "User-Agent": "huangque-content/1.0",
+        "Connection": "close",
+    }
     data = None
     if body is not None:
         headers["Content-Type"] = "application/json"
@@ -5034,6 +5060,8 @@ def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
     # 429（API Key 媒体任务过多）自动退避重试，扛并发限流。图像创建可传入
     # monotonic 截止时间，避免这里的内层退避突破调用方的总重试预算。
     last_retry_error = None
+    routes = _xiaole_request_routes()
+    route_index = 0
     for attempt in range(_xiaole_429_retries + 1):
         request_timeout = timeout
         if retry_deadline is not None:
@@ -5041,9 +5069,10 @@ def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
             if attempt and remaining <= 0:
                 raise last_retry_error
             request_timeout = min(timeout, max(0.001, remaining))
+        route_name, open_request = routes[route_index]
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=request_timeout) as r:
+            with open_request(req, timeout=request_timeout) as r:
                 return json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
@@ -5055,7 +5084,8 @@ def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
                     if remaining <= 0:
                         raise error
                     wait = min(wait, remaining)
-                print("[video] 429 并发限流，%.1fs 后重试(%d/%d)" % (wait, attempt + 1, _xiaole_429_retries), flush=True)
+                print("[video] 429 并发限流，%.1fs 后重试(%d/%d) route=%s" % (
+                    wait, attempt + 1, _xiaole_429_retries, route_name), flush=True)
                 last_retry_error = error
                 time.sleep(wait)
                 continue
@@ -5070,7 +5100,11 @@ def _xiaole_request(method, path, body=None, timeout=90, retry_deadline=None):
                     if remaining <= 0:
                         raise error
                     wait = min(wait, remaining)
-                print("[video] 网络异常，%.1fs 后重试(%d/%d): %s" % (wait, attempt + 1, _xiaole_429_retries, str(e)[:80]), flush=True)
+                if len(routes) > 1:
+                    route_index = (route_index + 1) % len(routes)
+                print("[video] 网络异常，%.1fs 后重试(%d/%d) route=%s->%s: %s" % (
+                    wait, attempt + 1, _xiaole_429_retries, route_name,
+                    routes[route_index][0], str(e)[:80]), flush=True)
                 last_retry_error = error
                 time.sleep(wait)
                 continue
