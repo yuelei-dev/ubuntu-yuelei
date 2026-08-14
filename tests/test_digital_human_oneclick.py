@@ -1020,6 +1020,16 @@ class DigitalHumanOneClickTests(unittest.TestCase):
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):
+    def test_oneclick_image_jobs_use_xiaole_for_gestures_and_materials(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]
+        materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(images,voiceKey,epoch)")]
+
+        self.assertIn("provider:'xiaole'", gestures)
+        self.assertIn("reference_images:photoData?[photoData]:[]", gestures)
+        self.assertIn("provider:'xiaole'", materials)
+        self.assertNotIn("provider:'openai'", gestures + materials)
+
     def test_page_exposes_required_inputs_and_real_pipeline_calls(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         for marker in (
