@@ -2,12 +2,21 @@ import base64
 import hashlib
 import io
 import json
+import os
+import ssl
 import sys
 import tempfile
 import unittest
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+
+
+if os.name == "nt":
+    sys.modules.setdefault("fcntl", SimpleNamespace(
+        LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_args: None,
+    ))
 
 
 class XiaoleVideoTests(unittest.TestCase):
@@ -37,13 +46,108 @@ class XiaoleVideoTests(unittest.TestCase):
         with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
              patch.object(self.video.time, "monotonic", side_effect=monotonic), \
              patch.object(self.video.time, "sleep", side_effect=sleep), \
-             patch.object(self.video.urllib.request, "urlopen", side_effect=rate_limited):
+             patch.object(self.video, "_xiaole_request_routes", return_value=[
+                 ("direct", rate_limited),
+             ]):
             with self.assertRaisesRegex(RuntimeError, "HTTP 429"):
                 self.video._xiaole_request("POST", "/api/v1/generations", {}, retry_deadline=10)
 
         self.assertEqual(len(calls), 2)
         self.assertAlmostEqual(now[0], 10)
         self.assertEqual(calls, [10, 2])
+
+    class _Response:
+        def __init__(self, body=b'{"code":200,"data":{"request_id":"r1"}}'):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return self.body
+
+    def test_xiaole_request_bypasses_process_proxy_by_default(self):
+        direct = Mock(return_value=self._Response())
+        with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
+             patch.object(self.video, "_xiaole_request_routes", return_value=[
+                 ("direct", direct),
+             ]), \
+             patch.object(self.video.urllib.request, "urlopen",
+                          side_effect=AssertionError("must not inherit process proxy")):
+            result = self.video._xiaole_request(
+                "POST", "/api/v1/generations", {"model": "gpt-image-2"}
+            )
+        self.assertEqual(result["data"]["request_id"], "r1")
+        self.assertEqual(direct.call_count, 1)
+
+    def test_xiaole_routes_are_direct_then_configured_egress(self):
+        from content_domains import egress
+
+        direct_opener = Mock()
+        proxy_opener = Mock()
+        with patch.object(egress, "preferred_proxy", return_value="http://proxy.test"), \
+             patch.object(egress, "_opener", side_effect=[direct_opener, proxy_opener]) as opener:
+            routes = self.video._xiaole_request_routes()
+
+        self.assertEqual([name for name, _open in routes], ["direct", "egress"])
+        self.assertIs(routes[0][1], direct_opener.open)
+        self.assertIs(routes[1][1], proxy_opener.open)
+        self.assertEqual(opener.call_args_list[0].args, ("",))
+        self.assertEqual(opener.call_args_list[1].args, ("http://proxy.test",))
+
+    def test_ssl_eof_falls_back_route_with_same_idempotency_key(self):
+        seen = []
+
+        def direct(request, timeout):
+            seen.append(("direct", request.get_header("Idempotency-key"), timeout))
+            raise urllib.error.URLError(
+                ssl.SSLError("UNEXPECTED_EOF_WHILE_READING")
+            )
+
+        def egress(request, timeout):
+            seen.append(("egress", request.get_header("Idempotency-key"), timeout))
+            return self._Response()
+
+        with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
+             patch.object(self.video, "_xiaole_429_retries", 2), \
+             patch.object(self.video, "_xiaole_request_routes", return_value=[
+                 ("direct", direct), ("egress", egress),
+             ]), \
+             patch.object(self.video.time, "sleep"):
+            result = self.video._xiaole_request(
+                "POST", "/api/v1/generations", {"model": "gpt-image-2"}
+            )
+
+        self.assertEqual(result["data"]["request_id"], "r1")
+        self.assertEqual([item[0] for item in seen], ["direct", "egress"])
+        self.assertTrue(seen[0][1])
+        self.assertEqual(seen[0][1], seen[1][1])
+
+    def test_http_400_does_not_switch_routes_or_retry(self):
+        calls = []
+
+        def rejected(_request, timeout):
+            del timeout
+            calls.append("direct")
+            raise urllib.error.HTTPError(
+                "https://api.xiaolevideo.cn/api/v1/generations",
+                400, "bad request", None, io.BytesIO(b'{"message":"bad"}'),
+            )
+
+        fallback = Mock(return_value=self._Response())
+        with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
+             patch.object(self.video, "_xiaole_request_routes", return_value=[
+                 ("direct", rejected), ("egress", fallback),
+             ]):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
+                self.video._xiaole_request(
+                    "POST", "/api/v1/generations", {"model": "gpt-image-2"}
+                )
+        self.assertEqual(calls, ["direct"])
+        fallback.assert_not_called()
 
     def test_official_micro_and_omni_parameters_are_validated_before_charge(self):
         from content_domains import feature_flags, video_gemini_omni, video_seedance
