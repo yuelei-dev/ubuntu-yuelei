@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -298,6 +299,114 @@ class ScriptToVideoTests(unittest.TestCase):
         self.assertTrue(calls[1][1]["local_files_only"])
         self.assertEqual("cpu", calls[1][1]["device"])
         self.assertEqual("int8", calls[1][1]["compute_type"])
+
+    def test_whisper_prepare_requires_precreated_writable_cache(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_gate", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            missing = Path(raw) / "missing" / "faster-whisper"
+            with self.assertRaises(FileNotFoundError):
+                module.prepare("small", missing)
+            cache = Path(raw) / "faster-whisper"
+            cache.mkdir()
+            with self.assertRaises(PermissionError):
+                module.prepare("small", cache, access_fn=lambda *_args: False)
+
+    def test_whisper_cache_preparation_creates_only_owned_leaf(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_setup", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        chown = mock.Mock()
+        chmod = mock.Mock()
+        user = SimpleNamespace(pw_uid=1001)
+        group = SimpleNamespace(gr_gid=1002)
+        with tempfile.TemporaryDirectory() as raw:
+            cache_root = Path(raw) / "huangque"
+            cache = cache_root / "faster-whisper"
+            result = module.prepare_cache_for_service(
+                cache, "ubuntu", "ubuntu",
+                effective_uid_fn=lambda: 0,
+                user_lookup=lambda _name: user,
+                group_lookup=lambda _name: group,
+                allowed_root=cache_root,
+                chown_fn=chown,
+                chmod_fn=chmod,
+            )
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(str(cache.resolve()), result["cache_dir"])
+            chown.assert_called_once_with(str(cache.resolve()), 1001, 1002)
+            chmod.assert_called_once_with(str(cache.resolve()), 0o750)
+            self.assertEqual([cache.name], [item.name for item in cache_root.iterdir()])
+
+    def test_whisper_cache_preparation_rejects_non_root_and_broad_target(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_reject", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            cache_root = Path(raw) / "huangque"
+            cache = cache_root / "faster-whisper"
+            with self.assertRaises(PermissionError):
+                module.prepare_cache_for_service(
+                    cache, "ubuntu", "ubuntu",
+                    effective_uid_fn=lambda: 1001,
+                    allowed_root=cache_root,
+                )
+            with self.assertRaises(ValueError):
+                module.prepare_cache_directory(
+                    cache_root, 1001, 1002, allowed_root=cache_root,
+                    chown_fn=mock.Mock(), chmod_fn=mock.Mock(),
+                )
+
+    def test_whisper_deployment_contract_stops_before_restart_and_scopes_rollback(self):
+        root = Path(__file__).resolve().parents[1]
+        contract = (
+            root / "deploy/systemd/huangque-content.service.d/whisper.conf"
+        ).read_text(encoding="utf-8")
+        runtime = (
+            root / "scripts/prepare_content_whisper_runtime.sh"
+        ).read_text(encoding="utf-8")
+        prepare_cache = runtime.index("--prepare-cache")
+        download = runtime.index('"${RUNUSER_BIN}"', prepare_cache)
+        verify = runtime.index("--verify-only", download)
+        self.assertLess(prepare_cache, download)
+        self.assertLess(download, verify)
+        self.assertNotIn("systemctl", runtime)
+        self.assertIn("set -euo pipefail", runtime)
+        self.assertIn("prepare_content_whisper_runtime.sh &&", contract)
+        restart = contract.index("restart huangque-content")
+        self.assertLess(contract.index("prepare_content_whisper_runtime.sh"), restart)
+        self.assertIn("任一步失败都必须停止", contract)
+        self.assertIn("只能清理 faster-whisper 叶目录", contract)
+        self.assertIn("禁止删除父目录或其他缓存", contract)
+
+    def test_whisper_runtime_prepare_shell_has_valid_linux_syntax(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/prepare_content_whisper_runtime.sh"
+        )
+        bash = shutil.which("bash")
+        if bash:
+            subprocess.run(
+                [bash, "-n", str(script)], check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        else:
+            source = script.read_text(encoding="utf-8")
+            self.assertTrue(source.startswith("#!/usr/bin/env bash\n"))
+            self.assertIn("set -euo pipefail", source)
 
     def test_drama_style_routes_to_grok_pipeline(self):
         calls = {}
