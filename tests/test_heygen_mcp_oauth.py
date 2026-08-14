@@ -4,8 +4,16 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
+
+from types import SimpleNamespace
+
+if os.name == "nt":
+    sys.modules.setdefault("fcntl", SimpleNamespace(
+        LOCK_EX=1, LOCK_NB=2, LOCK_UN=8, flock=lambda *_args: None,
+    ))
 
 SERVER = str(Path(__file__).resolve().parents[1] / "server")
 if SERVER not in sys.path:
@@ -15,6 +23,11 @@ video = importlib.import_module("content_domains.video")
 
 
 class HeyGenMcpOAuthTests(unittest.TestCase):
+    @staticmethod
+    def _private_stat(path):
+        current = os.stat(path)
+        return os.stat_result((current.st_mode & ~0o077, *current[1:]))
+
     def test_paid_create_never_silently_falls_back_to_api_wallet(self):
         with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", ""), \
              patch.object(video, "_HEYGEN_ALLOW_API_WALLET", False), \
@@ -46,6 +59,21 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             )
         self.assertEqual(video_id, "api-wallet-video")
         request.assert_called_once()
+
+    def test_explicit_api_wallet_route_never_uses_mcp_assets_or_create(self):
+        response = {"data": {"video_id": "api-wallet-video"}}
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", "/secure/oauth.json"), \
+             patch.object(video, "_HEYGEN_ALLOW_API_WALLET", True), \
+             patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             patch.object(video, "_heygen_mcp_call") as mcp_call, \
+             patch.object(video, "_heygen_request_json", return_value=response) as api_request:
+            video_id = video._heygen_create_video(
+                "image-asset", "audio-asset", "1080p", "9:16", "medium",
+                direct=True, route="api_wallet",
+            )
+        self.assertEqual(video_id, "api-wallet-video")
+        api_request.assert_called_once()
+        mcp_call.assert_not_called()
 
     def test_missing_oauth_is_a_definitive_pre_billing_rejection(self):
         error = video.HeyGenMCPAuthError("套餐 OAuth 未配置")
@@ -124,13 +152,16 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             credentials.chmod(0o600)
             with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", str(credentials)), \
                  patch.object(video, "_heygen_direct_opener", return_value=Opener()), \
+                 patch.object(Path, "stat", autospec=True, side_effect=self._private_stat), \
+                 patch.object(video.os, "fchmod", create=True), \
                  patch.object(video.time, "time", return_value=1000):
                 self.assertEqual(video._heygen_mcp_access_token(), "new-access")
                 self.assertEqual(video._heygen_mcp_access_token(), "new-access")
             saved = json.loads(credentials.read_text())
             self.assertEqual(saved["refresh_token"], "new-refresh")
-            self.assertEqual(os.stat(credentials).st_mode & 0o077, 0)
-            self.assertEqual(os.stat(str(credentials) + ".lock").st_mode & 0o077, 0)
+            if os.name != "nt":
+                self.assertEqual(os.stat(credentials).st_mode & 0o077, 0)
+                self.assertEqual(os.stat(str(credentials) + ".lock").st_mode & 0o077, 0)
             self.assertEqual(len(requests), 1)
             self.assertEqual(requests[0].get_header("User-agent"), "huangque-content/1.0")
 
@@ -161,11 +192,15 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             credentials.chmod(0o600)
             with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", str(credentials)), \
                  patch.object(video, "_heygen_direct_opener", return_value=Opener()), \
+                 patch.object(Path, "stat", autospec=True, side_effect=self._private_stat), \
+                 patch.object(video.os, "fchmod", create=True), \
                  patch.object(video.time, "time", return_value=1000):
                 self.assertEqual(video._heygen_mcp_access_token(), "last-access")
             saved = json.loads(credentials.read_text())
             self.assertEqual(saved["refresh_token"], "")
             with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", str(credentials)), \
+                 patch.object(Path, "stat", autospec=True, side_effect=self._private_stat), \
+                 patch.object(video.os, "fchmod", create=True), \
                  patch.object(video.time, "time", return_value=5000):
                 with self.assertRaisesRegex(video.HeyGenMCPAuthError, "不可刷新"):
                     video._heygen_mcp_access_token()
@@ -225,16 +260,194 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", "/secure/heygen-mcp.json"), \
              patch.object(video, "_heygen_mcp_call", return_value={"video_id": "plain-mcp-1"}) as call:
             video_id = video._heygen_create_video(
-                "image-asset", "audio-asset", "1080p", "9:16", "medium", direct=True)
+                "image-asset", "audio-asset", "720p", "9:16", "medium", direct=True,
+                route="mcp_oauth", image_url="https://files.heygen.com/image.jpg",
+                audio_url="https://files.heygen.com/audio.mp3")
         self.assertEqual(video_id, "plain-mcp-1")
         arguments = call.call_args.args[1]
         self.assertEqual(call.call_args.args[0], "create_video_from_image")
         self.assertEqual(arguments, {
             "title": arguments["title"],
-            "image": {"type": "asset_id", "asset_id": "image-asset"},
-            "audioAssetId": "audio-asset", "resolution": "1080p", "aspectRatio": "9:16",
+            "image": {"type": "url", "url": "https://files.heygen.com/image.jpg"},
+            "audioUrl": "https://files.heygen.com/audio.mp3",
+            "resolution": "720p", "aspectRatio": "9:16",
             "fit": "cover", "expressiveness": "medium", "outputFormat": "mp4",
         })
+
+    def test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url(self):
+        calls = []
+        puts = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b""
+
+        class Opener:
+            def open(self, request, **_kwargs):
+                puts.append(request)
+                return Response()
+
+        def call(tool, arguments, timeout=90):
+            calls.append((tool, arguments))
+            if tool == "create_asset_upload":
+                suffix = "image" if arguments["contentType"].startswith("image/") else "audio"
+                return {
+                    "assetId": suffix + "-asset",
+                    "uploadUrl": "https://upload.heygen.com/signed/" + suffix,
+                }
+            if tool == "bulk_asset_statuses":
+                return {"assets": [
+                    {"assetId": "image-asset", "status": "completed"},
+                    {"assetId": "audio-asset", "status": "completed"},
+                ]}
+            if tool == "get_asset":
+                return {"assetId": arguments["assetId"],
+                        "url": "https://files.heygen.com/" + arguments["assetId"]}
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "avatar.jpg"
+            audio = Path(directory) / "speech.mp3"
+            image.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 32)
+            audio.write_bytes(b"ID3" + b"x" * 32)
+            with patch.object(video, "_heygen_mcp_call", side_effect=call), \
+                 patch.object(video, "_heygen_direct_opener", return_value=Opener()):
+                result = video._heygen_mcp_prepare_assets(image, audio)
+
+        self.assertEqual(result, {
+            "image_asset_id": "image-asset", "audio_asset_id": "audio-asset",
+            "image_url": "https://files.heygen.com/image-asset",
+            "audio_url": "https://files.heygen.com/audio-asset",
+        })
+        self.assertEqual(len(puts), 2)
+        self.assertTrue(all(request.get_method() == "PUT" for request in puts))
+        self.assertIn(("complete_asset_upload", {"assetId": "image-asset"}), calls)
+        self.assertIn(("complete_asset_upload", {"assetId": "audio-asset"}), calls)
+        self.assertIn(("bulk_asset_statuses", {
+            "assetIds": "image-asset,audio-asset",
+        }), calls)
+
+    def test_mcp_asset_failure_or_timeout_never_reaches_create(self):
+        with patch.object(video, "_heygen_mcp_call", return_value={
+                "assets": [{"assetId": "a", "status": "failed"}]
+        }) as call, patch.object(video.time, "monotonic", side_effect=[0, 0]):
+            with self.assertRaisesRegex(RuntimeError, "素材处理失败"):
+                video._heygen_mcp_wait_assets(["a"])
+        call.assert_called_once_with(
+            "bulk_asset_statuses", {"assetIds": "a"}, timeout=30,
+        )
+
+        with patch.object(video, "_HEYGEN_MCP_ASSET_TIMEOUT", 0), \
+             patch.object(video, "_heygen_mcp_call") as poll, \
+             patch.object(video.time, "monotonic", return_value=0):
+            with self.assertRaisesRegex(TimeoutError, "素材处理超时"):
+                video._heygen_mcp_wait_assets(["a"])
+        poll.assert_not_called()
+
+    def test_mcp_resolution_is_downgraded_before_paid_create(self):
+        with patch.object(video, "_HEYGEN_MCP_MAX_RESOLUTION", "720p"):
+            self.assertEqual(
+                video._heygen_actual_resolution("1080p", "mcp_oauth"), "720p",
+            )
+            self.assertEqual(
+                video._heygen_actual_resolution("720p", "mcp_oauth"), "720p",
+            )
+            self.assertEqual(
+                video._heygen_actual_resolution("1080p", "api_wallet"), "1080p",
+            )
+
+    def test_mcp_resume_polls_same_account_without_upload_or_create(self):
+        state = {
+            "provider": "mcp_oauth", "provider_transport": "mcp",
+            "provider_video_id": "oauth-video", "actual_resolution": "720p",
+            "image_asset_id": "img", "audio_asset_id": "aud",
+        }
+        lifecycle = {"state": state}
+        with patch.object(video, "_heygen_mcp_prepare_assets") as prepare, \
+             patch.object(video, "_heygen_create_video") as create, \
+             patch.object(video, "_heygen_request_json") as api, \
+             patch.object(video, "_heygen_poll_video", return_value={
+                 "status": "completed", "video_url": "https://files.heygen.com/video.mp4",
+             }) as poll, \
+             patch.object(video, "_download_video_file_direct", return_value="video/result.mp4"), \
+             patch.object(video, "_extract_first_frame_cover", return_value=None):
+            result = video.generate_heygen_video_recoverable(
+                "missing", "missing", "1080p", "9:16", "medium", lifecycle,
+            )
+        prepare.assert_not_called()
+        create.assert_not_called()
+        api.assert_not_called()
+        self.assertTrue(poll.call_args.kwargs["mcp"])
+        self.assertEqual(result["provider"], "mcp_oauth")
+        self.assertEqual(result["actual_resolution"], "720p")
+
+    def test_mcp_new_job_persists_route_before_single_create(self):
+        events = []
+        lifecycle = {
+            "state": {},
+            "on_submitting": lambda data: events.append(("submitting", data)),
+            "on_submitted": lambda data: events.append(("submitted", data)),
+            "on_completed": lambda data: events.append(("completed", data)),
+        }
+        assets = {
+            "image_asset_id": "oauth-image", "audio_asset_id": "oauth-audio",
+            "image_url": "https://files.heygen.com/image.jpg",
+            "audio_url": "https://files.heygen.com/audio.mp3",
+        }
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", "/secure/oauth.json"), \
+             patch.object(video, "_HEYGEN_MCP_MAX_RESOLUTION", "720p"), \
+             patch.object(video, "preflight_heygen_image_file", return_value={
+                 "path": Path("avatar.jpg"), "mime": "image/jpeg",
+             }), \
+             patch.object(video, "preflight_heygen_audio_file", return_value=Path("speech.mp3")), \
+             patch.object(video, "_ensure_heygen_audio_mp3", return_value=Path("speech.mp3")), \
+             patch.object(video, "_heygen_mcp_prepare_assets", return_value=assets), \
+             patch.object(video, "_heygen_create_video", return_value="oauth-video") as create, \
+             patch.object(video, "_heygen_poll_video", return_value={
+                 "status": "completed", "video_url": "https://files.heygen.com/video.mp4",
+             }) as poll, \
+             patch.object(video, "_download_video_file_direct", return_value="video/result.mp4"), \
+             patch.object(video, "_extract_first_frame_cover", return_value=None):
+            result = video.generate_heygen_video_recoverable(
+                "avatar.jpg", "speech.mp3", "1080p", "9:16", "medium", lifecycle,
+            )
+
+        create.assert_called_once()
+        self.assertEqual(create.call_args.kwargs["route"], "mcp_oauth")
+        self.assertEqual(create.call_args.args[2], "720p")
+        self.assertEqual(create.call_args.kwargs["image_url"], assets["image_url"])
+        self.assertEqual(create.call_args.kwargs["audio_url"], assets["audio_url"])
+        self.assertTrue(poll.call_args.kwargs["mcp"])
+        self.assertEqual([name for name, _ in events], [
+            "submitting", "submitted", "completed",
+        ])
+        self.assertEqual(events[0][1]["provider"], "mcp_oauth")
+        self.assertEqual(events[0][1]["actual_resolution"], "720p")
+        self.assertEqual(result["actual_resolution"], "720p")
+
+    def test_mcp_material_failure_stops_before_paid_create(self):
+        lifecycle = {"state": {}, "on_submitting": lambda _data: self.fail(
+            "provider boundary must not be entered")}
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", "/secure/oauth.json"), \
+             patch.object(video, "preflight_heygen_image_file", return_value={
+                 "path": Path("avatar.jpg"), "mime": "image/jpeg",
+             }), \
+             patch.object(video, "preflight_heygen_audio_file", return_value=Path("speech.mp3")), \
+             patch.object(video, "_ensure_heygen_audio_mp3", return_value=Path("speech.mp3")), \
+             patch.object(video, "_heygen_mcp_prepare_assets",
+                          side_effect=RuntimeError("素材处理失败")), \
+             patch.object(video, "_heygen_create_video") as create:
+            with self.assertRaisesRegex(RuntimeError, "素材处理失败"):
+                video.generate_heygen_video_recoverable(
+                    "avatar.jpg", "speech.mp3", "720p", "9:16", "medium", lifecycle,
+                )
+        create.assert_not_called()
 
     def test_photo_avatar_create_and_status_use_exact_mcp_contract(self):
         calls = []
@@ -276,15 +489,24 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
                 video._heygen_poll_video("plain-video", deadline_s=30)
         mcp_call.assert_not_called()
 
-    def test_cinematic_poll_falls_back_to_free_api_get_after_oauth_failure(self):
-        completed = {"data": {"id": "mcp-video", "status": "completed",
-                              "video_url": "https://example/video.mp4"}}
-        with patch.object(video, "_heygen_mcp_call",
-                          side_effect=video.HeyGenMCPAuthError("invalid_grant")), \
-             patch.object(video, "_heygen_request_json", return_value=completed) as api_get:
-            info = video._heygen_poll_video("mcp-video", direct=True, deadline_s=30, mcp=True)
-        self.assertEqual(info["video_url"], "https://example/video.mp4")
-        api_get.assert_called_once_with("GET", "/videos/mcp-video", timeout=90, direct=True)
+    def test_mcp_poll_errors_never_cross_account_or_repeat_create(self):
+        errors = [
+            video.HeyGenMCPAuthError("HTTP 401"),
+            video.HeyGenMCPAuthError("HTTP 403"),
+            RuntimeError("HTTP 404"),
+            RuntimeError("HTTP 500"),
+        ]
+        for error in errors:
+            with self.subTest(error=str(error)), \
+                 patch.object(video, "_heygen_mcp_call", side_effect=error), \
+                 patch.object(video, "_heygen_request_json") as api_get, \
+                 patch.object(video, "_heygen_create_video") as create:
+                with self.assertRaises(type(error)):
+                    video._heygen_poll_video(
+                        "mcp-video", direct=True, deadline_s=30, mcp=True,
+                    )
+            api_get.assert_not_called()
+            create.assert_not_called()
 
 
 if __name__ == "__main__":

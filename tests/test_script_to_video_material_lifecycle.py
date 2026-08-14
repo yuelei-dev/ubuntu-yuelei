@@ -48,6 +48,9 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
             "video_video_out": video.VIDEO_OUT_DIR,
             "avatar": script_to_video._get_first_avatar,
             "gen_video": video.gen_video,
+            "mcp_credentials": video._HEYGEN_MCP_CREDENTIALS,
+            "allow_api_wallet": video._HEYGEN_ALLOW_API_WALLET,
+            "heygen_api_key": video.HEYGEN_API_KEY,
         }
         core.JOB_DB = str(self.root / "jobs.db")
         core.AUDIO_DB = str(self.root / "audio.db")
@@ -62,6 +65,9 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         script_to_video._get_first_avatar = lambda _username: {
             "id": 1, "image_file": "image/avatar.png",
         }
+        video._HEYGEN_MCP_CREDENTIALS = ""
+        video._HEYGEN_ALLOW_API_WALLET = True
+        video.HEYGEN_API_KEY = "test-api-wallet"
         self._init_databases()
 
     def tearDown(self):
@@ -73,6 +79,9 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
         video.VIDEO_OUT_DIR = self.old["video_video_out"]
         script_to_video._get_first_avatar = self.old["avatar"]
         video.gen_video = self.old["gen_video"]
+        video._HEYGEN_MCP_CREDENTIALS = self.old["mcp_credentials"]
+        video._HEYGEN_ALLOW_API_WALLET = self.old["allow_api_wallet"]
+        video.HEYGEN_API_KEY = self.old["heygen_api_key"]
         self.temp.cleanup()
 
     def _init_databases(self):
@@ -651,7 +660,7 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
                     "720p", "9:16", "medium", lifecycle,
                 )
         paid_request.assert_not_called()
-        self.assertEqual([name for name, _ in events], ["submitting", "rejected"])
+        self.assertEqual(events, [])
 
     def test_script_pipeline_definitive_rejection_preserves_http_error_and_consistent_phase(self):
         job_id = self._job({}, status="running")
@@ -685,6 +694,47 @@ class ScriptToVideoMaterialLifecycleTests(unittest.TestCase):
                 "SELECT phase FROM video_assets WHERE job_id=?", (job_id,),
             ).fetchone()[0]
         self.assertEqual(phase, "materials_ready")
+
+    def test_script_pipeline_persists_oauth_route_transport_and_actual_resolution(self):
+        job_id = self._job({}, status="running")
+        base = self._image("video/oauth-base.mp4", b"video")
+
+        def oauth_provider(_payload, provider_lifecycle=None):
+            provider_lifecycle["on_prepared"]({
+                "audio_file": "audio/speech.mp3", "image_file": "image/avatar.png",
+            })
+            common = {
+                "provider": "mcp_oauth", "provider_transport": "mcp",
+                "image_asset_id": "oauth-image", "audio_asset_id": "oauth-audio",
+                "actual_resolution": "720p",
+            }
+            provider_lifecycle["on_submitting"](common)
+            provider_lifecycle["on_submitted"]({
+                **common, "provider_video_id": "oauth-video",
+            })
+            result = {
+                **common, "video_id": "oauth-video",
+                "video_file": base.relative_to(self.out).as_posix(),
+                "video_url": "/oauth-base",
+            }
+            provider_lifecycle["on_completed"](result)
+            return {"provider_video_id": "oauth-video", **result}
+
+        with mock.patch.object(video, "gen_video", side_effect=oauth_provider), \
+             mock.patch.object(script_to_video, "_prepare_frozen_materials", return_value=[]), \
+             mock.patch.object(script_to_video, "_provider_file_exists", return_value=False):
+            script_to_video.gen_script_to_video({
+                "_username": "alice", "_job_id": job_id,
+                "scenes": [{"line": "介绍产品"}], "material_plan": [],
+                "subtitle": False, "resolution": "1080p",
+            })
+
+        state = script_to_video.get_recovery_state(job_id)
+        self.assertEqual(state["provider"], "mcp_oauth")
+        self.assertEqual(state["provider_transport"], "mcp")
+        self.assertEqual(state["provider_video_id"], "oauth-video")
+        self.assertEqual(state["actual_resolution"], "720p")
+        self.assertEqual(state["provider_result"]["actual_resolution"], "720p")
 
     def test_compose_failure_retries_local_only_and_keeps_base_video(self):
         plan = []
