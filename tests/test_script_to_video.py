@@ -124,7 +124,14 @@ class ScriptToVideoTests(unittest.TestCase):
         }), handler.sent)
 
     def test_subtitle_runtime_preflight_loads_local_cpu_stack_once(self):
-        with tempfile.TemporaryDirectory() as raw, \
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            charset = " ".join(
+                "%04x" % ord(character)
+                for character in self.video.SUBTITLE_REQUIRED_CJK_GLYPHS
+            )
+            with \
              mock.patch.object(self.video, "_subtitle_runtime_ready", False), \
              mock.patch.object(self.video.shutil, "which", return_value="/usr/bin/tool"), \
              mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
@@ -133,23 +140,31 @@ class ScriptToVideoTests(unittest.TestCase):
                  side_effect=[
                      " V..... libx264 H.264\n A..... aac AAC\n",
                      " T.C drawtext\n ... subtitles\n",
-                     "NotoSansCJK-Regular.ttc\n",
+                     "Noto Sans CJK SC\n%s\n" % font,
+                     charset,
                  ],
              ) as tools, mock.patch.object(
                  self.video, "_get_whisper_model", return_value=object(),
              ) as model:
-            first = self.video.subtitle_runtime_preflight()
-            second = self.video.subtitle_runtime_preflight()
+                first = self.video.subtitle_runtime_preflight()
+                second = self.video.subtitle_runtime_preflight()
         self.assertEqual("small", first["model"])
         self.assertEqual("cpu", first["device"])
         self.assertEqual("int8", first["compute_type"])
         self.assertTrue(first["no_charge"])
         self.assertEqual(first, second)
-        self.assertEqual(3, tools.call_count)
+        self.assertEqual(4, tools.call_count)
         model.assert_called_once_with()
 
     def test_subtitle_runtime_preflight_rejects_missing_whisper_before_charge(self):
-        with tempfile.TemporaryDirectory() as raw, \
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            charset = " ".join(
+                "%04x" % ord(character)
+                for character in self.video.SUBTITLE_REQUIRED_CJK_GLYPHS
+            )
+            with \
              mock.patch.object(self.video, "_subtitle_runtime_ready", False), \
              mock.patch.object(self.video.shutil, "which", return_value="/usr/bin/tool"), \
              mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
@@ -158,18 +173,89 @@ class ScriptToVideoTests(unittest.TestCase):
                  side_effect=[
                      " V..... libx264 H.264\n A..... aac AAC\n",
                      " T.C drawtext\n ... subtitles\n",
-                     "NotoSansCJK-Regular.ttc\n",
+                     "Noto Sans CJK SC\n%s\n" % font,
+                     charset,
                  ],
              ), mock.patch.object(
                  self.video, "_get_whisper_model",
                  side_effect=ModuleNotFoundError("faster_whisper"),
              ):
-            with self.assertRaises(
-                    self.video.SubtitleRuntimePreflightError) as caught:
-                self.video.subtitle_runtime_preflight()
+                with self.assertRaises(
+                        self.video.SubtitleRuntimePreflightError) as caught:
+                    self.video.subtitle_runtime_preflight()
         self.assertEqual("subtitle_runtime_unavailable", caught.exception.code)
         self.assertIn("faster-whisper 未安装", str(caught.exception))
         self.assertIn("未调用付费视频渠道", str(caught.exception))
+
+    def test_subtitle_runtime_preflight_rejects_dejavu_fallback_before_heygen(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.HEYGEN_PREFLIGHT_PATH
+            def _token(self): return "token"
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        with tempfile.TemporaryDirectory() as raw:
+            fallback = Path(raw) / "DejaVuSans.ttf"
+            fallback.write_bytes(b"font")
+            handler = Handler()
+            heygen = mock.Mock(return_value={
+                "ok": True, "channel": "relay", "no_charge": True,
+            })
+            with mock.patch.object(
+                    self.video, "_subtitle_runtime_ready", False), \
+                 mock.patch.object(
+                    self.video.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+                 mock.patch.object(
+                    self.video, "_subtitle_tool_output", side_effect=[
+                        " V..... libx264 H.264\n A..... aac AAC\n",
+                        " T.C drawtext\n ... subtitles\n",
+                        "DejaVu Sans\n%s\n" % fallback,
+                    ],
+                 ), mock.patch.object(
+                    self.video, "_get_whisper_model",
+                 ) as model, mock.patch.object(
+                    self.video, "heygen_upload_preflight", heygen,
+                 ):
+                self.assertTrue(self.script_to_video.dispatch_http(
+                    handler, "POST", lambda _token: {"username": "fang"},
+                    lambda _user: False,
+                ))
+        self.assertEqual(503, handler.sent[0])
+        self.assertEqual("subtitle_runtime_unavailable", handler.sent[1]["code"])
+        self.assertTrue(handler.sent[1]["no_charge"])
+        self.assertIn("未调用付费视频渠道", handler.sent[1]["detail"])
+        heygen.assert_not_called()
+        model.assert_not_called()
+
+    def test_subtitle_runtime_preflight_rejects_font_without_cjk_glyphs(self):
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            with mock.patch.object(
+                    self.video, "_subtitle_runtime_ready", False), \
+                 mock.patch.object(
+                    self.video.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+                 mock.patch.object(
+                    self.video, "_subtitle_tool_output", side_effect=[
+                        " V..... libx264 H.264\n A..... aac AAC\n",
+                        " T.C drawtext\n ... subtitles\n",
+                        "Noto Sans CJK SC\n%s\n" % font,
+                        "0041-007a",
+                    ],
+                 ), mock.patch.object(
+                    self.video, "_get_whisper_model",
+                 ) as model:
+                with self.assertRaises(
+                        self.video.SubtitleRuntimePreflightError) as caught:
+                    self.video.subtitle_runtime_preflight()
+        self.assertEqual("subtitle_runtime_unavailable", caught.exception.code)
+        self.assertIn("缺少中文字符", str(caught.exception))
+        self.assertIn("未调用付费视频渠道", str(caught.exception))
+        model.assert_not_called()
 
     def test_content_runtime_declares_pinned_offline_whisper_dependency(self):
         root = Path(__file__).resolve().parents[1]
