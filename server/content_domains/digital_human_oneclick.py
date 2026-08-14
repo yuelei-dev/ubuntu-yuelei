@@ -362,11 +362,16 @@ def verify_child_submission_with_record(payload, username, kind):
                 "人物照片与授权记录不一致，请重新开始并授权",
                 "consent_photo_mismatch", 403,
             )
-        cleaned["reference_images"] = [references[0]]
+        # Banana accepts trusted references through `images`, while the
+        # one-click consent contract deliberately receives `reference_images`
+        # so the portrait can be verified before any paid request is created.
+        cleaned.pop("reference_images", None)
+        cleaned["images"] = [references[0]]
         # The one-click workflow owns its paid image route. Do not let an old
         # page or a forged child request switch providers after consent.
-        cleaned["provider"] = "xiaole"
-        cleaned["quality"] = "standard"
+        cleaned["provider"] = "banana"
+        cleaned["model"] = "nb2"
+        cleaned["quality"] = "std"
     elif stage == "talking":
         try:
             segment_index = int(raw_item_index)
@@ -465,8 +470,16 @@ def verify_child_submission_with_record(payload, username, kind):
             )
         cleaned["prompt"] = material["prompt"]
         cleaned["digital_human_item_index"] = material_index
-        cleaned["provider"] = "xiaole"
-        cleaned["quality"] = "standard"
+        # Only references expanded from the established one-click payload are
+        # forwarded. A forged client-side Banana `images` field must not bypass
+        # the existing upload/reference contract.
+        references = cleaned.pop("reference_images", None)
+        cleaned.pop("images", None)
+        if references is not None:
+            cleaned["images"] = references
+        cleaned["provider"] = "banana"
+        cleaned["model"] = "nb2"
+        cleaned["quality"] = "std"
     cleaned.pop("digital_human_script", None)
     return cleaned, record
 

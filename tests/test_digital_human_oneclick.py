@@ -260,14 +260,19 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         }
         gesture = dict(common, digital_human_stage="gesture", prompt="safe",
                        provider="openai",
+                       images=[base64.b64encode(b"forged-portrait").decode("ascii")],
                        reference_images=[base64.b64encode(b"portrait").decode("ascii")])
         with mock.patch.object(self.domain, "cdb", self._consent_connection):
             checked = self.domain.verify_child_submission(gesture, "yuelei", "image")
             self.assertEqual(checked["digital_human_consent_id"], consent["consent_id"])
-            self.assertEqual(checked["provider"], "xiaole")
+            self.assertEqual(checked["provider"], "banana")
+            self.assertEqual(checked["model"], "nb2")
+            self.assertEqual(checked["quality"], "std")
+            self.assertEqual(checked["images"], gesture["reference_images"])
+            self.assertNotIn("reference_images", checked)
             self.assertEqual(
                 self.points.cost_of("image", checked),
-                self.points.pricing.get_price("image.xiaole.std"),
+                self.points.pricing.get_price("image.banana.nb2.std"),
             )
             self.assertNotIn("digital_human_consent_token", checked)
             missing_provider = dict(gesture)
@@ -276,34 +281,40 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 self.domain.verify_child_submission(
                     missing_provider, "yuelei", "image",
                 )["provider"],
-                "xiaole",
+                "banana",
             )
             material_reference = base64.b64encode(
                 b"\x89PNG\r\n\x1a\n" + b"authorized-material",
             ).decode("ascii")
             material = dict(
                 common, digital_human_stage="material", provider="openai",
+                images=[base64.b64encode(b"forged-material").decode("ascii")],
                 reference_images=[material_reference],
             )
             checked_material = self.domain.verify_child_submission(
                 material, "yuelei", "image",
             )
-            self.assertEqual(checked_material["provider"], "xiaole")
+            self.assertEqual(checked_material["provider"], "banana")
+            self.assertEqual(checked_material["model"], "nb2")
+            self.assertEqual(checked_material["quality"], "std")
             self.assertEqual(
-                checked_material["reference_images"], [material_reference],
+                checked_material["images"], [material_reference],
             )
+            self.assertNotIn("reference_images", checked_material)
             self.assertEqual(
                 self.points.cost_of("image", checked_material),
-                self.points.pricing.get_price("image.xiaole.std"),
+                self.points.pricing.get_price("image.banana.nb2.std"),
             )
             if sys.platform != "win32":
                 image_domain = importlib.import_module("content_domains.image")
                 validated_material = image_domain.validate_image_payload(
                     checked_material,
                 )
-                self.assertEqual(validated_material["provider"], "xiaole")
+                self.assertEqual(validated_material["provider"], "banana")
+                self.assertEqual(validated_material["model"], "nb2")
                 self.assertEqual(
-                    validated_material["reference_images"], [material_reference],
+                    [item["data"] for item in validated_material["images"]],
+                    [material_reference],
                 )
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "照片"):
                 self.domain.verify_child_submission(
@@ -1076,14 +1087,19 @@ class DigitalHumanOneClickTests(unittest.TestCase):
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):
-    def test_oneclick_image_jobs_use_xiaole_for_gestures_and_materials(self):
+    def test_oneclick_image_jobs_use_banana_for_gestures_and_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]
         materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(images,voiceKey,epoch)")]
 
-        self.assertIn("provider:'xiaole'", gestures)
+        self.assertIn("provider:'banana'", gestures)
+        self.assertIn("model:'nb2'", gestures)
+        self.assertIn("quality:'std'", gestures)
         self.assertIn("reference_images:photoData?[photoData]:[]", gestures)
-        self.assertIn("provider:'xiaole'", materials)
+        self.assertIn("provider:'banana'", materials)
+        self.assertIn("model:'nb2'", materials)
+        self.assertIn("quality:'std'", materials)
+        self.assertNotIn("provider:'xiaole'", gestures + materials)
         self.assertNotIn("provider:'openai'", gestures + materials)
 
     def test_page_exposes_required_inputs_and_real_pipeline_calls(self):
