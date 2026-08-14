@@ -1,6 +1,7 @@
 import importlib
 import base64
 import hashlib
+import io
 import json
 import shutil
 import sqlite3
@@ -13,6 +14,15 @@ from types import SimpleNamespace
 from unittest import mock
 
 
+PNG_2X2 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGMU0bBhYGBgYgADAAWiAHylyrQdAAAAAElFTkSuQmCC"
+)
+JPEG_2X2 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDyOiiiuw5D/9k="
+)
+WEBP_2X2 = base64.b64decode("UklGRh4AAABXRUJQVlA4TBEAAAAvAUAAAAdQlFKUp/+BiOh/AAA=")
+
+
 class DigitalHumanOneClickTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -21,6 +31,8 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             sys.path.insert(0, server_dir)
         cls.domain = importlib.import_module("content_domains.digital_human_oneclick")
         cls.points = importlib.import_module("content_domains.points")
+        cls.banana_provider = importlib.import_module("content_domains.banana_provider")
+        cls.cli_uploads = importlib.import_module("content_domains.cli_uploads")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -189,7 +201,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "run_id": "dh-run-test-001",
             "plan_digest": planned["plan_digest"],
             "script": script,
-            "photo_sha256": hashlib.sha256(b"portrait").hexdigest(),
+            "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
             "voice_mode": "existing",
             "voice_ref": "vip_ready_voice",
             "voice_sha256": "",
@@ -213,7 +225,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(row["username"], "yuelei")
-        self.assertEqual(row["photo_sha256"], hashlib.sha256(b"portrait").hexdigest())
+        self.assertEqual(row["photo_sha256"], hashlib.sha256(PNG_2X2).hexdigest())
         self.assertNotIn("portrait", json.dumps(row))
         self.assertNotIn(first["consent_token"], json.dumps(row))
 
@@ -260,14 +272,19 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         }
         gesture = dict(common, digital_human_stage="gesture", prompt="safe",
                        provider="openai",
-                       reference_images=[base64.b64encode(b"portrait").decode("ascii")])
+                       images=[base64.b64encode(b"forged-portrait").decode("ascii")],
+                       reference_images=[base64.b64encode(PNG_2X2).decode("ascii")])
         with mock.patch.object(self.domain, "cdb", self._consent_connection):
             checked = self.domain.verify_child_submission(gesture, "yuelei", "image")
             self.assertEqual(checked["digital_human_consent_id"], consent["consent_id"])
-            self.assertEqual(checked["provider"], "xiaole")
+            self.assertEqual(checked["provider"], "banana")
+            self.assertEqual(checked["model"], "nb2")
+            self.assertEqual(checked["quality"], "std")
+            self.assertEqual(checked["images"], gesture["reference_images"])
+            self.assertNotIn("reference_images", checked)
             self.assertEqual(
                 self.points.cost_of("image", checked),
-                self.points.pricing.get_price("image.xiaole.std"),
+                self.points.pricing.get_price("image.banana.nb2.std"),
             )
             self.assertNotIn("digital_human_consent_token", checked)
             missing_provider = dict(gesture)
@@ -276,45 +293,55 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 self.domain.verify_child_submission(
                     missing_provider, "yuelei", "image",
                 )["provider"],
-                "xiaole",
+                "banana",
             )
-            material_reference = base64.b64encode(
-                b"\x89PNG\r\n\x1a\n" + b"authorized-material",
-            ).decode("ascii")
+            material_reference = base64.b64encode(JPEG_2X2).decode("ascii")
             material = dict(
                 common, digital_human_stage="material", provider="openai",
+                images=[base64.b64encode(b"forged-material").decode("ascii")],
                 reference_images=[material_reference],
             )
             checked_material = self.domain.verify_child_submission(
                 material, "yuelei", "image",
             )
-            self.assertEqual(checked_material["provider"], "xiaole")
+            self.assertEqual(checked_material["provider"], "banana")
+            self.assertEqual(checked_material["model"], "nb2")
+            self.assertEqual(checked_material["quality"], "std")
             self.assertEqual(
-                checked_material["reference_images"], [material_reference],
+                checked_material["images"], [material_reference],
             )
+            self.assertNotIn("reference_images", checked_material)
+            validated_reference = self.banana_provider.validate_payload(checked_material)
+            self.assertEqual("image/jpeg", validated_reference["images"][0]["mime_type"])
             self.assertEqual(
                 self.points.cost_of("image", checked_material),
-                self.points.pricing.get_price("image.xiaole.std"),
+                self.points.pricing.get_price("image.banana.nb2.std"),
             )
             if sys.platform != "win32":
                 image_domain = importlib.import_module("content_domains.image")
                 validated_material = image_domain.validate_image_payload(
                     checked_material,
                 )
-                self.assertEqual(validated_material["provider"], "xiaole")
+                self.assertEqual(validated_material["provider"], "banana")
+                self.assertEqual(validated_material["model"], "nb2")
                 self.assertEqual(
-                    validated_material["reference_images"], [material_reference],
+                    [item["data"] for item in validated_material["images"]],
+                    [material_reference],
+                )
+                self.assertEqual(
+                    ["image/jpeg"],
+                    [item["mime_type"] for item in validated_material["images"]],
                 )
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "照片"):
                 self.domain.verify_child_submission(
-                    dict(gesture, reference_images=[base64.b64encode(b"other").decode("ascii")]),
+                    dict(gesture, reference_images=[base64.b64encode(JPEG_2X2).decode("ascii")]),
                     "yuelei", "image",
                 )
             with self.assertRaises(self.domain.DigitalHumanRequestError) as extra_photo:
                 self.domain.verify_child_submission(
                     dict(gesture, reference_images=[
-                        base64.b64encode(b"portrait").decode("ascii"),
-                        base64.b64encode(b"other").decode("ascii"),
+                        base64.b64encode(PNG_2X2).decode("ascii"),
+                        base64.b64encode(WEBP_2X2).decode("ascii"),
                     ]),
                     "yuelei", "image",
                 )
@@ -368,6 +395,69 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             self.assertEqual(
                 "talking_gesture_binding_invalid", wrong_gesture.exception.code,
             )
+
+    def test_banana_references_reject_invalid_content_and_preserve_upload_mime(self):
+        invalid = b"not-an-image"
+        invalid_payload = self._consent_payload(
+            run_id="dh-run-invalid-image-001",
+            photo_sha256=hashlib.sha256(invalid).hexdigest(),
+        )
+        invalid_consent = self.domain.create_consent(
+            invalid_payload, "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        invalid_gesture = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "gesture",
+            "digital_human_run_id": invalid_consent["run_id"],
+            "digital_human_plan_digest": invalid_payload["plan_digest"],
+            "digital_human_consent_token": invalid_consent["consent_token"],
+            "digital_human_script": invalid_payload["script"],
+            "digital_human_item_index": 0,
+            "reference_images": [base64.b64encode(invalid).decode("ascii")],
+        }
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            checked_invalid = self.domain.verify_child_submission(
+                invalid_gesture, "yuelei", "image",
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be decoded"):
+            self.banana_provider.validate_payload(checked_invalid)
+
+        consent_payload = self._consent_payload(run_id="dh-run-upload-mime-001")
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        common = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "material",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": consent_payload["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+            "digital_human_script": consent_payload["script"],
+            "digital_human_item_index": 0,
+            "provider": "banana",
+            "images": [base64.b64encode(PNG_2X2).decode("ascii")],
+        }
+        upload_root = self.root / "private-uploads"
+        with mock.patch.object(self.cli_uploads, "UPLOAD_ROOT", upload_root):
+            uploaded = self.cli_uploads.store_image(
+                io.BytesIO(WEBP_2X2), len(WEBP_2X2), "yuelei", "image/webp",
+                hashlib.sha256(WEBP_2X2).hexdigest(), now=100,
+            )
+            expanded = self.cli_uploads.expand_image_payload(
+                dict(common, reference_upload_ids=[uploaded["upload_id"]]),
+                "yuelei", now=101,
+            )
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            checked = self.domain.verify_child_submission(expanded, "yuelei", "image")
+        validated = self.banana_provider.validate_payload(checked)
+        self.assertNotIn("reference_images", checked)
+        self.assertEqual("banana", validated["provider"])
+        self.assertEqual("nb2", validated["model"])
+        self.assertEqual("std", validated["quality"])
+        self.assertEqual("image/webp", validated["images"][0]["mime_type"])
+        self.assertEqual(WEBP_2X2, base64.b64decode(validated["images"][0]["data"]))
 
     def test_clone_consent_binds_audio_hash_and_slot(self):
         sample = b"voice-sample"
@@ -1076,14 +1166,19 @@ class DigitalHumanOneClickTests(unittest.TestCase):
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):
-    def test_oneclick_image_jobs_use_xiaole_for_gestures_and_materials(self):
+    def test_oneclick_image_jobs_use_banana_for_gestures_and_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]
         materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(images,voiceKey,epoch)")]
 
-        self.assertIn("provider:'xiaole'", gestures)
+        self.assertIn("provider:'banana'", gestures)
+        self.assertIn("model:'nb2'", gestures)
+        self.assertIn("quality:'std'", gestures)
         self.assertIn("reference_images:photoData?[photoData]:[]", gestures)
-        self.assertIn("provider:'xiaole'", materials)
+        self.assertIn("provider:'banana'", materials)
+        self.assertIn("model:'nb2'", materials)
+        self.assertIn("quality:'std'", materials)
+        self.assertNotIn("provider:'xiaole'", gestures + materials)
         self.assertNotIn("provider:'openai'", gestures + materials)
 
     def test_page_exposes_required_inputs_and_real_pipeline_calls(self):
