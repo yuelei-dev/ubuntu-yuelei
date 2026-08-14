@@ -2128,23 +2128,28 @@ def _gen_talking(username, scenes, payload):
             _persist_job_state(
                 job_id, username, "provider_submitting",
                 provider=data.get("provider"),
+                provider_transport=data.get("provider_transport"),
                 image_asset_id=data.get("image_asset_id"),
                 audio_asset_id=data.get("audio_asset_id"),
+                actual_resolution=data.get("actual_resolution"),
             )
 
         def on_submitted(data):
             _persist_job_state(
                 job_id, username, "provider_submitted",
                 provider=data.get("provider"),
+                provider_transport=data.get("provider_transport"),
                 provider_video_id=data.get("provider_video_id"),
                 image_asset_id=data.get("image_asset_id"),
                 audio_asset_id=data.get("audio_asset_id"),
+                actual_resolution=data.get("actual_resolution"),
             )
 
         def on_rejected(_data):
             _persist_job_state(
                 job_id, username, "materials_ready",
                 provider=None, provider_video_id=None,
+                provider_transport=None, actual_resolution=None,
                 image_asset_id=None, audio_asset_id=None,
             )
             video_domain.update_video_asset_phase(
@@ -2157,6 +2162,7 @@ def _gen_talking(username, scenes, payload):
                     "video_id", "video_file", "video_url", "source_video_url",
                     "thumbnail_url", "duration", "provider", "image_file",
                     "image_url", "image_asset_id", "audio_asset_id",
+                    "provider_transport", "actual_resolution",
                 ) if data.get(key) is not None
             }
             _persist_job_state(

@@ -3412,14 +3412,19 @@ def _shrink_motion_reference(reference_video_file):
         pass
     return "video/" + small.name
 
-def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion, direct=False):
-    _heygen_require_paid_route()
+def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion, direct=False,
+                         route=None, image_url=None, audio_url=None):
+    route = route or _heygen_require_paid_route()
     title = "huangque video %d" % int(time.time())
-    if _heygen_mcp_enabled():
+    if route == "mcp_oauth":
+        if not _heygen_mcp_enabled():
+            raise HeyGenMCPAuthError("HeyGen MCP OAuth 未配置")
+        if not image_url or not audio_url:
+            raise ValueError("HeyGen MCP 素材 URL 未准备完成")
         data = _heygen_mcp_call("create_video_from_image", {
             "title": title,
-            "image": {"type": "asset_id", "asset_id": image_asset_id},
-            "audioAssetId": audio_asset_id,
+            "image": {"type": "url", "url": image_url},
+            "audioUrl": audio_url,
             "resolution": resolution,
             "aspectRatio": ratio,
             "fit": "cover",
@@ -3427,7 +3432,11 @@ def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, moti
             "outputFormat": "mp4",
         }, timeout=90)
         video_id = str(data.get("video_id") or data.get("id") or "").strip()
-    else:
+    elif route == "api_wallet":
+        if not _HEYGEN_ALLOW_API_WALLET:
+            raise HeyGenMCPAuthError("HeyGen API 钱包通道未显式启用")
+        if not HEYGEN_API_KEY:
+            raise ValueError("视频生成服务未配置")
         body = json.dumps({
             "title": title,
             "type": "image",
@@ -3443,6 +3452,8 @@ def _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, moti
             "Content-Type": "application/json",
         }, timeout=90, direct=direct)
         video_id = ((data.get("data") or {}).get("video_id") or "").strip()
+    else:
+        raise ValueError("未知 HeyGen 付费通道")
     if not video_id:
         raise RuntimeError("HeyGen未返回video_id: %s" % json.dumps(data, ensure_ascii=False)[:500])
     return video_id
@@ -3641,6 +3652,13 @@ _HEYGEN_MCP_CREDENTIALS = os.environ.get("HEYGEN_MCP_CREDENTIALS", "").strip()
 _HEYGEN_ALLOW_API_WALLET = os.environ.get(
     "HEYGEN_ALLOW_API_WALLET", "0"
 ).strip().lower() in ("1", "true", "yes")
+_HEYGEN_MCP_MAX_RESOLUTION = os.environ.get(
+    "HEYGEN_MCP_MAX_RESOLUTION", "720p"
+).strip().lower()
+_HEYGEN_MCP_ASSET_TIMEOUT = _env_positive_int("HEYGEN_MCP_ASSET_TIMEOUT", 120)
+_HEYGEN_MCP_ASSET_POLL_INTERVAL = _env_positive_int(
+    "HEYGEN_MCP_ASSET_POLL_INTERVAL", 2
+)
 _heygen_mcp_auth_lock = threading.Lock()
 
 
@@ -3697,6 +3715,20 @@ def _heygen_require_paid_route():
         "HeyGen 套餐 OAuth 未配置，已阻止回退到 API 钱包；"
         "请为当前环境配置独立的 HEYGEN_MCP_CREDENTIALS"
     )
+
+
+def _heygen_actual_resolution(requested, route):
+    requested = str(requested or "720p").strip().lower()
+    if requested not in VALID_VIDEO_RESOLUTIONS:
+        raise ValueError("视频分辨率不支持")
+    if route != "mcp_oauth":
+        return requested
+    maximum = _HEYGEN_MCP_MAX_RESOLUTION
+    if maximum not in VALID_VIDEO_RESOLUTIONS:
+        raise ValueError("HEYGEN_MCP_MAX_RESOLUTION 配置无效")
+    if maximum == "720p" and requested == "1080p":
+        return "720p"
+    return requested
 
 
 def _heygen_mcp_access_token(force_refresh=False):
@@ -3804,6 +3836,123 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
         except json.JSONDecodeError:
             return {"text": texts[0]}
     return result.get("structuredContent") or result
+
+
+def _heygen_mcp_begin_asset(file_path, content_type):
+    path = pathlib.Path(file_path)
+    if not path.is_file() or path.stat().st_size <= 0:
+        raise ValueError("视频素材文件不存在")
+    raw = path.read_bytes()
+    response = _heygen_mcp_call("create_asset_upload", {
+        "fileName": path.name,
+        "contentType": content_type,
+    }, timeout=30)
+    node = _find_nested_dict(
+        response,
+        lambda item: bool(item.get("assetId") or item.get("asset_id"))
+        and bool(item.get("uploadUrl") or item.get("upload_url")),
+    )
+    if not node:
+        raise RuntimeError("HeyGen MCP 素材返回缺少必要字段")
+    asset_id = str(node.get("assetId") or node.get("asset_id") or "").strip()
+    upload_url = str(node.get("uploadUrl") or node.get("upload_url") or "").strip()
+    parsed = urllib.parse.urlsplit(upload_url)
+    if (parsed.scheme != "https" or not parsed.hostname
+            or parsed.username or parsed.password):
+        raise RuntimeError("HeyGen MCP 素材上传地址无效")
+    request = urllib.request.Request(
+        upload_url,
+        data=raw,
+        headers={"Content-Type": content_type, "Content-Length": str(len(raw))},
+        method="PUT",
+    )
+    try:
+        with _heygen_direct_opener().open(request, timeout=240) as result:
+            result.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError("HeyGen MCP 素材上传失败: HTTP %s" % exc.code) from exc
+    except OSError as exc:
+        raise HeyGenNetworkError("HeyGen MCP 素材上传网络失败") from exc
+    _heygen_mcp_call("complete_asset_upload", {"assetId": asset_id}, timeout=30)
+    return asset_id
+
+
+def _heygen_mcp_asset_rows(data):
+    root = (data.get("data") or data) if isinstance(data, dict) else data
+    if isinstance(root, dict):
+        root = root.get("assets") or root.get("items") or root.get("results") or root
+    if isinstance(root, dict):
+        return [root]
+    if isinstance(root, list):
+        return [item for item in root if isinstance(item, dict)]
+    return []
+
+
+def _heygen_mcp_wait_assets(asset_ids):
+    wanted = {str(asset_id) for asset_id in asset_ids if asset_id}
+    deadline = time.monotonic() + _HEYGEN_MCP_ASSET_TIMEOUT
+    while time.monotonic() < deadline:
+        response = _heygen_mcp_call(
+            "bulk_asset_statuses", {"assetIds": ",".join(asset_ids)}, timeout=30,
+        )
+        statuses = {}
+        for item in _heygen_mcp_asset_rows(response):
+            asset_id = str(
+                item.get("assetId") or item.get("asset_id") or item.get("id") or ""
+            ).strip()
+            status = str(item.get("status") or item.get("state") or "").strip().lower()
+            if asset_id:
+                statuses[asset_id] = status
+        failed = {
+            asset_id: statuses.get(asset_id) for asset_id in wanted
+            if statuses.get(asset_id) in {"failed", "error", "rejected"}
+        }
+        row_statuses = {
+            str(item.get("status") or item.get("state") or "").strip().lower()
+            for item in _heygen_mcp_asset_rows(response)
+        }
+        if failed or row_statuses.intersection({"failed", "error", "rejected"}):
+            raise RuntimeError("HeyGen MCP 素材处理失败")
+        if wanted and all(statuses.get(asset_id) == "completed" for asset_id in wanted):
+            return
+        time.sleep(_HEYGEN_MCP_ASSET_POLL_INTERVAL)
+    raise TimeoutError("HeyGen MCP 素材处理超时")
+
+
+def _heygen_mcp_asset_url(asset_id):
+    response = _heygen_mcp_call("get_asset", {"assetId": asset_id}, timeout=30)
+    node = _find_nested_dict(
+        response,
+        lambda item: bool(
+            item.get("url") or item.get("assetUrl") or item.get("asset_url")
+            or item.get("downloadUrl") or item.get("download_url")
+        ),
+    )
+    url = str((node or {}).get("url") or (node or {}).get("assetUrl")
+              or (node or {}).get("asset_url") or (node or {}).get("downloadUrl")
+              or (node or {}).get("download_url") or "").strip()
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != "https" or not parsed.hostname
+            or parsed.username or parsed.password):
+        raise RuntimeError("HeyGen MCP 素材 URL 不可用")
+    return url
+
+
+def _heygen_mcp_prepare_assets(image_path, audio_path):
+    image_raw = pathlib.Path(image_path).read_bytes()
+    image_type = _detect_image_mime(image_raw)
+    if image_type not in VALID_IMAGE_MIMES:
+        raise ValueError("图片内容无法识别，请重新导出后上传")
+    image_asset_id = _heygen_mcp_begin_asset(image_path, image_type)
+    audio_asset_id = _heygen_mcp_begin_asset(audio_path, "audio/mpeg")
+    asset_ids = [image_asset_id, audio_asset_id]
+    _heygen_mcp_wait_assets(asset_ids)
+    return {
+        "image_asset_id": image_asset_id,
+        "audio_asset_id": audio_asset_id,
+        "image_url": _heygen_mcp_asset_url(image_asset_id),
+        "audio_url": _heygen_mcp_asset_url(audio_asset_id),
+    }
 
 
 def _heygen_create_cinematic_video(avatar_item_id, reference_asset_id, ratio, resolution, duration,
@@ -4054,15 +4203,9 @@ def _heygen_poll_video(video_id, direct=False, deadline_s=None, mcp=False):
     while time.time() < deadline:
         try:
             if mcp:
-                try:
-                    info = _heygen_mcp_call("get_video", {"videoId": video_id}, timeout=90)
-                except RuntimeError as e:
-                    # GET 不计费。MCP OAuth 即使在已提交后失效，也必须用 API Key 把成片/真实失败接回来。
-                    print("[heygen] MCP GET 不可用，回退 API GET video_id=%s: %s"
-                          % (video_id, str(e)[:160]), flush=True)
-                    data = _heygen_request_json("GET", "/videos/" + urllib.parse.quote(video_id),
-                                                timeout=90, direct=direct)
-                    info = data.get("data") or {}
+                # OAuth 和 API wallet 是两个独立账户。OAuth 创建的任务只能由
+                # 同一 MCP 账户查询；查询失败也不能跨账户 API GET，更不能重提。
+                info = _heygen_mcp_call("get_video", {"videoId": video_id}, timeout=90)
             else:
                 data = _heygen_request_json("GET", "/videos/" + urllib.parse.quote(video_id), timeout=90, direct=direct)
                 info = data.get("data") or {}
@@ -4166,20 +4309,39 @@ def generate_heygen_video_direct(image_file, audio_file, resolution, ratio, moti
     if not image_fp or not audio_fp:
         raise ValueError("视频素材文件不存在")
     audio_fp = _ensure_heygen_audio_mp3(audio_fp)
-    # 素材上传对瞬时网络错误重试：上传不计费(计费在 create-video)，重试安全。隧道抖动一下不该
-    # 让整条口播失败(fang 的 cinematic/口播上传 240s 超时同源)。见 _heygen_retry_net。
-    image_asset_id = _upload_heygen_image_asset(
-        image_fp, "口播传图", direct=True)
-    audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp, direct=True), "口播传音")
+    route = _heygen_require_paid_route()
+    actual_resolution = _heygen_actual_resolution(resolution, route)
+    image_url = audio_url = None
+    if route == "mcp_oauth":
+        assets = _heygen_mcp_prepare_assets(image_fp, audio_fp)
+        image_asset_id = assets["image_asset_id"]
+        audio_asset_id = assets["audio_asset_id"]
+        image_url = assets["image_url"]
+        audio_url = assets["audio_url"]
+    else:
+        # 素材上传对瞬时网络错误重试：上传不计费(计费在 create-video)，重试安全。
+        image_asset_id = _upload_heygen_image_asset(
+            image_fp, "口播传图", direct=True)
+        audio_asset_id = _heygen_retry_net(
+            lambda: _heygen_upload_asset(audio_fp, direct=True), "口播传音",
+        )
     with heygen_slot("口播直连"):   # 账号级并发上限 10，三个池共用；超了在本地排队，不让 HeyGen 甩 429
         # 429 退避重试：请求被瞬间拒绝、未计费，是唯一可以安全重发的失败。
         # 不重试的话，一次突发就把用户的任务判死退点、白等几分钟。
         video_id = _heygen_retry_429(
-            lambda: _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion, direct=True),
+            lambda: _heygen_create_video(
+                image_asset_id, audio_asset_id, actual_resolution, ratio, motion,
+                direct=True, route=route, image_url=image_url, audio_url=audio_url,
+            ),
             "口播直连")
         # ↓ 此刻已计费。之后任何失败都不能回退中转重发（同一账号，会再付一次），见 HeyGenBilledError
         try:
-            info = _heygen_poll_video(video_id, direct=True, deadline_s=VIDEO_GEN_DEADLINE)
+            if route == "mcp_oauth":
+                info = _heygen_poll_video(
+                    video_id, direct=True, deadline_s=VIDEO_GEN_DEADLINE, mcp=True,
+                )
+            else:
+                info = _heygen_poll_video(video_id, direct=True, deadline_s=VIDEO_GEN_DEADLINE)
             video_file = _download_video_file_direct(info["video_url"], "heygen")
             cover = _extract_first_frame_cover(video_file)
         except Exception as e:
@@ -4189,7 +4351,9 @@ def generate_heygen_video_direct(image_file, audio_file, resolution, ratio, moti
         "video_id": video_id, "video_file": video_file, "video_url": _file_url(video_file),
         "image_asset_id": image_asset_id, "audio_asset_id": audio_asset_id,
         "source_video_url": info.get("video_url"), "thumbnail_url": info.get("thumbnail_url"),
-        "duration": info.get("duration"), "provider": "heygen_direct",
+        "duration": info.get("duration"), "provider": route,
+        "provider_transport": "mcp" if route == "mcp_oauth" else "direct",
+        "actual_resolution": actual_resolution,
     }
     if cover:
         ret["image_file"] = cover
@@ -4197,7 +4361,8 @@ def generate_heygen_video_direct(image_file, audio_file, resolution, ratio, moti
     return ret
 
 def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
-    if _HEYGEN_DIRECT and HEYGEN_API_KEY:
+    route = "mcp_oauth" if _heygen_mcp_enabled() else None
+    if route or (_HEYGEN_DIRECT and HEYGEN_API_KEY):
         try:
             return generate_heygen_video_direct(image_file, audio_file, resolution, ratio, motion)
         except HeyGenBilledError:
@@ -4205,20 +4370,27 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
         except HeyGenMCPAuthError:
             raise   # MCP 创建前鉴权失败，第二条线路仍是同一份 OAuth；立刻退点，不能假回退。
         except Exception as e:
+            if route == "mcp_oauth":
+                raise  # OAuth 生命周期不能切到 API wallet 上传/创建。
             print("[heygen] 直连失败(提交前),回退泽龙中转: %s" % str(e)[:200], flush=True)
+    route = _heygen_require_paid_route()
     image_fp = _resolve_out_file(image_file)
     audio_fp = _resolve_out_file(audio_file)
     if not image_fp or not audio_fp:
         raise ValueError("视频素材文件不存在")
     audio_fp = _ensure_heygen_audio_mp3(audio_fp)
     # 素材上传对瞬时网络错误重试(不计费、安全，同直连)
+    actual_resolution = _heygen_actual_resolution(resolution, route)
     image_asset_id = _upload_heygen_image_asset(
         image_fp, "口播中转传图")
     audio_asset_id = _heygen_retry_net(lambda: _heygen_upload_asset(audio_fp), "口播中转传音")
     # 中转(泽龙)转发的是同一个 HeyGen 账号，一样占账号的并发额度 —— 不占槽就等于绕过了闸
     with heygen_slot("口播中转"):
         video_id = _heygen_retry_429(
-            lambda: _heygen_create_video(image_asset_id, audio_asset_id, resolution, ratio, motion), "口播中转")
+            lambda: _heygen_create_video(
+                image_asset_id, audio_asset_id, actual_resolution, ratio, motion,
+                route=route,
+            ), "口播中转")
         # 中转也用同一个死线。原来它回落到 HEYGEN_TIMEOUT(1200s)，比 reaper 对口播的宽限
         # (540s)还长 —— reaper 先把任务判死并退点，worker 却还在轮询，上游照样出片照样收钱。
         info = _heygen_poll_video(video_id, deadline_s=VIDEO_GEN_DEADLINE)
@@ -4233,6 +4405,9 @@ def generate_heygen_video(image_file, audio_file, resolution, ratio, motion):
         "source_video_url": info.get("video_url"),
         "thumbnail_url": info.get("thumbnail_url"),
         "duration": info.get("duration"),
+        "provider": route,
+        "provider_transport": "relay",
+        "actual_resolution": actual_resolution,
     }
     if cover:
         ret["image_file"] = cover
@@ -4266,32 +4441,57 @@ def generate_heygen_video_recoverable(
     state = dict((lifecycle or {}).get("state") or {})
     provider_id = str(state.get("provider_video_id") or "").strip()
     provider = str(state.get("provider") or "").strip()
+    provider_transport = str(state.get("provider_transport") or "").strip()
     image_asset_id = str(state.get("image_asset_id") or "").strip()
     audio_asset_id = str(state.get("audio_asset_id") or "").strip()
+    actual_resolution = str(state.get("actual_resolution") or "").strip()
+    image_url = audio_url = None
     creating = not provider_id
     if provider_id:
-        if provider not in {"heygen_direct", "heygen_relay"}:
+        if provider in {"heygen_direct", "heygen_relay"}:
+            # Historical jobs predate explicit account routing and were API-wallet jobs.
+            provider_transport = "direct" if provider == "heygen_direct" else "relay"
+            provider = "api_wallet"
+        if provider not in {"mcp_oauth", "api_wallet"}:
             raise RuntimeError("已受理的口播任务缺少供应商通道")
-        direct = provider == "heygen_direct"
+        if provider == "mcp_oauth":
+            provider_transport = "mcp"
+        elif provider_transport not in {"direct", "relay"}:
+            raise RuntimeError("已受理的口播任务缺少供应商传输通道")
+        direct = provider_transport in {"direct", "mcp"}
+        actual_resolution = actual_resolution or _heygen_actual_resolution(resolution, provider)
     else:
         image_fp = preflight_heygen_image_file(image_file, "avatar")["path"]
         audio_fp = preflight_heygen_audio_file(audio_file)
         audio_fp = _ensure_heygen_audio_mp3(audio_fp)
-        direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
-        provider = "heygen_direct" if direct else "heygen_relay"
-        image_asset_id = _upload_heygen_image_asset(
-            image_fp, "口播传图", direct=direct, category="avatar",
-        )
-        audio_asset_id = _heygen_retry_net(
-            lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播传音",
-        )
+        provider = _heygen_require_paid_route()
+        actual_resolution = _heygen_actual_resolution(resolution, provider)
+        if provider == "mcp_oauth":
+            provider_transport = "mcp"
+            direct = True
+            assets = _heygen_mcp_prepare_assets(image_fp, audio_fp)
+            image_asset_id = assets["image_asset_id"]
+            audio_asset_id = assets["audio_asset_id"]
+            image_url = assets["image_url"]
+            audio_url = assets["audio_url"]
+        else:
+            direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
+            provider_transport = "direct" if direct else "relay"
+            image_asset_id = _upload_heygen_image_asset(
+                image_fp, "口播传图", direct=direct, category="avatar",
+            )
+            audio_asset_id = _heygen_retry_net(
+                lambda: _heygen_upload_asset(audio_fp, direct=direct), "口播传音",
+            )
 
     with heygen_slot("口播恢复" if creating else "口播恢复轮询"):
         if creating:
             _lifecycle_notify(lifecycle, "on_submitting", {
                 "provider": provider,
+                "provider_transport": provider_transport,
                 "image_asset_id": image_asset_id,
                 "audio_asset_id": audio_asset_id,
+                "actual_resolution": actual_resolution,
             })
             # Only an explicit 429 is documented as rejected before billing and
             # therefore safe to retry. Network/5xx/unknown outcomes still pass
@@ -4299,8 +4499,9 @@ def generate_heygen_video_recoverable(
             try:
                 provider_id = _heygen_retry_429(
                     lambda: _heygen_create_video(
-                        image_asset_id, audio_asset_id, resolution, ratio, motion,
-                        direct=direct,
+                        image_asset_id, audio_asset_id, actual_resolution, ratio, motion,
+                        direct=direct, route=provider,
+                        image_url=image_url, audio_url=audio_url,
                     ),
                     "口播恢复提交",
                 )
@@ -4313,9 +4514,11 @@ def generate_heygen_video_recoverable(
             try:
                 _lifecycle_notify(lifecycle, "on_submitted", {
                     "provider": provider,
+                    "provider_transport": provider_transport,
                     "provider_video_id": provider_id,
                     "image_asset_id": image_asset_id,
                     "audio_asset_id": audio_asset_id,
+                    "actual_resolution": actual_resolution,
                 })
             except BaseException as exc:
                 raise HeyGenBilledError(
@@ -4325,6 +4528,7 @@ def generate_heygen_video_recoverable(
         try:
             info = _heygen_poll_video(
                 provider_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
+                mcp=provider == "mcp_oauth",
             )
             video_file = (
                 _download_video_file_direct(info["video_url"], "heygen")
@@ -4348,6 +4552,8 @@ def generate_heygen_video_recoverable(
         "thumbnail_url": info.get("thumbnail_url"),
         "duration": info.get("duration"),
         "provider": provider,
+        "provider_transport": provider_transport,
+        "actual_resolution": actual_resolution,
     }
     if cover:
         ret["image_file"] = cover
@@ -4629,7 +4835,7 @@ def gen_video(payload, provider_lifecycle=None):
     if mode not in {"text", "audio"}:
         raise ValueError("生成方式不正确")
     # 口播(text/audio)走 HeyGen。
-    if not HEYGEN_API_KEY:
+    if not HEYGEN_API_KEY and not _heygen_mcp_enabled():
         raise ValueError("视频生成服务未配置")
     avatar = None
     avatar_id = payload.get("avatar_id")
@@ -4756,7 +4962,11 @@ def gen_video(payload, provider_lifecycle=None):
         "reference_asset_id": video_result.get("reference_asset_id"),
         "source_video_url": video_result.get("source_video_url"),
         "thumbnail_url": video_result.get("thumbnail_url"), "duration": video_result.get("duration"),
-        "resolution": resolution, "ratio": ratio, "motion": motion,
+        "resolution": resolution,
+        "actual_resolution": video_result.get("actual_resolution") or resolution,
+        "provider": video_result.get("provider"),
+        "provider_transport": video_result.get("provider_transport"),
+        "ratio": ratio, "motion": motion,
         "phase": "done",
         "subtitle": subtitle_on,
         "subtitle_style": subtitle_style if subtitle_on else None,
