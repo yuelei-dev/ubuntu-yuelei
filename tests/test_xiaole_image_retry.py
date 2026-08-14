@@ -34,7 +34,9 @@ RATE_LIMIT_MSG = "当前 API Key 媒体任务过多，请稍后再试"
 
 def _fake_request(calls, post_results, get_results):
     """生成 _xiaole_request 替身：按队列依次返回/抛错，记录调用。"""
-    def fake(method, path, body=None, timeout=90, retry_deadline=None):
+    def fake(method, path, body=None, timeout=90, retry_deadline=None,
+             idempotency_key=None):
+        del body, timeout, retry_deadline, idempotency_key
         calls.append((method, path))
         queue = post_results if method == "POST" else get_results
         item = queue.pop(0) if queue else POLL_OK
@@ -93,7 +95,9 @@ class XiaoleImageRetryTest(unittest.TestCase):
         """外层预算按墙钟计时，不会漏掉 _xiaole_request 内部消耗的时间。"""
         calls = []
 
-        def slow_rate_limit(method, path, body=None, timeout=90, retry_deadline=None):
+        def slow_rate_limit(method, path, body=None, timeout=90, retry_deadline=None,
+                            idempotency_key=None):
+            del body, timeout, retry_deadline, idempotency_key
             calls.append((method, path))
             self._now += 120
             raise RuntimeError("视频接口失败: HTTP 429 busy")
@@ -112,6 +116,78 @@ class XiaoleImageRetryTest(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             self._run([{"code": 400, "message": "内容审核未通过"}])
         self.assertIn("出图创建失败", str(ctx.exception))
+
+    def test_explicit_route_unavailable_retries_with_one_idempotency_key(self):
+        """明确未创建的线路不可用可等待；所有重放必须共用一个幂等键。"""
+        calls = []
+        results = [
+            RuntimeError(
+                '视频接口失败: HTTP 503 {"code":"IMAGE_ROUTE_TEMPORARILY_UNAVAILABLE",'
+                '"message":"匹配当前图片参数的生成线路暂不可用，请稍后重试","data":null}'
+            ),
+            CREATE_OK,
+        ]
+
+        def fake(method, path, body=None, timeout=90, retry_deadline=None,
+                 idempotency_key=None):
+            del body, timeout, retry_deadline
+            calls.append((method, path, idempotency_key))
+            if method == "GET":
+                return POLL_OK
+            item = results.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        with patch.object(image.random, "random", return_value=0.5), \
+             patch.object(image, "_xiaole_request", fake):
+            result = image._gen_image_xiaole_locked(
+                "保持人物身份，改变讲解手势", "9:16", "standard", 1, PNG_B64,
+            )
+
+        post_calls = [item for item in calls if item[0] == "POST"]
+        self.assertEqual(result["provider"], "xiaole")
+        self.assertEqual(len(post_calls), 2)
+        self.assertTrue(post_calls[0][2])
+        self.assertEqual(post_calls[0][2], post_calls[1][2])
+
+    def test_body_route_unavailable_code_is_retried(self):
+        result, calls = self._run([
+            {
+                "code": "IMAGE_ROUTE_TEMPORARILY_UNAVAILABLE",
+                "message": "匹配当前图片参数的生成线路暂不可用，请稍后重试",
+                "data": None,
+            },
+            CREATE_OK,
+        ])
+        self.assertEqual(result["provider"], "xiaole")
+        self.assertEqual([method for method, _path in calls].count("POST"), 2)
+
+    def test_generic_http_503_is_not_retried(self):
+        """未知 503 可能是已受理后的网关异常，不能盲目重放创建请求。"""
+        calls = []
+
+        def fake(method, path, body=None, timeout=90, retry_deadline=None,
+                 idempotency_key=None):
+            del body, timeout, retry_deadline, idempotency_key
+            calls.append((method, path))
+            raise RuntimeError("视频接口失败: HTTP 503 upstream unavailable")
+
+        with patch.object(image, "_xiaole_request", fake):
+            with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+                image._gen_image_xiaole_locked(
+                    "保持人物身份，改变讲解手势", "9:16", "standard", 1, PNG_B64,
+                )
+        self.assertEqual([method for method, _path in calls], ["POST"])
+
+    def test_route_unavailable_budget_exhausted_has_specific_message(self):
+        with patch.object(image, "XIAOLE_IMG_CREATE_MAX_WAIT", 10):
+            with self.assertRaisesRegex(ValueError, "生图线路暂不可用"):
+                self._run([
+                    RuntimeError(
+                        "视频接口失败: HTTP 503 IMAGE_ROUTE_TEMPORARILY_UNAVAILABLE"
+                    )
+                ] * 10)
 
     def test_rate_limit_budget_exhausted(self):
         """持续限流超过预算 → 放弃并给「限流」人话（走失败退点，不会死等）。"""
