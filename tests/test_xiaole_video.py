@@ -83,6 +83,24 @@ class XiaoleVideoTests(unittest.TestCase):
         self.assertEqual(result["data"]["request_id"], "r1")
         self.assertEqual(direct.call_count, 1)
 
+    def test_xiaole_request_uses_caller_idempotency_key(self):
+        seen = []
+
+        def direct(request, timeout):
+            del timeout
+            seen.append(request.get_header("Idempotency-key"))
+            return self._Response()
+
+        with patch.object(self.video, "XIAOLEVIDEO_API_KEY", "test-key"), \
+             patch.object(self.video, "_xiaole_request_routes", return_value=[
+                 ("direct", direct),
+             ]):
+            self.video._xiaole_request(
+                "POST", "/api/v1/generations", {"model": "gpt-image-2"},
+                idempotency_key="image-create-stable-key",
+            )
+        self.assertEqual(seen, ["image-create-stable-key"])
+
     def test_xiaole_routes_are_direct_then_configured_egress(self):
         from content_domains import egress
 
