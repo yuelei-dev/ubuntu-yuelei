@@ -363,6 +363,10 @@ def verify_child_submission_with_record(payload, username, kind):
                 "consent_photo_mismatch", 403,
             )
         cleaned["reference_images"] = [references[0]]
+        # The one-click workflow owns its paid image route. Do not let an old
+        # page or a forged child request switch providers after consent.
+        cleaned["provider"] = "xiaole"
+        cleaned["quality"] = "standard"
     elif stage == "talking":
         try:
             segment_index = int(raw_item_index)
@@ -461,6 +465,8 @@ def verify_child_submission_with_record(payload, username, kind):
             )
         cleaned["prompt"] = material["prompt"]
         cleaned["digital_human_item_index"] = material_index
+        cleaned["provider"] = "xiaole"
+        cleaned["quality"] = "standard"
     cleaned.pop("digital_human_script", None)
     return cleaned, record
 

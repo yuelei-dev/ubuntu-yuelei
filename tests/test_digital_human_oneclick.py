@@ -259,11 +259,52 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "digital_human_item_index": 0,
         }
         gesture = dict(common, digital_human_stage="gesture", prompt="safe",
+                       provider="openai",
                        reference_images=[base64.b64encode(b"portrait").decode("ascii")])
         with mock.patch.object(self.domain, "cdb", self._consent_connection):
             checked = self.domain.verify_child_submission(gesture, "yuelei", "image")
             self.assertEqual(checked["digital_human_consent_id"], consent["consent_id"])
+            self.assertEqual(checked["provider"], "xiaole")
+            self.assertEqual(
+                self.points.cost_of("image", checked),
+                self.points.pricing.get_price("image.xiaole.std"),
+            )
             self.assertNotIn("digital_human_consent_token", checked)
+            missing_provider = dict(gesture)
+            missing_provider.pop("provider")
+            self.assertEqual(
+                self.domain.verify_child_submission(
+                    missing_provider, "yuelei", "image",
+                )["provider"],
+                "xiaole",
+            )
+            material_reference = base64.b64encode(
+                b"\x89PNG\r\n\x1a\n" + b"authorized-material",
+            ).decode("ascii")
+            material = dict(
+                common, digital_human_stage="material", provider="openai",
+                reference_images=[material_reference],
+            )
+            checked_material = self.domain.verify_child_submission(
+                material, "yuelei", "image",
+            )
+            self.assertEqual(checked_material["provider"], "xiaole")
+            self.assertEqual(
+                checked_material["reference_images"], [material_reference],
+            )
+            self.assertEqual(
+                self.points.cost_of("image", checked_material),
+                self.points.pricing.get_price("image.xiaole.std"),
+            )
+            if sys.platform != "win32":
+                image_domain = importlib.import_module("content_domains.image")
+                validated_material = image_domain.validate_image_payload(
+                    checked_material,
+                )
+                self.assertEqual(validated_material["provider"], "xiaole")
+                self.assertEqual(
+                    validated_material["reference_images"], [material_reference],
+                )
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "照片"):
                 self.domain.verify_child_submission(
                     dict(gesture, reference_images=[base64.b64encode(b"other").decode("ascii")]),
@@ -369,7 +410,11 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         record = self._consent_record(
             consent_payload["plan_digest"], id=consent["consent_id"],
         )
-        job_ids = self._insert_gesture_jobs(record)
+        # Existing OpenAI children remain recoverable; retries are new
+        # submissions and are forced to xiaole by the server.
+        job_ids = self._insert_gesture_jobs(
+            record, overrides={"provider": "openai"},
+        )
         body = {
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
             "digital_human_stage": "gesture_recovery",
@@ -551,6 +596,17 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             consent_payload["plan_digest"], id=consent["consent_id"],
         )
         self._bind_child_jobs(record)
+        connection = self._connection()
+        old_material = json.loads(connection.execute(
+            "SELECT payload FROM jobs WHERE id=11",
+        ).fetchone()[0])
+        old_material["provider"] = "openai"
+        connection.execute(
+            "UPDATE jobs SET payload=? WHERE id=11",
+            (json.dumps(old_material),),
+        )
+        connection.commit()
+        connection.close()
         material_body = self._recovery_body(
             consent, consent_payload, "material_recovery", "material_job_ids",
             [11, 12, 13, 14, 15, 16],
