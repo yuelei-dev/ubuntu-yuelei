@@ -453,7 +453,11 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             self.manifest["executor"]["confirm_target"],
         )
         self.assertEqual(
-            {"tests/test_script_to_video.py", "tests/test_digital_human_oneclick.py"},
+            {
+                "tests/test_script_to_video.py",
+                "tests/test_digital_human_oneclick.py",
+                "tests/test_heygen_mcp_oauth.py",
+            },
             {
                 entry["repository_path"]
                 for entry in self.manifest["release_contract_sources"]

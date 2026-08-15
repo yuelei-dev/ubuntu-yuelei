@@ -144,7 +144,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             "run_staged_whisper_cache_prepare_and_online_model_preload",
             "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
             "run_candidate_subtitle_runtime_preflight_for_model_and_cjk_font",
-            "run_no_charge_page_and_talking_subtask_contracts",
+            "run_no_charge_page_talking_and_mcp_asset_contracts",
         }
         self.assertTrue(required_before_restart.issubset(set(steps[:restart])))
         self.assertEqual(steps.count("restart_huangque_content_once"), 1)
@@ -164,6 +164,8 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertIn("before", contract["page_preflight_failure"])
         self.assertIn("503", contract["talking_subtask_preflight_failure"])
         self.assertIn("before", contract["talking_subtask_preflight_failure"])
+        self.assertIn("before asset upload", contract["mcp_asset_contract_failure"])
+        self.assertIn("before a paid HeyGen create", contract["mcp_asset_contract_failure"])
         self.assertFalse(contract["automatic_paid_retry_allowed"])
         script_source = (ROOT / "server/content_domains/script_to_video.py").read_text(
             encoding="utf-8"
@@ -183,6 +185,30 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         )
         self.assertIn("still before core creates/charges the video child job", oneclick)
         self.assertIn("video_domain.subtitle_runtime_preflight()", oneclick)
+
+        release_tests = set(self.manifest["release_gate_tests"])
+        self.assertIn(
+            "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests."
+            "test_mcp_asset_contract_uses_live_tools_list_schema",
+            release_tests,
+        )
+        self.assertIn(
+            "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests."
+            "test_mcp_asset_validation_error_is_redacted_and_pre_billing",
+            release_tests,
+        )
+        command_patterns = {
+            command["argv"][7]
+            for command in self.manifest["release_commands"]["no_charge"]
+        }
+        self.assertEqual(
+            command_patterns,
+            {
+                "test_script_to_video.py",
+                "test_digital_human_oneclick.py",
+                "test_heygen_mcp_oauth.py",
+            },
+        )
 
     def test_verifier_fails_closed_on_drift_and_accepts_exact_images(self):
         synthetic = copy.deepcopy(self.manifest)
