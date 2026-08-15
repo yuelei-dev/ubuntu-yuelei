@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -105,14 +106,307 @@ class ScriptToVideoTests(unittest.TestCase):
             def _method_not_allowed(self): self.sent = (405, {})
 
         handler = Handler()
+        subtitle_result = {
+            "ok": True, "model": "small", "device": "cpu",
+            "compute_type": "int8", "no_charge": True,
+        }
         with mock.patch.object(
+                self.video, "subtitle_runtime_preflight",
+                return_value=subtitle_result), mock.patch.object(
                 self.video, "heygen_upload_preflight",
                 return_value={"ok": True, "channel": "relay", "no_charge": True}):
             self.assertTrue(self.script_to_video.dispatch_http(
                 handler, "POST", lambda _token: {"username": "fang"},
                 lambda _user: False,
             ))
-        self.assertEqual((200, {"ok": True, "channel": "relay", "no_charge": True}), handler.sent)
+        self.assertEqual((200, {
+            "ok": True, "channel": "relay", "no_charge": True,
+            "subtitle": subtitle_result,
+        }), handler.sent)
+
+    def test_subtitle_runtime_preflight_loads_local_cpu_stack_once(self):
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            charset = " ".join(
+                "%04x" % ord(character)
+                for character in self.video.SUBTITLE_REQUIRED_CJK_GLYPHS
+            )
+            with \
+             mock.patch.object(self.video, "_subtitle_runtime_ready", False), \
+             mock.patch.object(self.video.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+             mock.patch.object(
+                 self.video, "_subtitle_tool_output",
+                 side_effect=[
+                     " V..... libx264 H.264\n A..... aac AAC\n",
+                     " T.C drawtext\n ... subtitles\n",
+                     "Noto Sans CJK SC\n%s\n" % font,
+                     charset,
+                 ],
+             ) as tools, mock.patch.object(
+                 self.video, "_get_whisper_model", return_value=object(),
+             ) as model:
+                first = self.video.subtitle_runtime_preflight()
+                second = self.video.subtitle_runtime_preflight()
+        self.assertEqual("small", first["model"])
+        self.assertEqual("cpu", first["device"])
+        self.assertEqual("int8", first["compute_type"])
+        self.assertTrue(first["no_charge"])
+        self.assertEqual(first, second)
+        self.assertEqual(4, tools.call_count)
+        model.assert_called_once_with()
+
+    def test_subtitle_runtime_preflight_rejects_missing_whisper_before_charge(self):
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            charset = " ".join(
+                "%04x" % ord(character)
+                for character in self.video.SUBTITLE_REQUIRED_CJK_GLYPHS
+            )
+            with \
+             mock.patch.object(self.video, "_subtitle_runtime_ready", False), \
+             mock.patch.object(self.video.shutil, "which", return_value="/usr/bin/tool"), \
+             mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+             mock.patch.object(
+                 self.video, "_subtitle_tool_output",
+                 side_effect=[
+                     " V..... libx264 H.264\n A..... aac AAC\n",
+                     " T.C drawtext\n ... subtitles\n",
+                     "Noto Sans CJK SC\n%s\n" % font,
+                     charset,
+                 ],
+             ), mock.patch.object(
+                 self.video, "_get_whisper_model",
+                 side_effect=ModuleNotFoundError("faster_whisper"),
+             ):
+                with self.assertRaises(
+                        self.video.SubtitleRuntimePreflightError) as caught:
+                    self.video.subtitle_runtime_preflight()
+        self.assertEqual("subtitle_runtime_unavailable", caught.exception.code)
+        self.assertIn("faster-whisper 未安装", str(caught.exception))
+        self.assertIn("未调用付费视频渠道", str(caught.exception))
+
+    def test_subtitle_runtime_preflight_rejects_dejavu_fallback_before_heygen(self):
+        domain = self.digital_human_oneclick
+
+        class Handler:
+            path = domain.HEYGEN_PREFLIGHT_PATH
+            def _token(self): return "token"
+            def _send(self, status, payload): self.sent = (status, payload)
+            def _method_not_allowed(self): self.sent = (405, {})
+
+        with tempfile.TemporaryDirectory() as raw:
+            fallback = Path(raw) / "DejaVuSans.ttf"
+            fallback.write_bytes(b"font")
+            handler = Handler()
+            heygen = mock.Mock(return_value={
+                "ok": True, "channel": "relay", "no_charge": True,
+            })
+            with mock.patch.object(
+                    self.video, "_subtitle_runtime_ready", False), \
+                 mock.patch.object(
+                    self.video.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+                 mock.patch.object(
+                    self.video, "_subtitle_tool_output", side_effect=[
+                        " V..... libx264 H.264\n A..... aac AAC\n",
+                        " T.C drawtext\n ... subtitles\n",
+                        "DejaVu Sans\n%s\n" % fallback,
+                    ],
+                 ), mock.patch.object(
+                    self.video, "_get_whisper_model",
+                 ) as model, mock.patch.object(
+                    self.video, "heygen_upload_preflight", heygen,
+                 ):
+                self.assertTrue(self.script_to_video.dispatch_http(
+                    handler, "POST", lambda _token: {"username": "fang"},
+                    lambda _user: False,
+                ))
+        self.assertEqual(503, handler.sent[0])
+        self.assertEqual("subtitle_runtime_unavailable", handler.sent[1]["code"])
+        self.assertTrue(handler.sent[1]["no_charge"])
+        self.assertIn("未调用付费视频渠道", handler.sent[1]["detail"])
+        heygen.assert_not_called()
+        model.assert_not_called()
+
+    def test_subtitle_runtime_preflight_rejects_font_without_cjk_glyphs(self):
+        with tempfile.TemporaryDirectory() as raw:
+            font = Path(raw) / "NotoSansCJK-Regular.ttc"
+            font.write_bytes(b"font")
+            with mock.patch.object(
+                    self.video, "_subtitle_runtime_ready", False), \
+                 mock.patch.object(
+                    self.video.shutil, "which", return_value="/usr/bin/tool"), \
+                 mock.patch.object(self.video, "VIDEO_OUT_DIR", Path(raw)), \
+                 mock.patch.object(
+                    self.video, "_subtitle_tool_output", side_effect=[
+                        " V..... libx264 H.264\n A..... aac AAC\n",
+                        " T.C drawtext\n ... subtitles\n",
+                        "Noto Sans CJK SC\n%s\n" % font,
+                        "0041-007a",
+                    ],
+                 ), mock.patch.object(
+                    self.video, "_get_whisper_model",
+                 ) as model:
+                with self.assertRaises(
+                        self.video.SubtitleRuntimePreflightError) as caught:
+                    self.video.subtitle_runtime_preflight()
+        self.assertEqual("subtitle_runtime_unavailable", caught.exception.code)
+        self.assertIn("缺少中文字符", str(caught.exception))
+        self.assertIn("未调用付费视频渠道", str(caught.exception))
+        model.assert_not_called()
+
+    def test_content_runtime_declares_pinned_offline_whisper_dependency(self):
+        root = Path(__file__).resolve().parents[1]
+        requirements = (root / "deploy/requirements-content.txt").read_text(
+            encoding="utf-8",
+        )
+        whisper_conf = (
+            root / "deploy/systemd/huangque-content.service.d/whisper.conf"
+        ).read_text(encoding="utf-8")
+        self.assertIn("faster-whisper==1.2.1", requirements)
+        for marker in (
+            "WHISPER_MODEL=small", "WHISPER_DEVICE=cpu",
+            "WHISPER_COMPUTE_TYPE=int8",
+            "WHISPER_CACHE_DIR=/var/cache/huangque/faster-whisper",
+            "HF_HUB_OFFLINE=1",
+        ):
+            self.assertIn(marker, whisper_conf)
+
+    def test_whisper_prepare_script_supports_download_then_offline_verify(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location("prepare_content_whisper", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        calls = []
+
+        class FakeWhisperModel:
+            def __init__(self, model, **kwargs):
+                calls.append((model, kwargs))
+
+        fake_package = type(sys)("faster_whisper")
+        fake_package.WhisperModel = FakeWhisperModel
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(
+                sys.modules, {"faster_whisper": fake_package}):
+            downloaded = module.prepare("small", raw, verify_only=False)
+            verified = module.prepare("small", raw, verify_only=True)
+        self.assertTrue(downloaded["loaded"])
+        self.assertTrue(verified["loaded"])
+        self.assertFalse(calls[0][1]["local_files_only"])
+        self.assertTrue(calls[1][1]["local_files_only"])
+        self.assertEqual("cpu", calls[1][1]["device"])
+        self.assertEqual("int8", calls[1][1]["compute_type"])
+
+    def test_whisper_prepare_requires_precreated_writable_cache(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_gate", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            missing = Path(raw) / "missing" / "faster-whisper"
+            with self.assertRaises(FileNotFoundError):
+                module.prepare("small", missing)
+            cache = Path(raw) / "faster-whisper"
+            cache.mkdir()
+            with self.assertRaises(PermissionError):
+                module.prepare("small", cache, access_fn=lambda *_args: False)
+
+    def test_whisper_cache_preparation_creates_only_owned_leaf(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_setup", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        chown = mock.Mock()
+        chmod = mock.Mock()
+        user = SimpleNamespace(pw_uid=1001)
+        group = SimpleNamespace(gr_gid=1002)
+        with tempfile.TemporaryDirectory() as raw:
+            cache_root = Path(raw) / "huangque"
+            cache = cache_root / "faster-whisper"
+            result = module.prepare_cache_for_service(
+                cache, "ubuntu", "ubuntu",
+                effective_uid_fn=lambda: 0,
+                user_lookup=lambda _name: user,
+                group_lookup=lambda _name: group,
+                allowed_root=cache_root,
+                chown_fn=chown,
+                chmod_fn=chmod,
+            )
+            self.assertTrue(cache.is_dir())
+            self.assertEqual(str(cache.resolve()), result["cache_dir"])
+            chown.assert_called_once_with(str(cache.resolve()), 1001, 1002)
+            chmod.assert_called_once_with(str(cache.resolve()), 0o750)
+            self.assertEqual([cache.name], [item.name for item in cache_root.iterdir()])
+
+    def test_whisper_cache_preparation_rejects_non_root_and_broad_target(self):
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts/prepare_content_whisper.py"
+        spec = importlib.util.spec_from_file_location(
+            "prepare_content_whisper_cache_reject", script,
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as raw:
+            cache_root = Path(raw) / "huangque"
+            cache = cache_root / "faster-whisper"
+            with self.assertRaises(PermissionError):
+                module.prepare_cache_for_service(
+                    cache, "ubuntu", "ubuntu",
+                    effective_uid_fn=lambda: 1001,
+                    allowed_root=cache_root,
+                )
+            with self.assertRaises(ValueError):
+                module.prepare_cache_directory(
+                    cache_root, 1001, 1002, allowed_root=cache_root,
+                    chown_fn=mock.Mock(), chmod_fn=mock.Mock(),
+                )
+
+    def test_whisper_deployment_contract_stops_before_restart_and_scopes_rollback(self):
+        root = Path(__file__).resolve().parents[1]
+        contract = (
+            root / "deploy/systemd/huangque-content.service.d/whisper.conf"
+        ).read_text(encoding="utf-8")
+        runtime = (
+            root / "scripts/prepare_content_whisper_runtime.sh"
+        ).read_text(encoding="utf-8")
+        prepare_cache = runtime.index("--prepare-cache")
+        download = runtime.index('"${RUNUSER_BIN}"', prepare_cache)
+        verify = runtime.index("--verify-only", download)
+        self.assertLess(prepare_cache, download)
+        self.assertLess(download, verify)
+        self.assertNotIn("systemctl", runtime)
+        self.assertIn("set -euo pipefail", runtime)
+        self.assertIn("prepare_content_whisper_runtime.sh &&", contract)
+        restart = contract.index("restart huangque-content")
+        self.assertLess(contract.index("prepare_content_whisper_runtime.sh"), restart)
+        self.assertIn("任一步失败都必须停止", contract)
+        self.assertIn("只能清理 faster-whisper 叶目录", contract)
+        self.assertIn("禁止删除父目录或其他缓存", contract)
+
+    def test_whisper_runtime_prepare_shell_has_valid_linux_syntax(self):
+        script = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/prepare_content_whisper_runtime.sh"
+        )
+        bash = shutil.which("bash")
+        if bash:
+            subprocess.run(
+                [bash, "-n", str(script)], check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+        else:
+            source = script.read_text(encoding="utf-8")
+            self.assertTrue(source.startswith("#!/usr/bin/env bash\n"))
+            self.assertIn("set -euo pipefail", source)
 
     def test_drama_style_routes_to_grok_pipeline(self):
         calls = {}

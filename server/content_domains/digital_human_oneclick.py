@@ -455,6 +455,18 @@ def verify_child_submission_with_record(payload, username, kind):
             mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
         )
         cleaned.pop("gesture_job_id", None)
+        # This is still before core creates/charges the video child job.  Load
+        # the local subtitle stack now so a missing deployment dependency can
+        # never waste a paid HeyGen submission.
+        try:
+            from . import video as video_domain
+            video_domain.subtitle_runtime_preflight()
+        except Exception as exc:
+            raise DigitalHumanRequestError(
+                str(exc)[:220],
+                str(getattr(exc, "code", "subtitle_runtime_unavailable")),
+                int(getattr(exc, "status", 503) or 503),
+            ) from exc
     elif stage == "compose":
         if str(payload.get("plan_digest") or "").strip().lower() != record["plan_digest"]:
             raise DigitalHumanRequestError("成片方案与授权记录不一致", "consent_binding_mismatch", 403)
@@ -1105,9 +1117,20 @@ def compose(payload, persist_state=None):
         "-movflags", "+faststart", str(composed),
     ])
     rel = composed.resolve().relative_to(OUT_DIR.resolve()).as_posix()
-    final_rel = video_domain.burn_subtitle(
-        rel, known_text=payload.get("copy"), style_key="white", job_id=job_id, position="bottom",
-    )
+    if persist_state:
+        persist_state("subtitle_processing", plain_video_file=rel)
+    subtitle_error = ""
+    try:
+        final_rel = video_domain.burn_subtitle(
+            rel, known_text=payload.get("copy"), style_key="white",
+            job_id=job_id, position="bottom",
+        )
+    except Exception as exc:
+        # HeyGen has already been paid and the local composition is complete.
+        # Preserve and deliver that video; a local subtitle retry must never
+        # create another provider task or discard the paid output.
+        final_rel = rel
+        subtitle_error = str(exc)[:220] or "字幕处理失败"
     final_path, width, height, final_duration = _verify_final_video(
         video_domain, final_rel, duration,
     )
@@ -1121,12 +1144,16 @@ def compose(payload, persist_state=None):
         "segments": payload.get("segments") or [],
         "child_jobs": {"videos": payload.get("video_job_ids"), "materials": payload.get("material_job_ids")},
         "verification": {
-            "resolution": "1080x1920", "frame_rate": 30, "subtitle": "whisper",
+            "resolution": "1080x1920", "frame_rate": 30,
+            "subtitle": "whisper" if not subtitle_error else "unavailable",
             "audio_source": "joined_presenter", "audio_stream": True,
             "duration_sync": True, "black_frame_check": True,
             "material_provenance": "CONCEPT / AI FILL",
         },
+        "subtitle_retryable": bool(subtitle_error),
     }
+    if subtitle_error:
+        result["subtitle_error"] = subtitle_error
     if persist_state:
         persist_state("done", final_result=result)
     for path in normalized + [concat_file, joined, background, composed]:

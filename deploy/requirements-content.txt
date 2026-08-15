@@ -4,3 +4,6 @@
 cos-python-sdk-v5==1.9.44
 # Seedance reference images are fully decoded before private staging.
 Pillow==12.2.0
+# CPU-only subtitle timing for talking-head and one-click composition.
+# Model weights are preloaded during deployment; requests run offline.
+faster-whisper==1.2.1

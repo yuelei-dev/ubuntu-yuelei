@@ -372,13 +372,30 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 gesture_job_id=gesture_ids[0],
                 image_data="data:image/png;base64," + base64.b64encode(b"other").decode("ascii"),
             )
-            self.assertIn(
-                "digital_human_consent_id",
-                self.domain.verify_child_submission(talking, "yuelei", "video"),
+            fake_video = SimpleNamespace(
+                subtitle_runtime_preflight=lambda: {
+                    "ok": True, "no_charge": True,
+                },
             )
-            checked_talking = self.domain.verify_child_submission(
-                talking, "yuelei", "video",
+            loaded_video = sys.modules.get("content_domains.video")
+            preflight_patch = (
+                mock.patch.object(
+                    loaded_video, "subtitle_runtime_preflight",
+                    side_effect=fake_video.subtitle_runtime_preflight,
+                )
+                if loaded_video is not None else
+                mock.patch.dict(sys.modules, {"content_domains.video": fake_video})
             )
+            with preflight_patch:
+                self.assertIn(
+                    "digital_human_consent_id",
+                    self.domain.verify_child_submission(
+                        talking, "yuelei", "video",
+                    ),
+                )
+                checked_talking = self.domain.verify_child_submission(
+                    talking, "yuelei", "video",
+                )
             self.assertNotIn("gesture_job_id", checked_talking)
             self.assertEqual(
                 "data:image/png;base64," + base64.b64encode(gesture_file.read_bytes()).decode("ascii"),
@@ -1163,6 +1180,21 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertEqual((result["width"], result["height"]), (1080, 1920))
         self.assertTrue(result["verification"]["audio_stream"])
         self.assertTrue((self.root / result["video_file"]).is_file())
+
+        @staticmethod
+        def failed_subtitle(_rel, **_kwargs):
+            raise ModuleNotFoundError("faster_whisper")
+
+        VideoDomain.burn_subtitle = failed_subtitle
+        fallback_payload = dict(payload, _job_id=231)
+        with mock.patch.object(
+            package, "video", VideoDomain, create=True,
+        ), mock.patch.dict(sys.modules, {"content_domains.video": VideoDomain}):
+            fallback = self.domain.compose(fallback_payload)
+        self.assertTrue(fallback["subtitle_retryable"])
+        self.assertEqual("unavailable", fallback["verification"]["subtitle"])
+        self.assertIn("faster_whisper", fallback["subtitle_error"])
+        self.assertTrue((self.root / fallback["video_file"]).is_file())
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):

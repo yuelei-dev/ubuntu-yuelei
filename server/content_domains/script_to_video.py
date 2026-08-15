@@ -912,7 +912,10 @@ def dispatch_http(handler, method, verify_token, must_change_password):
             return True
         try:
             from . import video as video_domain
-            handler._send(200, video_domain.heygen_upload_preflight())
+            subtitle = video_domain.subtitle_runtime_preflight()
+            result = dict(video_domain.heygen_upload_preflight())
+            result["subtitle"] = subtitle
+            handler._send(200, result)
         except Exception as exc:
             handler._send(int(getattr(exc, "status", 503) or 503), {
                 "detail": str(exc)[:220],
