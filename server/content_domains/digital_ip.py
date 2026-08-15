@@ -13,13 +13,38 @@ import urllib.error
 import uuid
 from contextlib import closing
 
-from .core import OPENAI_KEY, _post
+from . import egress
+from .core import OPENAI_BASE, OPENAI_KEY
 from . import ip12_pdf
 
 
 MODEL = os.environ.get("DIGITAL_IP_MODEL", "gpt-5.6-sol").strip() or "gpt-5.6-sol"
 REASONING_EFFORT = os.environ.get("DIGITAL_IP_REASONING_EFFORT", "low").strip() or "low"
 GUIDE_MODEL = os.environ.get("DIGITAL_IP_GUIDE_MODEL", "gpt-5.6-terra").strip() or "gpt-5.6-terra"
+OPENAI_OFFICIAL_BASE = os.environ.get("OPENAI_OFFICIAL_BASE", "https://api.openai.com").strip().rstrip("/")
+
+
+def _post(path, data, ctype, timeout=300):
+    """Send paid IP12 analysis without ambiguous upstream resubmission."""
+    def base_for_path(value):
+        value = str(value or "https://api.openai.com").strip().rstrip("/")
+        if value.endswith("/v1") and str(path).startswith("/v1/"):
+            value = value[:-3]
+        return value
+
+    return egress.post_json_pre_delivery_failover(
+        base_for_path(OPENAI_OFFICIAL_BASE),
+        base_for_path(OPENAI_BASE),
+        path,
+        data,
+        {
+            "Authorization": "Bearer " + OPENAI_KEY,
+            "Content-Type": ctype,
+        },
+        log=lambda message: print("[digital-ip-egress] " + message, flush=True),
+        max_attempts=2,
+        timeout=timeout,
+    )
 GUIDE_REASONING_EFFORT = os.environ.get("DIGITAL_IP_GUIDE_REASONING_EFFORT", "low").strip() or "low"
 MAX_ANSWER_CHARS = 6000
 MAX_CONTEXT_ITEMS = 12

@@ -8,6 +8,7 @@
 4. 全部失败时抛出最后一个异常，不静默吞
 5. 官方档走各自代理、heygen 档直连（不同 base + 不同 opener）
 """
+import errno
 import os
 import socket
 import sys
@@ -223,6 +224,150 @@ class FailoverTests(unittest.TestCase):
         self.assertEqual(result, {"ok": 2})
         self.assertEqual(calls, ["http://p1", "http://p2"])
 
+    def _run_paid_analysis(self, side_effects, monotonic=None):
+        calls = []
+
+        class _Opener:
+            def __init__(self, tag):
+                self.tag = tag
+
+            def open(self, req, timeout=None):
+                calls.append((self.tag, timeout))
+                effect = side_effects[len(calls) - 1]
+                if isinstance(effect, Exception):
+                    raise effect
+                if isinstance(effect, bytes):
+                    return _FakeResp(effect)
+                return effect
+
+        patches = [
+            patch.object(self.eg, "_channel_usable", return_value=True),
+            patch.object(
+                self.eg, "_opener",
+                side_effect=lambda proxy: _Opener("direct" if not proxy else proxy),
+            ),
+        ]
+        if monotonic is not None:
+            patches.append(patch.object(self.eg.time, "monotonic", side_effect=monotonic))
+        for item in patches:
+            item.start()
+        try:
+            try:
+                result = self.eg.post_json_pre_delivery_failover(
+                    "https://official", "https://relay", "/v1/responses", b"{}", {},
+                    max_attempts=2, timeout=60,
+                )
+                return result, calls, None
+            except Exception as error:
+                return None, calls, error
+        finally:
+            for item in reversed(patches):
+                item.stop()
+
+    def test_paid_analysis_network_unreachable_uses_next_route(self):
+        result, calls, error = self._run_paid_analysis([
+            urllib.error.URLError(OSError(errno.ENETUNREACH, "Network is unreachable")),
+            b'{"ok":5}',
+        ])
+        self.assertIsNone(error)
+        self.assertEqual(result, {"ok": 5})
+        self.assertEqual([call[0] for call in calls], ["http://p1", "http://p2"])
+
+    def test_paid_analysis_timeout_is_not_resent(self):
+        result, calls, error = self._run_paid_analysis([
+            TimeoutError("read timed out"), b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, TimeoutError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_connection_reset_is_not_resent(self):
+        result, calls, error = self._run_paid_analysis([
+            urllib.error.URLError(ConnectionResetError("RST")), b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, urllib.error.URLError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_ssl_eof_from_open_is_not_resent(self):
+        import ssl
+
+        result, calls, error = self._run_paid_analysis([
+            urllib.error.URLError(
+                ssl.SSLEOFError(8, "unexpected EOF while reading")
+            ),
+            b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, urllib.error.URLError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_http_500_is_not_resent(self):
+        import io
+        upstream = urllib.error.HTTPError(
+            "https://redacted.invalid", 500, "server error", {}, io.BytesIO(b"{}"),
+        )
+        result, calls, error = self._run_paid_analysis([upstream, b'{"ok":2}'])
+        self.assertIsNone(result)
+        self.assertIs(error, upstream)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_http_4xx_and_429_are_not_resent(self):
+        import io
+        for code in (400, 429):
+            with self.subTest(code=code):
+                upstream = urllib.error.HTTPError(
+                    "https://redacted.invalid", code, "client error", {}, io.BytesIO(b"{}"),
+                )
+                result, calls, error = self._run_paid_analysis([upstream, b'{"ok":2}'])
+                self.assertIsNone(result)
+                self.assertIs(error, upstream)
+                self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_response_read_failure_is_not_resent(self):
+        class _ReadFailure(_FakeResp):
+            def read(self):
+                raise ConnectionResetError("response lost")
+
+        result, calls, error = self._run_paid_analysis([
+            _ReadFailure(b""), b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ConnectionResetError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_tls_failure_while_reading_is_not_resent(self):
+        import ssl
+
+        class _ReadFailure(_FakeResp):
+            def read(self):
+                raise ssl.SSLError("unexpected EOF while reading")
+
+        result, calls, error = self._run_paid_analysis([
+            _ReadFailure(b""), b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ssl.SSLError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_invalid_json_is_not_resent(self):
+        result, calls, error = self._run_paid_analysis([b'{', b'{"ok":2}'])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(len(calls), 1)
+
+    def test_paid_analysis_deadline_exhaustion_sends_no_second_request(self):
+        result, calls, error = self._run_paid_analysis(
+            [
+                urllib.error.URLError(OSError(errno.ENETUNREACH, "Network is unreachable")),
+                b'{"ok":2}',
+            ],
+            monotonic=[100.0, 100.0, 161.0],
+        )
+        self.assertIsNone(result)
+        self.assertIsInstance(error, TimeoutError)
+        self.assertEqual(len(calls), 1)
+
     def test_idempotent_analysis_retries_only_route_once(self):
         eg = _reload_egress(primary="", fallback="")
         calls = []
@@ -241,7 +386,6 @@ class FailoverTests(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": 3})
         self.assertEqual(len(calls), 2)
-
 
 class ChannelPreflightTests(unittest.TestCase):
     """代理不可达时，整档跳过且一个字节都不发——最安全的降级。"""

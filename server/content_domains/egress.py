@@ -119,7 +119,7 @@ def _channel_usable(proxy):
 _PRE_DELIVERY_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH}
 
 
-def _pre_delivery_failure(e):
+def _pre_delivery_failure(e, *, allow_generic_tls=True):
     """这个异常能否证明「请求还没送到上游」？只有能证明时，换通道重发才是安全的。
 
     出图 POST 是**非幂等**的：请求一旦抵达 OpenAI/Google，就可能已经出图并计费。
@@ -145,7 +145,10 @@ def _pre_delivery_failure(e):
         if isinstance(reason, ConnectionRefusedError):
             return True
         if isinstance(reason, ssl.SSLError):
-            return True              # 握手阶段失败，应用层字节未发送
+            # urllib 的 opener.open() 同时覆盖连接、TLS、发送请求和读取响应头。
+            # 因此付费请求不能只凭通用 SSLError/SSLEOFError 证明应用层字节未发送；
+            # 旧作图链保留原行为，付费分析入口传 allow_generic_tls=False。
+            return bool(allow_generic_tls)
         if isinstance(reason, OSError) and reason.errno in _PRE_DELIVERY_ERRNOS:
             return True
     return False
@@ -199,6 +202,85 @@ def post_json(official_base, heygen_base, path, data, headers, log=None):
             if label != "heygen" and log:
                 log("[egress] %s via %s 连接阶段失败(未送达)，降级下一档: %s" % (path, label, str(e)[:120]))
     raise last if last is not None else RuntimeError("egress: 无可用通道")
+
+
+def post_json_pre_delivery_failover(official_base, heygen_base, path, data, headers,
+                                    log=None, max_attempts=2, timeout=None):
+    """POST once per route and fail over only when non-delivery is provable.
+
+    This is for paid analysis requests whose upstream side effect cannot be
+    deduplicated by Huangque.  A timeout, reset, HTTP response, response-read
+    failure, or invalid response is ambiguous and therefore never resent.
+    Only DNS/connectivity/TLS-handshake failures classified by
+    ``_pre_delivery_failure`` may advance to the next distinct route.
+
+    ``timeout`` is a shared deadline for the complete route chain.  Exhausting
+    it before a later route is attempted raises without sending another POST.
+    """
+    limit = max(1, int(max_attempts or 1))
+    deadline = None
+    if timeout is not None:
+        timeout = float(timeout)
+        if timeout <= 0:
+            raise TimeoutError("egress: shared deadline exhausted")
+        deadline = time.monotonic() + timeout
+
+    available = [
+        channel for channel in channels(official_base, heygen_base)
+        if _channel_usable(channel[2])
+    ]
+    if not available:
+        raise RuntimeError("egress: 无可用通道")
+
+    last = None
+    for number, (label, base, proxy, channel_timeout) in enumerate(
+            available[:limit], 1):
+        request_timeout = float(channel_timeout)
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("egress: shared deadline exhausted") from last
+            request_timeout = min(request_timeout, remaining)
+
+        request = urllib.request.Request(
+            base + path, data=data, headers=headers, method="POST",
+        )
+        try:
+            response = _opener(proxy).open(request, timeout=request_timeout)
+        except Exception as error:
+            last = error
+            error_name = type(error).__name__
+            if not _pre_delivery_failure(error, allow_generic_tls=False):
+                if log:
+                    log(
+                        "[egress] paid analysis %s attempt %d/%d via %s failed "
+                        "ambiguously (%s); not resending"
+                        % (path, number, limit, label, error_name)
+                    )
+                raise
+            if log:
+                log(
+                    "[egress] paid analysis %s attempt %d/%d via %s failed "
+                    "before delivery (%s); trying next distinct route"
+                    % (path, number, limit, label, error_name)
+                )
+
+            continue
+
+        try:
+            with response:
+                payload = response.read()
+            return json.loads(payload)
+        except Exception as error:
+            if log:
+                log(
+                    "[egress] paid analysis %s attempt %d/%d via %s failed "
+                    "while reading/parsing the response (%s); not resending"
+                    % (path, number, limit, label, type(error).__name__)
+                )
+            raise
+
+    raise last if last is not None else RuntimeError("egress: 请求失败")
 
 
 def post_json_idempotent(official_base, heygen_base, path, data, headers, log=None,
