@@ -202,13 +202,20 @@ def post_json(official_base, heygen_base, path, data, headers, log=None):
 
 
 def post_json_idempotent(official_base, heygen_base, path, data, headers, log=None,
-                         max_attempts=2):
+                         max_attempts=2, timeout=None):
     """POST an idempotent analysis request, retrying a slow/broken read once.
 
     Unlike image generation, chat analysis can be safely repeated from the
     user's perspective: the paid site job is created and charged only once.
     Prefer the next configured route; with a single route, retry it once.
     """
+    deadline = None
+    if timeout is not None:
+        timeout = float(timeout)
+        if timeout <= 0:
+            raise TimeoutError("egress: shared deadline exhausted")
+        deadline = time.monotonic() + timeout
+
     available = channels(official_base, heygen_base)
     if not available:
         raise RuntimeError("egress: 无可用通道")
@@ -222,13 +229,19 @@ def post_json_idempotent(official_base, heygen_base, path, data, headers, log=No
         attempts.append(attempts[-1])
 
     last = None
-    for number, (label, base, proxy, timeout) in enumerate(
+    for number, (label, base, proxy, channel_timeout) in enumerate(
             attempts[:max(1, int(max_attempts or 1))], 1):
+        request_timeout = channel_timeout
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("egress: shared deadline exhausted") from last
+            request_timeout = min(float(channel_timeout), remaining)
         request = urllib.request.Request(
             base + path, data=data, headers=headers, method="POST",
         )
         try:
-            with _opener(proxy).open(request, timeout=timeout) as response:
+            with _opener(proxy).open(request, timeout=request_timeout) as response:
                 return json.loads(response.read())
         except urllib.error.HTTPError as error:
             last = error

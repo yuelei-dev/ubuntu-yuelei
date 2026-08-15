@@ -137,6 +137,34 @@ class DigitalIPTests(unittest.TestCase):
         self.assertTrue(result["ai_recommendation"])
         self.assertFalse(result["user_confirmed"])
 
+    def test_openai_transport_uses_managed_egress_and_shared_deadline(self):
+        expected = {"ok": True}
+        with mock.patch.object(digital_ip, "OPENAI_KEY", "test-key"), \
+                mock.patch.object(digital_ip, "OPENAI_BASE", "https://relay.example/v1"), \
+                mock.patch.object(digital_ip, "OPENAI_OFFICIAL_BASE", "https://api.openai.com"), \
+                mock.patch.object(
+                    digital_ip.egress, "post_json_idempotent", return_value=expected,
+                ) as post:
+            result = digital_ip._post(
+                "/v1/responses", b"{}", "application/json", timeout=60,
+            )
+
+        self.assertIs(result, expected)
+        args, kwargs = post.call_args
+        self.assertEqual(args[:5], (
+            "https://api.openai.com",
+            "https://relay.example",
+            "/v1/responses",
+            b"{}",
+            {
+                "Authorization": "Bearer test-key",
+                "Content-Type": "application/json",
+            },
+        ))
+        self.assertEqual(kwargs["max_attempts"], 2)
+        self.assertEqual(kwargs["timeout"], 60)
+        self.assertTrue(callable(kwargs["log"]))
+
     def test_payload_validation_bounds_user_input(self):
         with self.assertRaisesRegex(digital_ip.DigitalIPValidationError, "当前回答不能为空"):
             digital_ip.validate_payload({"module": "定位诊断", "step": "第一步", "answer": ""})

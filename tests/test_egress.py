@@ -8,6 +8,7 @@
 4. 全部失败时抛出最后一个异常，不静默吞
 5. 官方档走各自代理、heygen 档直连（不同 base + 不同 opener）
 """
+import errno
 import os
 import socket
 import sys
@@ -223,6 +224,34 @@ class FailoverTests(unittest.TestCase):
         self.assertEqual(result, {"ok": 2})
         self.assertEqual(calls, ["http://p1", "http://p2"])
 
+    def test_idempotent_analysis_retries_network_unreachable_on_next_channel(self):
+        calls = []
+
+        class _Opener:
+            def __init__(self, tag):
+                self.tag = tag
+
+            def open(self, req, timeout=None):
+                calls.append(self.tag)
+                if len(calls) == 1:
+                    raise urllib.error.URLError(
+                        OSError(errno.ENETUNREACH, "Network is unreachable")
+                    )
+                return _FakeResp(b'{"ok":5}')
+
+        with patch.object(self.eg, "_channel_usable", return_value=True), \
+             patch.object(
+                 self.eg, "_opener",
+                 side_effect=lambda proxy: _Opener("direct" if not proxy else proxy),
+             ):
+            result = self.eg.post_json_idempotent(
+                "https://official", "https://relay", "/v1/responses", b"{}", {},
+                max_attempts=2, timeout=60,
+            )
+
+        self.assertEqual(result, {"ok": 5})
+        self.assertEqual(calls, ["http://p1", "http://p2"])
+
     def test_idempotent_analysis_retries_only_route_once(self):
         eg = _reload_egress(primary="", fallback="")
         calls = []
@@ -241,6 +270,27 @@ class FailoverTests(unittest.TestCase):
             )
         self.assertEqual(result, {"ok": 3})
         self.assertEqual(len(calls), 2)
+
+    def test_idempotent_analysis_shares_deadline_across_attempts(self):
+        calls = []
+
+        class _Opener:
+            def open(self, req, timeout=None):
+                calls.append(timeout)
+                if len(calls) == 1:
+                    raise TimeoutError("read timed out")
+                return _FakeResp(b'{"ok":4}')
+
+        with patch.object(self.eg, "_channel_usable", return_value=True), \
+             patch.object(self.eg, "_opener", return_value=_Opener()), \
+             patch.object(self.eg.time, "monotonic", side_effect=[100.0, 100.0, 159.5]):
+            result = self.eg.post_json_idempotent(
+                "https://official", "https://heygen", "/v1/responses", b"{}", {},
+                max_attempts=2, timeout=60,
+            )
+
+        self.assertEqual(result, {"ok": 4})
+        self.assertEqual(calls, [60.0, 0.5])
 
 
 class ChannelPreflightTests(unittest.TestCase):
