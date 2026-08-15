@@ -29,8 +29,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "b41fa69548188ef69f64c17ff920721f64948a07",
-    "source_sha256": "4d9c894543cb9295fd2b5c657604bd199cdf90368b3854f645fde0aa360ae7ce",
+    "source_blob": "eb090f6156dec1803a64093ef78231ed4b05357a",
+    "source_sha256": "34a72f9da57cc369f92e8429a2fa0c45fb989900a64af680f53c7c865a8dab86",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
@@ -297,6 +297,10 @@
       "expected_status": 401
     }
   ],
+  "health_probe_policy": {
+    "startup_timeout_seconds": 60,
+    "interval_seconds": 1
+  },
   "rollback": {
     "method": "restore every target recorded present and remove only staged targets recorded missing, then daemon-reload and restart huangque-content.service once",
     "scope": "all seven manifest targets as one unit",

@@ -46,16 +46,33 @@ class FakeRunner:
 
 
 class HealthProbe:
-    def __init__(self, fail_first=False):
-        self.fail_first = fail_first
+    def __init__(self, fail_count=0, connection_fail_count=0):
+        self.fail_count = fail_count
+        self.connection_fail_count = connection_fail_count
         self.calls = []
 
     def __call__(self, url):
         self.calls.append(url)
-        if self.fail_first:
-            self.fail_first = False
+        if self.connection_fail_count:
+            self.connection_fail_count -= 1
+            raise ConnectionRefusedError("service is still starting")
+        if self.fail_count:
+            self.fail_count -= 1
             return 500
         return 200 if url.endswith("/health") else 401
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 @contextlib.contextmanager
@@ -182,7 +199,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     def _release(
             self, *, runner=None, health=None, checkpoint=None, manifest=None,
             git_runner=None, reviewed_source=REVIEWED_SOURCE,
-            reviewed_main=REVIEWED_MAIN, use_real_health=False):
+            reviewed_main=REVIEWED_MAIN, use_real_health=False, clock=None):
         return self.release_module.ContentWhisperRelease(
             manifest or self.manifest,
             ROOT,
@@ -194,6 +211,8 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             git_runner=git_runner or FakeGitRunner(),
             reviewed_source_commit=reviewed_source,
             reviewed_main_commit=reviewed_main,
+            monotonic=clock.monotonic if clock else None,
+            sleeper=clock.sleep if clock else None,
         )
 
     def _assert_restored_without_residue(self):
@@ -308,16 +327,52 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
 
     def test_health_failure_restores_and_restarts_old_version_once(self):
         runner = FakeRunner()
-        health = HealthProbe(fail_first=True)
+        health = HealthProbe(fail_count=3)
+        clock = FakeClock()
+        self.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
         with self.assertRaisesRegex(
                 self.release_module.ReleaseError, "all seven targets were restored"):
-            self._release(runner=runner, health=health).execute(
+            self._release(runner=runner, health=health, clock=clock).execute(
                 self.release_module.AUTHORIZED_TARGET
             )
         self._assert_restored_without_residue()
         self.assertEqual(1, runner.calls.count("restart"))
         self.assertEqual(1, runner.calls.count("rollback_restart"))
         self.assertGreaterEqual(len(health.calls), 3)
+
+    def test_restart_health_waits_for_delayed_listener_without_rollback(self):
+        runner = FakeRunner()
+        health = HealthProbe(connection_fail_count=19)
+        clock = FakeClock()
+        result = self._release(
+            runner=runner, health=health, clock=clock,
+        ).execute(self.release_module.AUTHORIZED_TARGET)
+        self.assertTrue(result["ok"])
+        self.assertEqual(21, len(health.calls))
+        self.assertEqual([1] * 19, clock.sleeps)
+        self.assertEqual(1, runner.calls.count("restart"))
+        self.assertNotIn("rollback_restart", runner.calls)
+
+    def test_health_wait_is_bounded_and_rollback_gets_a_fresh_deadline(self):
+        runner = FakeRunner()
+        health = HealthProbe(connection_fail_count=3)
+        clock = FakeClock()
+        self.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
+        with self.assertRaisesRegex(
+                self.release_module.ReleaseError, "all seven targets were restored"):
+            self._release(
+                runner=runner, health=health, clock=clock,
+            ).execute(self.release_module.AUTHORIZED_TARGET)
+        self.assertEqual([1, 1], clock.sleeps)
+        self.assertEqual(1, runner.calls.count("rollback_restart"))
+        self.assertGreaterEqual(len(health.calls), 5)
+        self._assert_restored_without_residue()
 
     def test_success_and_rollback_health_probes_ignore_environment_proxy(self):
         proxy_status = lambda _path: 418
@@ -326,11 +381,17 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 self.tearDown()
                 self.setUp()
                 health_calls = {"count": 0}
+                clock = FakeClock()
+                if rollback:
+                    self.manifest["health_probe_policy"] = {
+                        "startup_timeout_seconds": 2,
+                        "interval_seconds": 1,
+                    }
 
                 def target_status(path):
                     if path == "/api/gen/health":
                         health_calls["count"] += 1
-                        if rollback and health_calls["count"] == 1:
+                        if rollback and health_calls["count"] <= 3:
                             return 500
                         return 200
                     return 401
@@ -359,7 +420,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                             "no_proxy": "",
                     }), patch("urllib.request.proxy_bypass", return_value=False):
                         release = self._release(
-                            runner=runner, use_real_health=True,
+                            runner=runner, use_real_health=True, clock=clock,
                         )
                         if rollback:
                             with self.assertRaisesRegex(
@@ -374,7 +435,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                             )
 
                 self.assertEqual([], proxy.hits)
-                expected_target_hits = 3 if rollback else 2
+                expected_target_hits = 5 if rollback else 2
                 self.assertEqual(expected_target_hits, len(target.hits))
                 if rollback:
                     self._assert_restored_without_residue()
@@ -392,6 +453,23 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaisesRegex(
                     self.release_module.ReleaseError, "approved local endpoint"):
                 release._http_status(url)
+
+    def test_invalid_health_wait_policy_fails_before_backup_or_commands(self):
+        for policy in (
+                {"startup_timeout_seconds": 0, "interval_seconds": 1},
+                {"startup_timeout_seconds": 60, "interval_seconds": 0},
+                {"startup_timeout_seconds": 2, "interval_seconds": 3}):
+            with self.subTest(policy=policy):
+                runner = FakeRunner()
+                manifest = copy.deepcopy(self.manifest)
+                manifest["health_probe_policy"] = policy
+                with self.assertRaisesRegex(
+                        self.release_module.ReleaseError, "health"):
+                    self._release(runner=runner, manifest=manifest).execute(
+                        self.release_module.AUTHORIZED_TARGET
+                    )
+                self.assertEqual([], runner.calls)
+                self.assertFalse(self.backup_root.exists())
 
     def test_backup_failure_happens_before_first_target_write(self):
         runner = FakeRunner()
@@ -443,6 +521,10 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.assertEqual(
             {200, 401},
             {int(check["expected_status"]) for check in self.manifest["health_checks"]},
+        )
+        self.assertEqual(
+            {"startup_timeout_seconds": 60, "interval_seconds": 1},
+            self.manifest["health_probe_policy"],
         )
         self.assertEqual(
             "scripts/deploy_content_whisper_runtime.py",
