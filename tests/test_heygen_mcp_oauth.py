@@ -229,6 +229,52 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             self.assertEqual(video._heygen_mcp_call("get_current_user", {}), {"ok": True})
         self.assertEqual(requests[0].get_header("User-agent"), "huangque-content/1.0")
 
+    def test_mcp_asset_contract_uses_live_tools_list_schema(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+        with patch.object(video, "_heygen_mcp_rpc", return_value={
+                "tools": [{"name": "create_asset_upload", "inputSchema": schema}]
+        }) as rpc:
+            self.assertIs(video._heygen_mcp_asset_upload_contract(), schema)
+        rpc.assert_called_once_with("tools/list", {}, timeout=30)
+
+    def test_mcp_asset_contract_rejects_unknown_required_fields(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+                "workspaceSecret": {"type": "string"},
+            },
+            "required": ["filename", "sizeBytes", "workspaceSecret"],
+        }
+        with patch.object(video, "_heygen_mcp_rpc", return_value={
+                "tools": [{"name": "create_asset_upload", "inputSchema": schema}]
+        }), patch.object(video, "_heygen_mcp_call") as call:
+            with self.assertRaisesRegex(
+                    video.HeyGenMCPContractError, "契约已更新"):
+                video._heygen_mcp_asset_upload_contract()
+        call.assert_not_called()
+
+    def test_mcp_asset_validation_error_is_redacted_and_pre_billing(self):
+        private = "https://private.example/user-material.png?secret=value"
+        detail = "Input validation error: filename field required " + private
+        with patch.object(video, "_heygen_mcp_rpc", return_value={
+                "content": [{"type": "text", "text": detail}], "isError": True,
+        }):
+            with self.assertRaises(video.HeyGenMCPContractError) as rejected:
+                video._heygen_mcp_call("create_asset_upload", {})
+        self.assertNotIn(private, str(rejected.exception))
+        self.assertIn("视频任务尚未提交", str(rejected.exception))
+
     def test_cinematic_create_and_poll_use_exact_mcp_contract(self):
         calls = []
 
@@ -316,7 +362,18 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             audio = Path(directory) / "speech.mp3"
             image.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 32)
             audio.write_bytes(b"ID3" + b"x" * 32)
-            with patch.object(video, "_heygen_mcp_call", side_effect=call), \
+            contract = {
+                "type": "object",
+                "properties": {
+                    "filename": {"type": "string"},
+                    "contentType": {"type": "string"},
+                    "sizeBytes": {"type": "integer"},
+                },
+                "required": ["filename", "sizeBytes"],
+            }
+            with patch.object(video, "_heygen_mcp_asset_upload_contract",
+                              return_value=contract), \
+                 patch.object(video, "_heygen_mcp_call", side_effect=call), \
                  patch.object(video, "_heygen_direct_opener", return_value=Opener()):
                 result = video._heygen_mcp_prepare_assets(image, audio)
 
@@ -327,11 +384,60 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         })
         self.assertEqual(len(puts), 2)
         self.assertTrue(all(request.get_method() == "PUT" for request in puts))
+        create_calls = [arguments for tool, arguments in calls
+                        if tool == "create_asset_upload"]
+        self.assertEqual(create_calls, [
+            {"filename": "avatar.jpg", "contentType": "image/jpeg", "sizeBytes": 36},
+            {"filename": "speech.mp3", "contentType": "audio/mpeg", "sizeBytes": 35},
+        ])
+        self.assertTrue(all("fileName" not in arguments for arguments in create_calls))
+        self.assertEqual([request.get_header("Content-length") for request in puts],
+                         ["36", "35"])
         self.assertIn(("complete_asset_upload", {"assetId": "image-asset"}), calls)
         self.assertIn(("complete_asset_upload", {"assetId": "audio-asset"}), calls)
         self.assertIn(("bulk_asset_statuses", {
             "assetIds": "image-asset,audio-asset",
         }), calls)
+
+    def test_mcp_asset_short_read_stops_before_provider_call(self):
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "avatar.png"
+            image.write_bytes(b"123456")
+            with patch.object(Path, "read_bytes", return_value=b"123"), \
+                 patch.object(video, "_heygen_mcp_call") as call:
+                with self.assertRaisesRegex(ValueError, "读取不完整"):
+                    video._heygen_mcp_begin_asset(image, "image/png", contract)
+        call.assert_not_called()
+
+    def test_mcp_missing_and_empty_assets_stop_before_provider_call(self):
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.png"
+            empty = Path(directory) / "empty.png"
+            empty.write_bytes(b"")
+            with patch.object(video, "_heygen_mcp_call") as call:
+                with self.assertRaisesRegex(ValueError, "素材文件不存在"):
+                    video._heygen_mcp_begin_asset(missing, "image/png", contract)
+                with self.assertRaisesRegex(ValueError, "读取不完整"):
+                    video._heygen_mcp_begin_asset(empty, "image/png", contract)
+        call.assert_not_called()
 
     def test_mcp_asset_failure_or_timeout_never_reaches_create(self):
         with patch.object(video, "_heygen_mcp_call", return_value={

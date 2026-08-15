@@ -3667,6 +3667,10 @@ class HeyGenMCPAuthError(RuntimeError):
     pass
 
 
+class HeyGenMCPContractError(RuntimeError):
+    """The provider's MCP tool schema is incompatible before paid create."""
+
+
 class HeyGenMCPPlanCreditsExhausted(RuntimeError):
     """MCP explicitly rejected a create because the web-plan has no credits.
 
@@ -3780,10 +3784,12 @@ def _heygen_mcp_access_token(force_refresh=False):
             os.close(lock_fd)
 
 
-def _heygen_mcp_call(tool, arguments, timeout=90):
+def _heygen_mcp_rpc(method, params, timeout=90):
     def request(token):
-        payload = {"jsonrpc": "2.0", "id": uuid.uuid4().hex, "method": "tools/call",
-                   "params": {"name": tool, "arguments": arguments}}
+        payload = {
+            "jsonrpc": "2.0", "id": uuid.uuid4().hex,
+            "method": method, "params": params,
+        }
         req = urllib.request.Request(_HEYGEN_MCP_URL, data=json.dumps(payload, ensure_ascii=False).encode(), headers={
             "Authorization": "Bearer " + token,
             "Accept": "application/json, text/event-stream",
@@ -3820,7 +3826,16 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
     message = messages[-1]
     if message.get("error"):
         raise RuntimeError("HeyGen MCP 失败: %s" % json.dumps(message["error"], ensure_ascii=False)[:500])
-    result = message.get("result") or {}
+    result = message.get("result")
+    if not isinstance(result, dict):
+        raise RuntimeError("HeyGen MCP 返回格式无效")
+    return result
+
+
+def _heygen_mcp_call(tool, arguments, timeout=90):
+    result = _heygen_mcp_rpc(
+        "tools/call", {"name": tool, "arguments": arguments}, timeout=timeout,
+    )
     texts = [item.get("text", "") for item in result.get("content", []) if item.get("type") == "text"]
     detail = texts[0] if texts else json.dumps(result, ensure_ascii=False)
     if result.get("isError"):
@@ -3829,6 +3844,11 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
         if _heygen_mcp_plan_credits_exhausted(detail):
             raise HeyGenMCPPlanCreditsExhausted(
                 "HeyGen 套餐额度不足，供应商未受理任务"
+            )
+        if tool == "create_asset_upload" and (
+                "validation" in detail.lower() or "field required" in detail.lower()):
+            raise HeyGenMCPContractError(
+                "HeyGen MCP 素材上传接口契约已更新，视频任务尚未提交"
             )
         raise RuntimeError("HeyGen MCP 工具失败: %s" % detail[:500])
     if texts:
@@ -3839,14 +3859,64 @@ def _heygen_mcp_call(tool, arguments, timeout=90):
     return result.get("structuredContent") or result
 
 
-def _heygen_mcp_begin_asset(file_path, content_type):
+def _heygen_mcp_asset_upload_contract():
+    """Read and validate the live upload tool contract before user media moves.
+
+    ``create_asset_upload`` is an MCP tool, so its JSON schema is the source of
+    truth.  Failing closed here prevents a provider-side schema change from
+    surfacing only after a user starts the paid one-click workflow.
+    """
+    result = _heygen_mcp_rpc("tools/list", {}, timeout=30)
+    tools = result.get("tools")
+    if not isinstance(tools, list):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP 未返回素材上传接口契约，视频任务尚未提交"
+        )
+    entry = next((item for item in tools if isinstance(item, dict)
+                  and item.get("name") == "create_asset_upload"), None)
+    schema = (entry or {}).get("inputSchema") or (entry or {}).get("input_schema")
+    if not isinstance(schema, dict):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP 素材上传接口不可用，视频任务尚未提交"
+        )
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP 素材上传接口契约无效，视频任务尚未提交"
+        )
+    supported = {"filename", "contentType", "sizeBytes"}
+    required_set = {str(item) for item in required}
+    if (not supported.issubset(properties)
+            or not {"filename", "sizeBytes"}.issubset(required_set)
+            or required_set - supported):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP 素材上传接口契约已更新，视频任务尚未提交"
+        )
+    return schema
+
+
+def _heygen_mcp_begin_asset(file_path, content_type, contract=None):
     path = pathlib.Path(file_path)
-    if not path.is_file() or path.stat().st_size <= 0:
+    if not path.is_file():
         raise ValueError("视频素材文件不存在")
-    raw = path.read_bytes()
+    try:
+        declared_size = path.stat().st_size
+        raw = path.read_bytes()
+        final_size = path.stat().st_size
+    except OSError:
+        raise ValueError("视频素材文件读取失败") from None
+    if declared_size <= 0 or len(raw) != declared_size or final_size != declared_size:
+        raise ValueError("视频素材文件读取不完整")
+    contract = contract or _heygen_mcp_asset_upload_contract()
+    if not isinstance(contract, dict):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP 素材上传接口契约无效，视频任务尚未提交"
+        )
     response = _heygen_mcp_call("create_asset_upload", {
-        "fileName": path.name,
+        "filename": path.name,
         "contentType": content_type,
+        "sizeBytes": len(raw),
     }, timeout=30)
     node = _find_nested_dict(
         response,
@@ -3944,8 +4014,9 @@ def _heygen_mcp_prepare_assets(image_path, audio_path):
     image_type = _detect_image_mime(image_raw)
     if image_type not in VALID_IMAGE_MIMES:
         raise ValueError("图片内容无法识别，请重新导出后上传")
-    image_asset_id = _heygen_mcp_begin_asset(image_path, image_type)
-    audio_asset_id = _heygen_mcp_begin_asset(audio_path, "audio/mpeg")
+    contract = _heygen_mcp_asset_upload_contract()
+    image_asset_id = _heygen_mcp_begin_asset(image_path, image_type, contract)
+    audio_asset_id = _heygen_mcp_begin_asset(audio_path, "audio/mpeg", contract)
     asset_ids = [image_asset_id, audio_asset_id]
     _heygen_mcp_wait_assets(asset_ids)
     return {
