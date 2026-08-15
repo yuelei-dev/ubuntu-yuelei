@@ -251,7 +251,7 @@
 
       <div class="function-tabs" aria-label="视频功能分页">
         <span class="function-tab-label" aria-label="digital ip mode">数字化 IP</span>
-        <button class="function-tab on" type="button" data-function="oneclick">数字人一键生成</button>
+        <a class="function-tab on" href="digital-human-oneclick.html" id="oneclickTab" data-oneclick-tab="true" aria-current="page" style="display:inline-flex;align-items:center;text-decoration:none;">数字人一键生成</a>
         <button class="function-tab" type="button" data-function="cinematic">电影化身</button>
         <button class="function-tab" type="button" data-function="tryon">换装换背景</button>
         <button class="function-tab" type="button" data-function="grok">果肉视频生成</button>
@@ -2334,6 +2334,12 @@
     if(workspace) workspace.classList.toggle('oneclick-active',videoFunction==='oneclick');
     if($('bgmPanel')) $('bgmPanel').classList.toggle('hidden',videoFunction!=='talking');
     document.querySelectorAll('[data-function]').forEach(function(b){b.classList.toggle('on',b.dataset.function===videoFunction);});
+    var oneclickTab=$('oneclickTab');
+    if(oneclickTab){
+      oneclickTab.classList.toggle('on',videoFunction==='oneclick');
+      if(videoFunction==='oneclick') oneclickTab.setAttribute('aria-current','page');
+      else oneclickTab.removeAttribute('aria-current');
+    }
     $('oneclickPanel').classList.toggle('hidden',videoFunction!=='oneclick');
     $('talkingPanel').classList.toggle('hidden',videoFunction!=='talking');
     if($('cinematicPanel')) $('cinematicPanel').classList.toggle('hidden',videoFunction!=='cinematic');
@@ -2496,6 +2502,7 @@
       });
   }
   document.querySelectorAll('[data-function]').forEach(function(b){b.onclick=function(){updateFunction(b.dataset.function);};});
+  if($('oneclickTab')) $('oneclickTab').onclick=function(event){event.preventDefault();updateFunction('oneclick');};
   window.addEventListener('message',function(event){
     var frame=$('oneclickFrame'),data=event.data||{},height=Number(data.height);
     if(!frame||event.source!==frame.contentWindow||event.origin!==location.origin||data.type!=='hq:digital-human-oneclick:resize'||!isFinite(height)) return;
