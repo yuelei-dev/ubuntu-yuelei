@@ -866,34 +866,39 @@ def validate_video_recovery(payload, username):
         ).fetchall()
     by_id = {int(row["id"]): row for row in rows}
     statuses = []
+    invalid_job_ids = []
     for entry in entries:
         expected_index = entry["index"]
         job_id = entry["job_id"]
         row = by_id.get(job_id)
         status = str(row["status"] or "").strip().lower() if row else ""
         if not row or row["kind"] != "video" or status not in {"pending", "running", "done"}:
-            raise DigitalHumanRequestError(
-                "口播任务 #%d 不存在、类型不符或已不可恢复，请重新生成口播" % job_id,
-                "video_recovery_invalid", 409, [job_id],
-            )
+            invalid_job_ids.append(job_id)
+            continue
         try:
             _child_binding(
                 row["payload"], job_id, "talking", consent_record,
                 expected_index,
             )
-        except DigitalHumanRequestError as exc:
-            raise DigitalHumanRequestError(
-                "口播任务 #%d 不属于本次授权制作，请重新生成口播" % job_id,
-                "video_recovery_invalid", 409, [job_id],
-            ) from exc
+        except DigitalHumanRequestError:
+            invalid_job_ids.append(job_id)
+            continue
         if status == "done" and not _recoverable_done_file(row["result"], "video"):
-            raise DigitalHumanRequestError(
-                "口播任务 #%d 的视频文件已不可用，请重新生成口播" % job_id,
-                "video_recovery_invalid", 409, [job_id],
-            )
+            invalid_job_ids.append(job_id)
+            continue
         statuses.append({
             "index": expected_index, "job_id": job_id, "status": status,
         })
+    if invalid_job_ids:
+        count = len(invalid_job_ids)
+        message = (
+            "3 段口播均未生成成功，可从口播步骤重新生成"
+            if count == VIDEO_COUNT and len(entries) == VIDEO_COUNT
+            else "检测到 %d 段口播已不可恢复，可从口播步骤重新生成" % count
+        )
+        raise DigitalHumanRequestError(
+            message, "video_recovery_invalid", 409, invalid_job_ids,
+        )
     return {"ok": True, "video_jobs": statuses}
 
 

@@ -111,6 +111,8 @@ test('recovery selects every reusable child and marks only the server-invalid in
   assert.equal(pageState.canRecoverMaterials(saved),false);
   assert.equal(pageState.invalidateVideoRecovery(saved,{code:'video_recovery_invalid',invalidJobIds:[22]}),true);
   assert.deepEqual(saved.failed.video,[false,true,false]);
+  assert.equal(pageState.retryLabel({code:'video_recovery_invalid',invalidJobIds:[21,22,23]},'talking'),'重新生成失败的 3 段口播');
+  assert.equal(pageState.retryLabel({code:'other'},'talking'),'从失败步骤再试一次');
 });
 
 test('sparse recovery preserves original indexes for every paid child bucket',()=>{

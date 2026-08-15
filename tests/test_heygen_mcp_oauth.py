@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import os
 import sys
@@ -374,7 +375,9 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             with patch.object(video, "_heygen_mcp_asset_upload_contract",
                               return_value=contract), \
                  patch.object(video, "_heygen_mcp_call", side_effect=call), \
-                 patch.object(video, "_heygen_direct_opener", return_value=Opener()):
+                 patch.object(video, "_heygen_mcp_presigned_upload_opener",
+                              return_value=Opener()), \
+                 patch.object(video, "_heygen_direct_opener") as api_opener:
                 result = video._heygen_mcp_prepare_assets(image, audio)
 
         self.assertEqual(result, {
@@ -398,6 +401,120 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         self.assertIn(("bulk_asset_statuses", {
             "assetIds": "image-asset,audio-asset",
         }), calls)
+        api_opener.assert_not_called()
+
+    def test_mcp_presigned_upload_bypasses_process_proxy(self):
+        with patch.object(video.urllib.request, "build_opener") as build:
+            video._heygen_mcp_presigned_upload_opener()
+        build.assert_called_once()
+        proxy_handler = build.call_args.args[0]
+        self.assertIsInstance(proxy_handler, video.urllib.request.ProxyHandler)
+        self.assertEqual({}, proxy_handler.proxies)
+
+    def test_mcp_presigned_403_is_sanitized_and_never_completed(self):
+        private_url = "https://storage.example/upload?signature=private-value"
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+
+        class Opener:
+            def open(self, request, **_kwargs):
+                raise urllib.error.HTTPError(
+                    request.full_url, 403, "Forbidden", {},
+                    io.BytesIO(b"<Error><Code>AccessDenied</Code></Error>"),
+                )
+
+        calls = []
+
+        def call(tool, arguments, timeout=90):
+            calls.append((tool, arguments))
+            return {"assetId": "asset-403", "uploadUrl": private_url}
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "avatar.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 24)
+            with patch.object(video, "_heygen_mcp_call", side_effect=call), \
+                 patch.object(video, "_heygen_mcp_presigned_upload_opener",
+                              return_value=Opener()), \
+                 patch("builtins.print") as log:
+                with self.assertRaisesRegex(
+                        RuntimeError, "HTTP 403 AccessDenied") as rejected:
+                    video._heygen_mcp_begin_asset(image, "image/png", contract)
+
+        text = " ".join(str(value) for call_args in log.call_args_list
+                        for value in call_args.args)
+        self.assertIn("storage.example", text)
+        self.assertIn("AccessDenied", text)
+        self.assertNotIn("private-value", text)
+        self.assertNotIn("private-value", str(rejected.exception))
+        self.assertEqual(["create_asset_upload"], [tool for tool, _ in calls])
+
+    def test_mcp_presigned_5xx_retries_same_asset_then_completes_once(self):
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b""
+
+        class Opener:
+            def open(self, request, **_kwargs):
+                requests.append(request.full_url)
+                if len(requests) == 1:
+                    raise urllib.error.HTTPError(
+                        request.full_url, 503, "Unavailable", {},
+                        io.BytesIO(b"<Error><Code>SlowDown</Code></Error>"),
+                    )
+                return Response()
+
+        calls = []
+
+        def call(tool, arguments, timeout=90):
+            calls.append((tool, arguments))
+            if tool == "create_asset_upload":
+                return {
+                    "assetId": "asset-retry",
+                    "uploadUrl": "https://storage.example/signed?secret=hidden",
+                }
+            return {"ok": True}
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "avatar.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 24)
+            with patch.object(video, "_HEYGEN_MCP_UPLOAD_ATTEMPTS", 2), \
+                 patch.object(video, "_heygen_mcp_call", side_effect=call), \
+                 patch.object(video, "_heygen_mcp_presigned_upload_opener",
+                              return_value=Opener()), \
+                 patch("builtins.print"):
+                self.assertEqual(
+                    "asset-retry",
+                    video._heygen_mcp_begin_asset(image, "image/png", contract),
+                )
+
+        self.assertEqual(2, len(requests))
+        self.assertEqual(requests[0], requests[1])
+        self.assertEqual(1, sum(tool == "create_asset_upload" for tool, _ in calls))
+        self.assertEqual(1, sum(tool == "complete_asset_upload" for tool, _ in calls))
 
     def test_mcp_asset_short_read_stops_before_provider_call(self):
         contract = {

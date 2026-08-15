@@ -77,6 +77,13 @@
     return result;
   }
   function invalidateVideoRecovery(saved,error){return invalidateRecovery(saved,error,'video','video_recovery_invalid',3);}
+  function retryLabel(error,step){
+    var invalid=error&&Array.isArray(error.invalidJobIds)?error.invalidJobIds:[];
+    if(error&&error.code==='video_recovery_invalid'&&invalid.length){
+      return '重新生成失败的 '+invalid.length+' 段口播';
+    }
+    return step==='gestures'?'重试手势照':'从失败步骤再试一次';
+  }
   function jobFailureDecision(job){
     job=job||{};
     var charged=Number(job.cost||0)>0;
@@ -94,6 +101,7 @@
     completeRecoveryJobs:completeRecoveryJobs,
     recoveryJobIds:recoveryJobIds,
     invalidateVideoRecovery:invalidateVideoRecovery,
+    retryLabel:retryLabel,
     jobFailureDecision:jobFailureDecision,
   };
 });
