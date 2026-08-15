@@ -10,7 +10,7 @@
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
     "development_base_commit": "783fe3088ff38a9ae11ebcb426e5d6e469cb0125",
-    "code_source_commit": "763e14e92c781626005990c953d0c7fc45e2890c",
+    "code_source_commit": "c72538e268e3b86ede7802c48f2bb464a89b9ab6",
     "deployment_ref_requirement": "exact merged main commit containing code_source_commit and both locked postimage blobs"
   },
   "deployment_policy": {
@@ -38,8 +38,8 @@
       "runtime_path": "/home/ubuntu/content-api/content_domains/egress.py",
       "preimage_blob": "bcedb7c52101b95acc238031808100b22385874e",
       "preimage_sha256": "102798fbdfc0e581bce1c254b426d6c78d1f2d77654a07a9812da69fe5dd2e79",
-      "postimage_blob": "360125ad9d2a9213884bcee3d0cbf754042c1378",
-      "postimage_sha256": "8ecd22dda4e3e6cef2f04df2f06caa686ab247620a5fe838981981c0717b36aa"
+      "postimage_blob": "ee11528e564b90057c8d080927ca6847b33815cf",
+      "postimage_sha256": "1ad22c3d6feb6b133571b3be22d049525182b120e1576ef77e029e5c4633db94"
     }
   ],
   "pre_write_checks": [
