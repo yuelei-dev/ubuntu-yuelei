@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "service": "huangque-content.service"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "pre_feature_commit": "c875c7f42e6b016f29dc02905a980bdeeb865a72",
+    "whisper_feature_commit": "2d70c8370c61d926155576da886f63c819d67fa4",
+    "font_contract_parent": "783fe3088ff38a9ae11ebcb426e5d6e469cb0125",
+    "review_lock": "the exact PR head and tree are recorded by the PR gate; file blobs below are the deployment authority"
+  },
+  "deployment_policy": {
+    "fail_closed_on_source_mismatch": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "backup_all_targets_before_first_write": true,
+    "record_missing_targets_in_backup_manifest": true,
+    "atomic_replace": true,
+    "restart_only_after_dependencies_cache_font_and_contracts_pass": true,
+    "restart_service_once": true,
+    "rollback_all_targets_as_one_unit": true,
+    "remove_only_targets_recorded_missing_during_rollback": true,
+    "preserve_model_cache_during_rollback": true,
+    "copy_environment_database_or_user_data": false,
+    "production_server_write_allowed": false
+  },
+  "executor": {
+    "repository_path": "scripts/deploy_content_whisper_runtime.py",
+    "source_blob": "b41fa69548188ef69f64c17ff920721f64948a07",
+    "source_sha256": "4d9c894543cb9295fd2b5c657604bd199cdf90368b3854f645fde0aa360ae7ce",
+    "verifier": {
+      "repository_path": "scripts/verify_content_whisper_deployment.py",
+      "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
+      "source_sha256": "b514582d10604908614643a54b748c1e161c6fd920775fb680479be3d5d69027"
+    },
+    "requirements_verifier": {
+      "repository_path": "scripts/verify_content_python_requirements.py",
+      "source_blob": "c5b98f095d7599576d4750fff65f1f46615036d6",
+      "source_sha256": "70dffcf974bada7c1ed2f93edb08d0f8577fb3473eeaeabe37b6c3b6c1c15893"
+    },
+    "confirm_target": "test@8.148.158.106",
+    "remote_connection_capability": false,
+    "requires_root_only_when_runtime_root_is_filesystem_root": true,
+    "source_checkout_gate": {
+      "clean_worktree_required": true,
+      "branch": "main",
+      "local_tracking_ref": "refs/remotes/origin/main",
+      "live_remote_ref": "refs/heads/main",
+      "reviewed_source_commit_argument_required": true,
+      "reviewed_main_commit_argument_required": true,
+      "head_local_tracking_live_remote_and_reviewed_main_must_match": true,
+      "reviewed_source_commit_must_be_ancestor": true,
+      "network_or_missing_history_fails_closed": true
+    }
+  },
+  "absent_target_digest": {
+    "canonical_bytes": "ABSENT\n",
+    "sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001"
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
+      "classification": "runtime_code",
+      "source_blob": "1a0df2d83fc1e4dcf232dbade518455d806cee55",
+      "source_sha256": "907769c068a517cf8d955beaaec2d3892a3669b12fe13f8123a33ab1d44aa1e9",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
+      "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
+      "expected_postimage_blob": "1a0df2d83fc1e4dcf232dbade518455d806cee55",
+      "expected_postimage_sha256": "907769c068a517cf8d955beaaec2d3892a3669b12fe13f8123a33ab1d44aa1e9"
+    },
+    {
+      "repository_path": "server/content_domains/script_to_video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/script_to_video.py",
+      "classification": "runtime_code",
+      "source_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
+      "source_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "c7d9c8dbba07d2504cc856695612b1a43433dac4",
+      "target_preimage_sha256": "7154a39a8c66f44f7638c665c551afc2f7a5b0e52344b667b1b5bb5d6ad598a9",
+      "expected_postimage_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
+      "expected_postimage_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_oneclick.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
+      "classification": "runtime_code",
+      "source_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
+      "source_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "aa6bc0bfe2bcf68e5a131cb53309053776a85447",
+      "target_preimage_sha256": "2f73895135b07dc346749813842d692f739337883b183794ecac5b53378c0a95",
+      "expected_postimage_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
+      "expected_postimage_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e"
+    },
+    {
+      "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",
+      "runtime_path": "/etc/systemd/system/huangque-content.service.d/whisper.conf",
+      "classification": "systemd_drop_in",
+      "source_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
+      "source_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "7850c33c09e60a888f641c99d816ded675a249d3",
+      "target_preimage_sha256": "a8140bb6c63dd9a93cac9a2627d76a96f1b11e02356a63d0d34079c472a469ec",
+      "expected_postimage_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
+      "expected_postimage_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd"
+    },
+    {
+      "repository_path": "deploy/requirements-content.txt",
+      "runtime_path": "/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt",
+      "classification": "staged_deployment_input",
+      "source_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+      "source_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "expected_postimage_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+      "expected_postimage_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee"
+    },
+    {
+      "repository_path": "scripts/prepare_content_whisper.py",
+      "runtime_path": "/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper.py",
+      "classification": "staged_deployment_input",
+      "source_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
+      "source_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "expected_postimage_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
+      "expected_postimage_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3"
+    },
+    {
+      "repository_path": "scripts/prepare_content_whisper_runtime.sh",
+      "runtime_path": "/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper_runtime.sh",
+      "classification": "staged_deployment_input",
+      "source_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
+      "source_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "expected_postimage_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
+      "expected_postimage_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec"
+    }
+  ],
+  "ordered_release_steps": [
+    "verify_source_blobs_and_sha256",
+    "verify_all_target_preimages_before_first_write",
+    "backup_all_seven_targets_and_record_present_or_missing",
+    "atomically_install_all_seven_targets",
+    "verify_all_seven_postimages",
+    "verify_exact_existing_content_dependencies_without_mutation",
+    "run_staged_whisper_cache_prepare_and_online_model_preload",
+    "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
+    "run_candidate_subtitle_runtime_preflight_for_model_and_cjk_font",
+    "run_no_charge_page_and_talking_subtask_contracts",
+    "systemctl_daemon_reload",
+    "restart_huangque_content_once",
+    "verify_health_200_and_unauthenticated_401"
+  ],
+  "release_gate_tests": [
+    "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_missing_whisper_before_charge",
+    "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_dejavu_fallback_before_heygen",
+    "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_font_without_cjk_glyphs",
+    "tests.test_script_to_video.ScriptToVideoTests.test_heygen_preflight_http_endpoint_is_authenticated_and_no_charge",
+    "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs"
+  ],
+  "release_contract_sources": [
+    {
+      "repository_path": "tests/test_script_to_video.py",
+      "source_blob": "e4751e49b83b9bc37a932486240cd422ff5665e5",
+      "source_sha256": "2cbf80ac752b94eeaa513cae28f9a1af8d854de6dc5063ad0bbdc5ba3aedc822"
+    },
+    {
+      "repository_path": "tests/test_digital_human_oneclick.py",
+      "source_blob": "d870f51b76864597e0d7e36c37fddf4f8feb3713",
+      "source_sha256": "628ac0e6788ded3acebe18e4751d083a1afc7b21b5fe87a70965d6437e20e5cf"
+    }
+  ],
+  "paid_submission_contract": {
+    "page_preflight_failure": "HTTP 503 with no_charge=true before a paid HeyGen create",
+    "talking_subtask_preflight_failure": "HTTP 503 before core creates or charges the child job",
+    "automatic_paid_retry_allowed": false
+  },
+  "release_commands": {
+    "pre_service_active": [
+      {
+        "argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"],
+        "timeout_seconds": 30
+      }
+    ],
+    "dependencies": [
+      {
+        "argv": ["/usr/bin/python3", "{source:scripts/verify_content_python_requirements.py}", "--requirements", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt}"],
+        "timeout_seconds": 120
+      },
+      {
+        "argv": ["/usr/bin/python3", "-m", "pip", "check"],
+        "timeout_seconds": 120
+      }
+    ],
+    "cache": [
+      {
+        "argv": ["/bin/bash", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper_runtime.sh}"],
+        "env": {
+          "CONTENT_PYTHON_BIN": "/usr/bin/python3",
+          "WHISPER_CACHE_DIR": "/var/cache/huangque/faster-whisper",
+          "WHISPER_MODEL": "small",
+          "WHISPER_DEVICE": "cpu",
+          "WHISPER_COMPUTE_TYPE": "int8"
+        },
+        "timeout_seconds": 1800
+      }
+    ],
+    "offline": [
+      {
+        "argv": ["/usr/bin/python3", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper.py}", "--verify-only"],
+        "env": {
+          "HF_HUB_OFFLINE": "1",
+          "WHISPER_CACHE_DIR": "/var/cache/huangque/faster-whisper",
+          "WHISPER_MODEL": "small",
+          "WHISPER_DEVICE": "cpu",
+          "WHISPER_COMPUTE_TYPE": "int8"
+        },
+        "timeout_seconds": 600
+      }
+    ],
+    "font": [
+      {
+        "argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"],
+        "cwd": "{runtime:/home/ubuntu/content-api}",
+        "env": {
+          "HF_HUB_OFFLINE": "1",
+          "WHISPER_CACHE_DIR": "/var/cache/huangque/faster-whisper",
+          "WHISPER_MODEL": "small",
+          "WHISPER_DEVICE": "cpu",
+          "WHISPER_COMPUTE_TYPE": "int8",
+          "SUBTITLE_FONT": "Noto Sans CJK SC"
+        },
+        "timeout_seconds": 600
+      }
+    ],
+    "no_charge": [
+      {
+        "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_script_to_video.py", "-v"],
+        "cwd": "{source:.}",
+        "timeout_seconds": 900
+      },
+      {
+        "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_digital_human_oneclick.py", "-v"],
+        "cwd": "{source:.}",
+        "timeout_seconds": 900
+      }
+    ],
+    "daemon_reload": [
+      {
+        "argv": ["/usr/bin/systemctl", "daemon-reload"],
+        "timeout_seconds": 30
+      }
+    ],
+    "restart": [
+      {
+        "argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"],
+        "timeout_seconds": 180
+      }
+    ],
+    "service_active": [
+      {
+        "argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"],
+        "timeout_seconds": 30
+      }
+    ],
+    "rollback_daemon_reload": [
+      {
+        "argv": ["/usr/bin/systemctl", "daemon-reload"],
+        "timeout_seconds": 30
+      }
+    ],
+    "rollback_restart": [
+      {
+        "argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"],
+        "timeout_seconds": 180
+      }
+    ],
+    "rollback_service_active": [
+      {
+        "argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"],
+        "timeout_seconds": 30
+      }
+    ]
+  },
+  "health_checks": [
+    {
+      "url": "http://127.0.0.1:8096/api/gen/health",
+      "expected_status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8096/api/gen/history",
+      "expected_status": 401
+    }
+  ],
+  "rollback": {
+    "method": "restore every target recorded present and remove only staged targets recorded missing, then daemon-reload and restart huangque-content.service once",
+    "scope": "all seven manifest targets as one unit",
+    "preserve": [
+      "/var/cache/huangque/faster-whisper",
+      "environment and secret files",
+      "database, points, jobs, uploads and generated output"
+    ],
+    "verify": [
+      "all seven targets match the backup present-or-missing manifest",
+      "huangque-content.service is active",
+      "GET /api/gen/health returns HTTP 200",
+      "unauthenticated submission returns HTTP 401"
+    ]
+  },
+  "known_test_runtime_evidence": {
+    "rollback_backup": "/opt/huangque-deploy-backups/pr245-20260815T020909Z",
+    "restored_runtime_targets": 4,
+    "service_restarted_during_failed_release": false,
+    "health_after_rollback": 200
+  }
+}

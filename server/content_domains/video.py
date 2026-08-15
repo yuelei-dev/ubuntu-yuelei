@@ -4578,7 +4578,8 @@ _whisper_model = None
 _whisper_model_lock = threading.Lock()
 _subtitle_runtime_ready = False
 _subtitle_runtime_lock = threading.Lock()
-SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", "Noto Sans SC")  # 服务器已装，libass 可用
+DEFAULT_SUBTITLE_FONT = "Noto Sans CJK SC"
+SUBTITLE_FONT = os.environ.get("SUBTITLE_FONT", DEFAULT_SUBTITLE_FONT)
 SUBTITLE_REQUIRED_CJK_GLYPHS = "黄雀字幕测试"
 # 三个预设样式；数值是相对视频高度的比例。ASS 颜色为 &HAABBGGRR。
 _SUB_STYLES = {
