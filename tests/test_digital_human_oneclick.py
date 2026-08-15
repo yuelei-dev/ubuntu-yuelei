@@ -1528,11 +1528,25 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertNotEqual(profiles[0]["speed"], profiles[1]["speed"])
 
 
-    def test_video_page_replaces_the_old_talking_tab_instead_of_adding_a_header_link(self):
+    def test_video_page_embeds_oneclick_as_the_default_internal_tab(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
-        self.assertIn('<a class="function-tab on" href="digital-human-oneclick.html"', page)
-        self.assertEqual(page.count('href="digital-human-oneclick.html"'), 1)
+        self.assertIn('data-function="oneclick">数字人一键生成</button>', page)
+        self.assertIn('id="oneclickPanel" class="function-panel oneclick-panel"', page)
+        self.assertIn('id="oneclickFrame"', page)
+        self.assertIn('src="digital-human-oneclick.html?embed=1"', page)
+        self.assertIn("var videoFunction='oneclick'", page)
+        self.assertIn("$('oneclickPanel').classList.toggle('hidden',videoFunction!=='oneclick')", page)
+        self.assertIn("updateFunction('oneclick')", page)
+        self.assertNotIn('<a class="function-tab on" href="digital-human-oneclick.html"', page)
         self.assertNotIn('data-function="talking">数字人口播', page)
+
+    def test_embedded_oneclick_page_avoids_a_nested_shell_and_returns_to_tab_after_login(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        self.assertIn("window.HQ_DIGITAL_HUMAN_EMBEDDED", page)
+        self.assertIn("document.documentElement.classList.add('dh-embedded')", page)
+        self.assertIn("if(!window.HQ_DIGITAL_HUMAN_EMBEDDED)", page)
+        self.assertIn("hq:digital-human-oneclick:resize", page)
+        self.assertIn("/workbench/video.html?function=oneclick", page)
 
 
 if __name__ == "__main__":
