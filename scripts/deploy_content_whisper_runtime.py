@@ -231,7 +231,7 @@ class ContentWhisperRelease:
             self, manifest, source_root, runtime_root, backup_root,
             *, runner=None, health_getter=None, checkpoint=None,
             git_runner=None, reviewed_source_commit=None,
-            reviewed_main_commit=None):
+            reviewed_main_commit=None, monotonic=None, sleeper=None):
         self.manifest = manifest
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime = RuntimeFiles(runtime_root)
@@ -241,6 +241,8 @@ class ContentWhisperRelease:
         self.reviewed_source_commit = reviewed_source_commit
         self.reviewed_main_commit = reviewed_main_commit
         self.health_getter = health_getter or self._http_status
+        self.monotonic = monotonic or time.monotonic
+        self.sleeper = sleeper or time.sleep
         self.checkpoint = checkpoint or (lambda _name: None)
         self.backup_path = None
         self.backup_entries = []
@@ -499,14 +501,43 @@ class ContentWhisperRelease:
             runtime_root=self.runtime.root,
         )
 
+    def _health_probe_policy(self):
+        policy = self.manifest.get("health_probe_policy", {})
+        timeout = float(policy.get("startup_timeout_seconds", 60))
+        interval = float(policy.get("interval_seconds", 1))
+        if not 1 <= timeout <= 120:
+            raise ReleaseError("health startup timeout must be between 1 and 120 seconds")
+        if not 0.1 <= interval <= 5 or interval > timeout:
+            raise ReleaseError("health retry interval must be between 0.1 and 5 seconds")
+        return timeout, interval
+
     def _verify_health(self, prefix=""):
+        timeout, interval = self._health_probe_policy()
+        deadline = self.monotonic() + timeout
         for check in self.manifest["health_checks"]:
-            status = self.health_getter(check["url"])
-            if status != int(check["expected_status"]):
-                raise ReleaseError(
-                    "%shealth status mismatch for %s: %s" %
-                    (prefix, check["url"], status)
-                )
+            expected = int(check["expected_status"])
+            last_status = None
+            last_error = None
+            while True:
+                try:
+                    last_status = self.health_getter(check["url"])
+                    last_error = None
+                except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                    last_status = None
+                    last_error = exc
+                if last_status == expected:
+                    break
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    detail = (
+                        "connection unavailable" if last_error is not None
+                        else "status %s" % last_status
+                    )
+                    raise ReleaseError(
+                        "%shealth readiness timeout for %s: expected %s, last %s" %
+                        (prefix, check["url"], expected, detail)
+                    )
+                self.sleeper(min(interval, remaining))
 
     def _http_status(self, url):
         locked_urls = {
@@ -588,6 +619,7 @@ class ContentWhisperRelease:
         )
         self._verify_release_tools()
         payloads = self._source_payloads()
+        self._health_probe_policy()
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
         self.checkpoint("preimage_complete")
         self._run_stage("pre_service_active")
