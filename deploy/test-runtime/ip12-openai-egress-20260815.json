@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "purpose": "Route paid IP12 OpenAI analysis through managed egress without ambiguous resubmission.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "development_base_commit": "783fe3088ff38a9ae11ebcb426e5d6e469cb0125",
+    "code_source_commit": "763e14e92c781626005990c953d0c7fc45e2890c",
+    "deployment_ref_requirement": "exact merged main commit containing code_source_commit and both locked postimage blobs"
+  },
+  "deployment_policy": {
+    "fail_closed_on_preimage_mismatch": true,
+    "fail_closed_on_source_blob_mismatch": true,
+    "backup_all_targets_before_first_write": true,
+    "stage_and_validate_all_candidates_before_first_write": true,
+    "atomic_replace": true,
+    "restart_after_both_backend_files_match": true,
+    "rollback_both_files_as_one_unit": true,
+    "copy_environment_or_database": false,
+    "production_server_write_allowed": false
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/digital_ip.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_ip.py",
+      "preimage_blob": "814999a3654df59b41e889c53237adca99c9471a",
+      "preimage_sha256": "45cc5ad234e3fc95f9e77fd0796e1ae9ca1a133fbbb3cee0fc0d01df3c111618",
+      "postimage_blob": "7b75d5d08e795e1a4859e5558c0e71614440563d",
+      "postimage_sha256": "d62ad1047c1c94e85bb0311379c447affa2703e6963bca40555cb72f8745525a"
+    },
+    {
+      "repository_path": "server/content_domains/egress.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/egress.py",
+      "preimage_blob": "bcedb7c52101b95acc238031808100b22385874e",
+      "preimage_sha256": "102798fbdfc0e581bce1c254b426d6c78d1f2d77654a07a9812da69fe5dd2e79",
+      "postimage_blob": "360125ad9d2a9213884bcee3d0cbf754042c1378",
+      "postimage_sha256": "8ecd22dda4e3e6cef2f04df2f06caa686ab247620a5fe838981981c0717b36aa"
+    }
+  ],
+  "pre_write_checks": [
+    "persistent repository is clean and on the exact merged main commit selected for deployment",
+    "selected merged main commit contains code_source_commit and both locked postimage blobs",
+    "both runtime files match their locked preimage SHA-256 values before any write",
+    "both candidate files match their locked postimage Git blob and SHA-256 values",
+    "python -m py_compile succeeds for both staged candidate files",
+    "isolated import of content_domains.egress and content_domains.digital_ip succeeds against disposable state"
+  ],
+  "deployment_steps": [
+    "record service PID, start time and active state",
+    "create one timestamped backup directory and copy both verified preimages into it",
+    "stage both verified postimages on the same filesystem as their runtime targets",
+    "atomically replace both runtime files only after every pre-write check passes",
+    "verify both runtime postimage SHA-256 values and repeat syntax/import validation",
+    "restart huangque-content.service exactly once",
+    "require service active state and GET /api/gen/health HTTP 200"
+  ],
+  "post_deploy_checks": [
+    "both runtime files match their locked postimage SHA-256 values",
+    "huangque-content.service is active after one restart",
+    "GET /api/gen/health returns HTTP 200",
+    "unauthenticated POST /api/gen/digital-ip/diagnose returns HTTP 401",
+    "the unauthenticated probe creates no job, point transaction or outbound model request",
+    "no paid model request is issued during deployment verification"
+  ],
+  "rollback": {
+    "trigger": "any replace, syntax, import, restart, service-state, hash or health check failure",
+    "method": "stop forward deployment, atomically restore both timestamped preimages as one unit, verify both preimage hashes, then restart huangque-content.service once",
+    "verify": [
+      "both runtime files match their locked preimage SHA-256 values",
+      "huangque-content.service returns to the recorded active state",
+      "GET /api/gen/health returns HTTP 200",
+      "unauthenticated POST /api/gen/digital-ip/diagnose returns HTTP 401",
+      "the rollback probe creates no job, point transaction or outbound model request"
+    ]
+  }
+}
