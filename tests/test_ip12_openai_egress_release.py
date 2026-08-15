@@ -5,7 +5,6 @@ import json
 import os
 import pathlib
 import shutil
-import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -133,6 +132,7 @@ class IP12LockedReleaseExecutorTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temp.name)
+        self.source_root = self.root / "source"
         self.target_root = self.root / "target"
         self.backup_root = self.root / "backups"
         self.package = (
@@ -145,20 +145,40 @@ class IP12LockedReleaseExecutorTests(unittest.TestCase):
             encoding="utf-8",
         )
         (self.package / "ip12_pdf.py").write_text("", encoding="utf-8")
+        (self.package / "egress.py").write_text(
+            "VALUE = 'pre-egress'\n", encoding="utf-8",
+        )
+        (self.package / "digital_ip.py").write_text(
+            "from . import egress\nVALUE = 'pre-digital'\n", encoding="utf-8",
+        )
+
+        executor_target = self.source_root / "scripts" / "deploy_locked_manifest.py"
+        executor_target.parent.mkdir(parents=True)
+        shutil.copy2(EXECUTOR, executor_target)
+        source_package = self.source_root / "server" / "content_domains"
+        source_package.mkdir(parents=True)
+        (source_package / "egress.py").write_text(
+            "VALUE = 'post-egress'\n", encoding="utf-8",
+        )
+        (source_package / "digital_ip.py").write_text(
+            "from . import egress\nVALUE = 'post-digital'\n", encoding="utf-8",
+        )
+
         self.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
         self.preimages = {}
         for item in self.manifest["files"]:
-            data = subprocess.check_output(
-                ["git", "show", "%s:%s" % (
-                    self.manifest["source"]["development_base_commit"],
-                    item["repository_path"],
-                )],
-                cwd=ROOT,
-            )
             target = self._target(item)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            self.preimages[item["repository_path"]] = data
+            preimage = target.read_bytes()
+            postimage = (self.source_root / item["repository_path"]).read_bytes()
+            item["preimage_blob"] = _blob_id(preimage)
+            item["preimage_sha256"] = hashlib.sha256(preimage).hexdigest()
+            item["postimage_blob"] = _blob_id(postimage)
+            item["postimage_sha256"] = hashlib.sha256(postimage).hexdigest()
+            self.preimages[item["repository_path"]] = preimage
+        self.manifest_path = self.root / "manifest.json"
+        self.manifest_path.write_text(
+            json.dumps(self.manifest, ensure_ascii=False), encoding="utf-8",
+        )
 
     def tearDown(self):
         self.temp.cleanup()
@@ -168,7 +188,7 @@ class IP12LockedReleaseExecutorTests(unittest.TestCase):
 
     def _run(self, hooks=None, **kwargs):
         return release.execute_locked_release(
-            MANIFEST, ROOT, self.target_root, self.backup_root,
+            self.manifest_path, self.source_root, self.target_root, self.backup_root,
             hooks=hooks or _FakeHooks(), verify_repository=False, **kwargs,
         )
 
@@ -206,20 +226,13 @@ class IP12LockedReleaseExecutorTests(unittest.TestCase):
 
     def test_source_hash_mismatch_fails_before_any_target_write(self):
         source = self.root / "source"
-        executor_path = source / self.manifest["release_executor"]["repository_path"]
-        executor_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(EXECUTOR, executor_path)
-        for item in self.manifest["files"]:
-            path = source / item["repository_path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(ROOT / item["repository_path"], path)
         (source / self.manifest["files"][0]["repository_path"]).write_text(
             "tampered", encoding="utf-8",
         )
         hooks = _FakeHooks()
         with self.assertRaises(release.ReleaseError):
             release.execute_locked_release(
-                MANIFEST, source, self.target_root, self.backup_root,
+                self.manifest_path, source, self.target_root, self.backup_root,
                 hooks=hooks, verify_repository=False,
             )
         self._assert_preimages_restored()
