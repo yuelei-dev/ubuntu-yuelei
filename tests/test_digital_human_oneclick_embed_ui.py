@@ -27,6 +27,24 @@ class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
         self.assertIn("hq:digital-human-oneclick:resize", page)
         self.assertIn("/workbench/video.html?function=oneclick", page)
 
+    def test_embedded_401_redirects_the_top_level_workspace(self):
+        page = ONECLICK_PAGE.read_text(encoding="utf-8")
+        self.assertIn(
+            "if(window.HQ_DIGITAL_HUMAN_EMBEDDED&&window.top!==window){window.top.location.href=target;return;}",
+            page,
+        )
+
+    def test_standalone_401_redirects_the_current_page(self):
+        page = ONECLICK_PAGE.read_text(encoding="utf-8")
+        self.assertIn("window.location.href=target;", page)
+        self.assertIn("var target='/login.html?next='+encodeURIComponent('/workbench/video.html?function=oneclick')", page)
+
+    def test_only_401_responses_invoke_the_login_redirect(self):
+        page = ONECLICK_PAGE.read_text(encoding="utf-8")
+        self.assertEqual(page.count("redirectToLogin();"), 1)
+        self.assertIn("if(response.status===401){redirectToLogin();throw new Error('登录已过期');}", page)
+        self.assertNotIn("if(response.status===401){location.href=", page)
+
 
 if __name__ == "__main__":
     unittest.main()
