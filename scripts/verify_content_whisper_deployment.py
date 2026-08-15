@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import os
+import stat
 from pathlib import Path, PurePosixPath
 
 
@@ -21,9 +23,9 @@ def _safe_source_path(root, relative_path):
     relative = Path(relative_path)
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("repository_path must stay inside source root")
-    root = Path(root).resolve()
-    candidate = (root / relative).resolve()
-    if candidate != root and root not in candidate.parents:
+    root = Path(os.path.abspath(root))
+    candidate = Path(os.path.abspath(root / relative))
+    if os.path.commonpath((str(root), str(candidate))) != str(root):
         raise ValueError("repository_path escaped source root")
     return candidate
 
@@ -32,11 +34,81 @@ def _safe_runtime_path(root, absolute_path):
     runtime = PurePosixPath(str(absolute_path))
     if not runtime.is_absolute() or ".." in runtime.parts:
         raise ValueError("runtime_path must be a normalized absolute path")
-    root = Path(root).resolve()
-    candidate = root.joinpath(*runtime.parts[1:]).resolve()
-    if candidate != root and root not in candidate.parents:
+    root = Path(os.path.abspath(root))
+    candidate = Path(os.path.abspath(root.joinpath(*runtime.parts[1:])))
+    if os.path.commonpath((str(root), str(candidate))) != str(root):
         raise ValueError("runtime_path escaped runtime root")
     return candidate
+
+
+def _lstat_no_symlink_chain(root, target):
+    """Reject symlinks in every existing component without resolving them."""
+    root = Path(os.path.abspath(root))
+    target = Path(os.path.abspath(target))
+    if os.path.commonpath((str(root), str(target))) != str(root):
+        raise ValueError("target escaped verification root")
+    root_info = os.lstat(root)
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise RuntimeError("verification root must be a real directory: %s" % root)
+    current = root
+    relative_parts = target.relative_to(root).parts
+    for index, part in enumerate(relative_parts):
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return current, False
+        if stat.S_ISLNK(info.st_mode):
+            raise RuntimeError("symbolic link is forbidden in deployment path: %s" % current)
+        if index < len(relative_parts) - 1 and not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("deployment parent is not a directory: %s" % current)
+    return target, True
+
+
+def _read_regular_file_no_follow(root, target):
+    target, exists = _lstat_no_symlink_chain(root, target)
+    if not exists:
+        return None
+    parent_descriptor = None
+    if os.name == "posix":
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+        parent_descriptor = os.open(Path(os.path.abspath(root)), directory_flags)
+        try:
+            for part in target.parent.relative_to(
+                    Path(os.path.abspath(root))).parts:
+                next_descriptor = os.open(
+                    part, directory_flags, dir_fd=parent_descriptor,
+                )
+                os.close(parent_descriptor)
+                parent_descriptor = next_descriptor
+        except Exception:
+            os.close(parent_descriptor)
+            raise
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(
+        target.name if parent_descriptor is not None else target,
+        flags,
+        **({"dir_fd": parent_descriptor} if parent_descriptor is not None else {}),
+    )
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("deployment target is not a regular file: %s" % target)
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+    _lstat_no_symlink_chain(root, target)
+    return b"".join(chunks)
 
 
 def load_manifest(path):
@@ -59,7 +131,9 @@ def verify_sources(manifest, source_root):
     verified = []
     for entry in manifest["files"]:
         source = _safe_source_path(source_root, entry["repository_path"])
-        data = source.read_bytes()
+        data = _read_regular_file_no_follow(source_root, source)
+        if data is None:
+            raise RuntimeError("source file is missing: %s" % entry["repository_path"])
         if _sha256(data) != entry["source_sha256"]:
             raise RuntimeError("source SHA-256 mismatch: %s" % entry["repository_path"])
         if _blob_id(data) != entry["source_blob"]:
@@ -72,12 +146,10 @@ def verify_sources(manifest, source_root):
     return verified
 
 
-def _actual_target_digest(target):
-    if not target.exists():
+def _actual_target_digest(runtime_root, target):
+    data = _read_regular_file_no_follow(runtime_root, target)
+    if data is None:
         return "absent", _sha256(ABSENT_BYTES), None
-    if not target.is_file() or target.is_symlink():
-        raise RuntimeError("deployment target is not a regular file: %s" % target)
-    data = target.read_bytes()
     return "file", _sha256(data), _blob_id(data)
 
 
@@ -87,7 +159,7 @@ def verify_targets(manifest, runtime_root, phase):
     verified = []
     for entry in manifest["files"]:
         target = _safe_runtime_path(runtime_root, entry["runtime_path"])
-        state, digest, blob = _actual_target_digest(target)
+        state, digest, blob = _actual_target_digest(runtime_root, target)
         if phase == "preimage":
             expected_state = entry["target_preimage_state"]
             expected_digest = entry["target_preimage_sha256"]

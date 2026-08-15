@@ -3,6 +3,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -113,6 +114,11 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertTrue(policy["rollback_all_targets_as_one_unit"])
         self.assertFalse(policy["copy_environment_database_or_user_data"])
         self.assertFalse(policy["production_server_write_allowed"])
+        self.assertEqual(
+            "scripts/deploy_content_whisper_runtime.py",
+            self.manifest["executor"]["repository_path"],
+        )
+        self.assertFalse(self.manifest["executor"]["remote_connection_capability"])
         self.assertEqual(self.manifest["rollback"]["scope"], "all seven manifest targets as one unit")
 
     def test_release_order_preflights_before_the_only_restart(self):
@@ -223,6 +229,76 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             self.verify._safe_source_path(ROOT, "../outside")
         with self.assertRaises(ValueError):
             self.verify._safe_runtime_path(ROOT, "relative/path")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX no-follow regression")
+    def test_verifier_rejects_final_parent_broken_and_absent_symlinks(self):
+        def regular_preimages(manifest, runtime_root, count=4):
+            for entry in manifest["files"][:count]:
+                target = self.verify._safe_runtime_path(
+                    runtime_root, entry["runtime_path"]
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                data = ("old:" + entry["repository_path"]).encode("utf-8")
+                target.write_bytes(data)
+                entry["target_preimage_state"] = "file"
+                entry["target_preimage_sha256"] = hashlib.sha256(data).hexdigest()
+                entry["target_preimage_blob"] = self.verify._blob_id(data)
+
+        for destination_kind in ("inside", "outside", "broken"):
+            with self.subTest(final_symlink=destination_kind), \
+                 tempfile.TemporaryDirectory() as directory, \
+                 tempfile.TemporaryDirectory() as outside:
+                runtime_root = pathlib.Path(directory)
+                manifest = copy.deepcopy(self.manifest)
+                victim = self.verify._safe_runtime_path(
+                    runtime_root, manifest["files"][0]["runtime_path"]
+                )
+                victim.parent.mkdir(parents=True, exist_ok=True)
+                if destination_kind == "inside":
+                    destination = runtime_root / "inside.py"
+                    destination.write_text("inside", encoding="utf-8")
+                elif destination_kind == "outside":
+                    destination = pathlib.Path(outside) / "outside.py"
+                    destination.write_text("outside", encoding="utf-8")
+                else:
+                    destination = pathlib.Path(outside) / "missing.py"
+                victim.symlink_to(destination)
+                with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+                    self.verify.verify_targets(manifest, runtime_root, "preimage")
+
+        for destination_kind in ("inside", "outside"):
+            with self.subTest(parent_symlink=destination_kind), \
+                 tempfile.TemporaryDirectory() as directory, \
+                 tempfile.TemporaryDirectory() as outside:
+                runtime_root = pathlib.Path(directory)
+                manifest = copy.deepcopy(self.manifest)
+                victim = self.verify._safe_runtime_path(
+                    runtime_root, manifest["files"][0]["runtime_path"]
+                )
+                victim.parent.parent.mkdir(parents=True, exist_ok=True)
+                if destination_kind == "inside":
+                    destination = runtime_root / "linked-content-domains"
+                else:
+                    destination = pathlib.Path(outside) / "linked-content-domains"
+                destination.mkdir(parents=True)
+                (destination / victim.name).write_text("linked", encoding="utf-8")
+                victim.parent.symlink_to(destination, target_is_directory=True)
+                with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+                    self.verify.verify_targets(manifest, runtime_root, "preimage")
+
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory() as outside:
+            runtime_root = pathlib.Path(directory)
+            manifest = copy.deepcopy(self.manifest)
+            regular_preimages(manifest, runtime_root)
+            absent = manifest["files"][4]
+            victim = self.verify._safe_runtime_path(
+                runtime_root, absent["runtime_path"]
+            )
+            victim.parent.mkdir(parents=True, exist_ok=True)
+            victim.symlink_to(pathlib.Path(outside) / "missing-input")
+            with self.assertRaisesRegex(RuntimeError, "symbolic link"):
+                self.verify.verify_targets(manifest, runtime_root, "preimage")
 
 
 if __name__ == "__main__":
