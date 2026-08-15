@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the complete reviewed digital-human subtitle runtime as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset-schema fix as one fail-closed unit after the PR 245 test-runtime rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -38,8 +38,8 @@
     },
     "requirements_verifier": {
       "repository_path": "scripts/verify_content_python_requirements.py",
-      "source_blob": "c5b98f095d7599576d4750fff65f1f46615036d6",
-      "source_sha256": "70dffcf974bada7c1ed2f93edb08d0f8577fb3473eeaeabe37b6c3b6c1c15893"
+      "source_blob": "372a71c2fe6b8b0152307860b47e6415260a8267",
+      "source_sha256": "e1010b5e498ad05914ac0f48d986eb233abfebd866b6937b0b4f89beb7cb1bc5"
     },
     "confirm_target": "test@8.148.158.106",
     "remote_connection_capability": false,
@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "1a0df2d83fc1e4dcf232dbade518455d806cee55",
-      "source_sha256": "907769c068a517cf8d955beaaec2d3892a3669b12fe13f8123a33ab1d44aa1e9",
+      "source_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
+      "source_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
       "target_preimage_state": "file",
       "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
       "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
-      "expected_postimage_blob": "1a0df2d83fc1e4dcf232dbade518455d806cee55",
-      "expected_postimage_sha256": "907769c068a517cf8d955beaaec2d3892a3669b12fe13f8123a33ab1d44aa1e9"
+      "expected_postimage_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
+      "expected_postimage_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -156,7 +156,7 @@
     "run_staged_whisper_cache_prepare_and_online_model_preload",
     "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
     "run_candidate_subtitle_runtime_preflight_for_model_and_cjk_font",
-    "run_no_charge_page_and_talking_subtask_contracts",
+    "run_no_charge_page_talking_and_mcp_asset_contracts",
     "systemctl_daemon_reload",
     "restart_huangque_content_once",
     "verify_health_200_and_unauthenticated_401"
@@ -166,7 +166,10 @@
     "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_dejavu_fallback_before_heygen",
     "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_font_without_cjk_glyphs",
     "tests.test_script_to_video.ScriptToVideoTests.test_heygen_preflight_http_endpoint_is_authenticated_and_no_charge",
-    "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs"
+    "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_contract_uses_live_tools_list_schema",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_validation_error_is_redacted_and_pre_billing",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url"
   ],
   "release_contract_sources": [
     {
@@ -178,11 +181,17 @@
       "repository_path": "tests/test_digital_human_oneclick.py",
       "source_blob": "d870f51b76864597e0d7e36c37fddf4f8feb3713",
       "source_sha256": "628ac0e6788ded3acebe18e4751d083a1afc7b21b5fe87a70965d6437e20e5cf"
+    },
+    {
+      "repository_path": "tests/test_heygen_mcp_oauth.py",
+      "source_blob": "ff8a19b56f4c88bd9bb452d6337cf35ac9baaf94",
+      "source_sha256": "bbb1be821d51076c4c52c7ab127e3a68a491b7f2c2ac5e37a2dfc8878a72ccec"
     }
   ],
   "paid_submission_contract": {
     "page_preflight_failure": "HTTP 503 with no_charge=true before a paid HeyGen create",
     "talking_subtask_preflight_failure": "HTTP 503 before core creates or charges the child job",
+    "mcp_asset_contract_failure": "Fail closed before asset upload and before a paid HeyGen create",
     "automatic_paid_retry_allowed": false
   },
   "release_commands": {
@@ -194,11 +203,7 @@
     ],
     "dependencies": [
       {
-        "argv": ["/usr/bin/python3", "{source:scripts/verify_content_python_requirements.py}", "--requirements", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt}"],
-        "timeout_seconds": 120
-      },
-      {
-        "argv": ["/usr/bin/python3", "-m", "pip", "check"],
+        "argv": ["/usr/bin/sudo", "-u", "ubuntu", "-H", "/usr/bin/python3", "{source:scripts/verify_content_python_requirements.py}", "--requirements", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt}", "--allow-broken-requirement", "PyGObject==3.42.1:pycairo"],
         "timeout_seconds": 120
       }
     ],
@@ -217,29 +222,14 @@
     ],
     "offline": [
       {
-        "argv": ["/usr/bin/python3", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper.py}", "--verify-only"],
-        "env": {
-          "HF_HUB_OFFLINE": "1",
-          "WHISPER_CACHE_DIR": "/var/cache/huangque/faster-whisper",
-          "WHISPER_MODEL": "small",
-          "WHISPER_DEVICE": "cpu",
-          "WHISPER_COMPUTE_TYPE": "int8"
-        },
+        "argv": ["/usr/bin/sudo", "-u", "ubuntu", "-H", "/usr/bin/env", "HF_HUB_OFFLINE=1", "WHISPER_CACHE_DIR=/var/cache/huangque/faster-whisper", "WHISPER_MODEL=small", "WHISPER_DEVICE=cpu", "WHISPER_COMPUTE_TYPE=int8", "/usr/bin/python3", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/prepare_content_whisper.py}", "--verify-only"],
         "timeout_seconds": 600
       }
     ],
     "font": [
       {
-        "argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"],
+        "argv": ["/usr/bin/sudo", "-u", "ubuntu", "-H", "/usr/bin/env", "HF_HUB_OFFLINE=1", "WHISPER_CACHE_DIR=/var/cache/huangque/faster-whisper", "WHISPER_MODEL=small", "WHISPER_DEVICE=cpu", "WHISPER_COMPUTE_TYPE=int8", "SUBTITLE_FONT=Noto Sans CJK SC", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"],
         "cwd": "{runtime:/home/ubuntu/content-api}",
-        "env": {
-          "HF_HUB_OFFLINE": "1",
-          "WHISPER_CACHE_DIR": "/var/cache/huangque/faster-whisper",
-          "WHISPER_MODEL": "small",
-          "WHISPER_DEVICE": "cpu",
-          "WHISPER_COMPUTE_TYPE": "int8",
-          "SUBTITLE_FONT": "Noto Sans CJK SC"
-        },
         "timeout_seconds": 600
       }
     ],
@@ -251,6 +241,11 @@
       },
       {
         "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_digital_human_oneclick.py", "-v"],
+        "cwd": "{source:.}",
+        "timeout_seconds": 900
+      },
+      {
+        "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_heygen_mcp_oauth.py", "-v"],
         "cwd": "{source:.}",
         "timeout_seconds": 900
       }

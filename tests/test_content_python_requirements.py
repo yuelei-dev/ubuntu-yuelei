@@ -80,6 +80,64 @@ class ContentPythonRequirementsTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "inconsistent environment"):
                 self.module.verify_installed(path)
 
+    def test_exact_unrelated_pip_conflict_may_be_declared_without_hiding_it(self):
+        path = self._requirements("alpha==1.0\n")
+        versions = {"alpha": "1.0", "PyGObject": "3.42.1"}
+        result = subprocess.CompletedProcess(
+            [], 1,
+            stdout=(
+                "pygobject 3.42.1 requires pycairo, which is not installed.\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+                self.module.importlib.metadata, "version",
+                side_effect=lambda name: versions[name]), \
+             mock.patch.object(
+                 self.module.subprocess, "run", return_value=result):
+            self.assertEqual(
+                1,
+                self.module.verify_installed(
+                    path,
+                    allowed_broken=["PyGObject==3.42.1:pycairo"],
+                ),
+            )
+
+    def test_allowed_conflict_is_exact_and_never_covers_content_pins(self):
+        path = self._requirements("alpha==1.0\n")
+        versions = {"alpha": "1.0", "PyGObject": "3.42.1"}
+        with mock.patch.object(
+                self.module.importlib.metadata, "version",
+                side_effect=lambda name: versions[name]):
+            for allowed in (
+                    ["not-a-contract"],
+                    ["alpha==1.0:missing"],
+                    ["PyGObject==9.9:pycairo"]):
+                with self.subTest(allowed=allowed), self.assertRaises(RuntimeError):
+                    self.module.verify_installed(path, allowed_broken=allowed)
+
+    def test_allowed_conflict_does_not_hide_any_other_pip_problem(self):
+        path = self._requirements("alpha==1.0\n")
+        versions = {"alpha": "1.0", "PyGObject": "3.42.1"}
+        result = subprocess.CompletedProcess(
+            [], 1,
+            stdout=(
+                "pygobject 3.42.1 requires pycairo, which is not installed.\n"
+                "beta 2.0 requires gamma, which is not installed.\n"
+            ),
+            stderr="",
+        )
+        with mock.patch.object(
+                self.module.importlib.metadata, "version",
+                side_effect=lambda name: versions[name]), \
+             mock.patch.object(
+                 self.module.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "beta 2.0 requires gamma"):
+                self.module.verify_installed(
+                    path,
+                    allowed_broken=["PyGObject==3.42.1:pycairo"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
