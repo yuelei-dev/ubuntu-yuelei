@@ -29,8 +29,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "c8001742f8a0a0d9a957e8d593b8db1820e39b04",
-    "source_sha256": "f36686250c243e3814cbd4dc6e122fcfc8d3552df22a29ab8fdc772e5c2957f5",
+    "source_blob": "b41fa69548188ef69f64c17ff920721f64948a07",
+    "source_sha256": "4d9c894543cb9295fd2b5c657604bd199cdf90368b3854f645fde0aa360ae7ce",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",

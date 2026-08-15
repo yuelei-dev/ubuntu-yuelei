@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -507,11 +508,27 @@ class ContentWhisperRelease:
                     (prefix, check["url"], status)
                 )
 
-    @staticmethod
-    def _http_status(url):
+    def _http_status(self, url):
+        locked_urls = {
+            str(check.get("url") or "")
+            for check in self.manifest.get("health_checks", [])
+            if isinstance(check, dict)
+        }
+        parsed = urllib.parse.urlsplit(url)
+        if (url not in locked_urls
+                or parsed.scheme != "http"
+                or parsed.hostname != "127.0.0.1"
+                or parsed.port is None
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or parsed.path not in {"/api/gen/health", "/api/gen/history"}):
+            raise ReleaseError("health probe URL is not an approved local endpoint")
         request = urllib.request.Request(url, headers={"User-Agent": "hq-release-probe"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
+            with opener.open(request, timeout=8) as response:
                 return int(response.status)
         except urllib.error.HTTPError as exc:
             return int(exc.code)

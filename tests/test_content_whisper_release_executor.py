@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 import copy
+import contextlib
 import hashlib
+import http.server
 import importlib.util
 import json
 import os
 import pathlib
 import sys
 import tempfile
+import threading
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -52,6 +56,30 @@ class HealthProbe:
             self.fail_first = False
             return 500
         return 200 if url.endswith("/health") else 401
+
+
+@contextlib.contextmanager
+def _local_http_server(status_getter):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.server.hits.append(self.path)
+            self.send_response(int(self.server.status_getter(self.path)))
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.hits = []
+    server.status_getter = status_getter
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 class FakeGitRunner:
@@ -154,14 +182,14 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     def _release(
             self, *, runner=None, health=None, checkpoint=None, manifest=None,
             git_runner=None, reviewed_source=REVIEWED_SOURCE,
-            reviewed_main=REVIEWED_MAIN):
+            reviewed_main=REVIEWED_MAIN, use_real_health=False):
         return self.release_module.ContentWhisperRelease(
             manifest or self.manifest,
             ROOT,
             self.runtime_root,
             self.backup_root,
             runner=runner or FakeRunner(),
-            health_getter=health or HealthProbe(),
+            health_getter=None if use_real_health else (health or HealthProbe()),
             checkpoint=checkpoint,
             git_runner=git_runner or FakeGitRunner(),
             reviewed_source_commit=reviewed_source,
@@ -290,6 +318,80 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.assertEqual(1, runner.calls.count("restart"))
         self.assertEqual(1, runner.calls.count("rollback_restart"))
         self.assertGreaterEqual(len(health.calls), 3)
+
+    def test_success_and_rollback_health_probes_ignore_environment_proxy(self):
+        proxy_status = lambda _path: 418
+        for rollback in (False, True):
+            with self.subTest(rollback=rollback):
+                self.tearDown()
+                self.setUp()
+                health_calls = {"count": 0}
+
+                def target_status(path):
+                    if path == "/api/gen/health":
+                        health_calls["count"] += 1
+                        if rollback and health_calls["count"] == 1:
+                            return 500
+                        return 200
+                    return 401
+
+                with _local_http_server(target_status) as target, \
+                     _local_http_server(proxy_status) as proxy:
+                    port = target.server_address[1]
+                    self.manifest["health_checks"] = [
+                        {
+                            "url": "http://127.0.0.1:%d/api/gen/health" % port,
+                            "expected_status": 200,
+                        },
+                        {
+                            "url": "http://127.0.0.1:%d/api/gen/history" % port,
+                            "expected_status": 401,
+                        },
+                    ]
+                    proxy_url = "http://127.0.0.1:%d" % proxy.server_address[1]
+                    runner = FakeRunner()
+                    with patch.dict(os.environ, {
+                            "HTTP_PROXY": proxy_url,
+                            "HTTPS_PROXY": proxy_url,
+                            "NO_PROXY": "",
+                            "http_proxy": proxy_url,
+                            "https_proxy": proxy_url,
+                            "no_proxy": "",
+                    }), patch("urllib.request.proxy_bypass", return_value=False):
+                        release = self._release(
+                            runner=runner, use_real_health=True,
+                        )
+                        if rollback:
+                            with self.assertRaisesRegex(
+                                    self.release_module.ReleaseError,
+                                    "all seven targets were restored"):
+                                release.execute(self.release_module.AUTHORIZED_TARGET)
+                        else:
+                            self.assertTrue(
+                                release.execute(
+                                    self.release_module.AUTHORIZED_TARGET
+                                )["ok"]
+                            )
+
+                self.assertEqual([], proxy.hits)
+                expected_target_hits = 3 if rollback else 2
+                self.assertEqual(expected_target_hits, len(target.hits))
+                if rollback:
+                    self._assert_restored_without_residue()
+                    self.assertEqual(1, runner.calls.count("rollback_restart"))
+                else:
+                    self.assertNotIn("rollback_restart", runner.calls)
+
+    def test_health_probe_rejects_non_manifest_and_nonlocal_urls(self):
+        release = self._release(use_real_health=True)
+        for url in (
+                "http://127.0.0.1:8096/api/gen/not-health",
+                "http://localhost:8096/api/gen/health",
+                "https://127.0.0.1:8096/api/gen/health",
+                "http://127.0.0.1:8096/api/gen/health?proxy=1"):
+            with self.subTest(url=url), self.assertRaisesRegex(
+                    self.release_module.ReleaseError, "approved local endpoint"):
+                release._http_status(url)
 
     def test_backup_failure_happens_before_first_target_write(self):
         runner = FakeRunner()
