@@ -118,6 +118,21 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             "scripts/deploy_content_whisper_runtime.py",
             self.manifest["executor"]["repository_path"],
         )
+        for tool in (
+                self.manifest["executor"],
+                self.manifest["executor"]["verifier"],
+                self.manifest["executor"]["requirements_verifier"]):
+            data = (ROOT / tool["repository_path"]).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), tool["source_sha256"])
+            self.assertEqual(self.verify._blob_id(data), tool["source_blob"])
+        source_gate = self.manifest["executor"]["source_checkout_gate"]
+        self.assertTrue(source_gate["clean_worktree_required"])
+        self.assertEqual("main", source_gate["branch"])
+        self.assertTrue(
+            source_gate["head_local_tracking_live_remote_and_reviewed_main_must_match"]
+        )
+        self.assertTrue(source_gate["reviewed_source_commit_must_be_ancestor"])
+        self.assertTrue(source_gate["network_or_missing_history_fails_closed"])
         self.assertFalse(self.manifest["executor"]["remote_connection_capability"])
         self.assertEqual(self.manifest["rollback"]["scope"], "all seven manifest targets as one unit")
 
@@ -125,7 +140,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         steps = self.manifest["ordered_release_steps"]
         restart = steps.index("restart_huangque_content_once")
         required_before_restart = {
-            "install_pinned_content_dependencies_from_staged_requirements",
+            "verify_exact_existing_content_dependencies_without_mutation",
             "run_staged_whisper_cache_prepare_and_online_model_preload",
             "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
             "run_candidate_subtitle_runtime_preflight_for_model_and_cjk_font",

@@ -7,8 +7,10 @@ the first write, then treats file installation, preflight and service restart
 as one rollback unit.
 """
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -24,6 +26,10 @@ import verify_content_whisper_deployment as manifest_verify
 
 AUTHORIZED_TARGET = "test@8.148.158.106"
 DEFAULT_BACKUP_ROOT = "/opt/huangque-deploy-backups"
+MANIFEST_REPOSITORY_PATH = (
+    "deploy/test-runtime/digital-human-whisper-runtime-20260815.json"
+)
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 class ReleaseError(RuntimeError):
@@ -32,6 +38,20 @@ class ReleaseError(RuntimeError):
 
 class RollbackError(ReleaseError):
     pass
+
+
+class GitRunner:
+    def run(self, arguments, *, source_root, allow_failure=False):
+        result = subprocess.run(
+            ["git", "-C", str(source_root)] + list(arguments),
+            check=False, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode and not allow_failure:
+            raise ReleaseError(
+                "Git source checkout verification failed: %s" %
+                " ".join(arguments)
+            )
+        return result
 
 
 class CommandRunner:
@@ -144,9 +164,12 @@ class RuntimeFiles:
                 written = os.write(descriptor, view)
                 view = view[written:]
             os.fsync(descriptor)
-            os.fchmod(descriptor, int(mode))
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, int(mode))
             os.close(descriptor)
             descriptor = None
+            if not hasattr(os, "fchmod"):
+                os.chmod(temporary, int(mode))
             if parent_descriptor is not None:
                 os.replace(
                     temporary_name, target.name,
@@ -205,18 +228,149 @@ class RuntimeFiles:
 class ContentWhisperRelease:
     def __init__(
             self, manifest, source_root, runtime_root, backup_root,
-            *, runner=None, health_getter=None, checkpoint=None):
+            *, runner=None, health_getter=None, checkpoint=None,
+            git_runner=None, reviewed_source_commit=None,
+            reviewed_main_commit=None):
         self.manifest = manifest
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime = RuntimeFiles(runtime_root)
         self.backup_root = Path(os.path.abspath(backup_root))
         self.runner = runner or CommandRunner()
+        self.git_runner = git_runner or GitRunner()
+        self.reviewed_source_commit = reviewed_source_commit
+        self.reviewed_main_commit = reviewed_main_commit
         self.health_getter = health_getter or self._http_status
         self.checkpoint = checkpoint or (lambda _name: None)
         self.backup_path = None
         self.backup_entries = []
         self.daemon_reload_attempted = False
         self.restart_attempted = False
+
+    @staticmethod
+    def _git_blob(data):
+        return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+    def _read_locked_source(self, repository_path):
+        relative = Path(repository_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ReleaseError("release tool path must stay inside source root")
+        target = Path(os.path.abspath(self.source_root / relative))
+        if os.path.commonpath((str(self.source_root), str(target))) != str(
+                self.source_root):
+            raise ReleaseError("release tool path escaped source root")
+        current = self.source_root
+        root_info = os.lstat(current)
+        if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+            raise ReleaseError("source root must be a real directory")
+        for index, part in enumerate(target.relative_to(self.source_root).parts):
+            current = current / part
+            try:
+                info = os.lstat(current)
+            except FileNotFoundError as exc:
+                raise ReleaseError(
+                    "locked release tool is missing: %s" % repository_path
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise ReleaseError(
+                    "locked release tool path contains a symbolic link: %s" %
+                    repository_path
+                )
+            if index < len(target.relative_to(self.source_root).parts) - 1:
+                if not stat.S_ISDIR(info.st_mode):
+                    raise ReleaseError(
+                        "locked release tool parent is not a directory: %s" %
+                        repository_path
+                    )
+            elif not stat.S_ISREG(info.st_mode):
+                raise ReleaseError(
+                    "locked release tool is not a regular file: %s" %
+                    repository_path
+                )
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(target, flags)
+        try:
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
+    def _verify_release_tools(self):
+        executor = self.manifest.get("executor", {})
+        verifier = executor.get("verifier", {})
+        requirements_verifier = executor.get("requirements_verifier", {})
+        locked = (executor, verifier, requirements_verifier)
+        expected_runtime_paths = {
+            "scripts/deploy_content_whisper_runtime.py": Path(__file__),
+            "scripts/verify_content_whisper_deployment.py": Path(
+                manifest_verify.__file__
+            ),
+        }
+        for entry in locked:
+            repository_path = entry.get("repository_path")
+            if not repository_path:
+                raise ReleaseError("manifest release tool lock is incomplete")
+            data = self._read_locked_source(repository_path)
+            if hashlib.sha256(data).hexdigest() != entry.get("source_sha256"):
+                raise ReleaseError(
+                    "release tool SHA-256 mismatch: %s" % repository_path
+                )
+            if self._git_blob(data) != entry.get("source_blob"):
+                raise ReleaseError(
+                    "release tool Git blob mismatch: %s" % repository_path
+                )
+            loaded_path = expected_runtime_paths.get(repository_path)
+            if loaded_path is not None and Path(os.path.abspath(loaded_path)) != Path(
+                    os.path.abspath(self.source_root / repository_path)):
+                raise ReleaseError(
+                    "loaded release tool is outside the locked checkout: %s" %
+                    repository_path
+                )
+
+    def _git_output(self, arguments):
+        result = self.git_runner.run(arguments, source_root=self.source_root)
+        return result.stdout.strip()
+
+    def _verify_source_checkout(
+            self, reviewed_source_commit, reviewed_main_commit):
+        if not COMMIT_PATTERN.fullmatch(str(reviewed_source_commit or "")):
+            raise ReleaseError("exact reviewed source commit is required")
+        if not COMMIT_PATTERN.fullmatch(str(reviewed_main_commit or "")):
+            raise ReleaseError("exact reviewed main commit is required")
+        manifest_path = Path(os.path.abspath(self.manifest.get("_manifest_path", "")))
+        expected_manifest = Path(os.path.abspath(
+            self.source_root / MANIFEST_REPOSITORY_PATH
+        ))
+        if manifest_path != expected_manifest:
+            raise ReleaseError("manifest must come from the locked source checkout")
+        if self._git_output(["status", "--porcelain", "--untracked-files=normal"]):
+            raise ReleaseError("source checkout must be clean")
+        if self._git_output(["symbolic-ref", "--short", "HEAD"]) != "main":
+            raise ReleaseError("source checkout branch must be main")
+        head = self._git_output(["rev-parse", "HEAD"])
+        origin_main = self._git_output(["rev-parse", "refs/remotes/origin/main"])
+        remote_line = self._git_output([
+            "ls-remote", "--exit-code", "origin", "refs/heads/main",
+        ])
+        remote_main = remote_line.split()[0] if remote_line else ""
+        if not COMMIT_PATTERN.fullmatch(remote_main):
+            raise ReleaseError("live origin/main could not be verified")
+        if head != reviewed_main_commit or head != origin_main or head != remote_main:
+            raise ReleaseError(
+                "HEAD, reviewed main, local origin/main and live origin/main must match"
+            )
+        ancestor = self.git_runner.run(
+            ["merge-base", "--is-ancestor", reviewed_source_commit, head],
+            source_root=self.source_root, allow_failure=True,
+        )
+        if ancestor.returncode != 0:
+            raise ReleaseError(
+                "reviewed source commit is missing or not contained in live main"
+            )
 
     def _validate_target(self, confirmation):
         target = self.manifest.get("target", {})
@@ -407,8 +561,15 @@ class ContentWhisperRelease:
         if failures:
             raise RollbackError("; ".join(failures))
 
-    def execute(self, confirmation):
+    def execute(
+            self, confirmation, reviewed_source_commit=None,
+            reviewed_main_commit=None):
         self._validate_target(confirmation)
+        self._verify_source_checkout(
+            reviewed_source_commit or self.reviewed_source_commit,
+            reviewed_main_commit or self.reviewed_main_commit,
+        )
+        self._verify_release_tools()
         payloads = self._source_payloads()
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
         self.checkpoint("preimage_complete")
@@ -455,12 +616,18 @@ def main():
     parser.add_argument("--runtime-root", default="/")
     parser.add_argument("--backup-root", default=DEFAULT_BACKUP_ROOT)
     parser.add_argument("--confirm-target", required=True)
+    parser.add_argument("--reviewed-source-commit", required=True)
+    parser.add_argument("--reviewed-main-commit", required=True)
     args = parser.parse_args()
     manifest = manifest_verify.load_manifest(args.manifest)
     manifest["_manifest_path"] = str(Path(args.manifest).resolve())
     result = ContentWhisperRelease(
         manifest, args.source_root, args.runtime_root, args.backup_root,
-    ).execute(args.confirm_target)
+    ).execute(
+        args.confirm_target,
+        reviewed_source_commit=args.reviewed_source_commit,
+        reviewed_main_commit=args.reviewed_main_commit,
+    )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 

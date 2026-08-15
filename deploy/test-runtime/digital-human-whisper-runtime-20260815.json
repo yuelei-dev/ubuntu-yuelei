@@ -29,9 +29,32 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
+    "source_blob": "c8001742f8a0a0d9a957e8d593b8db1820e39b04",
+    "source_sha256": "f36686250c243e3814cbd4dc6e122fcfc8d3552df22a29ab8fdc772e5c2957f5",
+    "verifier": {
+      "repository_path": "scripts/verify_content_whisper_deployment.py",
+      "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
+      "source_sha256": "b514582d10604908614643a54b748c1e161c6fd920775fb680479be3d5d69027"
+    },
+    "requirements_verifier": {
+      "repository_path": "scripts/verify_content_python_requirements.py",
+      "source_blob": "c5b98f095d7599576d4750fff65f1f46615036d6",
+      "source_sha256": "70dffcf974bada7c1ed2f93edb08d0f8577fb3473eeaeabe37b6c3b6c1c15893"
+    },
     "confirm_target": "test@8.148.158.106",
     "remote_connection_capability": false,
-    "requires_root_only_when_runtime_root_is_filesystem_root": true
+    "requires_root_only_when_runtime_root_is_filesystem_root": true,
+    "source_checkout_gate": {
+      "clean_worktree_required": true,
+      "branch": "main",
+      "local_tracking_ref": "refs/remotes/origin/main",
+      "live_remote_ref": "refs/heads/main",
+      "reviewed_source_commit_argument_required": true,
+      "reviewed_main_commit_argument_required": true,
+      "head_local_tracking_live_remote_and_reviewed_main_must_match": true,
+      "reviewed_source_commit_must_be_ancestor": true,
+      "network_or_missing_history_fails_closed": true
+    }
   },
   "absent_target_digest": {
     "canonical_bytes": "ABSENT\n",
@@ -90,13 +113,13 @@
       "repository_path": "deploy/requirements-content.txt",
       "runtime_path": "/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt",
       "classification": "staged_deployment_input",
-      "source_blob": "5baa82784ec05084c67bf6a766993f5ebe9d12a8",
-      "source_sha256": "786faf3914e90e5e0bcb3dc48708e13861b716c8869451e883569928a3ac4267",
+      "source_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+      "source_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
       "target_preimage_state": "absent",
       "target_preimage_blob": null,
       "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
-      "expected_postimage_blob": "5baa82784ec05084c67bf6a766993f5ebe9d12a8",
-      "expected_postimage_sha256": "786faf3914e90e5e0bcb3dc48708e13861b716c8869451e883569928a3ac4267"
+      "expected_postimage_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+      "expected_postimage_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee"
     },
     {
       "repository_path": "scripts/prepare_content_whisper.py",
@@ -129,7 +152,7 @@
     "backup_all_seven_targets_and_record_present_or_missing",
     "atomically_install_all_seven_targets",
     "verify_all_seven_postimages",
-    "install_pinned_content_dependencies_from_staged_requirements",
+    "verify_exact_existing_content_dependencies_without_mutation",
     "run_staged_whisper_cache_prepare_and_online_model_preload",
     "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
     "run_candidate_subtitle_runtime_preflight_for_model_and_cjk_font",
@@ -171,8 +194,12 @@
     ],
     "dependencies": [
       {
-        "argv": ["/usr/bin/python3", "-m", "pip", "install", "-r", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt}"],
-        "timeout_seconds": 900
+        "argv": ["/usr/bin/python3", "{source:scripts/verify_content_python_requirements.py}", "--requirements", "{runtime:/home/ubuntu/content-api/.deploy/whisper-runtime-20260815/requirements-content.txt}"],
+        "timeout_seconds": 120
+      },
+      {
+        "argv": ["/usr/bin/python3", "-m", "pip", "check"],
+        "timeout_seconds": 120
       }
     ],
     "cache": [

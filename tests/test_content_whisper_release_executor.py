@@ -7,6 +7,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 
 
@@ -16,6 +17,8 @@ MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-whisper-runtime-20260815.json"
 )
 EXECUTOR_PATH = SCRIPTS / "deploy_content_whisper_runtime.py"
+REVIEWED_SOURCE = "1" * 40
+REVIEWED_MAIN = "2" * 40
 
 
 def _load_executor():
@@ -49,6 +52,47 @@ class HealthProbe:
             self.fail_first = False
             return 500
         return 200 if url.endswith("/health") else 401
+
+
+class FakeGitRunner:
+    def __init__(
+            self, *, dirty=False, branch="main", head=REVIEWED_MAIN,
+            origin_main=REVIEWED_MAIN, remote_main=REVIEWED_MAIN,
+            ancestor=True, network_error=False):
+        self.dirty = dirty
+        self.branch = branch
+        self.head = head
+        self.origin_main = origin_main
+        self.remote_main = remote_main
+        self.ancestor = ancestor
+        self.network_error = network_error
+        self.calls = []
+
+    def run(self, arguments, *, source_root, allow_failure=False):
+        self.calls.append(tuple(arguments))
+        if arguments[:2] == ["status", "--porcelain"]:
+            stdout, code = (" M scripts/release.py\n" if self.dirty else ""), 0
+        elif arguments[:3] == ["symbolic-ref", "--short", "HEAD"]:
+            stdout, code = self.branch + "\n", 0
+        elif arguments == ["rev-parse", "HEAD"]:
+            stdout, code = self.head + "\n", 0
+        elif arguments == ["rev-parse", "refs/remotes/origin/main"]:
+            stdout, code = self.origin_main + "\n", 0
+        elif arguments[:2] == ["ls-remote", "--exit-code"]:
+            if self.network_error:
+                raise self._error()
+            stdout, code = self.remote_main + "\trefs/heads/main\n", 0
+        elif arguments[:2] == ["merge-base", "--is-ancestor"]:
+            stdout, code = "", 0 if self.ancestor else 1
+        else:
+            raise AssertionError("unexpected git command: %r" % (arguments,))
+        if code and not allow_failure:
+            raise self._error()
+        return types.SimpleNamespace(stdout=stdout, returncode=code)
+
+    @staticmethod
+    def _error():
+        return RuntimeError("injected Git verification failure")
 
 
 class ContentWhisperReleaseExecutorTests(unittest.TestCase):
@@ -107,7 +151,10 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             )
         return result
 
-    def _release(self, *, runner=None, health=None, checkpoint=None, manifest=None):
+    def _release(
+            self, *, runner=None, health=None, checkpoint=None, manifest=None,
+            git_runner=None, reviewed_source=REVIEWED_SOURCE,
+            reviewed_main=REVIEWED_MAIN):
         return self.release_module.ContentWhisperRelease(
             manifest or self.manifest,
             ROOT,
@@ -116,6 +163,9 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             runner=runner or FakeRunner(),
             health_getter=health or HealthProbe(),
             checkpoint=checkpoint,
+            git_runner=git_runner or FakeGitRunner(),
+            reviewed_source_commit=reviewed_source,
+            reviewed_main_commit=reviewed_main,
         )
 
     def _assert_restored_without_residue(self):
@@ -319,6 +369,73 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             )
         self.assertEqual([], runner.calls)
         self.assertFalse(self.backup_root.exists())
+
+    def test_executor_and_verifier_single_byte_drift_fail_before_backup(self):
+        for key_path in (("source_sha256",), ("verifier", "source_sha256")):
+            with self.subTest(key_path=key_path):
+                drifted = copy.deepcopy(self.manifest)
+                target = drifted["executor"]
+                for key in key_path[:-1]:
+                    target = target[key]
+                target[key_path[-1]] = "0" * 64
+                runner = FakeRunner()
+                with self.assertRaisesRegex(
+                        self.release_module.ReleaseError,
+                        "release tool SHA-256 mismatch"):
+                    self._release(runner=runner, manifest=drifted).execute(
+                        self.release_module.AUTHORIZED_TARGET
+                    )
+                self.assertEqual([], runner.calls)
+                self.assertFalse(self.backup_root.exists())
+
+    def test_source_checkout_gate_fails_closed_before_backup_or_commands(self):
+        cases = {
+            "dirty": FakeGitRunner(dirty=True),
+            "non_main": FakeGitRunner(branch="feature/test"),
+            "local_origin_drift": FakeGitRunner(origin_main="3" * 40),
+            "live_origin_drift": FakeGitRunner(remote_main="4" * 40),
+            "reviewed_commit_missing": FakeGitRunner(ancestor=False),
+            "network_failure": FakeGitRunner(network_error=True),
+        }
+        for name, git_runner in cases.items():
+            with self.subTest(name=name):
+                runner = FakeRunner()
+                with self.assertRaises(Exception):
+                    self._release(
+                        runner=runner, git_runner=git_runner,
+                    ).execute(self.release_module.AUTHORIZED_TARGET)
+                self.assertEqual([], runner.calls)
+                self.assertFalse(self.backup_root.exists())
+
+    def test_exact_reviewed_commits_are_required_before_backup(self):
+        for reviewed_source, reviewed_main in (
+                ("short", REVIEWED_MAIN),
+                (REVIEWED_SOURCE, "not-a-commit"),
+                (REVIEWED_SOURCE, "3" * 40)):
+            with self.subTest(
+                    reviewed_source=reviewed_source,
+                    reviewed_main=reviewed_main):
+                runner = FakeRunner()
+                with self.assertRaises(self.release_module.ReleaseError):
+                    self._release(
+                        runner=runner,
+                        reviewed_source=reviewed_source,
+                        reviewed_main=reviewed_main,
+                    ).execute(self.release_module.AUTHORIZED_TARGET)
+                self.assertEqual([], runner.calls)
+                self.assertFalse(self.backup_root.exists())
+
+    def test_dependency_gate_is_read_only_and_never_installs_packages(self):
+        commands = self.manifest["release_commands"]["dependencies"]
+        rendered = json.dumps(commands, ensure_ascii=False)
+        self.assertNotIn("pip\", \"install", rendered)
+        self.assertNotIn("pip install", rendered)
+        self.assertIn("verify_content_python_requirements.py", rendered)
+        self.assertIn("pip\", \"check", rendered)
+        self.assertEqual(
+            "verify_exact_existing_content_dependencies_without_mutation",
+            self.manifest["ordered_release_steps"][5],
+        )
 
 
 if __name__ == "__main__":
