@@ -243,8 +243,7 @@ def post_json_pre_delivery_failover(official_base, heygen_base, path, data, head
             base + path, data=data, headers=headers, method="POST",
         )
         try:
-            with _opener(proxy).open(request, timeout=request_timeout) as response:
-                return json.loads(response.read())
+            response = _opener(proxy).open(request, timeout=request_timeout)
         except Exception as error:
             last = error
             error_name = type(error).__name__
@@ -262,6 +261,21 @@ def post_json_pre_delivery_failover(official_base, heygen_base, path, data, head
                     "before delivery (%s); trying next distinct route"
                     % (path, number, limit, label, error_name)
                 )
+
+            continue
+
+        try:
+            with response:
+                payload = response.read()
+            return json.loads(payload)
+        except Exception as error:
+            if log:
+                log(
+                    "[egress] paid analysis %s attempt %d/%d via %s failed "
+                    "while reading/parsing the response (%s); not resending"
+                    % (path, number, limit, label, type(error).__name__)
+                )
+            raise
 
     raise last if last is not None else RuntimeError("egress: 请求失败")
 

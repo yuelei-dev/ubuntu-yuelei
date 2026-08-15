@@ -323,6 +323,20 @@ class FailoverTests(unittest.TestCase):
         self.assertIsInstance(error, ConnectionResetError)
         self.assertEqual(len(calls), 1)
 
+    def test_paid_analysis_tls_failure_while_reading_is_not_resent(self):
+        import ssl
+
+        class _ReadFailure(_FakeResp):
+            def read(self):
+                raise ssl.SSLError("unexpected EOF while reading")
+
+        result, calls, error = self._run_paid_analysis([
+            _ReadFailure(b""), b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ssl.SSLError)
+        self.assertEqual(len(calls), 1)
+
     def test_paid_analysis_invalid_json_is_not_resent(self):
         result, calls, error = self._run_paid_analysis([b'{', b'{"ok":2}'])
         self.assertIsNone(result)
