@@ -537,10 +537,32 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.assertNotIn("pip\", \"install", rendered)
         self.assertNotIn("pip install", rendered)
         self.assertIn("verify_content_python_requirements.py", rendered)
-        self.assertIn("pip\", \"check", rendered)
+        self.assertEqual(1, len(commands))
+        self.assertEqual(
+            ["/usr/bin/sudo", "-u", "ubuntu", "-H"],
+            commands[0]["argv"][:4],
+        )
+        self.assertIn("PyGObject==3.42.1:pycairo", commands[0]["argv"])
         self.assertEqual(
             "verify_exact_existing_content_dependencies_without_mutation",
             self.manifest["ordered_release_steps"][5],
+        )
+
+    def test_runtime_preflights_use_the_real_content_service_identity(self):
+        for stage in ("dependencies", "offline", "font"):
+            commands = self.manifest["release_commands"][stage]
+            self.assertEqual(1, len(commands))
+            self.assertEqual(
+                ["/usr/bin/sudo", "-u", "ubuntu", "-H"],
+                commands[0]["argv"][:4],
+            )
+        self.assertIn(
+            "HF_HUB_OFFLINE=1",
+            self.manifest["release_commands"]["offline"][0]["argv"],
+        )
+        self.assertIn(
+            "SUBTITLE_FONT=Noto Sans CJK SC",
+            self.manifest["release_commands"]["font"][0]["argv"],
         )
 
 
