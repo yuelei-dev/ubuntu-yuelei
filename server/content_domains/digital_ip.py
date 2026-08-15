@@ -25,14 +25,14 @@ OPENAI_OFFICIAL_BASE = os.environ.get("OPENAI_OFFICIAL_BASE", "https://api.opena
 
 
 def _post(path, data, ctype, timeout=300):
-    """Send IP12 analysis through the managed egress chain with one shared deadline."""
+    """Send paid IP12 analysis without ambiguous upstream resubmission."""
     def base_for_path(value):
         value = str(value or "https://api.openai.com").strip().rstrip("/")
         if value.endswith("/v1") and str(path).startswith("/v1/"):
             value = value[:-3]
         return value
 
-    return egress.post_json_idempotent(
+    return egress.post_json_pre_delivery_failover(
         base_for_path(OPENAI_OFFICIAL_BASE),
         base_for_path(OPENAI_BASE),
         path,

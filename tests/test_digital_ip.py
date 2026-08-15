@@ -137,13 +137,13 @@ class DigitalIPTests(unittest.TestCase):
         self.assertTrue(result["ai_recommendation"])
         self.assertFalse(result["user_confirmed"])
 
-    def test_openai_transport_uses_managed_egress_and_shared_deadline(self):
+    def test_openai_transport_uses_paid_pre_delivery_failover(self):
         expected = {"ok": True}
         with mock.patch.object(digital_ip, "OPENAI_KEY", "test-key"), \
                 mock.patch.object(digital_ip, "OPENAI_BASE", "https://relay.example/v1"), \
                 mock.patch.object(digital_ip, "OPENAI_OFFICIAL_BASE", "https://api.openai.com"), \
                 mock.patch.object(
-                    digital_ip.egress, "post_json_idempotent", return_value=expected,
+                    digital_ip.egress, "post_json_pre_delivery_failover", return_value=expected,
                 ) as post:
             result = digital_ip._post(
                 "/v1/responses", b"{}", "application/json", timeout=60,
