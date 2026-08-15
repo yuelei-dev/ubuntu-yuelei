@@ -24,6 +24,24 @@
     "copy_environment_or_database": false,
     "production_server_write_allowed": false
   },
+  "release_executor": {
+    "repository_path": "scripts/deploy_locked_manifest.py",
+    "git_blob": "55a6afc4511fb424c4d502792fa2d9a66cda3583",
+    "sha256": "a57fea4a42e83b7c686d6da0ca00f46a0ab92c56d53150897a4ac8d37ecdfa41",
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "runtime_package": "content_domains",
+    "import_modules": [
+      "content_domains.egress",
+      "content_domains.digital_ip"
+    ],
+    "health_url": "http://127.0.0.1:3100/api/gen/health",
+    "unauthenticated_probe": {
+      "method": "POST",
+      "url": "http://127.0.0.1:3100/api/gen/digital-ip/diagnose",
+      "expected_status": 401,
+      "paid_model_calls": 0
+    }
+  },
   "files": [
     {
       "repository_path": "server/content_domains/digital_ip.py",
@@ -38,8 +56,8 @@
       "runtime_path": "/home/ubuntu/content-api/content_domains/egress.py",
       "preimage_blob": "bcedb7c52101b95acc238031808100b22385874e",
       "preimage_sha256": "102798fbdfc0e581bce1c254b426d6c78d1f2d77654a07a9812da69fe5dd2e79",
-      "postimage_blob": "ee11528e564b90057c8d080927ca6847b33815cf",
-      "postimage_sha256": "1ad22c3d6feb6b133571b3be22d049525182b120e1576ef77e029e5c4633db94"
+      "postimage_blob": "7064ab4f3cfcb50a320239b1c8c94a52241e1eb5",
+      "postimage_sha256": "95fd7fa62e751bcf5da056618308e62b302823f8a292bffac9566a64e9d452f3"
     }
   ],
   "pre_write_checks": [

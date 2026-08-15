@@ -289,6 +289,19 @@ class FailoverTests(unittest.TestCase):
         self.assertIsInstance(error, urllib.error.URLError)
         self.assertEqual(len(calls), 1)
 
+    def test_paid_analysis_ssl_eof_from_open_is_not_resent(self):
+        import ssl
+
+        result, calls, error = self._run_paid_analysis([
+            urllib.error.URLError(
+                ssl.SSLEOFError(8, "unexpected EOF while reading")
+            ),
+            b'{"ok":2}',
+        ])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, urllib.error.URLError)
+        self.assertEqual(len(calls), 1)
+
     def test_paid_analysis_http_500_is_not_resent(self):
         import io
         upstream = urllib.error.HTTPError(

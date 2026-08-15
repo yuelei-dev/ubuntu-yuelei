@@ -119,7 +119,7 @@ def _channel_usable(proxy):
 _PRE_DELIVERY_ERRNOS = {errno.ECONNREFUSED, errno.EHOSTUNREACH, errno.ENETUNREACH}
 
 
-def _pre_delivery_failure(e):
+def _pre_delivery_failure(e, *, allow_generic_tls=True):
     """这个异常能否证明「请求还没送到上游」？只有能证明时，换通道重发才是安全的。
 
     出图 POST 是**非幂等**的：请求一旦抵达 OpenAI/Google，就可能已经出图并计费。
@@ -145,7 +145,10 @@ def _pre_delivery_failure(e):
         if isinstance(reason, ConnectionRefusedError):
             return True
         if isinstance(reason, ssl.SSLError):
-            return True              # 握手阶段失败，应用层字节未发送
+            # urllib 的 opener.open() 同时覆盖连接、TLS、发送请求和读取响应头。
+            # 因此付费请求不能只凭通用 SSLError/SSLEOFError 证明应用层字节未发送；
+            # 旧作图链保留原行为，付费分析入口传 allow_generic_tls=False。
+            return bool(allow_generic_tls)
         if isinstance(reason, OSError) and reason.errno in _PRE_DELIVERY_ERRNOS:
             return True
     return False
@@ -247,7 +250,7 @@ def post_json_pre_delivery_failover(official_base, heygen_base, path, data, head
         except Exception as error:
             last = error
             error_name = type(error).__name__
-            if not _pre_delivery_failure(error):
+            if not _pre_delivery_failure(error, allow_generic_tls=False):
                 if log:
                     log(
                         "[egress] paid analysis %s attempt %d/%d via %s failed "
