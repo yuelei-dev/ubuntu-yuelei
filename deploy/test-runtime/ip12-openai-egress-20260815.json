@@ -10,7 +10,7 @@
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
     "development_base_commit": "783fe3088ff38a9ae11ebcb426e5d6e469cb0125",
-    "code_source_commit": "c72538e268e3b86ede7802c48f2bb464a89b9ab6",
+    "code_source_commit": "54282dbe7183218f89a9b10e9f3826a7cea38f46",
     "deployment_ref_requirement": "exact merged main commit containing code_source_commit and both locked postimage blobs"
   },
   "deployment_policy": {
