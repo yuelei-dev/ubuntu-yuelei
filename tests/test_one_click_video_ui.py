@@ -56,7 +56,7 @@ class OneClickVideoUiTests(unittest.TestCase):
             self.html,
             r'id="digitalHumanMode" class="mode-view"[^>]*\bhidden\b',
         )
-        for marker in ("文案智能成片", "口播粗剪", "数字人一键生成", "智能拆分", "确认并生成"):
+        for marker in ("文案智能成片", "口播粗剪", "数字人口播成片", "智能拆分", "确认并生成"):
             self.assertIn(marker, self.html)
         self.assertIn('maxlength="320"', self.html)
         self.assertIn("完整朗读", self.html)
