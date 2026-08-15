@@ -1528,10 +1528,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertNotEqual(profiles[0]["speed"], profiles[1]["speed"])
 
 
-    def test_video_page_replaces_the_old_talking_tab_instead_of_adding_a_header_link(self):
+    def test_video_page_routes_digital_human_into_the_unified_one_click_page(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
-        self.assertIn('<a class="function-tab on" href="digital-human-oneclick.html"', page)
-        self.assertEqual(page.count('href="digital-human-oneclick.html"'), 1)
+        self.assertIn('<a class="function-tab on" href="one-click-video.html?mode=digital-human"', page)
+        self.assertEqual(page.count('href="one-click-video.html?mode=digital-human"'), 1)
+        self.assertNotIn('href="digital-human-oneclick.html"', page)
         self.assertNotIn('data-function="talking">数字人口播', page)
 
 

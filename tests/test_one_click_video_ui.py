@@ -43,7 +43,7 @@ class OneClickVideoUiTests(unittest.TestCase):
     def test_mobile_shell_can_scroll_to_review_and_render_panels(self):
         self.assertIn('@media(max-width:900px){.hq-app{overflow:auto!important}}', self.html)
 
-    def test_smart_montage_is_default_and_keeps_rough_cut_as_a_second_mode(self):
+    def test_smart_montage_is_default_and_keeps_all_three_modes_on_one_page(self):
         self.assertRegex(
             self.html,
             r'id="smartMode" class="mode-view"(?![^>]*\bhidden\b)',
@@ -52,10 +52,26 @@ class OneClickVideoUiTests(unittest.TestCase):
             self.html,
             r'id="roughMode" class="mode-view"[^>]*\bhidden\b',
         )
-        for marker in ("文案智能成片", "口播粗剪", "智能拆分", "确认并生成"):
+        self.assertRegex(
+            self.html,
+            r'id="digitalHumanMode" class="mode-view"[^>]*\bhidden\b',
+        )
+        for marker in ("文案智能成片", "口播粗剪", "数字人一键生成", "智能拆分", "确认并生成"):
             self.assertIn(marker, self.html)
         self.assertIn('maxlength="320"', self.html)
         self.assertIn("完整朗读", self.html)
+
+    def test_digital_human_mode_is_lazy_loaded_and_kept_alive_between_tabs(self):
+        self.assertIn('id="digitalHumanModeTab"', self.html)
+        self.assertIn('aria-controls="digitalHumanMode"', self.html)
+        self.assertIn('id="digitalHumanFrame"', self.html)
+        self.assertIn('data-src="digital-human-oneclick.html?embed=1"', self.html)
+        self.assertNotRegex(self.html, r'id="digitalHumanFrame"[^>]+\ssrc=')
+        self.assertIn("if(frame.getAttribute('src'))return", self.html)
+        self.assertIn("frame.setAttribute('src',frame.getAttribute('data-src'))", self.html)
+        self.assertIn("'digital-human':{tab:'digitalHumanModeTab'", self.html)
+        self.assertIn("initialParams.get('mode')", self.html)
+        self.assertNotIn("OpenAI", self.html)
 
     def test_smart_plan_uses_copy_ratio_and_all_selected_styles(self):
         self.assertIn("'/api/gen/script_to_video/plan'", self.html)

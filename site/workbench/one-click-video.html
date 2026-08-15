@@ -14,7 +14,11 @@ body{overflow:hidden}.hq-content[data-active="video"]{height:100%;min-height:0;o
 .mode-tabs{display:flex;gap:6px;padding:4px;border:1px solid rgba(148,164,187,.14);border-radius:11px;background:rgba(5,10,18,.58)}
 .mode-tab{height:34px;padding:0 13px;border:0;border-radius:8px;background:transparent;color:#8595aa;font:800 12px inherit;cursor:pointer;white-space:nowrap}
 .mode-tab.on{background:linear-gradient(135deg,#f4cd72,#e7b24c);color:#171004}
+.mode-tab:focus-visible{outline:2px solid rgba(231,178,76,.72);outline-offset:2px}
 .mode-view{min-height:0;flex:1}.mode-view[hidden]{display:none!important}
+.digital-human-host{position:relative;height:100%;min-height:0;overflow:hidden;border:1px solid rgba(148,164,187,.12);border-radius:14px;background:linear-gradient(165deg,rgba(16,24,39,.72),rgba(8,13,23,.68))}
+.digital-human-frame{display:block;width:100%;height:100%;border:0;background:transparent}
+.digital-human-loading{position:absolute;inset:0;display:grid;place-items:center;margin:0;color:#94a4bb;font-size:12px;pointer-events:none}.digital-human-loading[hidden]{display:none}
 .smart-grid{display:grid;grid-template-columns:minmax(340px,430px) minmax(380px,1fr);gap:14px;height:100%;min-height:0}
 .smart-panel{min-height:0;border:1px solid rgba(148,164,187,.12);border-radius:14px;background:linear-gradient(165deg,rgba(16,24,39,.72),rgba(8,13,23,.68));overflow:hidden;display:flex;flex-direction:column}
 .smart-scroll{padding:16px;overflow:auto;min-height:0}
@@ -62,7 +66,7 @@ body{overflow:hidden}.hq-content[data-active="video"]{height:100%;min-height:0;o
 .job-state{margin-top:8px;color:#94a4bb;font-size:11px;line-height:1.5}.job-state.good{color:#2dd4bf}.job-state.bad{color:#f4708a}
 .job-video{display:block;width:100%;max-height:340px;margin-top:10px;border-radius:9px;background:#02050a;object-fit:contain}
 .job-links{display:flex;gap:8px;margin-top:9px}.job-link{display:inline-flex;align-items:center;justify-content:center;min-height:33px;padding:0 11px;border:1px solid rgba(231,178,76,.3);border-radius:8px;color:#e7b24c;text-decoration:none;font-size:11px;font-weight:800}
-@media(max-width:900px){.smart-grid{grid-template-columns:1fr;height:auto}.smart-panel{max-height:none}.smart-scroll{overflow:visible}.mode-view{height:auto}.mode-tabs{width:100%}.mode-tab{flex:1}.copy-input{min-height:180px}}
+@media(max-width:900px){.smart-grid{grid-template-columns:1fr;height:auto}.smart-panel{max-height:none}.smart-scroll{overflow:visible}.mode-view{height:auto}.mode-tabs{width:100%;overflow-x:auto}.mode-tab{flex:1}.copy-input{min-height:180px}.digital-human-host{height:calc(100vh - 190px);min-height:640px}}
 @media(max-width:600px){.style-choices{grid-template-columns:1fr}.smart-actions,.plan-summary{grid-template-columns:1fr}.compose-head>div:first-child{width:100%}.scene-row{grid-template-columns:30px minmax(0,1fr) auto}.scene-time{display:none}.material-card{grid-template-columns:40px minmax(0,1fr)}.material-thumb{width:40px;height:40px}.material-order{grid-column:1/-1;justify-content:flex-end}}
 </style>
 <link rel="stylesheet" href="theme.css?v=5873a2f4">
@@ -75,6 +79,7 @@ body{overflow:hidden}.hq-content[data-active="video"]{height:100%;min-height:0;o
     <div class="mode-tabs" role="tablist" aria-label="一键成片模式">
       <button id="smartModeTab" class="mode-tab on" type="button" role="tab" aria-selected="true" aria-controls="smartMode">文案智能成片</button>
       <button id="roughModeTab" class="mode-tab" type="button" role="tab" aria-selected="false" aria-controls="roughMode">口播粗剪</button>
+      <button id="digitalHumanModeTab" class="mode-tab" type="button" role="tab" aria-selected="false" aria-controls="digitalHumanMode">数字人一键生成</button>
     </div>
   </header>
 
@@ -146,6 +151,13 @@ body{overflow:hidden}.hq-content[data-active="video"]{height:100%;min-height:0;o
       </div></aside>
     </div>
   </div>
+
+  <div id="digitalHumanMode" class="mode-view" role="tabpanel" aria-labelledby="digitalHumanModeTab" hidden>
+    <div class="digital-human-host">
+      <p id="digitalHumanLoading" class="digital-human-loading" role="status">正在打开数字人一键生成…</p>
+      <iframe id="digitalHumanFrame" class="digital-human-frame" title="数字人一键生成" data-src="digital-human-oneclick.html?embed=1" loading="lazy"></iframe>
+    </div>
+  </div>
 </div></div></div>
 <script src="../assets/cloud.js?v=8"></script><script src="cloud-shell.js?v=dbd5a9e4"></script>
 <script>
@@ -177,7 +189,7 @@ $('analyzeBtn').onclick=analyze;$('confirmBtn').onclick=confirmCuts;$('renderBtn
 </script>
 <script>
 (function(){
-var token='__cookie__',activePlan=null,plannedSignature='',smartObjectUrls=[],smartUploads=[],smartUploadPreviews={},smartMaterialBusy=false,smartPlanning=false,smartSubmitting=false,smartReleaseBusy=false,smartSubmissionSlotsSnapshot=null,smartStorageKey='hq-smart-montage-batch-v2',smartBatch=emptySmartBatch(),smartPolls={},smartPollSequence=0,renderingStyle='',MAX_SMART_STYLES=3,MAX_SMART_MATERIALS=20,MAX_SMART_MATERIAL_BYTES=10*1024*1024,MAX_SMART_TOTAL_BYTES=96*1024*1024,SMART_PLANNER_VERSION='script_video_montage_v3';
+var token='__cookie__',activePlan=null,plannedSignature='',smartObjectUrls=[],smartUploads=[],smartUploadPreviews={},smartMaterialBusy=false,smartPlanning=false,smartSubmitting=false,smartReleaseBusy=false,smartSubmissionSlotsSnapshot=null,smartStorageKey='hq-smart-montage-batch-v2',smartBatch=emptySmartBatch(),smartPolls={},smartPollSequence=0,renderingStyle='',smartRestoreAttempted=false,MAX_SMART_STYLES=3,MAX_SMART_MATERIALS=20,MAX_SMART_MATERIAL_BYTES=10*1024*1024,MAX_SMART_TOTAL_BYTES=96*1024*1024,SMART_PLANNER_VERSION='script_video_montage_v3';
 var styleNames={luxe:'高奢美学',pop:'潮流快闪',clinic:'专业科技',wellness:'自然疗愈',neon:'未来霓虹',editorial:'杂志拼贴'};
 var $=function(id){return document.getElementById(id);};
 function emptySmartBatch(){return {version:4,signature:'',input:null,plan:null,keys:{},jobs:{},job_states:{},unresolved_submissions:{},materials_locked:false,submission_attempted:false,materials_released:false,material_slots_by_style:{},needs_new_batch:false};}
@@ -196,7 +208,16 @@ function currentBatchSignature(){
   return JSON.stringify({copy:$('smartCopy').value.trim(),styles:selectedStyles(),ratio:selectedRatio(),material_upload_ids:smartUploads.map(function(item){return item.upload_id;})});
 }
 function setSmartStatus(text,type,busy){$('smartStatus').className='smart-status'+(type?' '+type:'');$('smartStatus').innerHTML=(busy?'<i class="spinner"></i>':'')+esc(text);}
-function setMode(mode){var smart=mode==='smart';$('smartMode').hidden=!smart;$('roughMode').hidden=smart;$('smartModeTab').classList.toggle('on',smart);$('roughModeTab').classList.toggle('on',!smart);$('smartModeTab').setAttribute('aria-selected',smart?'true':'false');$('roughModeTab').setAttribute('aria-selected',smart?'false':'true');$('pageSubtitle').textContent=smart?'输入文案，系统按内容自动决定时长、分镜与素材数量':'已有口播 → AI 粗剪建议 → 用户确认 → 已验证模板 → 真实 MP4';}
+var modeConfig={
+  smart:{tab:'smartModeTab',panel:'smartMode',subtitle:'输入文案，系统按内容自动决定时长、分镜与素材数量'},
+  rough:{tab:'roughModeTab',panel:'roughMode',subtitle:'已有口播 → AI 粗剪建议 → 用户确认 → 已验证模板 → 真实 MP4'},
+  'digital-human':{tab:'digitalHumanModeTab',panel:'digitalHumanMode',subtitle:'一张照片、一个声音和一篇文案，自动完成三段数字人口播与剪辑成片'}
+};
+function normalizeMode(mode){return modeConfig[mode]?mode:'smart';}
+function ensureDigitalHumanFrame(){var frame=$('digitalHumanFrame');if(frame.getAttribute('src'))return;frame.addEventListener('load',function(){$('digitalHumanLoading').hidden=true;},{once:true});frame.setAttribute('src',frame.getAttribute('data-src'));}
+function restoreSmartModeOnce(){if(smartRestoreAttempted)return;smartRestoreAttempted=true;var restored=restoreBatchOnLoad();if(!restored)renderMaterialList();}
+function updateModeUrl(mode){var url=new URL(location.href);if(mode==='smart')url.searchParams.delete('mode');else url.searchParams.set('mode',mode);if(mode!=='rough')url.searchParams.delete('source_asset_id');history.replaceState(null,'',url.pathname+url.search+url.hash);}
+function setMode(mode,updateUrl){mode=normalizeMode(mode);Object.keys(modeConfig).forEach(function(name){var config=modeConfig[name],active=name===mode,tab=$(config.tab);$(config.panel).hidden=!active;tab.classList.toggle('on',active);tab.setAttribute('aria-selected',active?'true':'false');tab.tabIndex=active?0:-1;});$('pageSubtitle').textContent=modeConfig[mode].subtitle;if(mode==='digital-human')ensureDigitalHumanFrame();if(mode==='smart')restoreSmartModeOnce();if(updateUrl!==false)updateModeUrl(mode);}
 function responseError(message,response,data){var error=new Error(message);error.status=response.status;error.code=data&&data.code||'';error.operationTerminal=!!(data&&data.operation_terminal);error.responseReceived=true;error.submissionRef=data&&data.submission_ref||'';error.jobId=data&&data.job_id||'';return error;}
 function jsonRequest(url,options){options=options||{};options.credentials='same-origin';options.headers=Object.assign({'Authorization':'Bearer '+token,'Content-Type':'application/json'},options.headers||{});return fetch(url,options).then(function(r){return r.json().catch(function(){return {detail:'服务返回格式异常'};}).then(function(data){if(r.status===401){location.href='../login.html?redirect=workbench/one-click-video';throw responseError('登录已过期',r,data);}if(!r.ok){var detail=data&&data.detail;if(r.status===402)detail=detail||'点数不足，请充值后再试';throw responseError(typeof detail==='string'?detail:'请求失败',r,data);}return data;});});}
 function hasSmartJobs(){return Object.keys(smartBatch.jobs||{}).length>0;}
@@ -476,12 +497,12 @@ function startNewBatch(){
   var targets=smartUploads.filter(function(item){return !item.released;});smartMaterialBusy=true;renderMaterialList();setSmartStatus('正在清理当前批次临时素材…','',true);var failures=0;
   targets.reduce(function(chain,item){return chain.then(function(){return deleteMaterialUpload(item.upload_id).catch(function(error){if(!error||error.status!==404)failures++;});});},Promise.resolve()).then(function(){clearBatchUi(hadJobs,failures);});
 }
-$('smartModeTab').onclick=function(){setMode('smart');};$('roughModeTab').onclick=function(){setMode('rough');};$('smartPlanBtn').onclick=buildPlan;$('smartGenerateBtn').onclick=generateAll;$('smartNewBatchBtn').onclick=startNewBatch;
+[['smartModeTab','smart'],['roughModeTab','rough'],['digitalHumanModeTab','digital-human']].forEach(function(entry,index,list){var tab=$(entry[0]);tab.onclick=function(){setMode(entry[1]);};tab.onkeydown=function(event){if(event.key!=='ArrowLeft'&&event.key!=='ArrowRight')return;event.preventDefault();var next=(index+(event.key==='ArrowRight'?1:-1)+list.length)%list.length;$(list[next][0]).focus();setMode(list[next][1]);};});$('smartPlanBtn').onclick=buildPlan;$('smartGenerateBtn').onclick=generateAll;$('smartNewBatchBtn').onclick=startNewBatch;
 $('smartMaterialPick').onclick=function(){if(!materialControlsLocked())$('smartMaterialInput').click();};$('smartMaterialInput').addEventListener('change',function(){chooseMaterialFiles(this.files);});$('smartMaterialList').addEventListener('click',function(event){var button=event.target.closest&&event.target.closest('button[data-material-action]');if(!button)return;var card=button.closest('.material-card');moveOrRemoveMaterial(Number(card&&card.getAttribute('data-material-index')),button.getAttribute('data-material-action'));});
 $('smartPlan').addEventListener('change',function(event){var select=event.target.closest&&event.target.closest('select[data-material-style]');if(select)changeSceneMaterial(select);});
 $('smartCopy').addEventListener('input',function(){$('smartCopyCount').textContent=this.value.length+' / 320';invalidatePlan();});document.querySelectorAll('input[name="smartRatio"]').forEach(function(input){input.addEventListener('change',invalidatePlan);});document.querySelectorAll('input[name="smartStyle"]').forEach(function(input){input.addEventListener('change',function(){if(selectedStyles().length>MAX_SMART_STYLES){input.checked=false;setSmartStatus('单次最多选择 '+MAX_SMART_STYLES+' 种模板','bad');return;}invalidatePlan();});});
 window.addEventListener('beforeunload',function(){smartObjectUrls.forEach(function(url){URL.revokeObjectURL(url);});Object.keys(smartUploadPreviews).forEach(function(id){URL.revokeObjectURL(smartUploadPreviews[id]);});});
-renderMaterialList();if(new URLSearchParams(location.search).get('source_asset_id'))setMode('rough');else{setMode('smart');var restored=restoreBatchOnLoad();if(!restored)renderMaterialList();}
+renderMaterialList();var initialParams=new URLSearchParams(location.search),initialMode=initialParams.get('source_asset_id')?'rough':normalizeMode(initialParams.get('mode'));setMode(initialMode,false);
 })();
 </script>
 </body></html>
