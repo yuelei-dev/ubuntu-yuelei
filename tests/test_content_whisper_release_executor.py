@@ -222,7 +222,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             [], list(self.runtime_root.rglob(".hq-release-*")),
         )
         staged = self.runtime_root / "home" / "ubuntu" / "content-api" / ".deploy"
-        self.assertFalse(staged.exists())
+        self.assertTrue(staged.is_dir())
 
     def test_success_installs_all_files_and_restarts_exactly_once(self):
         runner = FakeRunner()
@@ -258,7 +258,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         )
         self.assertEqual(7, len(state["files"]))
         self.assertEqual(
-            ["file", "file", "file", "file", "absent", "absent", "absent"],
+            ["file"] * 7,
             [entry["state"] for entry in state["files"]],
         )
         self.assertEqual(2, len(health.calls))
