@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset-schema fix as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery plus public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "7fd326be09ea0e989a9f25f0520bc110246b71d0",
-      "source_sha256": "f7e20b0bf5f1262e15505dce1a404161f97032323492d93f18c41e3edebf42b6",
+      "source_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
+      "source_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6",
       "target_preimage_state": "file",
       "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
       "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
-      "expected_postimage_blob": "7fd326be09ea0e989a9f25f0520bc110246b71d0",
-      "expected_postimage_sha256": "f7e20b0bf5f1262e15505dce1a404161f97032323492d93f18c41e3edebf42b6"
+      "expected_postimage_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
+      "expected_postimage_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -169,7 +169,10 @@
     "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_contract_uses_live_tools_list_schema",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_validation_error_is_redacted_and_pre_billing",
-    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url"
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_presigned_upload_rejects_non_public_targets_before_put",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_presigned_redirect_is_not_followed_or_completed",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_private_upload_target_stops_before_paid_video_create"
   ],
   "release_contract_sources": [
     {
@@ -184,14 +187,15 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "cff59d055843e54ea5f0df60369b689128eca140",
-      "source_sha256": "fb6d78caa036a11a8aaf16c0a01a435750eaa4d6db2cdb0a5857fd1db33581a3"
+      "source_blob": "3acd5ef8661b14141a3393d81cff7b131d03698b",
+      "source_sha256": "6ada19ed1b33d92714c9d25abc81db200bdfe6bc2cc03883a0024c1ed5dd1815"
     }
   ],
   "paid_submission_contract": {
     "page_preflight_failure": "HTTP 503 with no_charge=true before a paid HeyGen create",
     "talking_subtask_preflight_failure": "HTTP 503 before core creates or charges the child job",
     "mcp_asset_contract_failure": "Fail closed before asset upload and before a paid HeyGen create",
+    "mcp_asset_target_failure": "Reject non-public or redirected upload targets before raw media egress, completion, and paid HeyGen create",
     "automatic_paid_retry_allowed": false
   },
   "release_commands": {

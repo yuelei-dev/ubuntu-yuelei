@@ -6,6 +6,7 @@ import io
 import ipaddress
 import math
 import shutil
+import socket
 import sqlite3
 import tempfile
 
@@ -3899,6 +3900,13 @@ def _heygen_mcp_asset_upload_contract():
     return schema
 
 
+class _HeyGenMCPNoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never forward raw user media to a redirected storage target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _heygen_mcp_presigned_upload_opener():
     """Upload signed storage URLs without the HeyGen API egress proxy.
 
@@ -3908,7 +3916,53 @@ def _heygen_mcp_presigned_upload_opener():
     handler also prevents process-level HTTP(S)_PROXY variables from leaking
     back into this request.
     """
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _HeyGenMCPNoRedirect(),
+    )
+
+
+def _heygen_mcp_public_upload_url(upload_url, resolver=None):
+    """Accept only a directly reachable public HTTPS presigned target.
+
+    HeyGen controls this URL, but the request body is raw user material.  Keep
+    the validation at the final egress boundary so a compromised or malformed
+    provider response cannot turn the worker into an internal-network PUT
+    client.  Every resolved address must be globally routable; a mixed public
+    and private DNS answer is rejected as well.
+    """
+    parsed = urllib.parse.urlsplit(str(upload_url or "").strip())
+    host = (parsed.hostname or "").strip().lower()
+    if (
+        parsed.scheme != "https"
+        or not host
+        or parsed.username
+        or parsed.password
+        or host == "localhost"
+        or host.endswith(".localhost")
+    ):
+        raise RuntimeError("HeyGen MCP 素材上传地址不安全")
+    try:
+        port = parsed.port or 443
+    except ValueError:
+        raise RuntimeError("HeyGen MCP 素材上传地址不安全") from None
+    resolver = resolver or socket.getaddrinfo
+    try:
+        addresses = {
+            entry[4][0]
+            for entry in resolver(host, port, type=socket.SOCK_STREAM)
+            if entry and len(entry) > 4 and entry[4]
+        }
+    except (OSError, UnicodeError, ValueError):
+        raise RuntimeError("HeyGen MCP 素材上传地址无法安全解析") from None
+    if not addresses:
+        raise RuntimeError("HeyGen MCP 素材上传地址无法安全解析")
+    try:
+        if any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise RuntimeError("HeyGen MCP 素材上传地址不安全")
+    except ValueError:
+        raise RuntimeError("HeyGen MCP 素材上传地址不安全") from None
+    return parsed
 
 
 def _heygen_mcp_upload_error_code(error):
@@ -3954,10 +4008,7 @@ def _heygen_mcp_begin_asset(file_path, content_type, contract=None):
         raise RuntimeError("HeyGen MCP 素材返回缺少必要字段")
     asset_id = str(node.get("assetId") or node.get("asset_id") or "").strip()
     upload_url = str(node.get("uploadUrl") or node.get("upload_url") or "").strip()
-    parsed = urllib.parse.urlsplit(upload_url)
-    if (parsed.scheme != "https" or not parsed.hostname
-            or parsed.username or parsed.password):
-        raise RuntimeError("HeyGen MCP 素材上传地址无效")
+    parsed = _heygen_mcp_public_upload_url(upload_url)
     opener = _heygen_mcp_presigned_upload_opener()
     attempts = max(1, int(_HEYGEN_MCP_UPLOAD_ATTEMPTS or 1))
     for attempt in range(1, attempts + 1):
