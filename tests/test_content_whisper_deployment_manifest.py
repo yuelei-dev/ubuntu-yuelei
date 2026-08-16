@@ -367,6 +367,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                 runtime_root, absent["runtime_path"]
             )
             victim.parent.mkdir(parents=True, exist_ok=True)
+            victim.unlink()
             victim.symlink_to(pathlib.Path(outside) / "missing-input")
             with self.assertRaisesRegex(RuntimeError, "symbolic link"):
                 self.verify.verify_targets(manifest, runtime_root, "preimage")
