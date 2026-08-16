@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset-schema fix as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery plus public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
-      "source_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
+      "source_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
+      "source_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6",
       "target_preimage_state": "file",
       "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
       "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
-      "expected_postimage_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
-      "expected_postimage_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38"
+      "expected_postimage_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
+      "expected_postimage_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -89,13 +89,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
-      "source_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
+      "source_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
+      "source_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
       "target_preimage_state": "file",
       "target_preimage_blob": "aa6bc0bfe2bcf68e5a131cb53309053776a85447",
       "target_preimage_sha256": "2f73895135b07dc346749813842d692f739337883b183794ecac5b53378c0a95",
-      "expected_postimage_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
-      "expected_postimage_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e"
+      "expected_postimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
+      "expected_postimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4"
     },
     {
       "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",
@@ -169,7 +169,10 @@
     "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_contract_uses_live_tools_list_schema",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_validation_error_is_redacted_and_pre_billing",
-    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url"
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_presigned_upload_rejects_non_public_targets_before_put",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_presigned_redirect_is_not_followed_or_completed",
+    "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_private_upload_target_stops_before_paid_video_create"
   ],
   "release_contract_sources": [
     {
@@ -179,19 +182,20 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "d870f51b76864597e0d7e36c37fddf4f8feb3713",
-      "source_sha256": "628ac0e6788ded3acebe18e4751d083a1afc7b21b5fe87a70965d6437e20e5cf"
+      "source_blob": "769b0c140111ad663fe3fbe1cc0ee0a250aede50",
+      "source_sha256": "eedef16a0dd1d99a7e36ff57f135e95d1da507bcf9ea7d381c10ccb16b0a021d"
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "ff8a19b56f4c88bd9bb452d6337cf35ac9baaf94",
-      "source_sha256": "bbb1be821d51076c4c52c7ab127e3a68a491b7f2c2ac5e37a2dfc8878a72ccec"
+      "source_blob": "3acd5ef8661b14141a3393d81cff7b131d03698b",
+      "source_sha256": "6ada19ed1b33d92714c9d25abc81db200bdfe6bc2cc03883a0024c1ed5dd1815"
     }
   ],
   "paid_submission_contract": {
     "page_preflight_failure": "HTTP 503 with no_charge=true before a paid HeyGen create",
     "talking_subtask_preflight_failure": "HTTP 503 before core creates or charges the child job",
     "mcp_asset_contract_failure": "Fail closed before asset upload and before a paid HeyGen create",
+    "mcp_asset_target_failure": "Reject non-public or redirected upload targets before raw media egress, completion, and paid HeyGen create",
     "automatic_paid_retry_allowed": false
   },
   "release_commands": {

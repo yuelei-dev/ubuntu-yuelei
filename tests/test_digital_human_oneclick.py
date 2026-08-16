@@ -769,6 +769,30 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             self.assertEqual("video_recovery_invalid", video_rejected.exception.code)
             self.assertEqual([2], video_rejected.exception.invalid_job_ids)
 
+    def test_video_recovery_reports_every_invalid_talking_job_at_once(self):
+        consent_payload = self._consent_payload()
+        consent = self.domain.create_consent(
+            consent_payload, "yuelei", "secret", now=int(self.domain.time.time()),
+            db_factory=self._consent_connection,
+        )
+        record = self._consent_record(
+            consent_payload["plan_digest"], id=consent["consent_id"],
+        )
+        self._bind_child_jobs(record)
+        connection = self._connection()
+        connection.execute("UPDATE jobs SET status='error' WHERE id IN (1,2,3)")
+        connection.commit()
+        connection.close()
+        video_body = self._recovery_body(
+            consent, consent_payload, "video_recovery", "video_job_ids", [1, 2, 3],
+        )
+        with mock.patch.object(self.domain, "cdb", self._consent_connection):
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                self.domain.validate_video_recovery(video_body, "yuelei")
+        self.assertEqual("video_recovery_invalid", rejected.exception.code)
+        self.assertEqual([1, 2, 3], rejected.exception.invalid_job_ids)
+        self.assertIn("3 段口播均未生成成功", str(rejected.exception))
+
     def tearDown(self):
         for patcher in reversed(self.patches):
             patcher.stop()
@@ -1221,7 +1245,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "digital-human-material-state.js?v=2",
             "digital-human-voice-state.js?v=2",
             "digital-human-setup-state.js?v=4",
-            "digital-human-oneclick-state.js?v=2",
+            "digital-human-oneclick-state.js?v=3",
             "digital-human-submit.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/digital-human-oneclick/gesture-recovery",
