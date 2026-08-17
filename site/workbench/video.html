@@ -32,6 +32,11 @@
   .function-tabs{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:18px;padding:4px;border:1px solid rgba(148,164,187,.12);border-radius:13px;background:rgba(7,11,19,.34)}
   .function-tab{height:36px;padding:0 18px;border:1px solid transparent;border-radius:10px;background:transparent;color:#94a4bb;font:800 13px inherit;cursor:pointer}
   .function-tab.on{color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);box-shadow:0 10px 24px rgba(231,178,76,.14)}
+  .video-header-row{align-items:flex-start}
+  .video-quick-actions{display:flex;align-items:center;gap:8px;flex:none}
+  .video-quick-action,.video-quick-actions .function-tab{height:36px;padding:0 13px;display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(231,178,76,.34);border-radius:9px;background:rgba(231,178,76,.08);color:#e7b24c;text-decoration:none;font-size:12px;font-weight:900;white-space:nowrap;transition:.16s}
+  .video-quick-action:hover,.video-quick-actions .function-tab:hover{border-color:rgba(244,205,114,.62);background:rgba(231,178,76,.14);transform:translateY(-1px)}
+  .video-quick-action.on,.video-quick-actions .function-tab.on{color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);box-shadow:0 10px 24px rgba(231,178,76,.14)}
   .gVid.oneclick-active{grid-template-columns:minmax(0,1fr)}
   .gVid.oneclick-active .vid-side{display:none}
   .oneclick-panel{margin-top:14px;min-height:920px;border:1px solid rgba(148,164,187,.12);border-radius:15px;background:rgba(7,11,19,.2);overflow:hidden}
@@ -223,6 +228,7 @@
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(12px);opacity:0;pointer-events:none;transition:.2s;background:#111827;border:1px solid rgba(148,164,187,.2);border-radius:12px;padding:11px 16px;color:#eaf1fa;font-size:13px;z-index:80}
   .toast.show{opacity:1;transform:translateX(-50%)}
   @media (max-width:1100px){.gVid{height:auto;min-height:0;overflow:visible}.gVid,.form-grid,.motion-grid,.video-parameter-grid{grid-template-columns:1fr}.vid-main,.vid-side{height:auto;overflow:visible}.history-list{max-height:420px}.voice-grid,.audio-source,.avatar-grid{grid-template-columns:1fr}.batch-avatar-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  @media (max-width:640px){.video-header-row{align-items:stretch;flex-direction:column}.video-quick-actions{width:100%}.video-quick-action,.video-quick-actions .function-tab{flex:1;padding-inline:10px}}
   @media (prefers-reduced-motion:reduce){.history-focus{animation:none}}
   .line-switch{margin:12px 0;padding:12px;background:rgba(255,255,255,.03);border:1px solid rgba(148,164,187,.14);border-radius:12px}
   .line-switch>.label{margin-bottom:8px}
@@ -241,17 +247,19 @@
 <div class="hq-app"><div class="hq-content" data-active="video">
   <div class="gVid">
     <section class="vid-card vid-main">
-      <div class="row">
+      <div class="row video-header-row">
         <div>
           <h1 style="margin:0;font-size:21px;font-weight:800; display:flex; align-items:center; gap:10px;"><img src="../assets/icons/ic_video.png" alt="" style="width:30px;height:30px;object-fit:contain;flex:none;">视频模块</h1>
           <p id="modeSummary" class="muted" style="margin:7px 0 0;font-size:13px;">选择视频生成功能，创建对应的视频内容</p>
         </div>
-        <a href="one-click-video.html" style="height:36px;padding:0 13px;display:inline-flex;align-items:center;border:1px solid rgba(231,178,76,.34);border-radius:9px;background:rgba(231,178,76,.08);color:#e7b24c;text-decoration:none;font-size:12px;font-weight:900;">一键成片</a>
+        <nav class="video-quick-actions" aria-label="快捷成片功能">
+          <a class="video-quick-action" href="one-click-video.html">一键成片</a>
+          <a class="function-tab on" href="digital-human-oneclick.html" id="oneclickTab" data-oneclick-tab="true" aria-current="page">数字人一键生成</a>
+        </nav>
       </div>
 
       <div class="function-tabs" aria-label="视频功能分页">
-        <span class="function-tab-label" aria-label="digital ip mode">数字化 IP</span>
-        <a class="function-tab on" href="digital-human-oneclick.html" id="oneclickTab" data-oneclick-tab="true" aria-current="page" style="display:inline-flex;align-items:center;text-decoration:none;">数字人一键生成</a>
+        <button class="function-tab" type="button" data-function="talking">数字化 IP</button>
         <button class="function-tab" type="button" data-function="cinematic">电影化身</button>
         <button class="function-tab" type="button" data-function="tryon">换装换背景</button>
         <button class="function-tab" type="button" data-function="grok">果肉视频生成</button>
