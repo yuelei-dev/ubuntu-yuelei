@@ -89,13 +89,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-      "source_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
+      "source_blob": "2416156e7be7db9de77494d6d0c6953cdc14027a",
+      "source_sha256": "da48423224bfc6f7cc0ec67d9d341c05a5854487e090710c8087697812408a1e",
       "target_preimage_state": "file",
       "target_preimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "target_preimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
-      "expected_postimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-      "expected_postimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4"
+      "expected_postimage_blob": "2416156e7be7db9de77494d6d0c6953cdc14027a",
+      "expected_postimage_sha256": "da48423224bfc6f7cc0ec67d9d341c05a5854487e090710c8087697812408a1e"
     },
     {
       "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",

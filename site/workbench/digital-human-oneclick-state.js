@@ -4,6 +4,8 @@
   else root.DigitalHumanOneClickState=api;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
   'use strict';
+  function segmentCount(saved){var value=Number(saved&&saved.segmentCount);return value===1||value===2||value===3?value:3;}
+  function materialCount(saved){return segmentCount(saved)*2;}
   function frozenMaterials(saved){
     var value=saved&&saved.customerUploads;
     return Array.isArray(value)?value.slice():value;
@@ -34,10 +36,10 @@
     return Promise.resolve().then(operation).catch(markTerminal);
   }
   function invalidateGestureRecovery(saved,error){
-    return invalidateRecovery(saved,error,'gesture','gesture_recovery_invalid',3);
+    return invalidateRecovery(saved,error,'gesture','gesture_recovery_invalid',segmentCount(saved));
   }
   function canRecoverMaterials(saved){
-    return completeRecoveryJobs(saved,'material',6).length===6;
+    var count=materialCount(saved);return completeRecoveryJobs(saved,'material',count).length===count;
   }
   function invalidateRecovery(saved,error,bucket,code,count){
     if(!saved||!error||error.code!==code)return false;
@@ -51,7 +53,7 @@
     saved.failed[bucket]=failed;
     return true;
   }
-  function invalidateMaterialRecovery(saved,error){return invalidateRecovery(saved,error,'material','material_recovery_invalid',6);}
+  function invalidateMaterialRecovery(saved,error){return invalidateRecovery(saved,error,'material','material_recovery_invalid',materialCount(saved));}
   function completeRecoveryJobs(saved,bucket,count){
     if(!saved||saved.phase!=='approved'||!saved.consent)return [];
     var jobs=saved.jobs&&Array.isArray(saved.jobs[bucket])?saved.jobs[bucket]:[];
@@ -76,7 +78,7 @@
     }
     return result;
   }
-  function invalidateVideoRecovery(saved,error){return invalidateRecovery(saved,error,'video','video_recovery_invalid',3);}
+  function invalidateVideoRecovery(saved,error){return invalidateRecovery(saved,error,'video','video_recovery_invalid',segmentCount(saved));}
   function retryLabel(error,step){
     var invalid=error&&Array.isArray(error.invalidJobIds)?error.invalidJobIds:[];
     if(error&&error.code==='video_recovery_invalid'&&invalid.length){
@@ -103,5 +105,7 @@
     invalidateVideoRecovery:invalidateVideoRecovery,
     retryLabel:retryLabel,
     jobFailureDecision:jobFailureDecision,
+    segmentCount:segmentCount,
+    materialCount:materialCount,
   };
 });

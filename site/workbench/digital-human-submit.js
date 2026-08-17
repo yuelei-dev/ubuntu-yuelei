@@ -55,5 +55,6 @@
     if(requestId)message+='（请求编号：'+requestId+'）';
     return message;
   }
-  return {isSecurityRetryable:isSecurityRetryable,withSecurityRetry:withSecurityRetry,isCapacityRetryable:isCapacityRetryable,withCapacityRetry:withCapacityRetry,describe:describe};
+  function segmentCount(value){value=Number(value);if(value!==1&&value!==2&&value!==3)throw new Error('生成数量只支持 1、2 或 3');return value;}
+  return {isSecurityRetryable:isSecurityRetryable,withSecurityRetry:withSecurityRetry,isCapacityRetryable:isCapacityRetryable,withCapacityRetry:withCapacityRetry,describe:describe,segmentCount:segmentCount};
 });

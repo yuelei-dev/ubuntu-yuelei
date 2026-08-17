@@ -813,6 +813,80 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertTrue(all(item["source_policy"] == "customer_then_feishu_then_ai" for item in first["materials"]))
         self.assertTrue(all(item["material_query"] for item in first["materials"]))
 
+    def test_plan_supports_exact_one_two_three_counts_and_semantic_roles(self):
+        script = "开场先说明用户遇到的问题。接着解释解决方法和主要价值。最后总结并邀请立即行动。"
+        expected_roles = {
+            1: ["complete"],
+            2: ["opening_explain", "summary_action"],
+            3: ["hook", "explain", "cta"],
+        }
+        for count in (1, 2, 3):
+            planned = self.domain.plan(script, count)
+            self.assertEqual(count, planned["segment_count"])
+            self.assertEqual(count * 2, planned["material_count"])
+            self.assertEqual(count, len(planned["segments"]))
+            self.assertEqual(count * 2, len(planned["materials"]))
+            self.assertEqual(expected_roles[count], [item["role"] for item in planned["segments"]])
+            self.assertEqual(script, "".join(item["text"] for item in planned["segments"]))
+            self.assertEqual(list(range(count)), [item["index"] for item in planned["segments"]])
+            self.assertEqual(list(range(count * 2)), [item["index"] for item in planned["materials"]])
+
+    def test_plan_rejects_invalid_counts_and_long_single_segment_before_paid_jobs(self):
+        script = "第一句说明问题。第二句解释方案。第三句邀请行动。"
+        for invalid in (None, True, 0, 4, "2", 2.0):
+            with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "1、2 或 3"):
+                self.domain.plan_response({"script": script, "segment_count": invalid})
+        with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "不适合单段口播"):
+            self.domain.plan("这是一段完整讲解。" * 120, 1)
+
+    def test_consent_persists_and_locks_dynamic_counts(self):
+        script = "先说明用户问题。接着解释解决方法。最后总结价值并邀请行动。"
+        planned = self.domain.plan(script, 2)
+        payload = self._consent_payload(
+            script=script, plan_digest=planned["plan_digest"],
+            segment_count=2, material_count=4,
+        )
+        consent = self.domain.create_consent(
+            payload, "yuelei", "test-signing-secret", now=1000,
+            db_factory=self._consent_connection,
+        )
+        self.assertEqual(2, consent["segment_count"])
+        self.assertEqual(4, consent["material_count"])
+        with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "方案"):
+            self.domain.create_consent(
+                dict(payload, segment_count=3, material_count=6),
+                "yuelei", "test-signing-secret", now=1001,
+                db_factory=self._consent_connection,
+            )
+
+    def test_prepare_uses_authorized_dynamic_counts_and_rejects_tampering(self):
+        script = "先说明用户问题。接着解释解决方法。最后总结价值并邀请行动。"
+        planned = self.domain.plan(script, 2)
+        record = self._consent_record(
+            planned["plan_digest"], segment_count=2, material_count=4,
+        )
+        self._bind_child_jobs(record)
+        request = self._compose_request(script, planned, record)
+        request.update({
+            "segment_count": 2, "material_count": 4,
+            "video_job_ids": [1, 2],
+            "material_job_ids": [11, 12, 13, 14],
+        })
+        prepared = self.domain.prepare_compose_payload(
+            request, "yuelei", consent_record=record,
+        )
+        self.assertEqual(2, prepared["segment_count"])
+        self.assertEqual(2, prepared["gesture_count"])
+        self.assertEqual(2, prepared["video_count"])
+        self.assertEqual(4, prepared["material_count"])
+        self.assertEqual([1, 2], prepared["video_job_ids"])
+        self.assertEqual([11, 12, 13, 14], prepared["material_job_ids"])
+        with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "数量"):
+            self.domain.prepare_compose_payload(
+                dict(request, segment_count=3, material_count=6),
+                "yuelei", consent_record=record,
+            )
+
     def test_prepare_freezes_only_owned_completed_child_jobs(self):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)
@@ -1244,9 +1318,9 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=2",
             "digital-human-voice-state.js?v=2",
-            "digital-human-setup-state.js?v=4",
-            "digital-human-oneclick-state.js?v=3",
-            "digital-human-submit.js?v=2",
+            "digital-human-setup-state.js?v=5",
+            "digital-human-oneclick-state.js?v=4",
+            "digital-human-submit.js?v=3",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/digital-human-oneclick/gesture-recovery",
             "/api/gen/digital-human-oneclick/material-recovery",
@@ -1277,6 +1351,12 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("确认方案并生成", page)
         self.assertIn("客户素材 → 飞书授权真实素材 → AI 补缺", page)
         self.assertIn("不上传也可以继续", page)
+        self.assertIn('role="radiogroup" aria-label="生成数量（必选）"', page)
+        self.assertEqual(3, page.count('type="radio" name="segmentCount"'))
+        self.assertIn('value="3" required checked', page)
+        self.assertIn("建议使用腰部以上、双手自然放在身体前方的照片", page)
+        self.assertIn("segment_count:segmentCount", page)
+        self.assertIn("最终以各段实际生成时长结算", page)
         self.assertIn('id="voiceSource"', page)
         self.assertIn("已有声音无需再次复刻", page)
         self.assertIn("DigitalHumanVoiceState.resolveLoaded(before,data.items||[])", page)
@@ -1357,7 +1437,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertLess(page.index('id="analyze"'), page.index('id="photo"'))
         self.assertLess(page.index('id="start"'), page.index('id="script"'))
         self.assertIn(".action-dock{position:sticky", page)
-        self.assertIn("资料填好后，先分析并预览三段方案", page)
+        self.assertIn("资料填好并选择生成数量后，先分析并预览方案", page)
 
     def test_video_flush_workspace_remains_vertically_scrollable(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
