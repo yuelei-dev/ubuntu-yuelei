@@ -354,6 +354,10 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
                 return {
                     "assetId": suffix + "-asset",
                     "uploadUrl": "https://upload.heygen.com/signed/" + suffix,
+                    "uploadHeaders": {
+                        "content-type": arguments["contentType"],
+                        "x-amz-server-side-encryption": "AES256",
+                    },
                 }
             if tool == "bulk_asset_statuses":
                 return {"assets": [
@@ -405,12 +409,59 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         self.assertTrue(all("fileName" not in arguments for arguments in create_calls))
         self.assertEqual([request.get_header("Content-length") for request in puts],
                          ["36", "35"])
+        self.assertEqual(
+            [request.get_header("X-amz-server-side-encryption") for request in puts],
+            ["AES256", "AES256"],
+        )
         self.assertIn(("complete_asset_upload", {"assetId": "image-asset"}), calls)
         self.assertIn(("complete_asset_upload", {"assetId": "audio-asset"}), calls)
         self.assertIn(("bulk_asset_statuses", {
             "assetIds": "image-asset,audio-asset",
         }), calls)
         api_opener.assert_not_called()
+
+    def test_mcp_presigned_upload_rejects_untrusted_or_mismatched_headers(self):
+        cases = [
+            ({"authorization": "provider-secret"}, "请求头已更新"),
+            ({"content-type": "text/plain"}, "上传类型不匹配"),
+            ({"content-length": "999"}, "上传大小不匹配"),
+            ({"x-amz-server-side-encryption": "public-read"}, "加密方式无效"),
+        ]
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+
+        for upload_headers, error in cases:
+            with self.subTest(upload_headers=upload_headers), \
+                 tempfile.TemporaryDirectory() as directory:
+                image = Path(directory) / "avatar.png"
+                image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 24)
+                calls = []
+
+                def call(tool, arguments, timeout=90):
+                    calls.append((tool, arguments))
+                    return {
+                        "assetId": "invalid-header-asset",
+                        "uploadUrl": "https://storage.example/upload",
+                        "uploadHeaders": upload_headers,
+                    }
+
+                with patch.object(video, "_heygen_mcp_call", side_effect=call), \
+                     patch.object(video.socket, "getaddrinfo",
+                                  side_effect=self._public_dns), \
+                     patch.object(video, "_heygen_mcp_presigned_upload_opener") as opener:
+                    with self.assertRaisesRegex(video.HeyGenMCPContractError, error):
+                        video._heygen_mcp_begin_asset(image, "image/png", contract)
+
+                opener.assert_not_called()
+                self.assertEqual(["create_asset_upload"],
+                                 [tool for tool, _ in calls])
 
     def test_mcp_presigned_upload_bypasses_process_proxy(self):
         with patch.object(video.urllib.request, "build_opener") as build:
