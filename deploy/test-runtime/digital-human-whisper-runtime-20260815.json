@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery plus public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery, signed upload headers, and public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
-      "source_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6",
+      "source_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
+      "source_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
       "target_preimage_state": "file",
-      "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
-      "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
-      "expected_postimage_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
-      "expected_postimage_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6"
+      "target_preimage_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
+      "target_preimage_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
+      "expected_postimage_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
+      "expected_postimage_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -80,8 +80,8 @@
       "source_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
       "source_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
       "target_preimage_state": "file",
-      "target_preimage_blob": "c7d9c8dbba07d2504cc856695612b1a43433dac4",
-      "target_preimage_sha256": "7154a39a8c66f44f7638c665c551afc2f7a5b0e52344b667b1b5bb5d6ad598a9",
+      "target_preimage_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
+      "target_preimage_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
       "expected_postimage_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
       "expected_postimage_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680"
     },
@@ -92,8 +92,8 @@
       "source_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "source_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
       "target_preimage_state": "file",
-      "target_preimage_blob": "aa6bc0bfe2bcf68e5a131cb53309053776a85447",
-      "target_preimage_sha256": "2f73895135b07dc346749813842d692f739337883b183794ecac5b53378c0a95",
+      "target_preimage_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
+      "target_preimage_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
       "expected_postimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "expected_postimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4"
     },
@@ -104,8 +104,8 @@
       "source_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
       "source_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd",
       "target_preimage_state": "file",
-      "target_preimage_blob": "7850c33c09e60a888f641c99d816ded675a249d3",
-      "target_preimage_sha256": "a8140bb6c63dd9a93cac9a2627d76a96f1b11e02356a63d0d34079c472a469ec",
+      "target_preimage_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
+      "target_preimage_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd",
       "expected_postimage_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
       "expected_postimage_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd"
     },
@@ -115,9 +115,9 @@
       "classification": "staged_deployment_input",
       "source_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
       "source_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
-      "target_preimage_state": "absent",
-      "target_preimage_blob": null,
-      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+      "target_preimage_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
       "expected_postimage_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
       "expected_postimage_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee"
     },
@@ -127,9 +127,9 @@
       "classification": "staged_deployment_input",
       "source_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
       "source_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3",
-      "target_preimage_state": "absent",
-      "target_preimage_blob": null,
-      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
+      "target_preimage_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3",
       "expected_postimage_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
       "expected_postimage_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3"
     },
@@ -139,9 +139,9 @@
       "classification": "staged_deployment_input",
       "source_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
       "source_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec",
-      "target_preimage_state": "absent",
-      "target_preimage_blob": null,
-      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
+      "target_preimage_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec",
       "expected_postimage_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
       "expected_postimage_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec"
     }
@@ -187,8 +187,8 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "3acd5ef8661b14141a3393d81cff7b131d03698b",
-      "source_sha256": "6ada19ed1b33d92714c9d25abc81db200bdfe6bc2cc03883a0024c1ed5dd1815"
+      "source_blob": "906f6a3082c1b77568a3f6cf10a88387f21fc978",
+      "source_sha256": "9563a945f1c0dd5b6911bc29d476b9645922f2c8152d37ade55cfb67ebc1d2d8"
     }
   ],
   "paid_submission_contract": {
@@ -324,6 +324,16 @@
     "rollback_backup": "/opt/huangque-deploy-backups/pr245-20260815T020909Z",
     "restored_runtime_targets": 4,
     "service_restarted_during_failed_release": false,
-    "health_after_rollback": 200
+    "health_after_rollback": 200,
+    "reconciliation_preimages_observed_date": "2026-08-17",
+    "reconciliation_preimages_captured_read_only": true,
+    "reconciliation_mixed_state": {
+      "intermediate_targets": 2,
+      "already_final_targets": 5,
+      "service_active": true,
+      "health_status": 200,
+      "unauthenticated_history_status": 401,
+      "writes_or_restarts_during_capture": false
+    }
   }
 }

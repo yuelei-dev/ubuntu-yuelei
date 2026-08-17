@@ -26,38 +26,38 @@ EXPECTED_SCOPE = {
 LOCKED_PREIMAGES = {
     "server/content_domains/video.py": (
         "file",
-        "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
-        "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
+        "bf4be323f968f76c5a3251729eab67e5f6db6f36",
+        "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
     ),
     "server/content_domains/script_to_video.py": (
         "file",
-        "c7d9c8dbba07d2504cc856695612b1a43433dac4",
-        "7154a39a8c66f44f7638c665c551afc2f7a5b0e52344b667b1b5bb5d6ad598a9",
+        "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
+        "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
     ),
     "server/content_domains/digital_human_oneclick.py": (
         "file",
-        "aa6bc0bfe2bcf68e5a131cb53309053776a85447",
-        "2f73895135b07dc346749813842d692f739337883b183794ecac5b53378c0a95",
+        "7ce2b132612a14331482ec406f9fd8e0db52e008",
+        "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
     ),
     "deploy/systemd/huangque-content.service.d/whisper.conf": (
         "file",
-        "7850c33c09e60a888f641c99d816ded675a249d3",
-        "a8140bb6c63dd9a93cac9a2627d76a96f1b11e02356a63d0d34079c472a469ec",
+        "885b9fef3ea2af1f3f22612505b5943a11068d0c",
+        "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd",
     ),
     "deploy/requirements-content.txt": (
-        "absent",
-        None,
-        "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+        "file",
+        "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+        "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
     ),
     "scripts/prepare_content_whisper.py": (
-        "absent",
-        None,
-        "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+        "file",
+        "2998290b369d8fbf71ab524ccea1f334959467ef",
+        "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3",
     ),
     "scripts/prepare_content_whisper_runtime.sh": (
-        "absent",
-        None,
-        "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+        "file",
+        "e7464a9af1bdc438f9c013a7af04ee96838c7621",
+        "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec",
     ),
 }
 
@@ -243,6 +243,12 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
 
     def test_verifier_rejects_unexpected_file_for_absent_preimage(self):
         synthetic = copy.deepcopy(self.manifest)
+        absent_entry = synthetic["files"][-1]
+        absent_entry["target_preimage_state"] = "absent"
+        absent_entry["target_preimage_blob"] = None
+        absent_entry["target_preimage_sha256"] = self.manifest[
+            "absent_target_digest"
+        ]["sha256"]
         with tempfile.TemporaryDirectory() as directory:
             runtime_root = pathlib.Path(directory)
             for entry in synthetic["files"]:
@@ -253,10 +259,6 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                     target.write_bytes(data)
                     entry["target_preimage_sha256"] = hashlib.sha256(data).hexdigest()
                     entry["target_preimage_blob"] = self.verify._blob_id(data)
-            absent_entry = next(
-                entry for entry in synthetic["files"]
-                if entry["target_preimage_state"] == "absent"
-            )
             unexpected = self.verify._safe_runtime_path(
                 runtime_root, absent_entry["runtime_path"]
             )
@@ -331,12 +333,18 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
              tempfile.TemporaryDirectory() as outside:
             runtime_root = pathlib.Path(directory)
             manifest = copy.deepcopy(self.manifest)
-            regular_preimages(manifest, runtime_root)
+            regular_preimages(manifest, runtime_root, count=7)
             absent = manifest["files"][4]
+            absent["target_preimage_state"] = "absent"
+            absent["target_preimage_blob"] = None
+            absent["target_preimage_sha256"] = manifest[
+                "absent_target_digest"
+            ]["sha256"]
             victim = self.verify._safe_runtime_path(
                 runtime_root, absent["runtime_path"]
             )
             victim.parent.mkdir(parents=True, exist_ok=True)
+            victim.unlink()
             victim.symlink_to(pathlib.Path(outside) / "missing-input")
             with self.assertRaisesRegex(RuntimeError, "symbolic link"):
                 self.verify.verify_targets(manifest, runtime_root, "preimage")
