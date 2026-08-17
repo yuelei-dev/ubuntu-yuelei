@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery plus public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
+  "purpose": "Deploy the complete reviewed digital-human subtitle runtime and HeyGen MCP asset upload recovery, signed upload headers, and public-target security gate as one fail-closed unit after the PR 245 test-runtime rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
-      "source_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6",
+      "source_blob": "309b0ced983747eb933e3f269fd040a1647c8046",
+      "source_sha256": "5369d571bbcb61273c6e80a6fc3c565489b3e7493686077174d2af962c798f32",
       "target_preimage_state": "file",
       "target_preimage_blob": "935bede1740e52e549ea389f4b76ddf3d4ba66d3",
       "target_preimage_sha256": "3b25b9eba89eccf5ba0212b2916a6d6e9679528b80a6d652ee7cac204b00b583",
-      "expected_postimage_blob": "2e9965a72f25b8407b4df9e933473d770f0f2159",
-      "expected_postimage_sha256": "535fe20434e9e4689ba5b5f6b65b5c258cef560c0bd153b957758a95a62c2ba6"
+      "expected_postimage_blob": "309b0ced983747eb933e3f269fd040a1647c8046",
+      "expected_postimage_sha256": "5369d571bbcb61273c6e80a6fc3c565489b3e7493686077174d2af962c798f32"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -187,8 +187,8 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "3acd5ef8661b14141a3393d81cff7b131d03698b",
-      "source_sha256": "6ada19ed1b33d92714c9d25abc81db200bdfe6bc2cc03883a0024c1ed5dd1815"
+      "source_blob": "982d1f2b26cf6e1c7a0a464b2e26ae1ce16fb38a",
+      "source_sha256": "dd4f3a579069246476f95b4dd1720631ff043d80f8c020f9598782ffe3cd036a"
     }
   ],
   "paid_submission_contract": {
