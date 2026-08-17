@@ -182,8 +182,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "769b0c140111ad663fe3fbe1cc0ee0a250aede50",
-      "source_sha256": "eedef16a0dd1d99a7e36ff57f135e95d1da507bcf9ea7d381c10ccb16b0a021d"
+      "source_blob": "8fec3fe549580f6091e524122031001a9db7e270",
+      "source_sha256": "d5f24866197cff4c5c7f3a0ae180a74dc65941bbf550a2bd19bfec5bfa9f9856"
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
