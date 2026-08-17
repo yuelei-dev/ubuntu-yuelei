@@ -13,6 +13,20 @@ PRODUCTION_NAMES = "server_name huangquechuanmei.com www.huangquechuanmei.com;"
 TEST_NAME = "yuelei.huangquechuanmei.com"
 PRODUCTION_CERT = "/etc/letsencrypt/live/huangquechuanmei.com/"
 TEST_CERT = f"/etc/letsencrypt/live/{TEST_NAME}/"
+GENERAL_LOCATION = "    location / {\n"
+ONECLICK_IFRAME_LOCATION = """    location = /workbench/digital-human-oneclick {
+        add_header Cache-Control "no-cache" always;
+
+        add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; font-src 'self' data:; img-src 'self' data: blob: https:; media-src 'self' data: blob: https:; connect-src 'self' https:" always;
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Request-ID $request_id always;
+
+        try_files /workbench/digital-human-oneclick.html =404;
+    }
+"""
 
 
 class RenderError(RuntimeError):
@@ -59,7 +73,9 @@ def render_config(source: str) -> str:
         "location ^~ /api/gen/",
         "location ^~ /api/auth/",
         "location ^~ /api/admin/",
-        "location / {",
+        GENERAL_LOCATION.strip(),
+        "frame-ancestors 'none'",
+        'X-Frame-Options "DENY"',
         PRODUCTION_CERT,
     )
     missing = [marker for marker in required if marker not in https]
@@ -79,6 +95,14 @@ def render_config(source: str) -> str:
     https = https.replace(
         "/var/log/nginx/huangquechuanmei.error.log",
         "/var/log/nginx/yuelei.huangquechuanmei.error.log",
+    )
+
+    if https.count(GENERAL_LOCATION) != 1:
+        raise RenderError("expected exactly one general location in reviewed HTTPS block")
+    https = https.replace(
+        GENERAL_LOCATION,
+        ONECLICK_IFRAME_LOCATION + "\n" + GENERAL_LOCATION,
+        1,
     )
 
     forbidden = (
