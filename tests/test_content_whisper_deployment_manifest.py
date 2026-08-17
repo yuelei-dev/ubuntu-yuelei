@@ -26,8 +26,8 @@ EXPECTED_SCOPE = {
 LOCKED_PREIMAGES = {
     "server/content_domains/video.py": (
         "file",
-        "bf4be323f968f76c5a3251729eab67e5f6db6f36",
-        "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
+        "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
+        "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
     ),
     "server/content_domains/script_to_video.py": (
         "file",
@@ -36,8 +36,8 @@ LOCKED_PREIMAGES = {
     ),
     "server/content_domains/digital_human_oneclick.py": (
         "file",
-        "7ce2b132612a14331482ec406f9fd8e0db52e008",
-        "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
+        "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
+        "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
     ),
     "deploy/systemd/huangque-content.service.d/whisper.conf": (
         "file",

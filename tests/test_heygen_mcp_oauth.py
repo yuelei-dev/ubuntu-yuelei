@@ -887,6 +887,22 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
                 video._heygen_mcp_wait_assets(["a"])
         poll.assert_not_called()
 
+    def test_mcp_asset_status_maps_shared_video_id_read_model(self):
+        response = {
+            "assets": [
+                {"video_id": "image-asset", "status": "completed"},
+                {"video_id": "audio-asset", "status": "completed"},
+            ]
+        }
+        with patch.object(video, "_heygen_mcp_call", return_value=response) as call, \
+             patch.object(video.time, "monotonic", side_effect=[0, 0]):
+            video._heygen_mcp_wait_assets(["image-asset", "audio-asset"])
+        call.assert_called_once_with(
+            "bulk_asset_statuses",
+            {"assetIds": "image-asset,audio-asset"},
+            timeout=30,
+        )
+
     def test_mcp_resolution_is_downgraded_before_paid_create(self):
         with patch.object(video, "_HEYGEN_MCP_MAX_RESOLUTION", "720p"):
             self.assertEqual(
