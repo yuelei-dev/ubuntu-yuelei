@@ -4009,21 +4009,40 @@ def _heygen_mcp_presigned_upload_headers(node, content_type, size_bytes):
             raise HeyGenMCPContractError(
                 "HeyGen MCP 素材上传请求头无效，视频任务尚未提交"
             )
-        value = raw_value.strip()
-        if not value or "\r" in value or "\n" in value:
+        if "\r" in raw_value or "\n" in raw_value:
+            raise HeyGenMCPContractError(
+                "HeyGen MCP 素材上传请求头无效，视频任务尚未提交"
+            )
+        # SigV4 canonicalizes signed header values by trimming surrounding
+        # whitespace and folding sequential spaces.  Preserve that provider
+        # value (including case) for the actual PUT after semantic checks.
+        value = re.sub(r"[ \t]+", " ", raw_value.strip())
+        if not value:
             raise HeyGenMCPContractError(
                 "HeyGen MCP 素材上传请求头无效，视频任务尚未提交"
             )
         normalized[name] = value
 
-    if normalized.get("content-type", content_type).lower() != content_type.lower():
+    signed_content_type = normalized.get("content-type")
+    if (
+        signed_content_type is not None
+        and signed_content_type.lower() != content_type.lower()
+    ):
         raise HeyGenMCPContractError(
             "HeyGen MCP 素材上传类型不匹配，视频任务尚未提交"
         )
-    if normalized.get("content-length", str(size_bytes)) != str(size_bytes):
+    if signed_content_type is not None:
+        headers["Content-Type"] = signed_content_type
+    signed_content_length = normalized.get("content-length")
+    if (
+        signed_content_length is not None
+        and signed_content_length != str(size_bytes)
+    ):
         raise HeyGenMCPContractError(
             "HeyGen MCP 素材上传大小不匹配，视频任务尚未提交"
         )
+    if signed_content_length is not None:
+        headers["Content-Length"] = signed_content_length
     encryption = normalized.get("x-amz-server-side-encryption")
     if encryption:
         if encryption not in {"AES256", "aws:kms", "aws:kms:dsse"}:

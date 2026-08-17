@@ -420,9 +420,77 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         }), calls)
         api_opener.assert_not_called()
 
+    def test_mcp_presigned_upload_forwards_snake_case_signed_headers_exactly(self):
+        puts = []
+        calls = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b""
+
+        class Opener:
+            def open(self, request, **_kwargs):
+                puts.append(request)
+                return Response()
+
+        def call(tool, arguments, timeout=90):
+            calls.append((tool, arguments))
+            if tool == "create_asset_upload":
+                return {
+                    "asset_id": "snake-case-asset",
+                    "upload_url": "https://storage.example/upload",
+                    "upload_headers": {
+                        "content-type": "IMAGE/PNG",
+                        "content-length": "32",
+                        "x-amz-server-side-encryption": "AES256",
+                    },
+                }
+            return {"ok": True}
+
+        contract = {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string"},
+                "contentType": {"type": "string"},
+                "sizeBytes": {"type": "integer"},
+            },
+            "required": ["filename", "sizeBytes"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "avatar.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 24)
+            with patch.object(video, "_heygen_mcp_call", side_effect=call), \
+                 patch.object(video.socket, "getaddrinfo",
+                              side_effect=self._public_dns), \
+                 patch.object(video, "_heygen_mcp_presigned_upload_opener",
+                              return_value=Opener()):
+                asset_id = video._heygen_mcp_begin_asset(
+                    image, "image/png", contract
+                )
+
+        self.assertEqual("snake-case-asset", asset_id)
+        self.assertEqual(1, len(puts))
+        self.assertEqual("IMAGE/PNG", puts[0].get_header("Content-type"))
+        self.assertEqual("32", puts[0].get_header("Content-length"))
+        self.assertEqual(
+            "AES256", puts[0].get_header("X-amz-server-side-encryption")
+        )
+        self.assertIn(
+            ("complete_asset_upload", {"assetId": "snake-case-asset"}), calls
+        )
+
     def test_mcp_presigned_upload_rejects_untrusted_or_mismatched_headers(self):
         cases = [
             ({"authorization": "provider-secret"}, "请求头已更新"),
+            ({"Content-Type": "image/png", "content-type": "image/png"},
+             "请求头已更新"),
+            ({"content-type": "image/png\r\nx-evil: yes"}, "请求头无效"),
             ({"content-type": "text/plain"}, "上传类型不匹配"),
             ({"content-length": "999"}, "上传大小不匹配"),
             ({"x-amz-server-side-encryption": "public-read"}, "加密方式无效"),
