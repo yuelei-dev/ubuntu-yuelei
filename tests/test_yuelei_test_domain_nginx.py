@@ -1,6 +1,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,94 @@ class YueleiTestDomainNginxTests(unittest.TestCase):
         self.assertNotIn("ipv6only", rendered)
         self.assertIn("listen [::]:443 ssl;", rendered)
         self.assertIn("listen 443 ssl;", rendered)
+
+    def test_only_digital_human_oneclick_allows_same_origin_framing(self):
+        rendered = self.renderer.render_config(self.source)
+        exception = self.renderer.ONECLICK_IFRAME_LOCATION
+
+        self.assertIn(exception, rendered)
+        self.assertIn("frame-ancestors 'none'", rendered)
+        self.assertIn('X-Frame-Options "DENY"', rendered)
+        self.assertIn("frame-ancestors 'self'", exception)
+        self.assertIn('X-Frame-Options "SAMEORIGIN"', exception)
+        self.assertIn(
+            "try_files /workbench/digital-human-oneclick.html =404;",
+            exception,
+        )
+        self.assertEqual(1, rendered.count("frame-ancestors 'self'"))
+        self.assertEqual(1, rendered.count('X-Frame-Options "SAMEORIGIN"'))
+        self.assertLess(
+            rendered.index("location = /workbench/digital-human-oneclick"),
+            rendered.rindex("    location / {"),
+        )
+
+    def test_login_home_admin_and_other_workbench_routes_remain_denied(self):
+        rendered = self.renderer.render_config(self.source)
+        exception_path = "location = /workbench/digital-human-oneclick"
+
+        self.assertNotIn("location = /login", rendered)
+        self.assertNotIn("location = /workbench/inspiration", rendered)
+        self.assertNotIn("location = /admin", rendered)
+        self.assertIn("location = / {", rendered)
+        self.assertIn("location ^~ /api/admin/", rendered)
+        self.assertEqual(1, rendered.count(exception_path))
+        self.assertGreaterEqual(rendered.count("frame-ancestors 'none'"), 4)
+        self.assertGreaterEqual(rendered.count('X-Frame-Options "DENY"'), 4)
+
+    def test_renderer_fails_closed_if_global_frame_denial_drifts(self):
+        for original, replacement in (
+            ("frame-ancestors 'none'", "frame-ancestors https:"),
+            ('X-Frame-Options "DENY"', 'X-Frame-Options "SAMEORIGIN"'),
+        ):
+            with self.subTest(original=original):
+                damaged = self.source.replace(original, replacement)
+                with self.assertRaisesRegex(self.renderer.RenderError, "missing"):
+                    self.renderer.render_config(damaged)
+
+    def test_same_origin_exception_passes_nginx_syntax_check_when_available(self):
+        nginx = shutil.which("nginx")
+        if nginx is None:
+            self.skipTest("nginx executable is not available")
+
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory)
+            (prefix / "logs").mkdir()
+            (prefix / "html" / "workbench").mkdir(parents=True)
+            for name in (
+                "client_body_temp",
+                "proxy_temp",
+                "fastcgi_temp",
+                "uwsgi_temp",
+                "scgi_temp",
+            ):
+                (prefix / "temp" / name).mkdir(parents=True)
+            config = prefix / "nginx.conf"
+            portable_prefix = str(prefix).replace(os.sep, "/")
+            config.write_text(
+                f"pid {portable_prefix}/nginx.pid;\n"
+                f"error_log {portable_prefix}/logs/error.log;\n"
+                "events {}\n"
+                "http {\n"
+                "    access_log off;\n"
+                "    server {\n"
+                "        listen 18080;\n"
+                f"        root {portable_prefix}/html;\n"
+                + self.renderer.ONECLICK_IFRAME_LOCATION
+                + "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [nginx, "-t", "-p", str(prefix), "-c", str(config)],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(
+                0,
+                completed.returncode,
+                completed.stdout + completed.stderr,
+            )
 
     def test_http_redirect_and_clean_url_redirect_stay_on_test_origin(self):
         rendered = self.renderer.render_config(self.source)
