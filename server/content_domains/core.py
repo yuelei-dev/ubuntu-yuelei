@@ -1514,7 +1514,14 @@ def run_job(job_id):
                     jdb, job_id, username, result
                 )
             if kind in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"}:
-                video_domain.record_video_asset(job_id, username, result)
+                asset_result = dict(result or {})
+                if not asset_result.get("mode"):
+                    asset_result["mode"] = (
+                        mode
+                        or str(payload.get("pipeline") or "").strip()
+                        or kind
+                    )
+                video_domain.record_video_asset(job_id, username, asset_result)
             if kind == "short_drama_preview":
                 _short_drama_domain().short_drama_assembly.reconcile_preview_job(
                     jdb, job_id
@@ -1534,8 +1541,12 @@ def run_job(job_id):
                 except Exception:
                     pass
             assets_store.record_asset(job_id, username, kind, result)  # 只有 copy 会入统一 assets 表；其余 kind 内部忽略
-        except Exception:
-            pass
+        except Exception as asset_error:
+            print(
+                "[asset] record failed job=%s kind=%s error=%s"
+                % (job_id, kind, type(asset_error).__name__),
+                flush=True,
+            )
     except Exception as e:
         if kind == "script_to_video":
             try:
