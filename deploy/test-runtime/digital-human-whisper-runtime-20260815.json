@@ -65,13 +65,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
-      "source_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
+      "source_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
+      "source_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
       "target_preimage_state": "file",
-      "target_preimage_blob": "bf4be323f968f76c5a3251729eab67e5f6db6f36",
-      "target_preimage_sha256": "08ee2b443b907571be6afb5e8cfce274dc58977ae0e22996716bc48e11c56a38",
-      "expected_postimage_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
-      "expected_postimage_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121"
+      "target_preimage_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
+      "target_preimage_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
+      "expected_postimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
+      "expected_postimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -92,8 +92,8 @@
       "source_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "source_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
       "target_preimage_state": "file",
-      "target_preimage_blob": "7ce2b132612a14331482ec406f9fd8e0db52e008",
-      "target_preimage_sha256": "b5604fd42950f4b235e27c541b94e97d7d23d0a2b63ba36e53c27524d7eac15e",
+      "target_preimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
+      "target_preimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
       "expected_postimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "expected_postimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4"
     },
@@ -187,8 +187,8 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "906f6a3082c1b77568a3f6cf10a88387f21fc978",
-      "source_sha256": "9563a945f1c0dd5b6911bc29d476b9645922f2c8152d37ade55cfb67ebc1d2d8"
+      "source_blob": "b2f26180b9c391c382b028124e51b64810465576",
+      "source_sha256": "7f995f5831e2083f6d2dedc5eca8de78498d921b5c5e667684dec5ddc81ea6bd"
     }
   ],
   "paid_submission_contract": {
@@ -328,8 +328,8 @@
     "reconciliation_preimages_observed_date": "2026-08-17",
     "reconciliation_preimages_captured_read_only": true,
     "reconciliation_mixed_state": {
-      "intermediate_targets": 2,
-      "already_final_targets": 5,
+      "intermediate_targets": 1,
+      "already_final_targets": 6,
       "service_active": true,
       "health_status": 200,
       "unauthenticated_history_status": 401,

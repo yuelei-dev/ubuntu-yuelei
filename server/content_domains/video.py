@@ -4148,7 +4148,9 @@ def _heygen_mcp_wait_assets(asset_ids):
         statuses = {}
         for item in _heygen_mcp_asset_rows(response):
             asset_id = str(
-                item.get("assetId") or item.get("asset_id") or item.get("id") or ""
+                item.get("assetId") or item.get("asset_id")
+                or item.get("videoId") or item.get("video_id")
+                or item.get("id") or ""
             ).strip()
             status = str(item.get("status") or item.get("state") or "").strip().lower()
             if asset_id:
