@@ -22,8 +22,10 @@
   function gesturesComplete(current){
     var jobs=current&&current.jobs&&Array.isArray(current.jobs.gesture)?current.jobs.gesture:[];
     var failed=current&&current.failed&&Array.isArray(current.failed.gesture)?current.failed.gesture:[];
-    if(jobs.length<3)return false;
-    for(var i=0;i<3;i++){
+    var count=Number(current&&(current.segmentCount||(current.plan&&current.plan.segment_count))||3);
+    if(count<1||count>3)count=3;
+    if(jobs.length<count)return false;
+    for(var i=0;i<count;i++){
       if(!Number.isFinite(Number(jobs[i]))||Number(jobs[i])<=0||failed[i]===true)return false;
     }
     return true;

@@ -93,29 +93,31 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         record.update(overrides)
         return record
 
-    def _bind_child_jobs(self, record):
+    def _bind_child_jobs(self, record, segment_count=3):
         connection = sqlite3.connect(self.db)
         try:
-            for job_id in range(1, 4):
+            for job_id in range(1, segment_count + 1):
                 payload = {
                     "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
                     "digital_human_stage": "talking",
                     "digital_human_consent_id": record["id"],
                     "digital_human_run_id": record["run_id"],
                     "digital_human_plan_digest": record["plan_digest"],
+                    "digital_human_segment_count": segment_count,
                     "digital_human_item_index": job_id - 1,
                 }
                 connection.execute(
                     "UPDATE jobs SET payload=? WHERE id=?",
                     (json.dumps(payload), job_id),
                 )
-            for job_id in range(11, 17):
+            for job_id in range(11, 11 + segment_count * 2):
                 payload = {
                     "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
                     "digital_human_stage": "material",
                     "digital_human_consent_id": record["id"],
                     "digital_human_run_id": record["run_id"],
                     "digital_human_plan_digest": record["plan_digest"],
+                    "digital_human_segment_count": segment_count,
                     "digital_human_item_index": job_id - 11,
                 }
                 connection.execute(
@@ -167,6 +169,8 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "digital_human_run_id": consent["run_id"],
             "digital_human_plan_digest": consent_payload["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
+            "digital_human_script": consent_payload["script"],
+            "digital_human_segment_count": consent_payload.get("segment_count", 3),
             field: self._indexed_jobs(ids),
         }
 
@@ -176,24 +180,28 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 for index, job_id in enumerate(ids)]
 
     def _compose_request(self, script, planned, record):
+        segment_count = planned.get("segment_count", 3)
+        material_count = planned.get("material_count", segment_count * 2)
         return {
             "pipeline": self.domain.PIPELINE,
             "script": script,
             "plan_digest": planned["plan_digest"],
-            "video_job_ids": [1, 2, 3],
-            "material_job_ids": [11, 12, 13, 14, 15, 16],
+            "video_job_ids": list(range(1, segment_count + 1)),
+            "material_job_ids": list(range(11, 11 + material_count)),
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
             "digital_human_stage": "compose",
             "digital_human_run_id": record["run_id"],
             "digital_human_plan_digest": record["plan_digest"],
             "digital_human_consent_id": record["id"],
             "digital_human_script": script,
+            "digital_human_segment_count": segment_count,
             "digital_human_item_index": 0,
         }
 
     def _consent_payload(self, **overrides):
         script = overrides.pop("script", "第一段介绍问题。第二段说明方案。第三段邀请行动。")
-        planned = self.domain.plan(script)
+        segment_count = overrides.pop("segment_count", 3)
+        planned = self.domain.plan(script, segment_count)
         payload = {
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
@@ -201,6 +209,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             "run_id": "dh-run-test-001",
             "plan_digest": planned["plan_digest"],
             "script": script,
+            "segment_count": segment_count,
             "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
             "voice_mode": "existing",
             "voice_ref": "vip_ready_voice",
@@ -813,6 +822,32 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertTrue(all(item["source_policy"] == "customer_then_feishu_then_ai" for item in first["materials"]))
         self.assertTrue(all(item["material_query"] for item in first["materials"]))
 
+    def test_plan_supports_one_two_or_three_matching_gestures_and_videos(self):
+        script = "开场介绍核心问题。接着说明解决方案。最后邀请用户立即行动。"
+        expected_roles = {
+            1: ["complete"],
+            2: ["hook", "explain_cta"],
+            3: ["hook", "explain", "cta"],
+        }
+        for count in (1, 2, 3):
+            with self.subTest(count=count):
+                planned = self.domain.plan(script, count)
+                self.assertEqual(count, planned["segment_count"])
+                self.assertEqual(count * 2, planned["material_count"])
+                self.assertEqual(count, len(planned["segments"]))
+                self.assertEqual(count * 2, len(planned["materials"]))
+                self.assertEqual(script, "".join(
+                    item["text"] for item in planned["segments"]
+                ))
+                self.assertEqual(
+                    expected_roles[count],
+                    [item["role"] for item in planned["segments"]],
+                )
+        for invalid in (0, 4, True, "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(self.domain.DigitalHumanRequestError):
+                    self.domain.plan(script, invalid)
+
     def test_prepare_freezes_only_owned_completed_child_jobs(self):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)
@@ -826,6 +861,22 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertEqual(len(payload["material_files"]), 6)
         self.assertEqual(payload["digital_human_consent_id"], record["id"])
         self.assertNotIn("_script_to_video_state", payload)
+
+    def test_prepare_uses_selected_segment_count_through_final_compose(self):
+        script = "开场介绍核心问题。接着说明解决方案。最后邀请用户立即行动。"
+        for count in (1, 2, 3):
+            with self.subTest(count=count):
+                planned = self.domain.plan(script, count)
+                record = self._consent_record(planned["plan_digest"])
+                self._bind_child_jobs(record, count)
+                payload = self.domain.prepare_compose_payload(
+                    self._compose_request(script, planned, record),
+                    "yuelei", consent_record=record,
+                )
+                self.assertEqual(count, payload["digital_human_segment_count"])
+                self.assertEqual(count * 2, payload["material_count"])
+                self.assertEqual(count, len(payload["video_files"]))
+                self.assertEqual(count * 2, len(payload["material_files"]))
 
     def test_prepare_rejects_digest_drift_and_foreign_job(self):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
@@ -1244,8 +1295,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             'id="customerMaterials"', 'id="customerMaterialList"',
             "digital-human-material-state.js?v=2",
             "digital-human-voice-state.js?v=2",
-            "digital-human-setup-state.js?v=4",
-            "digital-human-oneclick-state.js?v=3",
+            "digital-human-setup-state.js?v=5",
+            "digital-human-oneclick-state.js?v=4",
             "digital-human-submit.js?v=2",
             "/api/gen/digital-human-oneclick/plan", "/api/gen/audio/clone-vip",
             "/api/gen/digital-human-oneclick/gesture-recovery",
@@ -1357,7 +1408,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertLess(page.index('id="analyze"'), page.index('id="photo"'))
         self.assertLess(page.index('id="start"'), page.index('id="script"'))
         self.assertIn(".action-dock{position:sticky", page)
-        self.assertIn("资料填好后，先分析并预览三段方案", page)
+        self.assertIn("资料填好后，先分析并预览 3 段方案", page)
+        self.assertIn("建议腰部以上，双手自然放在身体前方", page)
+        self.assertIn('name="segmentCount" value="1"', page)
+        self.assertIn('name="segmentCount" value="2"', page)
+        self.assertIn('name="segmentCount" value="3" checked', page)
 
     def test_video_flush_workspace_remains_vertically_scrollable(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")

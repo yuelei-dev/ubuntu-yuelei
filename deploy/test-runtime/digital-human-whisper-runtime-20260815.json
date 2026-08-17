@@ -89,13 +89,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-      "source_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
+      "source_blob": "e2ad95b9572ae8a5f110759fa6571987e7f38010",
+      "source_sha256": "82df4a06c5897dc6691f6924bae4bcf51c3acd97c7e3a6a3600729d80a094d24",
       "target_preimage_state": "file",
       "target_preimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "target_preimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
-      "expected_postimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-      "expected_postimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4"
+      "expected_postimage_blob": "e2ad95b9572ae8a5f110759fa6571987e7f38010",
+      "expected_postimage_sha256": "82df4a06c5897dc6691f6924bae4bcf51c3acd97c7e3a6a3600729d80a094d24"
     },
     {
       "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",
@@ -182,8 +182,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "769b0c140111ad663fe3fbe1cc0ee0a250aede50",
-      "source_sha256": "eedef16a0dd1d99a7e36ff57f135e95d1da507bcf9ea7d381c10ccb16b0a021d"
+      "source_blob": "eb4cf648e0fa698a2c33e3808e0ca9f886322b8d",
+      "source_sha256": "adf2d557c2e19d89cf6aa63b234f616389daa4251745c5aa15b101f511e5fe4f"
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",

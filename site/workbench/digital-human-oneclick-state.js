@@ -33,11 +33,20 @@
     else operation=function(){return options.poll(jobId);};
     return Promise.resolve().then(operation).catch(markTerminal);
   }
+  function segmentCount(saved){
+    var value=Number(saved&&(saved.segmentCount||(saved.plan&&saved.plan.segment_count))||3);
+    return value>=1&&value<=3?value:3;
+  }
+  function expectedCount(saved,bucket){
+    var count=segmentCount(saved);
+    return bucket==='material'?count*2:count;
+  }
   function invalidateGestureRecovery(saved,error){
-    return invalidateRecovery(saved,error,'gesture','gesture_recovery_invalid',3);
+    return invalidateRecovery(saved,error,'gesture','gesture_recovery_invalid',expectedCount(saved,'gesture'));
   }
   function canRecoverMaterials(saved){
-    return completeRecoveryJobs(saved,'material',6).length===6;
+    var count=expectedCount(saved,'material');
+    return completeRecoveryJobs(saved,'material',count).length===count;
   }
   function invalidateRecovery(saved,error,bucket,code,count){
     if(!saved||!error||error.code!==code)return false;
@@ -51,7 +60,7 @@
     saved.failed[bucket]=failed;
     return true;
   }
-  function invalidateMaterialRecovery(saved,error){return invalidateRecovery(saved,error,'material','material_recovery_invalid',6);}
+  function invalidateMaterialRecovery(saved,error){return invalidateRecovery(saved,error,'material','material_recovery_invalid',expectedCount(saved,'material'));}
   function completeRecoveryJobs(saved,bucket,count){
     if(!saved||saved.phase!=='approved'||!saved.consent)return [];
     var jobs=saved.jobs&&Array.isArray(saved.jobs[bucket])?saved.jobs[bucket]:[];
@@ -76,7 +85,7 @@
     }
     return result;
   }
-  function invalidateVideoRecovery(saved,error){return invalidateRecovery(saved,error,'video','video_recovery_invalid',3);}
+  function invalidateVideoRecovery(saved,error){return invalidateRecovery(saved,error,'video','video_recovery_invalid',expectedCount(saved,'video'));}
   function retryLabel(error,step){
     var invalid=error&&Array.isArray(error.invalidJobIds)?error.invalidJobIds:[];
     if(error&&error.code==='video_recovery_invalid'&&invalid.length){
@@ -94,6 +103,8 @@
   return {
     frozenMaterials:frozenMaterials,
     persistableMaterials:persistableMaterials,
+    segmentCount:segmentCount,
+    expectedCount:expectedCount,
     resumeJob:resumeJob,
     invalidateGestureRecovery:invalidateGestureRecovery,
     canRecoverMaterials:canRecoverMaterials,
