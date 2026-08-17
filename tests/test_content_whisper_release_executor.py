@@ -23,6 +23,8 @@ MANIFEST_PATH = (
 EXECUTOR_PATH = SCRIPTS / "deploy_content_whisper_runtime.py"
 REVIEWED_SOURCE = "1" * 40
 REVIEWED_MAIN = "2" * 40
+TARGET_COUNT = 11
+LAST_WRITE = "write_%d" % TARGET_COUNT
 
 
 def _load_executor():
@@ -234,7 +236,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             self.release_module.AUTHORIZED_TARGET
         )
         self.assertTrue(result["ok"])
-        self.assertEqual(7, result["files"])
+        self.assertEqual(TARGET_COUNT, result["files"])
         self.assertEqual(1, result["restart_count"])
         self.assertEqual(1, runner.calls.count("restart"))
         self.assertNotIn("rollback_restart", runner.calls)
@@ -256,18 +258,18 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(7, len(state["files"]))
+        self.assertEqual(TARGET_COUNT, len(state["files"]))
         self.assertEqual(
-            ["file"] * 7,
+            ["file"] * TARGET_COUNT,
             [entry["state"] for entry in state["files"]],
         )
         self.assertEqual(2, len(health.calls))
         self.assertLess(events.index("backup_complete"), events.index("write_1"))
-        self.assertLess(events.index("write_1"), events.index("write_7"))
-        self.assertLess(events.index("write_7"), events.index("health"))
+        self.assertLess(events.index("write_1"), events.index(LAST_WRITE))
+        self.assertLess(events.index(LAST_WRITE), events.index("health"))
 
-    def test_first_middle_and_seventh_write_failures_restore_every_target(self):
-        for fault in ("write_1", "write_4", "write_7"):
+    def test_first_middle_and_last_write_failures_restore_every_target(self):
+        for fault in ("write_1", "write_6", LAST_WRITE):
             with self.subTest(fault=fault):
                 self.tearDown()
                 self.setUp()
@@ -278,7 +280,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                         raise RuntimeError("injected %s" % fault)
 
                 with self.assertRaisesRegex(
-                        self.release_module.ReleaseError, "all seven targets were restored"):
+                        self.release_module.ReleaseError, "all manifest targets were restored"):
                     self._release(runner=runner, checkpoint=checkpoint).execute(
                         self.release_module.AUTHORIZED_TARGET
                     )
@@ -293,7 +295,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 self.setUp()
                 runner = FakeRunner(fault)
                 with self.assertRaisesRegex(
-                        self.release_module.ReleaseError, "all seven targets were restored"):
+                        self.release_module.ReleaseError, "all manifest targets were restored"):
                     self._release(runner=runner).execute(
                         self.release_module.AUTHORIZED_TARGET
                     )
@@ -304,7 +306,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     def test_daemon_reload_failure_restores_without_restart(self):
         runner = FakeRunner("daemon_reload")
         with self.assertRaisesRegex(
-                self.release_module.ReleaseError, "all seven targets were restored"):
+                self.release_module.ReleaseError, "all manifest targets were restored"):
             self._release(runner=runner).execute(
                 self.release_module.AUTHORIZED_TARGET
             )
@@ -316,7 +318,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     def test_restart_failure_restores_and_restarts_old_version_once(self):
         runner = FakeRunner("restart")
         with self.assertRaisesRegex(
-                self.release_module.ReleaseError, "all seven targets were restored"):
+                self.release_module.ReleaseError, "all manifest targets were restored"):
             self._release(runner=runner).execute(
                 self.release_module.AUTHORIZED_TARGET
             )
@@ -334,7 +336,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             "interval_seconds": 1,
         }
         with self.assertRaisesRegex(
-                self.release_module.ReleaseError, "all seven targets were restored"):
+                self.release_module.ReleaseError, "all manifest targets were restored"):
             self._release(runner=runner, health=health, clock=clock).execute(
                 self.release_module.AUTHORIZED_TARGET
             )
@@ -365,7 +367,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             "interval_seconds": 1,
         }
         with self.assertRaisesRegex(
-                self.release_module.ReleaseError, "all seven targets were restored"):
+                self.release_module.ReleaseError, "all manifest targets were restored"):
             self._release(
                 runner=runner, health=health, clock=clock,
             ).execute(self.release_module.AUTHORIZED_TARGET)
@@ -425,7 +427,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                         if rollback:
                             with self.assertRaisesRegex(
                                     self.release_module.ReleaseError,
-                                    "all seven targets were restored"):
+                                    "all manifest targets were restored"):
                                 release.execute(self.release_module.AUTHORIZED_TARGET)
                         else:
                             self.assertTrue(
@@ -538,6 +540,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             {
                 "tests/test_script_to_video.py",
                 "tests/test_digital_human_oneclick.py",
+                "tests/test_script_to_video_asset_registration.py",
                 "tests/test_heygen_mcp_oauth.py",
             },
             {

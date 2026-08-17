@@ -843,7 +843,9 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                     expected_roles[count],
                     [item["role"] for item in planned["segments"]],
                 )
-        for invalid in (0, 4, True, "bad"):
+        for invalid in (
+                0, 4, True, "1", 1.0, 1.5, 2.9, 3.9,
+                float("nan"), float("inf"), float("-inf"), "bad"):
             with self.subTest(invalid=invalid):
                 with self.assertRaises(self.domain.DigitalHumanRequestError):
                     self.domain.plan(script, invalid)

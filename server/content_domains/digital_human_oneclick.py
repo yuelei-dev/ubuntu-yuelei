@@ -114,12 +114,9 @@ def _required_sha256(value, label):
 def _segment_count(value):
     if value in (None, ""):
         return DEFAULT_SEGMENT_COUNT
-    if isinstance(value, bool):
+    if type(value) is not int:
         raise DigitalHumanRequestError("生成数量只能选择 1、2 或 3")
-    try:
-        count = int(value)
-    except (TypeError, ValueError):
-        raise DigitalHumanRequestError("生成数量只能选择 1、2 或 3")
+    count = value
     if count < 1 or count > MAX_SEGMENT_COUNT:
         raise DigitalHumanRequestError("生成数量只能选择 1、2 或 3")
     return count

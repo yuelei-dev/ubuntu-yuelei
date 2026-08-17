@@ -29,8 +29,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "eb090f6156dec1803a64093ef78231ed4b05357a",
-    "source_sha256": "34a72f9da57cc369f92e8429a2fa0c45fb989900a64af680f53c7c865a8dab86",
+    "source_blob": "30ad69cdba2d6a5d6cf4fabd0c36137316d9502a",
+    "source_sha256": "a2dc51b01c7144eb6f10204aa3e32a9f3a303930381b1a612e7c1a187d6a0bef",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
@@ -86,16 +86,64 @@
       "expected_postimage_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680"
     },
     {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "classification": "runtime_code",
+      "source_blob": "2389d7baa25c93a75bcd6ff1d1ad71aa80962aa5",
+      "source_sha256": "8f27767de14063b751ea15435939b851541ebe087bcdbd9ec914e85f286996db",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "09ce5407f13a9b07b02266192011851de5984deb",
+      "target_preimage_sha256": "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e",
+      "expected_postimage_blob": "2389d7baa25c93a75bcd6ff1d1ad71aa80962aa5",
+      "expected_postimage_sha256": "8f27767de14063b751ea15435939b851541ebe087bcdbd9ec914e85f286996db"
+    },
+    {
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "e2ad95b9572ae8a5f110759fa6571987e7f38010",
-      "source_sha256": "82df4a06c5897dc6691f6924bae4bcf51c3acd97c7e3a6a3600729d80a094d24",
+      "source_blob": "c88531addd5c7202b23172fbabe4265533ec0a20",
+      "source_sha256": "a3f07fc77d68be0ab540755d0434865e315d4f4b5d751de56b652aeb229f6fa7",
       "target_preimage_state": "file",
       "target_preimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
       "target_preimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
-      "expected_postimage_blob": "e2ad95b9572ae8a5f110759fa6571987e7f38010",
-      "expected_postimage_sha256": "82df4a06c5897dc6691f6924bae4bcf51c3acd97c7e3a6a3600729d80a094d24"
+      "expected_postimage_blob": "c88531addd5c7202b23172fbabe4265533ec0a20",
+      "expected_postimage_sha256": "a3f07fc77d68be0ab540755d0434865e315d4f4b5d751de56b652aeb229f6fa7"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+      "classification": "static_runtime",
+      "source_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
+      "source_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "db10fce104dfb7a318dec4732729000d23345b1d",
+      "target_preimage_sha256": "5e7fb9c373c6c9a89edc17c8206e4fdcdd24c339272f292d09c5f0db7a01a58a",
+      "expected_postimage_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
+      "expected_postimage_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick-state.js",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick-state.js",
+      "classification": "static_runtime",
+      "source_blob": "8231103aa057746ce033fc06b80c3b750832175a",
+      "source_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "9c437984c262f79ebc47715c48988ae16f8472b3",
+      "target_preimage_sha256": "bb787a30cc6e6b06420401f25adbfbed327f4b9db2e0a4ec85e2c44f795a714d",
+      "expected_postimage_blob": "8231103aa057746ce033fc06b80c3b750832175a",
+      "expected_postimage_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-setup-state.js",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-setup-state.js",
+      "classification": "static_runtime",
+      "source_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
+      "source_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "0a4727991da696be63f4bcf81c45dda9eb7254e0",
+      "target_preimage_sha256": "e353d97e86f677c9fb88d18dcb0955fc5a6c8dc0884023e15502ba597f7bbd26",
+      "expected_postimage_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
+      "expected_postimage_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207"
     },
     {
       "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",
@@ -149,9 +197,9 @@
   "ordered_release_steps": [
     "verify_source_blobs_and_sha256",
     "verify_all_target_preimages_before_first_write",
-    "backup_all_seven_targets_and_record_present_or_missing",
-    "atomically_install_all_seven_targets",
-    "verify_all_seven_postimages",
+    "backup_all_eleven_targets_and_record_present_or_missing",
+    "atomically_install_all_eleven_targets",
+    "verify_all_eleven_postimages",
     "verify_exact_existing_content_dependencies_without_mutation",
     "run_staged_whisper_cache_prepare_and_online_model_preload",
     "run_staged_whisper_verify_only_with_HF_HUB_OFFLINE_1",
@@ -167,6 +215,7 @@
     "tests.test_script_to_video.ScriptToVideoTests.test_subtitle_runtime_preflight_rejects_font_without_cjk_glyphs",
     "tests.test_script_to_video.ScriptToVideoTests.test_heygen_preflight_http_endpoint_is_authenticated_and_no_charge",
     "tests.test_digital_human_oneclick.DigitalHumanOneClickUiTests.test_start_preflights_heygen_before_consent_and_child_jobs",
+    "tests.test_script_to_video_asset_registration.ScriptToVideoAssetRegistrationTests.test_missing_result_mode_is_registered_from_job_payload",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_contract_uses_live_tools_list_schema",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_asset_validation_error_is_redacted_and_pre_billing",
     "tests.test_heygen_mcp_oauth.HeyGenMcpOAuthTests.test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url",
@@ -182,8 +231,13 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "eb4cf648e0fa698a2c33e3808e0ca9f886322b8d",
-      "source_sha256": "adf2d557c2e19d89cf6aa63b234f616389daa4251745c5aa15b101f511e5fe4f"
+      "source_blob": "d3d8507c8eba4c158596540252e96865a95b7df4",
+      "source_sha256": "9cfc9bfdd3325a8d59ff2f4fb68a00b53863a00808a670a5b55dd3d71821f509"
+    },
+    {
+      "repository_path": "tests/test_script_to_video_asset_registration.py",
+      "source_blob": "cbf53eef2ee64c79545bcfc7e02326f81da91199",
+      "source_sha256": "88bd8fecb7fee4cde66ace5c29f682fbf80f6c8f08012b3521b6669b9a555577"
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
@@ -249,6 +303,11 @@
         "timeout_seconds": 900
       },
       {
+        "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_script_to_video_asset_registration.py", "-v"],
+        "cwd": "{source:.}",
+        "timeout_seconds": 900
+      },
+      {
         "argv": ["/usr/bin/python3", "-m", "unittest", "discover", "-s", "tests", "-p", "test_heygen_mcp_oauth.py", "-v"],
         "cwd": "{source:.}",
         "timeout_seconds": 900
@@ -307,14 +366,14 @@
   },
   "rollback": {
     "method": "restore every target recorded present and remove only staged targets recorded missing, then daemon-reload and restart huangque-content.service once",
-    "scope": "all seven manifest targets as one unit",
+    "scope": "all eleven manifest targets as one unit",
     "preserve": [
       "/var/cache/huangque/faster-whisper",
       "environment and secret files",
       "database, points, jobs, uploads and generated output"
     ],
     "verify": [
-      "all seven targets match the backup present-or-missing manifest",
+      "all eleven targets match the backup present-or-missing manifest",
       "huangque-content.service is active",
       "GET /api/gen/health returns HTTP 200",
       "unauthenticated submission returns HTTP 401"
@@ -327,6 +386,12 @@
     "health_after_rollback": 200,
     "reconciliation_preimages_observed_date": "2026-08-17",
     "reconciliation_preimages_captured_read_only": true,
+    "pr260_core_rollback_preimage": {
+      "repository_path": "server/content_domains/core.py",
+      "source_commit": "67f7aae",
+      "blob": "09ce5407f13a9b07b02266192011851de5984deb",
+      "sha256": "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e"
+    },
     "reconciliation_mixed_state": {
       "intermediate_targets": 1,
       "already_final_targets": 6,
