@@ -48,9 +48,6 @@ jobs:
       - name: 安装 content 服务 Python 依赖
         run: python -m pip install -r deploy/requirements-content.txt
 
-      - name: 安装 IP12 路由测试依赖
-        run: python -m pip install "Flask>=3.1,<4" "requests>=2.32,<3" "pypdf>=6,<7"
-
       - name: 检查敏感文件与静态资源
         run: python scripts/ci_validate.py
 
@@ -59,6 +56,12 @@ jobs:
 
       - name: 测试 CI 检查器
         run: python -m unittest discover -s tests -v
+
+      - name: 安装 IP12 选题工作区测试依赖
+        run: python -m pip install "Flask>=3.1,<4" "requests>=2.32,<3" "pypdf>=6,<7"
+
+      - name: 测试 IP12 选题工作区
+        run: python -m unittest tests.test_hermes_topic_workspace tests.test_hermes_ip12_routes.HermesIP12SourceTests -v
 
       - name: 测试并构建 HQ CLI
         working-directory: tools/hq-cli

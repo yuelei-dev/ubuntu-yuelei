@@ -1160,7 +1160,6 @@ quota_download.assert_not_called()
 assert {path.name for path in analyses_root.iterdir()} == before_analyses
 
 # Two analyses competing for the final quota cannot both reserve capacity.
-security._active.clear()
 analysis_started = threading.Event()
 analysis_release = threading.Event()
 artifact_store.DATA_QUOTA_BYTES = artifact_store.directory_size() + 700
