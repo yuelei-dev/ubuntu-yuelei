@@ -268,6 +268,39 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.assertLess(events.index("write_1"), events.index(LAST_WRITE))
         self.assertLess(events.index(LAST_WRITE), events.index("health"))
 
+    def test_mixed_state_with_one_already_postimage_is_backed_up_and_deployed(self):
+        video = next(
+            entry for entry in self.manifest["files"]
+            if entry["repository_path"] == "server/content_domains/video.py"
+        )
+        source = (ROOT / video["repository_path"]).read_bytes()
+        target = self._target(video)
+        target.write_bytes(source)
+        video["target_preimage_sha256"] = hashlib.sha256(source).hexdigest()
+        video["target_preimage_blob"] = self._blob(source)
+        self.original[video["runtime_path"]] = source
+
+        result = self._release().execute(
+            self.release_module.AUTHORIZED_TARGET
+        )
+
+        backup = pathlib.Path(result["backup"])
+        state = json.loads(
+            (backup / "backup-state.json").read_text(encoding="utf-8")
+        )
+        record = next(
+            entry for entry in state["files"]
+            if entry["runtime_path"] == video["runtime_path"]
+        )
+        self.assertEqual(record["sha256"], hashlib.sha256(source).hexdigest())
+        self.assertEqual(record["blob"], self._blob(source))
+        self.assertEqual((backup / record["backup_file"]).read_bytes(), source)
+        for entry in self.manifest["files"]:
+            self.assertEqual(
+                (ROOT / entry["repository_path"]).read_bytes(),
+                self._target(entry).read_bytes(),
+            )
+
     def test_first_middle_and_last_write_failures_restore_every_target(self):
         for fault in ("write_1", "write_6", LAST_WRITE):
             with self.subTest(fault=fault):
