@@ -1626,23 +1626,15 @@ def _repair_missing_completed_script_video_asset(video_domain, row):
     """Backfill legacy completed compositions without reviving deleted assets."""
     if not row or row["kind"] != "script_to_video" or row["status"] != "done":
         return False
-    with closing(adb()) as connection:
-        existing = connection.execute(
-            "SELECT 1 FROM video_assets WHERE job_id=? LIMIT 1", (row["id"],)
-        ).fetchone()
-    if existing:
-        return False
     payload = json.loads(row["payload"] or "{}") or {}
     asset_result = dict(json.loads(row["result"] or "{}") or {})
-    if not asset_result.get("video_file") and not asset_result.get("video_url"):
-        return False
     video_url = str(asset_result.get("video_url") or "")
-    local_rel = str(asset_result.get("video_file") or "")
+    local_rel = str(asset_result.get("video_file") or "").strip()
     if video_url.startswith("/api/gen/file/") and not local_rel:
-        local_rel = video_url[len("/api/gen/file/"):]
-    if local_rel and (not video_url or video_url.startswith("/api/gen/file/")):
-        if not _resolve_out_file(local_rel):
-            return False
+        local_rel = video_url[len("/api/gen/file/"):].strip()
+    if not local_rel or not _resolve_out_file(local_rel):
+        return False
+    asset_result["video_file"] = local_rel
     if not asset_result.get("mode"):
         asset_result["mode"] = (
             str(payload.get("mode") or "").strip()
@@ -1651,8 +1643,9 @@ def _repair_missing_completed_script_video_asset(video_domain, row):
         )
     asset_result["status"] = "done"
     asset_result.setdefault("phase", "complete")
-    video_domain.record_video_asset(row["id"], row["username"], asset_result)
-    return True
+    return video_domain.insert_video_asset_if_absent(
+        row["id"], row["username"], asset_result
+    )
 
 
 # ============ 超时清道夫：running 超 6 分钟的僵尸任务自动判失败 + 退点 ============

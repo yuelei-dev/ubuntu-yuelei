@@ -1955,6 +1955,29 @@ def record_video_asset(job_id, username, result):
              result.get("status") or "pending", result.get("error"), now, now))
         c.commit()
 
+def insert_video_asset_if_absent(job_id, username, result):
+    """Atomically insert a legacy asset without changing an existing row."""
+    now = int(time.time())
+    with closing(adb()) as c:
+        cursor = c.execute("""INSERT INTO video_assets
+            (job_id, username, mode, image_file, audio_file, reference_video_file, video_file, video_url, text, voice_key,
+             resolution, ratio, motion, phase, image_asset_id, audio_asset_id, reference_asset_id, provider_video_id,
+             provider_key_id, provider_avatar_id, provider_avatar_group_id, source_video_url, background_file, tryon_mode, model,
+             status, error, created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id) DO NOTHING""",
+            (job_id, username, result.get("mode"), result.get("image_file"), result.get("audio_file"),
+             result.get("reference_video_file"), result.get("video_file"), result.get("video_url"), result.get("text"), result.get("voice"),
+             result.get("resolution"), result.get("ratio"), result.get("motion"), result.get("phase"),
+             result.get("image_asset_id"), result.get("audio_asset_id"), result.get("reference_asset_id"),
+             result.get("provider_video_id") or result.get("video_id"), result.get("provider_key_id"),
+             result.get("provider_avatar_id") or result.get("avatar_item_id"),
+             result.get("provider_avatar_group_id") or result.get("avatar_group_id"), result.get("source_video_url"),
+             result.get("background_file"), result.get("tryon_mode"), result.get("model"),
+             result.get("status") or "pending", result.get("error"), now, now))
+        c.commit()
+        return cursor.rowcount == 1
+
 def update_video_asset_phase(job_id, phase, strict=False, **fields):
     if not job_id:
         if strict:

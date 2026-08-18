@@ -14,35 +14,90 @@
     "review_lock": "the exact PR head and tree are recorded by the PR gate; file blobs below are the deployment authority"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-18T11:17:00+08:00",
+    "captured_at": "2026-08-18T14:00:45+08:00",
     "target": "test@8.148.158.106",
-    "repository_main_commit": "ba903933a06bc8f754883fb386adace203a15600",
+    "repository_main_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+    "capture_method": "read-only SHA-256 and Git blob comparison recorded by independent review comment 5324247048",
     "classification": {
-      "matching_preimage": 8,
-      "matching_postimage": 1,
-      "matching_historical_main": 2
+      "matching_deployed_main": 11
     },
     "reconciled_files": [
       {
         "repository_path": "server/content_domains/video.py",
-        "provenance_commit": "b8a4886869995f72cf25ca1399620cef5966bf76",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
         "observed_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
         "observed_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
-        "observed_state": "matching_postimage"
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "server/content_domains/script_to_video.py",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
+        "observed_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "server/content_domains/core.py",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "2389d7baa25c93a75bcd6ff1d1ad71aa80962aa5",
+        "observed_sha256": "8f27767de14063b751ea15435939b851541ebe087bcdbd9ec914e85f286996db",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "server/content_domains/digital_human_oneclick.py",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
+        "observed_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
+        "observed_state": "matching_deployed_main"
       },
       {
         "repository_path": "site/workbench/digital-human-oneclick.html",
-        "provenance_commit": "e9414cbbbf29f176159b36f62f20a90146300030",
-        "observed_blob": "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
-        "observed_sha256": "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
-        "observed_state": "matching_historical_main"
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
+        "observed_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
+        "observed_state": "matching_deployed_main"
       },
       {
         "repository_path": "site/workbench/digital-human-oneclick-state.js",
-        "provenance_commit": "9618d2b02c407f5e56cbee239e3ced71fe9fdf2e",
-        "observed_blob": "b743d153920880ee845b30136cc5cbd947c5e409",
-        "observed_sha256": "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
-        "observed_state": "matching_historical_main"
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "8231103aa057746ce033fc06b80c3b750832175a",
+        "observed_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "site/workbench/digital-human-setup-state.js",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
+        "observed_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "deploy/systemd/huangque-content.service.d/whisper.conf",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "885b9fef3ea2af1f3f22612505b5943a11068d0c",
+        "observed_sha256": "fd5508e14937a0310583d7dcf81de268b99de59177300b0232fdffe32f9327fd",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "deploy/requirements-content.txt",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "d955895229f572e7cbb2f5fd6025ae6d6851caa1",
+        "observed_sha256": "69167372b7759a91fd5f983298e932a1a98d8a7cd68ab8c4a9cec283956d29ee",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "scripts/prepare_content_whisper.py",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "2998290b369d8fbf71ab524ccea1f334959467ef",
+        "observed_sha256": "3b145de7ee07e8b923d6c0decc5de0503515916ee4e39a2ffa517f15bb1d61f3",
+        "observed_state": "matching_deployed_main"
+      },
+      {
+        "repository_path": "scripts/prepare_content_whisper_runtime.sh",
+        "provenance_commit": "d301608b6e8568154c89ad9d1b4cfdde8878375f",
+        "observed_blob": "e7464a9af1bdc438f9c013a7af04ee96838c7621",
+        "observed_sha256": "87a47cb3de074c7bfe392d8d13163511a3c0bf94859ae0e0a1be3f1a5067b4ec",
+        "observed_state": "matching_deployed_main"
       }
     ]
   },
@@ -98,13 +153,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
-      "source_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
+      "source_blob": "327dbe086999d7c3df40c89e8318b09bd913f566",
+      "source_sha256": "6730a72e6539b0893efe93dac3b33b953d9490d7fcf5d5b09d26b41894551f8b",
       "target_preimage_state": "file",
       "target_preimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
       "target_preimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
-      "expected_postimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
-      "expected_postimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595"
+      "expected_postimage_blob": "327dbe086999d7c3df40c89e8318b09bd913f566",
+      "expected_postimage_sha256": "6730a72e6539b0893efe93dac3b33b953d9490d7fcf5d5b09d26b41894551f8b"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -122,13 +177,13 @@
       "repository_path": "server/content_domains/core.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
       "classification": "runtime_code",
-      "source_blob": "9881f3854a52a039bac5977a47bcabf950c3f43d",
-      "source_sha256": "09c3bce3ac36fe9516299e71b60a365461b2bf2cc0ffab2272465530627bb0ec",
+      "source_blob": "63cd17054f33e872b07f81b066108089323ef762",
+      "source_sha256": "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
       "target_preimage_state": "file",
-      "target_preimage_blob": "09ce5407f13a9b07b02266192011851de5984deb",
-      "target_preimage_sha256": "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e",
-      "expected_postimage_blob": "9881f3854a52a039bac5977a47bcabf950c3f43d",
-      "expected_postimage_sha256": "09c3bce3ac36fe9516299e71b60a365461b2bf2cc0ffab2272465530627bb0ec"
+      "target_preimage_blob": "2389d7baa25c93a75bcd6ff1d1ad71aa80962aa5",
+      "target_preimage_sha256": "8f27767de14063b751ea15435939b851541ebe087bcdbd9ec914e85f286996db",
+      "expected_postimage_blob": "63cd17054f33e872b07f81b066108089323ef762",
+      "expected_postimage_sha256": "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e"
     },
     {
       "repository_path": "server/content_domains/digital_human_oneclick.py",
@@ -137,8 +192,8 @@
       "source_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
       "source_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
       "target_preimage_state": "file",
-      "target_preimage_blob": "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-      "target_preimage_sha256": "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
+      "target_preimage_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
+      "target_preimage_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
       "expected_postimage_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
       "expected_postimage_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5"
     },
@@ -149,8 +204,8 @@
       "source_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
       "source_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
       "target_preimage_state": "file",
-      "target_preimage_blob": "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
-      "target_preimage_sha256": "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
+      "target_preimage_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
+      "target_preimage_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
       "expected_postimage_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
       "expected_postimage_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4"
     },
@@ -161,8 +216,8 @@
       "source_blob": "8231103aa057746ce033fc06b80c3b750832175a",
       "source_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
       "target_preimage_state": "file",
-      "target_preimage_blob": "b743d153920880ee845b30136cc5cbd947c5e409",
-      "target_preimage_sha256": "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
+      "target_preimage_blob": "8231103aa057746ce033fc06b80c3b750832175a",
+      "target_preimage_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
       "expected_postimage_blob": "8231103aa057746ce033fc06b80c3b750832175a",
       "expected_postimage_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21"
     },
@@ -173,8 +228,8 @@
       "source_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
       "source_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207",
       "target_preimage_state": "file",
-      "target_preimage_blob": "0a4727991da696be63f4bcf81c45dda9eb7254e0",
-      "target_preimage_sha256": "e353d97e86f677c9fb88d18dcb0955fc5a6c8dc0884023e15502ba597f7bbd26",
+      "target_preimage_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
+      "target_preimage_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207",
       "expected_postimage_blob": "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
       "expected_postimage_sha256": "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207"
     },
@@ -269,8 +324,8 @@
     },
     {
       "repository_path": "tests/test_script_to_video_asset_registration.py",
-      "source_blob": "aaac77104fe9a2f3f5baa1762a412d2760879e33",
-      "source_sha256": "3c68c9cd77028a97afee70097bf8df795adc6febf56d93988b9daa3379e09d24"
+      "source_blob": "79b721f30d2392c022965a0735288af5a8b160b2",
+      "source_sha256": "e5683530fa6384d4e73ec104e6da0b703b2b747b502f43e9d8aac0b9f771581d"
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",

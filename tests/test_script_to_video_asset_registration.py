@@ -290,6 +290,67 @@ class ScriptToVideoAssetRegistrationTests(unittest.TestCase):
         self.assertEqual(owner.status, 200)
         self.assertIsNone(self._asset(job_id))
 
+    def test_owner_poll_does_not_register_external_only_result(self):
+        job_id = 3492
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_url": "https://cdn.example/final.mp4"}), job_id),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertIsNone(self._asset(job_id))
+
+    def test_owner_poll_does_not_register_empty_local_path(self):
+        job_id = 3493
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_file": "  ", "video_url": "  "}), job_id),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertIsNone(self._asset(job_id))
+
+    def test_competing_deleted_asset_is_not_revived_by_atomic_insert(self):
+        job_id = 3494
+        rel = "video/final-3494.mp4"
+        (self.out / rel).write_bytes(b"video")
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_file": rel}), job_id),
+            )
+
+        original_insert = video.insert_video_asset_if_absent
+
+        def insert_deleted_then_repair(*args):
+            with sqlite3.connect(core.AUDIO_DB) as connection:
+                connection.execute(
+                    """INSERT INTO video_assets(
+                        job_id,username,mode,video_file,status,created_at,updated_at
+                    ) VALUES(?,?,?,?, 'deleted',1,1)""",
+                    (job_id, "alice", "digital_human_oneclick_compose", rel),
+                )
+            return original_insert(*args)
+
+        with mock.patch.object(
+                video, "insert_video_asset_if_absent",
+                side_effect=insert_deleted_then_repair):
+            owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        asset = self._asset(job_id)
+        self.assertEqual(asset["status"], "deleted")
+        self.assertEqual(asset["updated_at"], 1)
+
     def test_owner_poll_does_not_revive_deleted_asset(self):
         job_id = 3490
         rel = "video/final-3490.mp4"
