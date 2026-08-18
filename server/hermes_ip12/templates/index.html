@@ -174,6 +174,7 @@ button:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px soli
 .method-card p{margin:0;color:#7d8ca0;font-size:10px;line-height:1.55}.method-formula{padding:7px 8px;border-radius:8px;background:rgba(148,164,187,.04);color:#9eabc0;font-size:9px}
 .topic-primary,.topic-secondary,.topic-danger{border:1px solid rgba(244,205,114,.42);border-radius:8px;padding:8px 10px;background:linear-gradient(135deg,#f4cd72,#e7b24c);color:#211707;cursor:pointer;font-size:10px;font-weight:800}
 .topic-secondary{border-color:rgba(148,164,187,.16);background:rgba(148,164,187,.045);color:#aebbc9;font-weight:650}.topic-danger{border-color:rgba(239,68,68,.2);background:rgba(239,68,68,.055);color:#e68b8b;font-weight:650}
+.topic-primary:disabled,.topic-secondary:disabled{opacity:.46;cursor:not-allowed;filter:saturate(.35)}
 .topic-filters{display:grid;grid-template-columns:1fr 1fr auto;gap:8px}.topic-select{min-width:0;border:1px solid rgba(148,164,187,.14);border-radius:8px;padding:8px 9px;background:#0b121d;color:#c5cfda;font-size:10px}
 .topic-list{display:grid;gap:9px}.topic-card{padding:13px;border:1px solid rgba(148,164,187,.11);border-radius:12px;background:linear-gradient(145deg,rgba(18,26,39,.94),rgba(9,15,24,.95))}
 .topic-card h4{margin:0 0 7px;color:#f1f5f9;font-size:12px;line-height:1.55}.topic-card .hook{margin:0 0 7px;padding:8px 10px;border-left:2px solid #e7b24c;background:rgba(231,178,76,.055);color:#d6c59e;font-size:10px;line-height:1.55}.topic-card .reason{margin:0;color:#77879c;font-size:10px;line-height:1.55}
@@ -330,7 +331,7 @@ SKILL_MAP[12]=[{id:'calendar',icon:'calendar',name:'公众号日历',api:'/api/m
 
 var cid=null,state={current_module:1,completed_modules:[],module_step:0,ip_profile:{},intake:{status:'complete'}},reports={},deliverables={},streaming=false,convos=[];
 var expandedMod=0;
-var topicWorkspace=null,topicTab='methods';
+var topicWorkspace=null,topicTab='methods',topicGenerating=false;
 var WELCOME_HTML=document.getElementById('welcome').outerHTML;
 
 function toggleExpand(mid){
@@ -523,11 +524,12 @@ function renderTopicMethods(active){
 
 function renderTopicRecommendations(active){
   var filters=topicWorkspace.filters||{platform:'视频号',goal:'建立信任'};
+  var generatingAttr=topicGenerating?' disabled':'';
   var html='<div class="topic-section-head"><div><h3>给当前 IP 推荐可拍选题</h3><p>当前方法：'+eHtml(active?active.name:'教知识')+'。每条都带开场钩子和推荐理由。</p></div></div>';
-  html+='<div class="topic-filters"><select class="topic-select" id="topicPlatform" aria-label="发布平台">'+topicOptions(topicWorkspace.platforms,filters.platform)+'</select><select class="topic-select" id="topicGoal" aria-label="内容目标">'+topicOptions(topicWorkspace.goals,filters.goal)+'</select><button class="topic-primary" id="topicGenerate" onclick="generateTopicRecommendations()">生成 6 个选题</button></div><div class="topic-list">';
+  html+='<div class="topic-filters"><select class="topic-select" id="topicPlatform" aria-label="发布平台">'+topicOptions(topicWorkspace.platforms,filters.platform)+'</select><select class="topic-select" id="topicGoal" aria-label="内容目标">'+topicOptions(topicWorkspace.goals,filters.goal)+'</select><button class="topic-primary" id="topicGenerate"'+generatingAttr+' onclick="generateTopicRecommendations()">'+(topicGenerating?'正在生成...':'生成 6 个选题')+'</button></div><div class="topic-list">';
   var rows=topicWorkspace.recommendations||[];
   if(!rows.length)return html+'<div class="topic-empty">还没有推荐结果。<br>选择平台和目标后，生成一组真正属于当前 IP 的选题。</div></div>';
-  html+=rows.map(function(topic,index){return '<article class="topic-card"><h4>'+(index+1)+'. '+eHtml(topic.title)+'</h4><p class="hook">“'+eHtml(topic.hook)+'”</p><p class="reason">'+eHtml(topic.reason)+'</p><div class="topic-tags"><span>'+eHtml(topic.method_name)+'</span><span>'+eHtml(topic.platform)+'</span><span>'+eHtml(topic.goal)+'</span></div><div class="topic-actions"><button class="topic-primary" data-id="'+eAttr(topic.id)+'" onclick="saveRecommendedTopic(this.dataset.id)">采纳到选题池</button><button class="topic-secondary" data-id="'+eAttr(topic.id)+'" onclick="generateTopicRecommendations(this.dataset.id)">找相似</button><button class="topic-danger" data-id="'+eAttr(topic.id)+'" onclick="rejectRecommendedTopic(this.dataset.id)">不合适</button></div></article>'}).join('');
+  html+=rows.map(function(topic,index){return '<article class="topic-card"><h4>'+(index+1)+'. '+eHtml(topic.title)+'</h4><p class="hook">“'+eHtml(topic.hook)+'”</p><p class="reason">'+eHtml(topic.reason)+'</p><div class="topic-tags"><span>'+eHtml(topic.method_name)+'</span><span>'+eHtml(topic.platform)+'</span><span>'+eHtml(topic.goal)+'</span></div><div class="topic-actions"><button class="topic-primary" data-id="'+eAttr(topic.id)+'" onclick="saveRecommendedTopic(this.dataset.id)">采纳到选题池</button><button class="topic-secondary"'+generatingAttr+' data-id="'+eAttr(topic.id)+'" onclick="generateTopicRecommendations(this.dataset.id)">找相似</button><button class="topic-danger" data-id="'+eAttr(topic.id)+'" onclick="rejectRecommendedTopic(this.dataset.id)">不合适</button></div></article>'}).join('');
   return html+'</div>';
 }
 
@@ -544,9 +546,13 @@ async function topicAction(action,payload){
 }
 async function applyTopicMethod(methodId){try{var d=await topicAction('apply_method',{method_id:methodId});topicWorkspace=d.workspace;topicTab='recommendations';renderTopicWorkspace();toast('✅ 内容方法已应用到当前 IP')}catch(e){toast('❌ '+e.message)}}
 async function generateTopicRecommendations(referenceId){
-  var platform=document.getElementById('topicPlatform'),goal=document.getElementById('topicGoal'),button=document.getElementById('topicGenerate');if(button){button.disabled=true;button.textContent='正在生成...'}
-  try{var d=await topicAction(referenceId?'similar':'recommend',{topic_id:referenceId||'',method_id:topicWorkspace.active_method_id,platform:platform?platform.value:(topicWorkspace.filters||{}).platform,goal:goal?goal.value:(topicWorkspace.filters||{}).goal});topicWorkspace=d.workspace;renderTopicWorkspace();toast(referenceId?'✅ 已换一组相似角度':'✅ 已生成 6 个个性化选题')}
-  catch(e){renderTopicWorkspace();toast('❌ '+e.message)}
+  if(topicGenerating)return;
+  var platform=document.getElementById('topicPlatform'),goal=document.getElementById('topicGoal');
+  var platformValue=platform?platform.value:(topicWorkspace.filters||{}).platform,goalValue=goal?goal.value:(topicWorkspace.filters||{}).goal;
+  topicGenerating=true;renderTopicWorkspace();
+  try{var d=await topicAction(referenceId?'similar':'recommend',{topic_id:referenceId||'',method_id:topicWorkspace.active_method_id,platform:platformValue,goal:goalValue});topicWorkspace=d.workspace;toast(referenceId?'✅ 已换一组相似角度':'✅ 已生成 6 个个性化选题')}
+  catch(e){toast('❌ '+e.message)}
+  finally{topicGenerating=false;renderTopicWorkspace()}
 }
 async function saveRecommendedTopic(topicId){try{var d=await topicAction('save',{topic_id:topicId});topicWorkspace=d.workspace;renderTopicWorkspace();toast(d.duplicate?'⚠️ 选题池已有相似选题，未重复保存':'✅ 已加入我的选题池')}catch(e){toast('❌ '+e.message)}}
 async function rejectRecommendedTopic(topicId){try{var d=await topicAction('reject',{topic_id:topicId});topicWorkspace=d.workspace;renderTopicWorkspace()}catch(e){toast('❌ '+e.message)}}

@@ -94,6 +94,11 @@ class HermesIP12SourceTests(unittest.TestCase):
             self.assertIn(f"function {function}(", page)
         self.assertIn("/api/topic-workspace/", page)
         self.assertIn("正在生成口播稿", page)
+        self.assertIn("topicGenerating=false", page)
+        self.assertIn("if(topicGenerating)return", page)
+        self.assertIn("id=\"topicGenerate\"'+generatingAttr", page)
+        self.assertIn("class=\"topic-secondary\"'+generatingAttr", page)
+        self.assertIn("topic-primary:disabled,.topic-secondary:disabled", page)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_inline_javascript_parses(self):

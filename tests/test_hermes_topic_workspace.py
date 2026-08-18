@@ -3,7 +3,9 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -49,6 +51,8 @@ class HermesTopicWorkspaceTests(unittest.TestCase):
 
     def setUp(self):
         self.server.current_account_id = lambda: "acct_a"
+        with self.server.TOPIC_GENERATION_INFLIGHT_LOCK:
+            self.server.TOPIC_GENERATION_INFLIGHT.clear()
         created = self.client.post("/api/conversations", json={"title": "选题测试 IP"})
         self.assertEqual(created.status_code, 200)
         self.cid = created.get_json()["id"]
@@ -188,6 +192,81 @@ class HermesTopicWorkspaceTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         stored = self.server.load_conversation(self.cid).get("topic_workspace", {})
         self.assertEqual(stored.get("recommendations", []), [])
+
+    def test_identical_concurrent_generations_share_one_upstream_result(self):
+        call_started = threading.Event()
+        release_call = threading.Event()
+        waiter_started = threading.Event()
+        counter_lock = threading.Lock()
+        call_count = 0
+
+        def fake_call_ai(*_args, **_kwargs):
+            nonlocal call_count
+            with counter_lock:
+                call_count += 1
+                call_number = call_count
+            call_started.set()
+            if not release_call.wait(timeout=10):
+                raise AssertionError("timed out waiting to release topic generation")
+            rows = [
+                {
+                    "title": f"并发结果 {call_number}-{index}",
+                    "hook": f"同一请求只应该生成一次：{index}",
+                    "reason": "用于验证并发请求复用同一持久化结果。",
+                }
+                for index in range(1, 7)
+            ]
+            response = Mock()
+            response.json.return_value = {
+                "choices": [{"message": {"content": json.dumps(rows, ensure_ascii=False)}}]
+            }
+            return response
+
+        original_wait = self.server._wait_for_topic_generation
+
+        def observe_wait(record):
+            waiter_started.set()
+            return original_wait(record)
+
+        request_body = {
+            "action": "recommend",
+            "method_id": "knowledge",
+            "platform": "视频号",
+            "goal": "建立信任",
+        }
+
+        def post_recommendation():
+            client = self.server.app.test_client()
+            client.environ_base["HTTP_AUTHORIZATION"] = "Bearer admin-token"
+            return client.post(
+                f"/api/topic-workspace/{self.cid}", json=request_body
+            )
+
+        with patch.object(self.server, "call_ai", side_effect=fake_call_ai), patch.object(
+            self.server, "_wait_for_topic_generation", side_effect=observe_wait
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first_future = pool.submit(post_recommendation)
+                self.assertTrue(call_started.wait(timeout=10))
+                second_future = pool.submit(post_recommendation)
+                try:
+                    self.assertTrue(waiter_started.wait(timeout=10))
+                finally:
+                    release_call.set()
+                first = first_future.result(timeout=10)
+                second = second_future.result(timeout=10)
+
+        self.assertEqual(call_count, 1)
+        self.assertEqual(first.status_code, 200, first.get_data(as_text=True))
+        self.assertEqual(second.status_code, 200, second.get_data(as_text=True))
+        first_rows = first.get_json()["workspace"]["recommendations"]
+        second_rows = second.get_json()["workspace"]["recommendations"]
+        stored_rows = self.server.load_conversation(self.cid)["topic_workspace"]["recommendations"]
+        self.assertEqual(first_rows, second_rows)
+        self.assertEqual(first_rows, stored_rows)
+        self.assertTrue(all(row["title"].startswith("并发结果 1-") for row in stored_rows))
+        with self.server.TOPIC_GENERATION_INFLIGHT_LOCK:
+            self.assertEqual(self.server.TOPIC_GENERATION_INFLIGHT, {})
 
 
 if __name__ == "__main__":
