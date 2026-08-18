@@ -31,8 +31,8 @@ TARGET_COUNT = len(EXPECTED_SCOPE)
 LOCKED_PREIMAGES = {
     "server/content_domains/video.py": (
         "file",
-        "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
-        "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
+        "45b9fef1acbad1c10bb63e554890265e14acd308",
+        "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
     ),
     "server/content_domains/script_to_video.py": (
         "file",
@@ -51,13 +51,13 @@ LOCKED_PREIMAGES = {
     ),
     "site/workbench/digital-human-oneclick.html": (
         "file",
-        "db10fce104dfb7a318dec4732729000d23345b1d",
-        "5e7fb9c373c6c9a89edc17c8206e4fdcdd24c339272f292d09c5f0db7a01a58a",
+        "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
+        "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
     ),
     "site/workbench/digital-human-oneclick-state.js": (
         "file",
-        "9c437984c262f79ebc47715c48988ae16f8472b3",
-        "bb787a30cc6e6b06420401f25adbfbed327f4b9db2e0a4ec85e2c44f795a714d",
+        "b743d153920880ee845b30136cc5cbd947c5e409",
+        "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
     ),
     "site/workbench/digital-human-setup-state.js": (
         "file",
@@ -127,6 +127,61 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(b"ABSENT\n").hexdigest(), absent["sha256"]
         )
+
+    def test_reconciled_preimage_observation_is_exact_and_test_only(self):
+        observation = self.manifest["preimage_observation"]
+        self.assertEqual(observation["target"], "test@8.148.158.106")
+        self.assertEqual(
+            observation["repository_main_commit"],
+            "ba903933a06bc8f754883fb386adace203a15600",
+        )
+        self.assertEqual(
+            observation["classification"],
+            {
+                "matching_preimage": 8,
+                "matching_postimage": 1,
+                "matching_historical_main": 2,
+            },
+        )
+        expected = {
+            "server/content_domains/video.py": (
+                "b8a4886869995f72cf25ca1399620cef5966bf76",
+                "45b9fef1acbad1c10bb63e554890265e14acd308",
+                "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
+                "matching_postimage",
+            ),
+            "site/workbench/digital-human-oneclick.html": (
+                "e9414cbbbf29f176159b36f62f20a90146300030",
+                "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
+                "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
+                "matching_historical_main",
+            ),
+            "site/workbench/digital-human-oneclick-state.js": (
+                "9618d2b02c407f5e56cbee239e3ced71fe9fdf2e",
+                "b743d153920880ee845b30136cc5cbd947c5e409",
+                "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
+                "matching_historical_main",
+            ),
+        }
+        actual = {
+            entry["repository_path"]: (
+                entry["provenance_commit"],
+                entry["observed_blob"],
+                entry["observed_sha256"],
+                entry["observed_state"],
+            )
+            for entry in observation["reconciled_files"]
+        }
+        self.assertEqual(actual, expected)
+        locked = {
+            entry["repository_path"]: (
+                entry["target_preimage_blob"],
+                entry["target_preimage_sha256"],
+            )
+            for entry in self.manifest["files"]
+        }
+        for path, (_, blob, sha256, _) in expected.items():
+            self.assertEqual(locked[path], (blob, sha256))
 
     def test_policy_is_test_only_atomic_and_whole_unit_rollback(self):
         policy = self.manifest["deployment_policy"]

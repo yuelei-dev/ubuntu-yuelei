@@ -13,6 +13,39 @@
     "font_contract_parent": "783fe3088ff38a9ae11ebcb426e5d6e469cb0125",
     "review_lock": "the exact PR head and tree are recorded by the PR gate; file blobs below are the deployment authority"
   },
+  "preimage_observation": {
+    "captured_at": "2026-08-18T11:17:00+08:00",
+    "target": "test@8.148.158.106",
+    "repository_main_commit": "ba903933a06bc8f754883fb386adace203a15600",
+    "classification": {
+      "matching_preimage": 8,
+      "matching_postimage": 1,
+      "matching_historical_main": 2
+    },
+    "reconciled_files": [
+      {
+        "repository_path": "server/content_domains/video.py",
+        "provenance_commit": "b8a4886869995f72cf25ca1399620cef5966bf76",
+        "observed_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
+        "observed_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
+        "observed_state": "matching_postimage"
+      },
+      {
+        "repository_path": "site/workbench/digital-human-oneclick.html",
+        "provenance_commit": "e9414cbbbf29f176159b36f62f20a90146300030",
+        "observed_blob": "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
+        "observed_sha256": "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
+        "observed_state": "matching_historical_main"
+      },
+      {
+        "repository_path": "site/workbench/digital-human-oneclick-state.js",
+        "provenance_commit": "9618d2b02c407f5e56cbee239e3ced71fe9fdf2e",
+        "observed_blob": "b743d153920880ee845b30136cc5cbd947c5e409",
+        "observed_sha256": "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
+        "observed_state": "matching_historical_main"
+      }
+    ]
+  },
   "deployment_policy": {
     "fail_closed_on_source_mismatch": true,
     "fail_closed_on_preimage_mismatch": true,
@@ -68,8 +101,8 @@
       "source_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
       "source_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
       "target_preimage_state": "file",
-      "target_preimage_blob": "07c28a4cce563dc0459a44117259f99aa2fbf7aa",
-      "target_preimage_sha256": "f11ea60df98b5cef6ab3da3bc45f385771edea8a977e0833ef85e20cf8745121",
+      "target_preimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
+      "target_preimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
       "expected_postimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
       "expected_postimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595"
     },
@@ -116,8 +149,8 @@
       "source_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
       "source_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
       "target_preimage_state": "file",
-      "target_preimage_blob": "db10fce104dfb7a318dec4732729000d23345b1d",
-      "target_preimage_sha256": "5e7fb9c373c6c9a89edc17c8206e4fdcdd24c339272f292d09c5f0db7a01a58a",
+      "target_preimage_blob": "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
+      "target_preimage_sha256": "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
       "expected_postimage_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
       "expected_postimage_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4"
     },
@@ -128,8 +161,8 @@
       "source_blob": "8231103aa057746ce033fc06b80c3b750832175a",
       "source_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
       "target_preimage_state": "file",
-      "target_preimage_blob": "9c437984c262f79ebc47715c48988ae16f8472b3",
-      "target_preimage_sha256": "bb787a30cc6e6b06420401f25adbfbed327f4b9db2e0a4ec85e2c44f795a714d",
+      "target_preimage_blob": "b743d153920880ee845b30136cc5cbd947c5e409",
+      "target_preimage_sha256": "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
       "expected_postimage_blob": "8231103aa057746ce033fc06b80c3b750832175a",
       "expected_postimage_sha256": "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21"
     },
