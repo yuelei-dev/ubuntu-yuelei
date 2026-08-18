@@ -850,6 +850,66 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 with self.assertRaises(self.domain.DigitalHumanRequestError):
                     self.domain.plan(script, invalid)
 
+    def test_plan_enforces_downstream_tts_limit_for_every_selected_segment(self):
+        one_at_limit = "甲" * self.domain.MAX_TTS_SEGMENT_CHARS
+        planned = self.domain.plan(one_at_limit, 1)
+        self.assertEqual(self.domain.MAX_TTS_SEGMENT_CHARS,
+                         len(planned["segments"][0]["text"]))
+
+        with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+            self.domain.plan(one_at_limit + "甲", 1)
+        self.assertEqual("segment_tts_limit_exceeded", rejected.exception.code)
+        self.assertIn("增加生成数量或缩短文案", str(rejected.exception))
+
+        for count in (2, 3):
+            with self.subTest(count=count, boundary="accepted"):
+                script = ("甲" * (self.domain.MAX_TTS_SEGMENT_CHARS - 1) + "。") * count
+                planned = self.domain.plan(script, count)
+                self.assertTrue(all(
+                    len(item["text"]) <= self.domain.MAX_TTS_SEGMENT_CHARS
+                    for item in planned["segments"]
+                ))
+            with self.subTest(count=count, boundary="rejected"):
+                script = ("甲" * self.domain.MAX_TTS_SEGMENT_CHARS + "。") * count
+                with self.assertRaises(self.domain.DigitalHumanRequestError) as rejected:
+                    self.domain.plan(script, count)
+                self.assertEqual("segment_tts_limit_exceeded", rejected.exception.code)
+
+    def test_plan_tts_overflow_is_rejected_before_paid_job_or_point_creation(self):
+        script_to_video = importlib.import_module("content_domains.script_to_video")
+
+        class Handler:
+            path = self.domain.PLAN_PATH
+
+            def __init__(self):
+                self.sent = None
+
+            @staticmethod
+            def _token():
+                return "token"
+
+            @staticmethod
+            def _json_body_strict():
+                return {"script": "甲" * 1001, "segment_count": 1}
+
+            def _send(self, status, payload):
+                self.sent = (status, payload)
+
+        handler = Handler()
+        with mock.patch("content_domains.jobs_store.create_job_after_charge") as create_job, \
+             mock.patch.object(self.points, "deduct_points") as deduct_points:
+            handled = script_to_video.dispatch_http(
+                handler, "POST",
+                lambda _token: {"username": "yuelei"},
+                lambda _user: False,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(400, handler.sent[0])
+        self.assertEqual("segment_tts_limit_exceeded", handler.sent[1]["code"])
+        create_job.assert_not_called()
+        deduct_points.assert_not_called()
+
     def test_prepare_freezes_only_owned_completed_child_jobs(self):
         script = "第一段说明背景。第二段解释方案。第三段展示结果。第四段补充细节。第五段强调价值。第六段邀请行动。"
         planned = self.domain.plan(script)

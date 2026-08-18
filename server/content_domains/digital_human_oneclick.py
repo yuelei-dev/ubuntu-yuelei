@@ -28,6 +28,7 @@ DEFAULT_SEGMENT_COUNT = 3
 MAX_SEGMENT_COUNT = 3
 MATERIALS_PER_SEGMENT = 2
 MAX_SCRIPT_CHARS = 6000
+MAX_TTS_SEGMENT_CHARS = 1000
 CONSENT_VERSION = "digital-human-oneclick-v1"
 CONSENT_PURPOSE = "digital_human_oneclick"
 CONSENT_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -604,6 +605,13 @@ def plan(script, segment_count=DEFAULT_SEGMENT_COUNT):
     copy = _clean_script(script)
     segment_count = _segment_count(segment_count)
     parts = _split_script(copy, segment_count)
+    for index, part in enumerate(parts):
+        if len(part) > MAX_TTS_SEGMENT_CHARS:
+            raise DigitalHumanRequestError(
+                "拆分后的第 %d 段超过 %d 字，无法安全生成口播；请增加生成数量或缩短文案"
+                % (index + 1, MAX_TTS_SEGMENT_CHARS),
+                "segment_tts_limit_exceeded",
+            )
     gestures = (
         "人物保持与参考照片完全一致，竖屏半身口播照，右手自然抬起作开场讲解手势，左手放松；神态亲切有活力，眼神稳定直视镜头，嘴唇自然闭合",
         "人物保持与参考照片完全一致，竖屏半身口播照，双手在胸前自然展开作对比说明手势；神态专注放松，眼神稳定直视镜头，嘴唇自然闭合",
