@@ -57,7 +57,7 @@ class HermesIP12SourceTests(unittest.TestCase):
         for path in HERMES.glob("*.py"):
             routes.update(pattern.findall(path.read_text(encoding="utf-8")))
 
-        self.assertEqual(len(routes), 76)
+        self.assertEqual(len(routes), 77)
         self.assertTrue(
             {
                 "/api/chat",
@@ -66,6 +66,7 @@ class HermesIP12SourceTests(unittest.TestCase):
                 "/api/generate-image",
                 "/api/generate-video",
                 "/api/foundation-report/generate",
+                "/api/topic-workspace/<cid>",
                 "/api/analyze-video",
                 "/api/pipeline",
                 "/api/replica",
@@ -78,6 +79,21 @@ class HermesIP12SourceTests(unittest.TestCase):
                 "/team-workbench",
             }.issubset(routes)
         )
+
+    def test_topic_planning_ui_connects_methods_recommendations_pool_and_copywriting(self):
+        page = (HERMES / "templates" / "index.html").read_text(encoding="utf-8")
+        for label in ("内容方法", "选题推荐", "我的选题池", "应用到当前 IP", "生成口播稿"):
+            self.assertIn(label, page)
+        for function in (
+            "openTopicWorkspace",
+            "applyTopicMethod",
+            "generateTopicRecommendations",
+            "saveRecommendedTopic",
+            "handoffTopic",
+        ):
+            self.assertIn(f"function {function}(", page)
+        self.assertIn("/api/topic-workspace/", page)
+        self.assertIn("正在生成口播稿", page)
 
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_inline_javascript_parses(self):
@@ -380,7 +396,7 @@ security._validate_token = lambda token: {
 }.get(token)
 security.RATE_REQUESTS = 1000
 routes = {rule.rule for rule in app.url_map.iter_rules() if rule.endpoint != "static"}
-assert len(routes) == 76, len(routes)
+assert len(routes) == 77, len(routes)
 assert all(
     security._is_metered(method)
     for rule in app.url_map.iter_rules()
