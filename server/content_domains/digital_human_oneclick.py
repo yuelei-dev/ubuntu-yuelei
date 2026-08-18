@@ -24,9 +24,11 @@ HEYGEN_PREFLIGHT_PATH = "/api/gen/digital-human-oneclick/heygen-preflight"
 GESTURE_RECOVERY_PATH = "/api/gen/digital-human-oneclick/gesture-recovery"
 MATERIAL_RECOVERY_PATH = "/api/gen/digital-human-oneclick/material-recovery"
 VIDEO_RECOVERY_PATH = "/api/gen/digital-human-oneclick/video-recovery"
-VIDEO_COUNT = 3
-MATERIAL_COUNT = 6
+DEFAULT_SEGMENT_COUNT = 3
+MAX_SEGMENT_COUNT = 3
+MATERIALS_PER_SEGMENT = 2
 MAX_SCRIPT_CHARS = 6000
+MAX_TTS_SEGMENT_CHARS = 1000
 CONSENT_VERSION = "digital-human-oneclick-v1"
 CONSENT_PURPOSE = "digital_human_oneclick"
 CONSENT_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -40,7 +42,8 @@ _CONSENT_TOKEN_RE = re.compile(r"^dhc_[0-9a-f]{32}\.[0-9a-f]{64}$")
 _CONSENT_METADATA_FIELDS = {
     "digital_human_pipeline", "digital_human_stage", "digital_human_run_id",
     "digital_human_plan_digest", "digital_human_consent_token",
-    "digital_human_script", "digital_human_item_index",
+    "digital_human_script", "digital_human_segment_count",
+    "digital_human_item_index",
 }
 _STAGE_KINDS = {
     "gesture": "image",
@@ -109,6 +112,21 @@ def _required_sha256(value, label):
     return value
 
 
+def _segment_count(value):
+    if value in (None, ""):
+        return DEFAULT_SEGMENT_COUNT
+    if type(value) is not int:
+        raise DigitalHumanRequestError("生成数量只能选择 1、2 或 3")
+    count = value
+    if count < 1 or count > MAX_SEGMENT_COUNT:
+        raise DigitalHumanRequestError("生成数量只能选择 1、2 或 3")
+    return count
+
+
+def _material_count(segment_count):
+    return _segment_count(segment_count) * MATERIALS_PER_SEGMENT
+
+
 def _consent_signature(record, signing_secret):
     secret = str(signing_secret or "").strip()
     if not secret:
@@ -142,7 +160,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = {
         "confirmed", "consent_version", "purpose", "run_id", "plan_digest", "script",
-        "photo_sha256", "voice_mode", "voice_ref", "voice_sha256",
+        "segment_count", "photo_sha256", "voice_mode", "voice_ref", "voice_sha256",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -156,7 +174,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     run_id = str(payload.get("run_id") or "").strip()
     if not _RUN_ID_RE.fullmatch(run_id):
         raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
-    authoritative_plan = plan(payload.get("script"))
+    authoritative_plan = plan(payload.get("script"), payload.get("segment_count"))
     plan_digest = _required_sha256(payload.get("plan_digest"), "制作方案")
     if not hmac.compare_digest(plan_digest, authoritative_plan["plan_digest"]):
         raise DigitalHumanRequestError(
@@ -328,7 +346,10 @@ def verify_child_submission_with_record(payload, username, kind):
     if _STAGE_KINDS.get(stage) != str(kind or ""):
         raise DigitalHumanRequestError("数字人一键生成步骤与任务类型不匹配")
     cleaned, record = _verify_common_binding(payload, username)
-    authoritative_plan = plan(payload.get("digital_human_script"))
+    authoritative_plan = plan(
+        payload.get("digital_human_script"),
+        payload.get("digital_human_segment_count"),
+    )
     if not hmac.compare_digest(
             authoritative_plan["plan_digest"], record["plan_digest"]):
         raise DigitalHumanRequestError(
@@ -540,22 +561,38 @@ def _sentences(text):
     return [part for part in chunks if part]
 
 
-def _split_three(text):
+def _split_script(text, segment_count):
+    segment_count = _segment_count(segment_count)
+    if segment_count == 1:
+        return [text]
     chunks = _sentences(text)
-    if len(chunks) < 3:
-        size = max(1, (len(text) + 2) // 3)
-        chunks = [text[i:i + size] for i in range(0, len(text), size)]
-    if len(chunks) < 3:
-        chunks.extend([""] * (3 - len(chunks)))
+    if len(chunks) < segment_count:
+        boundaries = [round(len(text) * index / float(segment_count))
+                      for index in range(segment_count + 1)]
+        return [text[boundaries[index]:boundaries[index + 1]].strip()
+                for index in range(segment_count)]
     total = sum(len(item) for item in chunks)
     cumulative = []
     cursor = 0
     for item in chunks:
         cursor += len(item)
         cumulative.append(cursor)
-    cut_one = min(range(1, len(chunks) - 1), key=lambda value: abs(cumulative[value - 1] - total / 3.0))
-    cut_two = min(range(cut_one + 1, len(chunks)), key=lambda value: abs(cumulative[value - 1] - total * 2.0 / 3.0))
-    groups = (chunks[:cut_one], chunks[cut_one:cut_two], chunks[cut_two:])
+    cuts = []
+    previous = 0
+    for group_index in range(1, segment_count):
+        remaining_groups = segment_count - group_index
+        candidates = range(previous + 1, len(chunks) - remaining_groups + 1)
+        cut = min(
+            candidates,
+            key=lambda value: abs(
+                cumulative[value - 1] - total * group_index / float(segment_count)
+            ),
+        )
+        cuts.append(cut)
+        previous = cut
+    starts = [0] + cuts
+    ends = cuts + [len(chunks)]
+    groups = [chunks[start:end] for start, end in zip(starts, ends)]
     return ["".join(group).strip() for group in groups]
 
 
@@ -564,14 +601,32 @@ def _digest(plan):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def plan(script):
+def plan(script, segment_count=DEFAULT_SEGMENT_COUNT):
     copy = _clean_script(script)
-    parts = _split_three(copy)
+    segment_count = _segment_count(segment_count)
+    parts = _split_script(copy, segment_count)
+    for index, part in enumerate(parts):
+        if len(part) > MAX_TTS_SEGMENT_CHARS:
+            raise DigitalHumanRequestError(
+                "拆分后的第 %d 段超过 %d 字，无法安全生成口播；请增加生成数量或缩短文案"
+                % (index + 1, MAX_TTS_SEGMENT_CHARS),
+                "segment_tts_limit_exceeded",
+            )
     gestures = (
         "人物保持与参考照片完全一致，竖屏半身口播照，右手自然抬起作开场讲解手势，左手放松；神态亲切有活力，眼神稳定直视镜头，嘴唇自然闭合",
         "人物保持与参考照片完全一致，竖屏半身口播照，双手在胸前自然展开作对比说明手势；神态专注放松，眼神稳定直视镜头，嘴唇自然闭合",
         "人物保持与参考照片完全一致，竖屏半身口播照，一手轻指前方作总结强调手势，另一手自然放松；神态自信亲切，眼神稳定直视镜头，嘴唇自然闭合",
     )
+    profiles = (
+        {"speed": 1.08, "pitch": 1, "volume": 2, "motion": "high", "delivery": "energetic_hook"},
+        {"speed": 0.98, "pitch": 0, "volume": 1, "motion": "medium", "delivery": "clear_explain"},
+        {"speed": 1.04, "pitch": 1, "volume": 2, "motion": "high", "delivery": "confident_cta"},
+    )
+    selections = {
+        1: (("complete", 1),),
+        2: (("hook", 0), ("explain_cta", 2)),
+        3: (("hook", 0), ("explain", 1), ("cta", 2)),
+    }[segment_count]
     segments = []
     materials = []
     for index, part in enumerate(parts):
@@ -579,13 +634,9 @@ def plan(script):
         segment = {
             "index": index,
             "text": part,
-            "role": ("hook", "explain", "cta")[index],
-            "speech_profile": (
-                {"speed": 1.08, "pitch": 1, "volume": 2, "motion": "high", "delivery": "energetic_hook"},
-                {"speed": 0.98, "pitch": 0, "volume": 1, "motion": "medium", "delivery": "clear_explain"},
-                {"speed": 1.04, "pitch": 1, "volume": 2, "motion": "high", "delivery": "confident_cta"},
-            )[index],
-            "gesture_prompt": gestures[index] + "。服装、发型、眼镜、面部特征和背景风格一致，双手完整可见，真实摄影，不添加文字。",
+            "role": selections[index][0],
+            "speech_profile": profiles[selections[index][1]],
+            "gesture_prompt": gestures[selections[index][1]] + "。服装、发型、眼镜、面部特征和背景风格一致，双手完整可见，真实摄影，不添加文字。",
         }
         segments.append(segment)
         materials.extend([
@@ -604,14 +655,32 @@ def plan(script):
                 "prompt": "为竖屏短视频制作信息补充镜头，真实商业纪录片风格，无文字、无水印。内容紧扣：" + excerpt,
             },
         ])
-    core = {"pipeline": PIPELINE, "copy": copy, "ratio": "9:16", "segments": segments, "materials": materials}
-    return dict(core, plan_digest=_digest(core))
+    # Keep the legacy three-segment digest stable: the selected count is
+    # already cryptographically represented by the lengths and contents of
+    # segments/materials, so it does not need a second digest-only field.
+    core = {
+        "pipeline": PIPELINE, "copy": copy, "ratio": "9:16",
+        "segments": segments, "materials": materials,
+    }
+    return dict(
+        core,
+        segment_count=segment_count,
+        material_count=_material_count(segment_count),
+        plan_digest=_digest(core),
+    )
 
 
 def plan_response(payload):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
-    result = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
+    allowed = {"script", "copy", "text", "segment_count"}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
+    result = plan(
+        payload.get("script") or payload.get("copy") or payload.get("text"),
+        payload.get("segment_count"),
+    )
     return {"ok": True, "plan": result}
 
 
@@ -721,6 +790,34 @@ def _recovery_entries(payload, field, limit, label, error_code):
     return entries
 
 
+def _authorized_plan(payload, consent_record):
+    segment_count = _segment_count(payload.get("digital_human_segment_count"))
+    script = str(payload.get("digital_human_script") or "").strip()
+    if not script:
+        # Legacy three-segment recovery requests did not repeat the script.
+        # They remain valid only for the legacy fixed-size contract.
+        if segment_count != DEFAULT_SEGMENT_COUNT:
+            raise DigitalHumanRequestError(
+                "恢复任务缺少生成数量对应的授权文案",
+                "consent_plan_mismatch", 409,
+            )
+        return {
+            "segment_count": DEFAULT_SEGMENT_COUNT,
+            "material_count": _material_count(DEFAULT_SEGMENT_COUNT),
+        }
+    frozen = plan(
+        script, segment_count,
+    )
+    if not hmac.compare_digest(
+            frozen["plan_digest"],
+            str(consent_record.get("plan_digest") or "")):
+        raise DigitalHumanRequestError(
+            "恢复任务的生成数量或文案与授权方案不一致",
+            "consent_plan_mismatch", 409,
+        )
+    return frozen
+
+
 def validate_gesture_recovery(payload, username):
     """Authorize portrait-free resume only for this consent's recoverable jobs."""
     if not isinstance(payload, dict):
@@ -734,8 +831,10 @@ def validate_gesture_recovery(payload, username):
     if str(payload.get("digital_human_stage") or "").strip().lower() != "gesture_recovery":
         raise DigitalHumanRequestError("手势照恢复步骤标识无效")
     _cleaned, consent_record = _verify_common_binding(payload, username)
+    frozen = _authorized_plan(payload, consent_record)
     entries = _recovery_entries(
-        payload, "gesture_job_ids", 3, "手势照", "gesture_recovery_invalid",
+        payload, "gesture_job_ids", frozen["segment_count"],
+        "手势照", "gesture_recovery_invalid",
     )
     job_ids = [entry["job_id"] for entry in entries]
     placeholders = ",".join("?" for _ in job_ids)
@@ -782,7 +881,7 @@ def validate_gesture_recovery(payload, username):
 
 
 def validate_material_recovery(payload, username):
-    """Authorize upload-free resume only when all six material jobs are durable."""
+    """Authorize upload-free resume for this plan's dynamic material jobs."""
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = set(_CONSENT_METADATA_FIELDS) | {"material_job_ids"}
@@ -794,8 +893,9 @@ def validate_material_recovery(payload, username):
     if str(payload.get("digital_human_stage") or "").strip().lower() != "material_recovery":
         raise DigitalHumanRequestError("主画面恢复步骤标识无效")
     _cleaned, consent_record = _verify_common_binding(payload, username)
+    frozen = _authorized_plan(payload, consent_record)
     entries = _recovery_entries(
-        payload, "material_job_ids", MATERIAL_COUNT,
+        payload, "material_job_ids", frozen["material_count"],
         "主画面", "material_recovery_invalid",
     )
     job_ids = [entry["job_id"] for entry in entries]
@@ -840,7 +940,7 @@ def validate_material_recovery(payload, username):
 
 
 def validate_video_recovery(payload, username):
-    """Authorize reuse of the three talking jobs before local composition."""
+    """Authorize reuse of this plan's talking jobs before local composition."""
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = set(_CONSENT_METADATA_FIELDS) | {"video_job_ids"}
@@ -852,8 +952,10 @@ def validate_video_recovery(payload, username):
     if str(payload.get("digital_human_stage") or "").strip().lower() != "video_recovery":
         raise DigitalHumanRequestError("口播恢复步骤标识无效")
     _cleaned, consent_record = _verify_common_binding(payload, username)
+    frozen = _authorized_plan(payload, consent_record)
+    expected_video_count = frozen["segment_count"]
     entries = _recovery_entries(
-        payload, "video_job_ids", VIDEO_COUNT,
+        payload, "video_job_ids", expected_video_count,
         "口播", "video_recovery_invalid",
     )
     job_ids = [entry["job_id"] for entry in entries]
@@ -892,8 +994,8 @@ def validate_video_recovery(payload, username):
     if invalid_job_ids:
         count = len(invalid_job_ids)
         message = (
-            "3 段口播均未生成成功，可从口播步骤重新生成"
-            if count == VIDEO_COUNT and len(entries) == VIDEO_COUNT
+            "%d 段口播均未生成成功，可从口播步骤重新生成" % expected_video_count
+            if count == expected_video_count and len(entries) == expected_video_count
             else "检测到 %d 段口播已不可恢复，可从口播步骤重新生成" % count
         )
         raise DigitalHumanRequestError(
@@ -902,14 +1004,14 @@ def validate_video_recovery(payload, username):
     return {"ok": True, "video_jobs": statuses}
 
 
-def _owned_completed_files(username, ids, kind, expected_stage, consent_record):
+def _owned_completed_files(username, ids, kind, expected_stage, consent_record,
+                           expected):
     if not isinstance(ids, list) or any(isinstance(item, bool) for item in ids):
         raise DigitalHumanRequestError("子任务编号格式无效")
     try:
         normalized = [int(item) for item in ids]
     except (TypeError, ValueError):
         raise DigitalHumanRequestError("子任务编号格式无效")
-    expected = VIDEO_COUNT if kind == "video" else MATERIAL_COUNT
     if len(normalized) != expected or len(set(normalized)) != expected:
         raise DigitalHumanRequestError("需要 %d 个互不重复的%s任务" % (expected, "口播视频" if kind == "video" else "主画面"))
     placeholders = ",".join("?" for _ in normalized)
@@ -953,14 +1055,18 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "video_job_ids", "material_job_ids", "digital_human_pipeline",
         "digital_human_stage", "digital_human_run_id",
         "digital_human_plan_digest", "digital_human_consent_id",
-        "digital_human_script", "digital_human_item_index",
+        "digital_human_script", "digital_human_segment_count",
+        "digital_human_item_index",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise DigitalHumanRequestError("提交包含不支持字段：" + ", ".join(unknown))
     if str(payload.get("pipeline") or "").strip().lower() != PIPELINE:
         raise DigitalHumanRequestError("pipeline 无效")
-    frozen = plan(payload.get("script") or payload.get("copy") or payload.get("text"))
+    frozen = plan(
+        payload.get("script") or payload.get("copy") or payload.get("text"),
+        payload.get("digital_human_segment_count"),
+    )
     if str(payload.get("plan_digest") or "").strip().lower() != frozen["plan_digest"]:
         raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
     if not isinstance(consent_record, dict):
@@ -979,6 +1085,8 @@ def prepare_compose_payload(payload, username, consent_record=None):
             or str(consent_record.get("purpose") or "") != CONSENT_PURPOSE
             or not authoritative["digital_human_consent_id"]
             or authoritative["digital_human_plan_digest"] != frozen["plan_digest"]
+            or _segment_count(payload.get("digital_human_segment_count"))
+            != frozen["segment_count"]
             or any(str(payload.get(key) or "") != value
                    for key, value in authoritative.items())):
         raise DigitalHumanRequestError(
@@ -987,9 +1095,11 @@ def prepare_compose_payload(payload, username, consent_record=None):
         )
     video_ids, video_files = _owned_completed_files(
         username, payload.get("video_job_ids"), "video", "talking", consent_record,
+        frozen["segment_count"],
     )
     material_ids, material_files = _owned_completed_files(
         username, payload.get("material_job_ids"), "image", "material", consent_record,
+        frozen["material_count"],
     )
     prepared = {
         "pipeline": PIPELINE,
@@ -997,6 +1107,8 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "copy": frozen["copy"],
         "ratio": "9:16",
         "plan_digest": frozen["plan_digest"],
+        "segment_count": frozen["segment_count"],
+        "material_count": frozen["material_count"],
         "segments": frozen["segments"],
         "materials": frozen["materials"],
         "video_job_ids": video_ids,
@@ -1006,6 +1118,7 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "material_generate_count": 0,
     }
     prepared.update(authoritative)
+    prepared["digital_human_segment_count"] = frozen["segment_count"]
     return prepared
 
 
@@ -1052,7 +1165,13 @@ def compose(payload, persist_state=None):
         raise RuntimeError("数字人一键生成缺少任务编号")
     videos = [(OUT_DIR / rel).resolve() for rel in payload.get("video_files") or []]
     images = [(OUT_DIR / rel).resolve() for rel in payload.get("material_files") or []]
-    if len(videos) != VIDEO_COUNT or len(images) != MATERIAL_COUNT:
+    segment_count = _segment_count(payload.get("segment_count"))
+    material_count = _material_count(segment_count)
+    if ((payload.get("segments") is not None
+         and len(payload.get("segments") or []) != segment_count)
+            or (payload.get("materials") is not None
+                and len(payload.get("materials") or []) != material_count)
+            or len(videos) != segment_count or len(images) != material_count):
         raise RuntimeError("数字人一键生成子任务数量不完整")
     for path in videos + images:
         path.relative_to(OUT_DIR.resolve())
@@ -1082,13 +1201,13 @@ def compose(payload, persist_state=None):
         raise RuntimeError("口播子片段合并后时长无效")
 
     background = out_dir / ("digital_human_%d_background.mp4" % job_id)
-    scene_duration = duration / float(MATERIAL_COUNT)
+    scene_duration = duration / float(material_count)
     command = ["ffmpeg", "-y"]
     for image in images:
         command.extend(["-loop", "1", "-t", "%.3f" % scene_duration, "-i", str(image)])
     filters = []
     labels = []
-    for index in range(MATERIAL_COUNT):
+    for index in range(material_count):
         label = "bg%d" % index
         labels.append("[%s]" % label)
         filters.append(
@@ -1096,7 +1215,7 @@ def compose(payload, persist_state=None):
             "zoompan=z='min(zoom+0.00035,1.055)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
             "d=1:s=1080x1920:fps=30,trim=duration=%.3f,setpts=PTS-STARTPTS[%s]" % (index, scene_duration, label)
         )
-    filters.append("%sconcat=n=%d:v=1:a=0[joinedbg]" % ("".join(labels), MATERIAL_COUNT))
+    filters.append("%sconcat=n=%d:v=1:a=0[joinedbg]" % ("".join(labels), material_count))
     filters.append(
         "[joinedbg]drawbox=x=44:y=44:w=356:h=58:color=black@0.68:t=fill,"
         "drawtext=text='CONCEPT / AI FILL':fontcolor=white:fontsize=26:x=62:y=60[outv]"
@@ -1146,6 +1265,10 @@ def compose(payload, persist_state=None):
         "duration": round(final_duration, 3),
         "width": width,
         "height": height,
+        "segment_count": segment_count,
+        "gesture_count": segment_count,
+        "video_count": segment_count,
+        "material_count": material_count,
         "segments": payload.get("segments") or [],
         "child_jobs": {"videos": payload.get("video_job_ids"), "materials": payload.get("material_job_ids")},
         "verification": {

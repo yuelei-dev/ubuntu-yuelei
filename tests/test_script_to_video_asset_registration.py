@@ -140,8 +140,6 @@ class ScriptToVideoAssetRegistrationTests(unittest.TestCase):
         result = {
             "video_file": "video/final-3485.mp4",
             "video_url": "/api/gen/file/video/final-3485.mp4",
-            "status": "done",
-            "phase": "complete",
         }
 
         handler, points = self._run(3485, result)
@@ -174,8 +172,6 @@ class ScriptToVideoAssetRegistrationTests(unittest.TestCase):
         self._run(3486, {
             "video_file": "video/final-3486.mp4",
             "video_url": "/api/gen/file/video/final-3486.mp4",
-            "status": "done",
-            "phase": "complete",
         })
 
         asset = self._asset(3486)

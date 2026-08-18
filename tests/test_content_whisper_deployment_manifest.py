@@ -17,12 +17,17 @@ VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
 EXPECTED_SCOPE = {
     "server/content_domains/video.py",
     "server/content_domains/script_to_video.py",
+    "server/content_domains/core.py",
     "server/content_domains/digital_human_oneclick.py",
+    "site/workbench/digital-human-oneclick.html",
+    "site/workbench/digital-human-oneclick-state.js",
+    "site/workbench/digital-human-setup-state.js",
     "deploy/systemd/huangque-content.service.d/whisper.conf",
     "deploy/requirements-content.txt",
     "scripts/prepare_content_whisper.py",
     "scripts/prepare_content_whisper_runtime.sh",
 }
+TARGET_COUNT = len(EXPECTED_SCOPE)
 LOCKED_PREIMAGES = {
     "server/content_domains/video.py": (
         "file",
@@ -34,10 +39,30 @@ LOCKED_PREIMAGES = {
         "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
         "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
     ),
+    "server/content_domains/core.py": (
+        "file",
+        "09ce5407f13a9b07b02266192011851de5984deb",
+        "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e",
+    ),
     "server/content_domains/digital_human_oneclick.py": (
         "file",
         "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
         "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
+    ),
+    "site/workbench/digital-human-oneclick.html": (
+        "file",
+        "db10fce104dfb7a318dec4732729000d23345b1d",
+        "5e7fb9c373c6c9a89edc17c8206e4fdcdd24c339272f292d09c5f0db7a01a58a",
+    ),
+    "site/workbench/digital-human-oneclick-state.js": (
+        "file",
+        "9c437984c262f79ebc47715c48988ae16f8472b3",
+        "bb787a30cc6e6b06420401f25adbfbed327f4b9db2e0a4ec85e2c44f795a714d",
+    ),
+    "site/workbench/digital-human-setup-state.js": (
+        "file",
+        "0a4727991da696be63f4bcf81c45dda9eb7254e0",
+        "e353d97e86f677c9fb88d18dcb0955fc5a6c8dc0884023e15502ba597f7bbd26",
     ),
     "deploy/systemd/huangque-content.service.d/whisper.conf": (
         "file",
@@ -78,9 +103,9 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
     def test_manifest_scope_sources_and_postimages_are_exact(self):
         entries = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in entries}, EXPECTED_SCOPE)
-        self.assertEqual(len(entries), 7)
-        self.assertEqual(len({entry["runtime_path"] for entry in entries}), 7)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 7)
+        self.assertEqual(len(entries), TARGET_COUNT)
+        self.assertEqual(len({entry["runtime_path"] for entry in entries}), TARGET_COUNT)
+        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), TARGET_COUNT)
         for entry in entries:
             data = (ROOT / entry["repository_path"]).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
@@ -134,7 +159,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertTrue(source_gate["reviewed_source_commit_must_be_ancestor"])
         self.assertTrue(source_gate["network_or_missing_history_fails_closed"])
         self.assertFalse(self.manifest["executor"]["remote_connection_capability"])
-        self.assertEqual(self.manifest["rollback"]["scope"], "all seven manifest targets as one unit")
+        self.assertEqual(self.manifest["rollback"]["scope"], "all eleven manifest targets as one unit")
 
     def test_release_order_preflights_before_the_only_restart(self):
         steps = self.manifest["ordered_release_steps"]
@@ -150,11 +175,11 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertEqual(steps.count("restart_huangque_content_once"), 1)
         self.assertLess(
             steps.index("verify_all_target_preimages_before_first_write"),
-            steps.index("backup_all_seven_targets_and_record_present_or_missing"),
+            steps.index("backup_all_eleven_targets_and_record_present_or_missing"),
         )
         self.assertLess(
-            steps.index("backup_all_seven_targets_and_record_present_or_missing"),
-            steps.index("atomically_install_all_seven_targets"),
+            steps.index("backup_all_eleven_targets_and_record_present_or_missing"),
+            steps.index("atomically_install_all_eleven_targets"),
         )
 
     def test_no_charge_contract_is_before_any_paid_heygen_create(self):
@@ -206,6 +231,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             {
                 "test_script_to_video.py",
                 "test_digital_human_oneclick.py",
+                "test_script_to_video_asset_registration.py",
                 "test_heygen_mcp_oauth.py",
             },
         )
@@ -225,7 +251,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                     entry["target_preimage_sha256"] = hashlib.sha256(data).hexdigest()
                     entry["target_preimage_blob"] = self.verify._blob_id(data)
             self.assertEqual(
-                len(self.verify.verify_targets(synthetic, runtime_root, "preimage")), 7
+                len(self.verify.verify_targets(synthetic, runtime_root, "preimage")), TARGET_COUNT
             )
             first = synthetic["files"][0]
             first_target = self.verify._safe_runtime_path(runtime_root, first["runtime_path"])
@@ -238,7 +264,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((ROOT / entry["repository_path"]).read_bytes())
             self.assertEqual(
-                len(self.verify.verify_targets(self.manifest, runtime_root, "postimage")), 7
+                len(self.verify.verify_targets(self.manifest, runtime_root, "postimage")), TARGET_COUNT
             )
 
     def test_verifier_rejects_unexpected_file_for_absent_preimage(self):
@@ -333,7 +359,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
              tempfile.TemporaryDirectory() as outside:
             runtime_root = pathlib.Path(directory)
             manifest = copy.deepcopy(self.manifest)
-            regular_preimages(manifest, runtime_root, count=7)
+            regular_preimages(manifest, runtime_root, count=TARGET_COUNT)
             absent = manifest["files"][4]
             absent["target_preimage_state"] = "absent"
             absent["target_preimage_blob"] = None

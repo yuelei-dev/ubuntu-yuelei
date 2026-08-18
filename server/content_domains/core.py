@@ -1521,6 +1521,12 @@ def run_job(job_id):
                         or str(payload.get("pipeline") or "").strip()
                         or kind
                     )
+                # The handler returned normally and the job has already been
+                # committed as done.  Do not let record_video_asset's
+                # historical "pending" default turn a completed result into
+                # an asset card that appears to run forever.
+                asset_result["status"] = "done"
+                asset_result.setdefault("phase", "complete")
                 video_domain.record_video_asset(job_id, username, asset_result)
             if kind == "short_drama_preview":
                 _short_drama_domain().short_drama_assembly.reconcile_preview_job(

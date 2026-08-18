@@ -2,7 +2,7 @@
 """Transactional, test-only release for the cumulative Whisper runtime.
 
 The executor never connects to a remote host.  It consumes the reviewed
-manifest locally on the Yuelei test server, verifies all seven targets before
+manifest locally on the Yuelei test server, verifies every manifest target before
 the first write, then treats file installation, preflight and service restart
 as one rollback unit.
 """
@@ -646,7 +646,7 @@ class ContentWhisperRelease:
                     (release_error, rollback_error)
                 ) from rollback_error
             raise ReleaseError(
-                "release failed and all seven targets were restored: %s" % release_error
+                "release failed and all manifest targets were restored: %s" % release_error
             ) from release_error
         return {
             "ok": True,
