@@ -1432,6 +1432,39 @@ def _start_job_heartbeat(job_id):
     return stop.set
 
 
+def _repair_missing_completed_script_video_asset(video_domain, row):
+    """Backfill legacy completed compositions without reviving deleted assets."""
+    if not row or row["kind"] != "script_to_video" or row["status"] != "done":
+        return False
+    with closing(adb()) as connection:
+        existing = connection.execute(
+            "SELECT 1 FROM video_assets WHERE job_id=? LIMIT 1", (row["id"],)
+        ).fetchone()
+    if existing:
+        return False
+    payload = json.loads(row["payload"] or "{}") or {}
+    asset_result = dict(json.loads(row["result"] or "{}") or {})
+    if not asset_result.get("video_file") and not asset_result.get("video_url"):
+        return False
+    video_url = str(asset_result.get("video_url") or "")
+    local_rel = str(asset_result.get("video_file") or "")
+    if video_url.startswith("/api/gen/file/") and not local_rel:
+        local_rel = video_url[len("/api/gen/file/"):]
+    if local_rel and (not video_url or video_url.startswith("/api/gen/file/")):
+        if not _resolve_out_file(local_rel):
+            return False
+    if not asset_result.get("mode"):
+        asset_result["mode"] = (
+            str(payload.get("mode") or "").strip()
+            or str(payload.get("pipeline") or "").strip()
+            or "script_to_video"
+        )
+    asset_result["status"] = "done"
+    asset_result.setdefault("phase", "complete")
+    video_domain.record_video_asset(row["id"], row["username"], asset_result)
+    return True
+
+
 def run_job(job_id):
     with closing(jdb()) as c:
         r = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -3768,6 +3801,14 @@ class H(BaseHTTPRequestHandler):
             if not r: return self._send(404, {"detail": "任务不存在"})
             if r["username"] != user.get("username"):
                 return self._send(404, {"detail": "任务不存在"})
+            try:
+                _repair_missing_completed_script_video_asset(video_domain, r)
+            except Exception as asset_error:
+                print(
+                    "[asset] reconcile failed job=%s kind=%s error=%s"
+                    % (jid, r["kind"], type(asset_error).__name__),
+                    flush=True,
+                )
             phase = video_domain.get_video_job_phase(jid) if r["kind"] in {"video", "tryon", "xiaole_video", "sora_video", "cinematic", "script_to_video"} else None
             if phase is None and r["kind"] == "breakdown":
                 try:
