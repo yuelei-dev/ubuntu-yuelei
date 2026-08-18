@@ -41,28 +41,28 @@ LOCKED_PREIMAGES = {
     ),
     "server/content_domains/core.py": (
         "file",
-        "09ce5407f13a9b07b02266192011851de5984deb",
-        "1e11ae935471f2c56af513adf4c43f6be762a706eb838f9896f2ce3f97849d0e",
+        "2389d7baa25c93a75bcd6ff1d1ad71aa80962aa5",
+        "8f27767de14063b751ea15435939b851541ebe087bcdbd9ec914e85f286996db",
     ),
     "server/content_domains/digital_human_oneclick.py": (
         "file",
-        "e4d52d26db5303c7fa4e73197690c03c8ed0e7f7",
-        "4614ce8bf98bd918b8e970c5111dd652d32b5fb3eabeaf0a596a2d017b25a0f4",
+        "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
+        "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
     ),
     "site/workbench/digital-human-oneclick.html": (
         "file",
-        "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
-        "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
+        "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
+        "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
     ),
     "site/workbench/digital-human-oneclick-state.js": (
         "file",
-        "b743d153920880ee845b30136cc5cbd947c5e409",
-        "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
+        "8231103aa057746ce033fc06b80c3b750832175a",
+        "d197e82ead86bd939acd5758fe36e947c86f04a3b7f40cb9e4694a9802e3dd21",
     ),
     "site/workbench/digital-human-setup-state.js": (
         "file",
-        "0a4727991da696be63f4bcf81c45dda9eb7254e0",
-        "e353d97e86f677c9fb88d18dcb0955fc5a6c8dc0884023e15502ba597f7bbd26",
+        "9e6a7a5701f016fb6d502ff11e587b8cdce9849a",
+        "cb54019c4c9993705d00dd35a410fc9e1f2511fb8a3e2aaa5ac7833a709ad207",
     ),
     "deploy/systemd/huangque-content.service.d/whisper.conf": (
         "file",
@@ -133,36 +133,13 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertEqual(
             observation["repository_main_commit"],
-            "ba903933a06bc8f754883fb386adace203a15600",
+            "d301608b6e8568154c89ad9d1b4cfdde8878375f",
         )
         self.assertEqual(
             observation["classification"],
-            {
-                "matching_preimage": 8,
-                "matching_postimage": 1,
-                "matching_historical_main": 2,
-            },
+            {"matching_deployed_main": TARGET_COUNT},
         )
-        expected = {
-            "server/content_domains/video.py": (
-                "b8a4886869995f72cf25ca1399620cef5966bf76",
-                "45b9fef1acbad1c10bb63e554890265e14acd308",
-                "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
-                "matching_postimage",
-            ),
-            "site/workbench/digital-human-oneclick.html": (
-                "e9414cbbbf29f176159b36f62f20a90146300030",
-                "2b5d1abcd9e35a2249ddba2193581e24a2e1a081",
-                "8b6a07d6c7e326441b61c44c0619a84d3c90d566ade8eae332ca09fa86bf416c",
-                "matching_historical_main",
-            ),
-            "site/workbench/digital-human-oneclick-state.js": (
-                "9618d2b02c407f5e56cbee239e3ced71fe9fdf2e",
-                "b743d153920880ee845b30136cc5cbd947c5e409",
-                "311a51e6deea500fedda559c7d0de0824ba2109a517a1278b4f64575f7394377",
-                "matching_historical_main",
-            ),
-        }
+        self.assertIn("read-only SHA-256", observation["capture_method"])
         actual = {
             entry["repository_path"]: (
                 entry["provenance_commit"],
@@ -172,16 +149,13 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             )
             for entry in observation["reconciled_files"]
         }
-        self.assertEqual(actual, expected)
-        locked = {
-            entry["repository_path"]: (
-                entry["target_preimage_blob"],
-                entry["target_preimage_sha256"],
+        self.assertEqual(set(actual), EXPECTED_SCOPE)
+        for path, (provenance, blob, sha256, state) in actual.items():
+            self.assertEqual(
+                provenance, "d301608b6e8568154c89ad9d1b4cfdde8878375f"
             )
-            for entry in self.manifest["files"]
-        }
-        for path, (_, blob, sha256, _) in expected.items():
-            self.assertEqual(locked[path], (blob, sha256))
+            self.assertEqual(state, "matching_deployed_main")
+            self.assertEqual((blob, sha256), LOCKED_PREIMAGES[path][1:])
 
     def test_policy_is_test_only_atomic_and_whole_unit_rollback(self):
         policy = self.manifest["deployment_policy"]

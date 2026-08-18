@@ -135,6 +135,36 @@ class ScriptToVideoAssetRegistrationTests(unittest.TestCase):
                 "SELECT * FROM video_assets WHERE job_id=?", (job_id,),
             ).fetchone()
 
+    def _get_job(self, job_id, username):
+        class Handler:
+            headers = {}
+
+            def __init__(self):
+                self.path = "/api/gen/job/%s" % job_id
+                self.status = None
+                self.payload = None
+
+            def _token(self):
+                return username
+
+            def _send(self, status, payload):
+                self.status = status
+                self.payload = payload
+
+        handler = Handler()
+        domains = (SimpleNamespace(), SimpleNamespace(), video)
+        with mock.patch.object(core, "_domains", return_value=domains), \
+                mock.patch.object(core, "_dispatch_short_drama", return_value=False), \
+                mock.patch.object(
+                    core, "_digital_ip_domain",
+                    return_value=SimpleNamespace(dispatch_http=lambda *_args: False),
+                ), \
+                mock.patch.object(
+                    core, "verify", side_effect=lambda token: {"username": token}
+                ):
+            core.H.do_GET(handler)
+        return handler
+
     def test_missing_result_mode_is_registered_from_job_payload(self):
         self._job(3485, {"mode": "digital_human_oneclick_compose"})
         result = {
@@ -214,6 +244,134 @@ class ScriptToVideoAssetRegistrationTests(unittest.TestCase):
         handler.assert_called_once()
         points.safe_refund_points.assert_not_called()
         points.refund_points.assert_not_called()
+
+    def test_owner_poll_repairs_legacy_done_asset_before_file_read(self):
+        job_id = 3489
+        rel = "video/final-3489.mp4"
+        (self.out / rel).write_bytes(b"video")
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({
+                    "video_file": rel,
+                    "video_url": "/api/gen/file/" + rel,
+                }), job_id),
+            )
+
+        other_user = self._get_job(job_id, "bob")
+        self.assertEqual(other_user.status, 404)
+        self.assertIsNone(self._asset(job_id))
+
+        owner = self._get_job(job_id, "alice")
+        self.assertEqual(owner.status, 200)
+        asset = self._asset(job_id)
+        self.assertEqual(asset["username"], "alice")
+        self.assertEqual(asset["mode"], "digital_human_oneclick_compose")
+        self.assertEqual(asset["video_file"], rel)
+        self.assertEqual(asset["status"], "done")
+        self.assertEqual(asset["phase"], "complete")
+
+    def test_owner_poll_does_not_register_missing_local_file(self):
+        job_id = 3491
+        rel = "video/missing-3491.mp4"
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({
+                    "video_file": rel,
+                    "video_url": "/api/gen/file/" + rel,
+                }), job_id),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertIsNone(self._asset(job_id))
+
+    def test_owner_poll_does_not_register_external_only_result(self):
+        job_id = 3492
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_url": "https://cdn.example/final.mp4"}), job_id),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertIsNone(self._asset(job_id))
+
+    def test_owner_poll_does_not_register_empty_local_path(self):
+        job_id = 3493
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_file": "  ", "video_url": "  "}), job_id),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertIsNone(self._asset(job_id))
+
+    def test_competing_deleted_asset_is_not_revived_by_atomic_insert(self):
+        job_id = 3494
+        rel = "video/final-3494.mp4"
+        (self.out / rel).write_bytes(b"video")
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_file": rel}), job_id),
+            )
+
+        original_insert = video.insert_video_asset_if_absent
+
+        def insert_deleted_then_repair(*args):
+            with sqlite3.connect(core.AUDIO_DB) as connection:
+                connection.execute(
+                    """INSERT INTO video_assets(
+                        job_id,username,mode,video_file,status,created_at,updated_at
+                    ) VALUES(?,?,?,?, 'deleted',1,1)""",
+                    (job_id, "alice", "digital_human_oneclick_compose", rel),
+                )
+            return original_insert(*args)
+
+        with mock.patch.object(
+                video, "insert_video_asset_if_absent",
+                side_effect=insert_deleted_then_repair):
+            owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        asset = self._asset(job_id)
+        self.assertEqual(asset["status"], "deleted")
+        self.assertEqual(asset["updated_at"], 1)
+
+    def test_owner_poll_does_not_revive_deleted_asset(self):
+        job_id = 3490
+        rel = "video/final-3490.mp4"
+        self._job(job_id, {"pipeline": "digital_human_oneclick_compose"})
+        with sqlite3.connect(core.JOB_DB) as connection:
+            connection.execute(
+                "UPDATE jobs SET status='done',result=? WHERE id=?",
+                (json.dumps({"video_file": rel}), job_id),
+            )
+        with sqlite3.connect(core.AUDIO_DB) as connection:
+            connection.execute(
+                """INSERT INTO video_assets(
+                    job_id,username,mode,video_file,status,created_at,updated_at
+                ) VALUES(?,?,?,?, 'deleted',1,1)""",
+                (job_id, "alice", "digital_human_oneclick_compose", rel),
+            )
+
+        owner = self._get_job(job_id, "alice")
+
+        self.assertEqual(owner.status, 200)
+        self.assertEqual(self._asset(job_id)["status"], "deleted")
 
     def test_download_allows_owner_and_rejects_other_deleted_or_missing_file(self):
         rel = "video/final-3488.mp4"
