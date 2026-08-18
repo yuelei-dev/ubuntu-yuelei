@@ -1345,8 +1345,9 @@ def compose(payload, persist_state=None):
         if item["kind"] == "presenter":
             filters.append(
                 "[0:v]trim=start=%.3f:end=%.3f,setpts=PTS-STARTPTS,"
-                "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30[%s]"
-                % (start, end, label)
+                "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,"
+                "tpad=stop_mode=clone:stop_duration=1,trim=duration=%.3f,setpts=PTS-STARTPTS[%s]"
+                % (start, end, end - start, label)
             )
         else:
             source_index = material_input_by_index[item["index"]]
@@ -1354,21 +1355,28 @@ def compose(payload, persist_state=None):
                 filters.append(
                     "[%d:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
                     "zoompan=z='min(zoom+0.00035,1.055)':x='iw/2-(iw/zoom/2)':"
-                    "y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,trim=duration=%.3f,"
+                    "y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,"
+                    "tpad=stop_mode=clone:stop_duration=1,trim=duration=%.3f,"
                     "setpts=PTS-STARTPTS[%s]" % (source_index, end - start, label)
                 )
             else:
                 filters.append(
                     "[%d:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
-                    "setsar=1,fps=30,trim=duration=%.3f,setpts=PTS-STARTPTS[%s]" %
+                    "setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=1,"
+                    "trim=duration=%.3f,setpts=PTS-STARTPTS[%s]" %
                     (source_index, end - start, label)
                 )
-    filters.append("%sconcat=n=%d:v=1:a=0[outv]" % ("".join(labels), len(labels)))
+    filters.append("%sconcat=n=%d:v=1:a=0[joinedv]" % ("".join(labels), len(labels)))
+    filters.append(
+        "[joinedv]tpad=stop_mode=clone:stop_duration=1,trim=duration=%.3f,"
+        "setpts=PTS-STARTPTS[outv]" % duration
+    )
     composed = out_dir / ("digital_human_v2_%d_composed.mp4" % job_id)
     command.extend([
         "-filter_complex", ";".join(filters), "-map", "[outv]", "-map", "0:a:0",
+        "-af", "apad=pad_dur=1",
         "-t", "%.3f" % duration, "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-        "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", str(composed),
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(composed),
     ])
     legacy._run(command)
     rel = composed.resolve().relative_to(OUT_DIR.resolve()).as_posix()

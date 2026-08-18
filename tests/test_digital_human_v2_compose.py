@@ -80,7 +80,7 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
             final = root / result["video_file"]
             self.assertTrue(final.is_file())
             self.assertEqual((result["width"], result["height"]), (1080, 1920))
-            self.assertAlmostEqual(result["duration"], 12.0, delta=0.75)
+            self.assertAlmostEqual(result["duration"], 12.0, delta=0.12)
             windows = result["presenter_windows"]
             self.assertEqual(len(windows), 2)
             self.assertEqual(windows[0], [0.0, 3.0])

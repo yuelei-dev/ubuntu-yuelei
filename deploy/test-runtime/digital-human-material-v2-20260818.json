@@ -104,13 +104,13 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "2159cd11eec4ca5d1457b7a36526ee180f1ae2f4",
-      "source_sha256": "ead9dbb99e5d82b5877c7b70e686bc66a7deff81de9c607af8ccdc4242d5f789",
+      "source_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
+      "source_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
       "target_preimage_state": "absent",
       "target_preimage_blob": null,
       "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
-      "expected_postimage_blob": "2159cd11eec4ca5d1457b7a36526ee180f1ae2f4",
-      "expected_postimage_sha256": "ead9dbb99e5d82b5877c7b70e686bc66a7deff81de9c607af8ccdc4242d5f789"
+      "expected_postimage_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
+      "expected_postimage_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
@@ -148,8 +148,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
-      "source_blob": "4e60758ac49888ef1e777786c1b3a2f3137f714c",
-      "source_sha256": "cc8d2f6b6147f29d780c48dfbd0a2133998b454db183f2e9ba43104987db8af9"
+      "source_blob": "25107897c092bdda73f2158023afda419d7f4475",
+      "source_sha256": "412a797a8f1f01e2abf475a748462a1eec2e36db7a7e3a527c2bf2e5e646bdd1"
     }
   ],
   "release_commands": {
