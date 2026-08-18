@@ -27,9 +27,9 @@ import verify_content_whisper_deployment as manifest_verify
 
 AUTHORIZED_TARGET = "test@8.148.158.106"
 DEFAULT_BACKUP_ROOT = "/opt/huangque-deploy-backups"
-MANIFEST_REPOSITORY_PATH = (
-    "deploy/test-runtime/digital-human-whisper-runtime-20260815.json"
-)
+MANIFEST_REPOSITORY_PATHS = {
+    "deploy/test-runtime/digital-human-material-v2-20260818.json",
+}
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
@@ -345,10 +345,11 @@ class ContentWhisperRelease:
         if not COMMIT_PATTERN.fullmatch(str(reviewed_main_commit or "")):
             raise ReleaseError("exact reviewed main commit is required")
         manifest_path = Path(os.path.abspath(self.manifest.get("_manifest_path", "")))
-        expected_manifest = Path(os.path.abspath(
-            self.source_root / MANIFEST_REPOSITORY_PATH
-        ))
-        if manifest_path != expected_manifest:
+        allowed_manifests = {
+            Path(os.path.abspath(self.source_root / relative))
+            for relative in MANIFEST_REPOSITORY_PATHS
+        }
+        if manifest_path not in allowed_manifests:
             raise ReleaseError("manifest must come from the locked source checkout")
         if self._git_output(["status", "--porcelain", "--untracked-files=normal"]):
             raise ReleaseError("source checkout must be clean")

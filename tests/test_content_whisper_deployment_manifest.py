@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -94,20 +95,27 @@ def _load_module():
     return module
 
 
+def _historical_blob(blob_id):
+    """Read the immutable object locked by the historical release manifest."""
+    return subprocess.run(
+        ["git", "-C", str(ROOT), "cat-file", "blob", blob_id],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ).stdout
+
+
 class ContentWhisperDeploymentManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
         cls.verify = _load_module()
 
-    def test_manifest_scope_sources_and_postimages_are_exact(self):
+    def test_manifest_scope_historical_sources_and_postimages_are_exact(self):
         entries = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in entries}, EXPECTED_SCOPE)
         self.assertEqual(len(entries), TARGET_COUNT)
         self.assertEqual(len({entry["runtime_path"] for entry in entries}), TARGET_COUNT)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), TARGET_COUNT)
         for entry in entries:
-            data = (ROOT / entry["repository_path"]).read_bytes()
+            data = _historical_blob(entry["source_blob"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
@@ -176,7 +184,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                 self.manifest["executor"],
                 self.manifest["executor"]["verifier"],
                 self.manifest["executor"]["requirements_verifier"]):
-            data = (ROOT / tool["repository_path"]).read_bytes()
+            data = _historical_blob(tool["source_blob"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), tool["source_sha256"])
             self.assertEqual(self.verify._blob_id(data), tool["source_blob"])
         source_gate = self.manifest["executor"]["source_checkout_gate"]
@@ -291,7 +299,7 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
             for entry in synthetic["files"]:
                 target = self.verify._safe_runtime_path(runtime_root, entry["runtime_path"])
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((ROOT / entry["repository_path"]).read_bytes())
+                target.write_bytes(_historical_blob(entry["expected_postimage_blob"]))
             self.assertEqual(
                 len(self.verify.verify_targets(self.manifest, runtime_root, "postimage")), TARGET_COUNT
             )

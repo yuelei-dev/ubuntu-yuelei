@@ -335,6 +335,13 @@ def verify_child_submission_with_record(payload, username, kind):
     if not isinstance(payload, dict):
         return payload, None
     pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    # v2 keeps the established points/refund/idempotency boundary in core but
+    # owns a separate consent and duration-driven child-job contract.
+    from . import digital_human_v2
+    if pipeline == digital_human_v2.CONSENT_PURPOSE:
+        return digital_human_v2.verify_child_submission_with_record(
+            payload, username, kind,
+        )
     has_fields = any(str(key).startswith("digital_human_") for key in payload)
     if not pipeline:
         if has_fields:
