@@ -15,6 +15,7 @@ from flask import (
     stream_with_context,
 )
 import requests
+from openai_egress import post_chat_completions
 from runtime_paths import DATA_DIR, ROOT_DIR
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -900,13 +901,14 @@ def call_ai(messages, stream=False, temperature=0.7, max_tokens=None):
     payload = {"model": MODEL, "messages": messages, "stream": stream, "temperature": temperature}
     if max_tokens:
         payload["max_tokens"] = max_tokens
-    resp = requests.post(f"{API_BASE}/chat/completions",
-        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=180, stream=stream)
-    if resp.status_code != 200:
-        raise Exception(f"API {resp.status_code}: {resp.text[:300]}")
-    return resp
+    return post_chat_completions(
+        API_BASE,
+        API_KEY,
+        payload,
+        stream=stream,
+        read_timeout=180,
+        log=lambda message: print(message, flush=True),
+    )
 
 def generate_module_report(convo_id, module_id):
     convo = load_conversation(convo_id)
