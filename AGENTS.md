@@ -14,6 +14,8 @@ git log --oneline -5
 ```
 
 - **`main` 已上分支保护**：禁止直接 push，必须开 PR；CI「代码与安全门禁」绿了才能合，合并后分支自动删。
+- **仓库只允许普通 merge commit**：禁止 squash merge 和 rebase merge。测试服事务发布器会校验审核 Head 是合并后 `main` 的祖先；合并时必须使用 `gh pr merge --merge --match-head-commit <审核Head>`。
+- 合并后、连接服务器前必须执行 `git merge-base --is-ancestor <审核Head> <合并后main>`。校验失败时停止部署，通过独立 PR 修复提交拓扑；禁止改传其他提交或放宽服务器发布门禁。
 - 用自己的分支（从最新 `main` 开）：`codex/<任务>`、`claude/<任务>`、`feature/<任务>`。`design-sync` 已废弃删除，别用。
 - 完整流程：`git checkout main && git pull` → 开分支 → 改 → `commit && push` → 开 PR → CI 绿 → 合并 → 从 `main` 部署。
 - 如果发现本地有别人未提交的改动，不要覆盖、reset、checkout 或删除，先说明。
@@ -36,6 +38,7 @@ git log --oneline -5
 
 - 改完先 commit，再 push 到自己的分支。
 - 需要部署时，只部署本次改过的文件，并从已经 push 的 commit 部署。
+- 测试服累计/事务发布必须从合并后的精确 `main` 执行，并同时记录审核 Head、合并提交、备份路径和健康检查；不得从 PR 分支或内容相同但来源不同的提交部署。
 - 部署后说明是否重启服务、验证了什么。
 
 收工汇报必须包含：
