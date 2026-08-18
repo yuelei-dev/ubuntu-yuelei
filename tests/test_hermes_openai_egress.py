@@ -9,6 +9,7 @@ try:
     import requests
 except ImportError as error:  # CI installs Hermes dependencies in a later step.
     raise unittest.SkipTest("requests is required for Hermes egress tests") from error
+from urllib3 import exceptions as urllib3_exceptions
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -44,6 +45,16 @@ class HermesOpenAIEgressTests(unittest.TestCase):
         response.status_code = status
         response.text = text
         return response
+
+    @staticmethod
+    def proxy_error(original_error):
+        urllib3_proxy = urllib3_exceptions.ProxyError(
+            "proxy connection failed", original_error
+        )
+        exhausted = urllib3_exceptions.MaxRetryError(
+            None, "/v1/chat/completions", reason=urllib3_proxy
+        )
+        return requests.exceptions.ProxyError(exhausted)
 
     def test_unconfigured_chain_preserves_one_direct_request(self):
         expected = self.response()
@@ -122,6 +133,67 @@ class HermesOpenAIEgressTests(unittest.TestCase):
                     "https://api.openai.com/v1", "test-key", {"stream": False}
                 )
         self.assertEqual(post.call_count, 1)
+
+    def test_proxy_wrapped_reset_is_ambiguous_and_is_not_resent(self):
+        os.environ["HERMES_EGRESS_PROXY"] = "http://127.0.0.1:10809"
+        os.environ["HERMES_OPENAI_RELAY_BASE"] = "https://relay.example/openai"
+        error = self.proxy_error(ConnectionResetError("reset after delivery"))
+        self.assertFalse(egress._pre_delivery_failure(error))
+        with patch.object(egress, "_proxy_reachable", return_value=True), patch.object(
+            egress, "_post_request", side_effect=error
+        ) as post:
+            with self.assertRaises(requests.exceptions.ProxyError):
+                egress.post_chat_completions(
+                    "https://api.openai.com/v1", "test-key", {"stream": False}
+                )
+        self.assertEqual(post.call_count, 1)
+
+    def test_proxy_wrapped_read_timeout_is_ambiguous_and_is_not_resent(self):
+        os.environ["HERMES_EGRESS_PROXY"] = "http://127.0.0.1:10809"
+        os.environ["HERMES_OPENAI_RELAY_BASE"] = "https://relay.example/openai"
+        error = self.proxy_error(
+            urllib3_exceptions.ReadTimeoutError(
+                None, "/v1/chat/completions", "response read timed out"
+            )
+        )
+        self.assertFalse(egress._pre_delivery_failure(error))
+        with patch.object(egress, "_proxy_reachable", return_value=True), patch.object(
+            egress, "_post_request", side_effect=error
+        ) as post:
+            with self.assertRaises(requests.exceptions.ProxyError):
+                egress.post_chat_completions(
+                    "https://api.openai.com/v1", "test-key", {"stream": False}
+                )
+        self.assertEqual(post.call_count, 1)
+
+    def test_proxy_wrapped_tls_failure_is_ambiguous_and_is_not_resent(self):
+        os.environ["HERMES_EGRESS_PROXY"] = "http://127.0.0.1:10809"
+        os.environ["HERMES_OPENAI_RELAY_BASE"] = "https://relay.example/openai"
+        error = self.proxy_error(urllib3_exceptions.SSLError("tls handshake failed"))
+        self.assertFalse(egress._pre_delivery_failure(error))
+        with patch.object(egress, "_proxy_reachable", return_value=True), patch.object(
+            egress, "_post_request", side_effect=error
+        ) as post:
+            with self.assertRaises(requests.exceptions.ProxyError):
+                egress.post_chat_completions(
+                    "https://api.openai.com/v1", "test-key", {"stream": False}
+                )
+        self.assertEqual(post.call_count, 1)
+
+    def test_proxy_wrapped_refused_connection_can_fail_over(self):
+        os.environ["HERMES_EGRESS_PROXY"] = "http://127.0.0.1:10809"
+        os.environ["HERMES_OPENAI_RELAY_BASE"] = "https://relay.example/openai"
+        error = self.proxy_error(ConnectionRefusedError("proxy refused connection"))
+        expected = self.response()
+        self.assertTrue(egress._pre_delivery_failure(error))
+        with patch.object(egress, "_proxy_reachable", return_value=True), patch.object(
+            egress, "_post_request", side_effect=[error, expected]
+        ) as post:
+            actual = egress.post_chat_completions(
+                "https://api.openai.com/v1", "test-key", {"stream": False}
+            )
+        self.assertIs(actual, expected)
+        self.assertEqual(post.call_count, 2)
 
     def test_http_error_proves_delivery_and_is_not_resent(self):
         os.environ["HERMES_OPENAI_RELAY_BASE"] = "https://relay.example/openai"

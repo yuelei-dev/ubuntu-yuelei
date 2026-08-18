@@ -12,10 +12,12 @@ never retried automatically.
 import errno
 import os
 import socket
+import ssl
 import threading
 import urllib.parse
 
 import requests
+from urllib3 import exceptions as urllib3_exceptions
 
 
 _PRE_DELIVERY_ERRNOS = {
@@ -132,23 +134,46 @@ def _exception_nodes(error):
 
 def _pre_delivery_failure(error):
     nodes = list(_exception_nodes(error))
-    if any(isinstance(node, requests.exceptions.ConnectTimeout) for node in nodes):
-        return True
-    if any(isinstance(node, requests.exceptions.SSLError) for node in nodes):
-        return False
+    # Ambiguous failures always win over outer transport wrappers.  In
+    # particular, requests.ProxyError can wrap urllib3.ProxyError whose
+    # original_error is a reset or response-read timeout after the upstream
+    # may already have received the billable request.
     if any(
-        isinstance(node, requests.exceptions.Timeout)
-        and not isinstance(node, requests.exceptions.ConnectTimeout)
+        isinstance(node, (
+            requests.exceptions.SSLError,
+            urllib3_exceptions.SSLError,
+            ssl.SSLError,
+        ))
         for node in nodes
     ):
         return False
-    if any(isinstance(node, requests.exceptions.ProxyError) for node in nodes):
-        return True
     if any(
-        isinstance(node, (ConnectionResetError, TimeoutError, socket.timeout))
+        isinstance(node, (
+            requests.exceptions.ReadTimeout,
+            urllib3_exceptions.ReadTimeoutError,
+            ConnectionResetError,
+        ))
         for node in nodes
     ):
         return False
+
+    explicit_connect_timeout = any(
+        isinstance(node, (
+            requests.exceptions.ConnectTimeout,
+            urllib3_exceptions.ConnectTimeoutError,
+        ))
+        for node in nodes
+    )
+    if any(
+        isinstance(node, (requests.exceptions.Timeout, TimeoutError, socket.timeout))
+        for node in nodes
+    ):
+        return explicit_connect_timeout
+    if explicit_connect_timeout:
+        return True
+
+    # A ProxyError alone proves nothing about delivery.  Only a concrete
+    # nested DNS/connectivity cause below can authorize route failover.
     for node in nodes:
         if isinstance(node, (socket.gaierror, ConnectionRefusedError)):
             return True
