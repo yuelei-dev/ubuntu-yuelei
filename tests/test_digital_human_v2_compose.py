@@ -15,7 +15,8 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
         server_dir = str(pathlib.Path(__file__).resolve().parents[1] / "server")
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
-        from content_domains import digital_human_oneclick, digital_human_v2, video
+        from content_domains import core, digital_human_oneclick, digital_human_v2, video
+        cls.core = core
         cls.legacy = digital_human_oneclick
         cls.domain = digital_human_v2
         cls.video = video
@@ -64,6 +65,7 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
             patches = (
                 mock.patch.object(self.domain, "OUT_DIR", root),
                 mock.patch.object(self.legacy, "OUT_DIR", root),
+                mock.patch.object(self.core, "OUT_DIR", root),
                 mock.patch.object(self.video, "OUT_DIR", root),
                 mock.patch.object(self.video, "VIDEO_OUT_DIR", output),
                 mock.patch.object(self.video, "burn_subtitle", side_effect=lambda rel, **_kwargs: rel),

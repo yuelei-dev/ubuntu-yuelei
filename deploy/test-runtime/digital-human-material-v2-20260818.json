@@ -148,8 +148,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
-      "source_blob": "5380e1a201b44f2b0d870977f298cff896c1c231",
-      "source_sha256": "c6d7134589e4fe5ad1767e33977fb9c77379ed7845bd878d2c6e388371e00a13"
+      "source_blob": "4e60758ac49888ef1e777786c1b3a2f3137f714c",
+      "source_sha256": "cc8d2f6b6147f29d780c48dfbd0a2133998b454db183f2e9ba43104987db8af9"
     }
   ],
   "release_commands": {
