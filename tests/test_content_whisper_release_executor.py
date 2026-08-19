@@ -673,10 +673,12 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             "HF_HUB_OFFLINE=1",
             self.manifest["release_commands"]["offline"][0]["argv"],
         )
-        self.assertIn(
-            "get('font')",
-            " ".join(self.manifest["release_commands"]["font"][0]["argv"]),
+        font_command = " ".join(
+            self.manifest["release_commands"]["font"][0]["argv"]
         )
+        self.assertIn("result=subtitle_runtime_preflight()", font_command)
+        self.assertIn("result.get('no_charge') is True", font_command)
+        self.assertNotIn("get('font')", font_command)
 
 
 if __name__ == "__main__":
