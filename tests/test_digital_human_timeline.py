@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import math
 import unittest
+from unittest import mock
 
 from server.content_domains import digital_human_timeline as timeline
 
@@ -64,6 +65,31 @@ class DigitalHumanTimelineTests(unittest.TestCase):
             for window_start, window_end in result["presenter_windows"]:
                 overlap = min(slot["end"], window_end) - max(slot["start"], window_start)
                 self.assertLessEqual(overlap, 0.001)
+
+    def test_zero_material_count_is_valid_only_for_full_presenter_timeline(self):
+        for duration in (6.0, 6.05):
+            with self.subTest(duration=duration):
+                windows = timeline.presenter_windows([duration], duration)
+                self.assertEqual(timeline.material_slots(windows, duration), [])
+                self.assertEqual(timeline.material_slots(windows, duration, 0), [])
+                for invalid_count in (False, 1):
+                    with self.assertRaises(timeline.TimelinePlanError):
+                        timeline.material_slots(windows, duration, invalid_count)
+
+        duration = 6.06
+        windows = timeline.presenter_windows([duration], duration)
+        self.assertEqual(len(timeline.material_slots(windows, duration)), 1)
+        with self.assertRaises(timeline.TimelinePlanError):
+            timeline.material_slots(windows, duration, 0)
+
+    def test_short_text_boundaries_keep_material_contract(self):
+        script = "这是一段合法的最短测试文案。"
+        for duration, expected_count in ((6.0, 0), (6.05, 0), (6.06, 1)):
+            with self.subTest(duration=duration), \
+                    mock.patch.object(timeline, "estimate_duration", return_value=duration):
+                result = timeline.plan_text(script, 1)
+                self.assertEqual(result["expected_duration"], duration)
+                self.assertEqual(result["material_count"], expected_count)
 
     def test_plan_digest_covers_schedule_and_source_priority(self):
         one = timeline.plan_text("先把问题讲清楚，再决定使用什么人工智能工具，往往会更高效。" * 4, 1)

@@ -180,12 +180,14 @@ def _material_intervals(windows, total_duration):
 def material_slots(windows, total_duration, count=None):
     intervals = _material_intervals(windows, total_duration)
     available = sum(end - start for start, end in intervals)
+    if not intervals:
+        if count is not None and (type(count) is not int or count != 0):
+            raise TimelinePlanError("全程真人画面不接受正文素材镜头")
+        return []
     if count is None:
         count = min(MAX_MATERIAL_COUNT, max(1, int(math.ceil(available / TARGET_MATERIAL_SECONDS))))
     elif type(count) is not int or count < 1 or count > MAX_MATERIAL_COUNT:
         raise TimelinePlanError("正文素材镜头数量无效")
-    if not intervals:
-        return []
     slots = []
     remaining_slots = count
     remaining_duration = available

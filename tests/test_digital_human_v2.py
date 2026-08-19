@@ -239,6 +239,23 @@ class DigitalHumanV2Tests(unittest.TestCase):
         decoded = base64.b64decode(cleaned["audio_data"].split(",", 1)[1])
         self.assertEqual(hashlib.sha256(decoded).hexdigest(), expected_slice["sha256"])
 
+    def test_short_audio_boundaries_keep_material_contract(self):
+        for duration, expected_count in ((6.0, 0), (6.05, 0), (6.06, 1)):
+            asset = {
+                "asset_id": "dhau_short_boundary",
+                "source_sha256": "b" * 64,
+                "duration": duration,
+                "transcript": "最短合法录音",
+                "slices": [{
+                    "start": 0.0, "end": duration, "duration": duration,
+                    "text": "最短合法录音", "sha256": "a" * 64,
+                }],
+            }
+            with self.subTest(duration=duration):
+                plan = self.domain._audio_plan(asset, 1)
+                self.assertEqual(plan["expected_duration"], duration)
+                self.assertEqual(plan["material_count"], expected_count)
+
     def test_material_resolver_uses_feishu_then_public_web_then_ai(self):
         plan, consent = self._consent("公开素材应当先查飞书，再查公开网络，最后才使用人工智能补图。" * 3)
         payload = self._metadata(plan, consent, "material_resolve", 0)
