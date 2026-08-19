@@ -139,6 +139,10 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         commands = self.manifest["release_commands"]
         for stage in ("dependencies", "cache", "offline", "font", "no_charge"):
             self.assertTrue(commands[stage])
+        font_command = commands["font"][0]["argv"][-1]
+        self.assertIn("result=subtitle_runtime_preflight()", font_command)
+        self.assertIn("result.get('no_charge') is True", font_command)
+        self.assertNotIn("get('font')", font_command)
         self.assertEqual(len(commands["restart"]), 1)
         self.assertEqual(len(commands["rollback_restart"]), 1)
         rendered = json.dumps(commands["no_charge"], ensure_ascii=False)

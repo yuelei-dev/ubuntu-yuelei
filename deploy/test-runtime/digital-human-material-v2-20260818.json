@@ -17,7 +17,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "9f298737e19e4eea5df7d20bbfeffb466b0b4b2d",
+    "base_main_commit": "25bec15445271d2030e730d448d9d2a61735746e",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -152,8 +152,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "04f84d7ab3d4d27e1929c9fd81eb0668bbd04c36",
-      "source_sha256": "3ae4ecb3e1142cc26930356b1b571c1784b15957ca79514215161fabdb645213"
+      "source_blob": "dd327d37d512734138e70c7faaae8fd842143784",
+      "source_sha256": "aba1892b21f0f860e82dce01f63dd2f18e485622c31cd50821b1e0f432cb2812"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -166,7 +166,7 @@
     "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
     "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
-    "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('font')"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "no_charge": [
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
