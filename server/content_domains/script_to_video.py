@@ -491,6 +491,11 @@ def prepare_script_to_video_payload(payload, username, digital_human_consent=Non
         return digital_human_oneclick.prepare_compose_payload(
             body, username, consent_record=digital_human_consent,
         )
+    from . import digital_human_v2
+    if str(body.get("pipeline") or "").strip().lower() == digital_human_v2.PIPELINE:
+        return digital_human_v2.prepare_compose_payload(
+            body, username, consent_record=digital_human_consent,
+        )
     if str(body.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
         from .script_video_montage import plan_digest, plan_script_video
 
@@ -790,6 +795,14 @@ def gen_script_to_video(payload):
             return _persist_job_state(job_id, username, phase, **fields)
 
         return digital_human_oneclick.compose(payload, persist_state=persist)
+    from . import digital_human_v2
+    if str(payload.get("pipeline") or "").strip().lower() == digital_human_v2.PIPELINE:
+        job_id = int(payload.get("_job_id") or 0)
+
+        def persist_v2(phase, **fields):
+            return _persist_job_state(job_id, username, phase, **fields)
+
+        return digital_human_v2.compose(payload, persist_state=persist_v2)
     if str(payload.get("pipeline") or "").strip().lower() == SMART_MONTAGE_PIPELINE:
         material_plan = payload.get("material_plan") or []
         has_uploaded_material = any(
@@ -813,14 +826,18 @@ def gen_script_to_video(payload):
 def dispatch_http(handler, method, verify_token, must_change_password):
     """Authenticated smart-montage planning and private material upload."""
     path = handler.path.split("?", 1)[0]
-    from . import digital_human_oneclick
+    from . import digital_human_oneclick, digital_human_v2
     if path not in {SMART_MONTAGE_PLAN_PATH, SMART_MONTAGE_MATERIAL_UPLOAD_PATH,
                      digital_human_oneclick.PLAN_PATH,
                      digital_human_oneclick.CONSENT_PATH,
                      digital_human_oneclick.GESTURE_RECOVERY_PATH,
                      digital_human_oneclick.MATERIAL_RECOVERY_PATH,
                      digital_human_oneclick.VIDEO_RECOVERY_PATH,
-                     digital_human_oneclick.HEYGEN_PREFLIGHT_PATH}:
+                     digital_human_oneclick.HEYGEN_PREFLIGHT_PATH,
+                     digital_human_v2.PLAN_PATH,
+                     digital_human_v2.CONSENT_PATH,
+                     digital_human_v2.AUDIO_UPLOAD_PATH,
+                     digital_human_v2.MATERIAL_RESOLVE_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -841,6 +858,66 @@ def dispatch_http(handler, method, verify_token, must_change_password):
         except ValueError as exc:
             handler._send(400, {"detail": str(exc)[:220]})
         return True
+    if path == digital_human_v2.PLAN_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_v2.plan_response(
+                handler._json_body_strict(), user["username"],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_v2.AUDIO_UPLOAD_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            if handler.headers.get("Transfer-Encoding"):
+                raise digital_human_oneclick.DigitalHumanRequestError(
+                    "录音上传必须提供 Content-Length", "audio_upload_length_required",
+                )
+            try:
+                length = int(handler.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError) as exc:
+                raise digital_human_oneclick.DigitalHumanRequestError(
+                    "录音上传长度无效", "audio_upload_length_required",
+                ) from exc
+            handler._send(200, digital_human_v2.audio_upload_response(
+                handler.rfile, length, user["username"],
+                handler.headers.get("X-HQ-Run-ID"),
+                handler.headers.get("Content-Type"),
+                handler.headers.get("X-HQ-Audio-SHA256"),
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                **({"retry_after_ms": 5000} if exc.status == 503 else {}),
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_v2.MATERIAL_RESOLVE_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            handler._send(200, digital_human_v2.resolve_material_response(
+                handler._json_body_strict(), user["username"],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                **({"retry_after_ms": 5000} if exc.status == 503 else {}),
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
     if path == digital_human_oneclick.CONSENT_PATH:
         if method != "POST":
             handler._method_not_allowed()
@@ -855,6 +932,28 @@ def dispatch_http(handler, method, verify_token, must_change_password):
             handler._send(200, digital_human_oneclick.consent_response(
                 body, user["username"],
                 os.environ.get("HQ_INTERNAL_TOKEN", ""),
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                **({"retry_after_ms": 5000} if exc.status == 503 else {}),
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_v2.CONSENT_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            body = handler._json_body_strict()
+            if str(body.get("voice_mode") or "").strip().lower() == "existing":
+                from . import audio as audio_domain
+                audio_domain.resolve_audio_provider_voice(
+                    user["username"], str(body.get("voice_ref") or "").strip(),
+                )
+            handler._send(200, digital_human_v2.consent_response(
+                body, user["username"], os.environ.get("HQ_INTERNAL_TOKEN", ""),
             ))
         except digital_human_oneclick.DigitalHumanRequestError as exc:
             handler._send(exc.status, {
@@ -1741,8 +1840,9 @@ def _cleanup_material_root(job_id, state):
 def cleanup_unsubmitted_materials(job_id):
     try:
         payload, _ = _load_job_payload(job_id)
-        from . import digital_human_oneclick
-        if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+        from . import digital_human_oneclick, digital_human_v2
+        if str(payload.get("pipeline") or "").strip().lower() in {
+                digital_human_oneclick.PIPELINE, digital_human_v2.PIPELINE}:
             return
     except Exception:
         pass
@@ -1962,8 +2062,9 @@ def recover_paid_job_error(job_id, error, requeue):
     if isinstance(error, video_domain.HeyGenProviderFailed):
         return False
     payload, _ = _load_job_payload(job_id)
-    from . import digital_human_oneclick
-    if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+    from . import digital_human_oneclick, digital_human_v2
+    if str(payload.get("pipeline") or "").strip().lower() in {
+            digital_human_oneclick.PIPELINE, digital_human_v2.PIPELINE}:
         return False
     state = get_recovery_state(job_id)
     phase = str(state.get("phase") or "")
@@ -2010,8 +2111,9 @@ def reclaim_orphaned_jobs(requeue, logger=print):
         if not isinstance(payload, dict):
             hold(row, "invalid-payload")
             continue
-        from . import digital_human_oneclick
-        if str(payload.get("pipeline") or "").strip().lower() == digital_human_oneclick.PIPELINE:
+        from . import digital_human_oneclick, digital_human_v2
+        if str(payload.get("pipeline") or "").strip().lower() in {
+                digital_human_oneclick.PIPELINE, digital_human_v2.PIPELINE}:
             if requeue(row["id"]):
                 handled += 1
             continue

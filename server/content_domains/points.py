@@ -137,11 +137,15 @@ def cost_of(kind, body):
         seconds = max(4, min(12, seconds))
         return rate * seconds
     if kind == "script_to_video":
-        if str(body.get("pipeline") or "").strip().lower() == "digital_human_oneclick_compose":
+        pipeline = str(body.get("pipeline") or "").strip().lower()
+        if pipeline in {"digital_human_oneclick_compose", "digital_human_material_v2"}:
+            reused = int(body.get("material_count") or (
+                6 if pipeline == "digital_human_oneclick_compose" else 0
+            ))
             body["cost_breakdown"] = {
                 "local_compose": 0,
                 "material_generate_count": 0,
-                "material_reused_count": 6,
+                "material_reused_count": reused,
                 "total": 0,
             }
             return 0

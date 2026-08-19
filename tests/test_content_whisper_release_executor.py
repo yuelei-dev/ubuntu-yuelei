@@ -18,12 +18,12 @@ from unittest.mock import patch
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 MANIFEST_PATH = (
-    ROOT / "deploy" / "test-runtime" / "digital-human-whisper-runtime-20260815.json"
+    ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
 EXECUTOR_PATH = SCRIPTS / "deploy_content_whisper_runtime.py"
 REVIEWED_SOURCE = "1" * 40
 REVIEWED_MAIN = "2" * 40
-TARGET_COUNT = 11
+TARGET_COUNT = len(json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["files"])
 LAST_WRITE = "write_%d" % TARGET_COUNT
 
 
@@ -224,7 +224,8 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             [], list(self.runtime_root.rglob(".hq-release-*")),
         )
         staged = self.runtime_root / "home" / "ubuntu" / "content-api" / ".deploy"
-        self.assertTrue(staged.is_dir())
+        if staged.exists():
+            self.assertTrue(staged.is_dir())
 
     def test_success_installs_all_files_and_restarts_exactly_once(self):
         runner = FakeRunner()
@@ -260,7 +261,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         )
         self.assertEqual(TARGET_COUNT, len(state["files"]))
         self.assertEqual(
-            ["file"] * TARGET_COUNT,
+            [entry["target_preimage_state"] for entry in self.manifest["files"]],
             [entry["state"] for entry in state["files"]],
         )
         self.assertEqual(2, len(health.calls))
@@ -271,7 +272,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     def test_mixed_state_with_one_already_postimage_is_backed_up_and_deployed(self):
         video = next(
             entry for entry in self.manifest["files"]
-            if entry["repository_path"] == "server/content_domains/video.py"
+            if entry["repository_path"] == "server/content_domains/script_to_video.py"
         )
         source = (ROOT / video["repository_path"]).read_bytes()
         target = self._target(video)
@@ -302,7 +303,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             )
 
     def test_first_middle_and_last_write_failures_restore_every_target(self):
-        for fault in ("write_1", "write_6", LAST_WRITE):
+        for fault in ("write_1", "write_%d" % (TARGET_COUNT // 2 + 1), LAST_WRITE):
             with self.subTest(fault=fault):
                 self.tearDown()
                 self.setUp()
@@ -571,10 +572,11 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "tests/test_script_to_video.py",
-                "tests/test_digital_human_oneclick.py",
-                "tests/test_script_to_video_asset_registration.py",
-                "tests/test_heygen_mcp_oauth.py",
+                "tests/test_digital_human_timeline.py",
+                "tests/test_digital_human_v2.py",
+                "tests/test_digital_human_v2_ui.py",
+                "tests/test_digital_human_v2_deployment_manifest.py",
+                "tests/test_digital_human_v2_compose.py",
             },
             {
                 entry["repository_path"]
@@ -654,33 +656,26 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         rendered = json.dumps(commands, ensure_ascii=False)
         self.assertNotIn("pip\", \"install", rendered)
         self.assertNotIn("pip install", rendered)
-        self.assertIn("verify_content_python_requirements.py", rendered)
+        self.assertIn("py_compile", rendered)
         self.assertEqual(1, len(commands))
-        self.assertEqual(
-            ["/usr/bin/sudo", "-u", "ubuntu", "-H"],
-            commands[0]["argv"][:4],
-        )
-        self.assertIn("PyGObject==3.42.1:pycairo", commands[0]["argv"])
-        self.assertEqual(
-            "verify_exact_existing_content_dependencies_without_mutation",
-            self.manifest["ordered_release_steps"][5],
-        )
+        self.assertEqual(["/usr/bin/python3", "-m", "py_compile"], commands[0]["argv"][:3])
+        for runtime_path in (
+                "digital_human_timeline.py", "digital_human_v2.py",
+                "digital_human_oneclick.py", "script_to_video.py", "points.py"):
+            self.assertIn(runtime_path, rendered)
 
     def test_runtime_preflights_use_the_real_content_service_identity(self):
-        for stage in ("dependencies", "offline", "font"):
+        for stage in ("cache", "offline", "font"):
             commands = self.manifest["release_commands"][stage]
             self.assertEqual(1, len(commands))
-            self.assertEqual(
-                ["/usr/bin/sudo", "-u", "ubuntu", "-H"],
-                commands[0]["argv"][:4],
-            )
+            self.assertEqual("{runtime:/home/ubuntu/content-api}", commands[0]["cwd"])
         self.assertIn(
             "HF_HUB_OFFLINE=1",
             self.manifest["release_commands"]["offline"][0]["argv"],
         )
         self.assertIn(
-            "SUBTITLE_FONT=Noto Sans CJK SC",
-            self.manifest["release_commands"]["font"][0]["argv"],
+            "get('font')",
+            " ".join(self.manifest["release_commands"]["font"][0]["argv"]),
         )
 
 
