@@ -17,7 +17,7 @@ jobs:
   quality:
     name: 代码与安全门禁
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: 检出代码
@@ -36,9 +36,22 @@ jobs:
           cache-dependency-path: design-system/package-lock.json
 
       - name: 安装媒体契约测试依赖
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          if command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null; then
+            echo "Using FFmpeg preinstalled on the GitHub-hosted runner."
+          else
+            sudo timeout 4m apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              update
+            sudo timeout 4m apt-get \
+              -o Acquire::Retries=3 \
+              -o Acquire::http::Timeout=20 \
+              -o Acquire::https::Timeout=20 \
+              install -y --no-install-recommends ffmpeg
+          fi
           ffmpeg -version
           ffprobe -version
 
