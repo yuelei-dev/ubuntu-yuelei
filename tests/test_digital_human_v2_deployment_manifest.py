@@ -21,28 +21,28 @@ EXPECTED_SCOPE = {
 }
 LOCKED_PREIMAGES = {
     "server/content_domains/script_to_video.py": (
-        "file", "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
-        "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
+        "file", "6b3f8b8c9068705debbd7959406362f19e821ba0",
+        "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
     ),
     "server/content_domains/digital_human_oneclick.py": (
-        "file", "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
-        "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
+        "file", "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
+        "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119",
     ),
     "server/content_domains/points.py": (
-        "file", "3f273f133fa22a544d4955d8a9bc4b0b34584fae",
-        "ffde6ee4e86bfb292809469ea53c0d39134c9c900506c46295dbecc5f2fed294",
+        "file", "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
+        "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
     ),
     "server/content_domains/digital_human_timeline.py": (
-        "absent", None,
-        "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+        "file", "c091ef9592409db774c72ec6a53f816240afdae5",
+        "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
     ),
     "server/content_domains/digital_human_v2.py": (
-        "absent", None,
-        "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+        "file", "a0c26b4617108f5e85b1c79bbf491c57436db083",
+        "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
-        "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
+        "file", "9b8f5e993584dc07abdd6213fd369213b812cbb6",
+        "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
     ),
 }
 
@@ -85,6 +85,12 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         observation = self.manifest["preimage_observation"]
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
+        self.assertEqual(
+            observation["repository_main_commit"],
+            "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
+        )
+        self.assertEqual(observation["service_state"], "active")
+        self.assertEqual(observation["health_status"], 200)
         self.assertEqual(observation["files"], 6)
 
     def test_policy_is_test_only_atomic_and_removes_only_new_targets_on_rollback(self):
@@ -102,10 +108,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertTrue(self.manifest["rollback"]["new_files_removed_only_if_preimage_was_absent"])
         absent = [entry["repository_path"] for entry in self.manifest["files"]
                   if entry["target_preimage_state"] == "absent"]
-        self.assertEqual(absent, [
-            "server/content_domains/digital_human_timeline.py",
-            "server/content_domains/digital_human_v2.py",
-        ])
+        self.assertEqual(absent, [])
 
     def test_feishu_credentials_are_named_but_never_committed(self):
         feishu = self.manifest["configuration_requirements"]["feishu"]

@@ -121,6 +121,51 @@ class DigitalHumanV2Tests(unittest.TestCase):
             }, "yuelei", "test-signing-secret", db_factory=self._consent_connection)
         self.assertEqual(caught.exception.code, "consent_plan_mismatch")
 
+    def test_v2_voice_clone_routes_through_legacy_entrypoint_and_keeps_bindings(self):
+        sample = b"authorized-v2-voice-sample"
+        script = "这是用于验证新版数字人声音复刻授权绑定的完整口播文案。"
+        plan = self.domain.timeline.plan_text(script, 2)
+        consent = self.domain.create_consent({
+            "confirmed": True,
+            "consent_version": self.domain.CONSENT_VERSION,
+            "purpose": self.domain.CONSENT_PURPOSE,
+            "run_id": "dh-v2-run-clone-001",
+            "plan_digest": plan["plan_digest"],
+            "script": script,
+            "gesture_count": 2,
+            "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
+            "voice_mode": "clone",
+            "voice_ref": "slot-v2-owned-1",
+            "voice_sha256": hashlib.sha256(sample).hexdigest(),
+            "narration_mode": "text",
+        }, "yuelei", "test-signing-secret", db_factory=self._consent_connection)
+        body = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "voice_clone",
+            "digital_human_run_id": consent["run_id"],
+            "digital_human_plan_digest": plan["plan_digest"],
+            "digital_human_consent_token": consent["consent_token"],
+            "digital_human_script": plan["copy"],
+            "digital_human_gesture_count": plan["gesture_count"],
+            "digital_human_narration_mode": "text",
+            "slot_id": "slot-v2-owned-1",
+            "audio": base64.b64encode(sample).decode("ascii"),
+        }
+
+        cleaned = self.legacy.verify_clone_submission(body, "yuelei")
+
+        self.assertEqual(cleaned["digital_human_consent_id"], consent["consent_id"])
+        self.assertNotIn("digital_human_consent_token", cleaned)
+        for changed, expected_code in (
+            ({"slot_id": "slot-other"}, "consent_voice_mismatch"),
+            ({"audio": base64.b64encode(b"other").decode("ascii")}, "consent_voice_mismatch"),
+            ({"digital_human_script": script + "篡改"}, "consent_plan_mismatch"),
+        ):
+            with self.subTest(changed=changed), self.assertRaises(
+                    self.domain.DigitalHumanRequestError) as caught:
+                self.legacy.verify_clone_submission(dict(body, **changed), "yuelei")
+            self.assertEqual(caught.exception.code, expected_code)
+
     def test_gesture_submission_ignores_forged_provider_and_prompt(self):
         plan, consent = self._consent("这是一段用于验证数字人手势安全绑定的完整口播文案。")
         payload = self._metadata(plan, consent, "gesture", 0)
