@@ -56,7 +56,12 @@ class WorkflowTests(TestCase):
         self.assertIn("install -y --no-install-recommends ffmpeg", self.workflow)
 
     def test_media_dependency_fallback_is_bounded(self) -> None:
-        self.assertGreaterEqual(self.workflow.count("sudo timeout 4m apt-get"), 2)
+        self.assertEqual(self.workflow.count("sudo timeout 4m apt-get"), 1)
+        self.assertEqual(self.workflow.count("sudo timeout 12m apt-get"), 1)
+        update = self.workflow.index("              update")
+        install = self.workflow.index("              install -y --no-install-recommends ffmpeg")
+        self.assertIn("sudo timeout 4m apt-get", self.workflow[update - 180 : update])
+        self.assertIn("sudo timeout 12m apt-get", self.workflow[install - 180 : install])
         self.assertGreaterEqual(self.workflow.count("Acquire::Retries=3"), 2)
         self.assertGreaterEqual(self.workflow.count("Acquire::http::Timeout=20"), 2)
         self.assertGreaterEqual(self.workflow.count("Acquire::https::Timeout=20"), 2)
