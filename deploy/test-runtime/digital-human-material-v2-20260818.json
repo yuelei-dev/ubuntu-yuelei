@@ -151,13 +151,13 @@
       "repository_path": "server/content_domains/cosyvoice.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/cosyvoice.py",
       "classification": "runtime_code",
-      "source_blob": "1bf7ae1cd4e40aea27cb5e2facd86ba91ca847b8",
-      "source_sha256": "51fa3a0bffe196d268ac463eb606a10ee6164a569e27804120a3c2bf0ea1ab25",
+      "source_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "source_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
       "target_preimage_state": "file",
       "target_preimage_blob": "eea015454e50fd0d7f545bd55c07991f768d5d5c",
       "target_preimage_sha256": "c8a988fe30c10abc14c456bad0f7d3fa1a8220139bf4151d2b5211b1f96b4b7f",
-      "expected_postimage_blob": "1bf7ae1cd4e40aea27cb5e2facd86ba91ca847b8",
-      "expected_postimage_sha256": "51fa3a0bffe196d268ac463eb606a10ee6164a569e27804120a3c2bf0ea1ab25"
+      "expected_postimage_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "expected_postimage_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
@@ -190,8 +190,8 @@
     },
     {
       "repository_path": "tests/test_cosyvoice.py",
-      "source_blob": "b2626f4a533298bfb6fb8c6dc9f54900f259fe5d",
-      "source_sha256": "6e66a163799b9fda2ca9839139f98903b6154c92feef95db7feb85bfc6c03ad8"
+      "source_blob": "797149f8ba349609e47c9c940d8792760a73569a",
+      "source_sha256": "8a33dcf51ea5bb2d524d99928559dca1cf903d68f4f2f249e0da8c7f6d08e8ea"
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",

@@ -183,6 +183,70 @@ class WebSocketFramingTests(unittest.TestCase):
             sent[0]["payload"]["parameters"]["instruction"],
             "请用自然清晰的讲解语气。",
         )
+    def test_synth_raises_retryable_530_during_startup(self):
+        class _Sock:
+            def close(self):
+                pass
+
+        task_id = "startup-provider-secret-id"
+        events = iter([(
+            0x1,
+            json.dumps({"header": {
+                "event": "task-failed",
+                "task_id": task_id,
+                "error_code": "InternalError.Algo",
+                "error_message": "[cosyvoice]Engine return error code: 530",
+            }}).encode(),
+        )])
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")), \
+                patch.object(cosyvoice, "_ws_send") as send, \
+                patch.object(cosyvoice, "_ws_frames", return_value=events):
+            with self.assertRaises(cosyvoice.CosyVoiceTaskError) as caught:
+                cosyvoice.synth("cosyvoice-v3.5-plus-bailian-test", "test")
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual(send.call_count, 1)
+        self.assertNotIn(task_id, str(caught.exception))
+        self.assertNotIn("530", str(caught.exception))
+        self.assertNotIn("error_message", str(caught.exception))
+
+    def test_synth_raises_terminal_failure_during_startup(self):
+        class _Sock:
+            def close(self):
+                pass
+
+        events = iter([(
+            0x1,
+            json.dumps({"header": {
+                "event": "task-failed",
+                "task_id": "startup-terminal-secret-id",
+                "error_code": "InvalidParameter",
+                "error_message": "voice does not exist",
+            }}).encode(),
+        )])
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")), \
+                patch.object(cosyvoice, "_ws_send") as send, \
+                patch.object(cosyvoice, "_ws_frames", return_value=events):
+            with self.assertRaises(cosyvoice.CosyVoiceTaskError) as caught:
+                cosyvoice.synth("cosyvoice-v3.5-plus-bailian-test", "test")
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(send.call_count, 1)
+        self.assertNotIn("startup-terminal-secret-id", str(caught.exception))
+        self.assertNotIn("voice does not exist", str(caught.exception))
+
+    def test_synth_stops_when_startup_event_stream_ends(self):
+        class _Sock:
+            def close(self):
+                pass
+
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")), \
+                patch.object(cosyvoice, "_ws_send") as send, \
+                patch.object(cosyvoice, "_ws_frames", return_value=iter(())):
+            with self.assertRaisesRegex(RuntimeError, "CosyVoice"):
+                cosyvoice.synth("cosyvoice-v3.5-plus-bailian-test", "test")
+        self.assertEqual(send.call_count, 1)
 
 
     def test_transient_530_is_typed_retryable_and_user_safe(self):
@@ -261,6 +325,64 @@ class AudioVoiceMappingTests(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2)
         self.assertNotIn("provider-secret-id", str(caught.exception))
         self.assertNotIn("530", str(caught.exception))
+
+    def test_formal_generation_retries_startup_530_at_most_three_times(self):
+        class _Sock:
+            def close(self):
+                pass
+
+        task_id = "startup-wrapper-secret-id"
+        failure = (
+            0x1,
+            json.dumps({"header": {
+                "event": "task-failed",
+                "task_id": task_id,
+                "error_code": "InternalError.Algo",
+                "error_message": "[cosyvoice]Engine return error code: 530",
+            }}).encode(),
+        )
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")) as connect, \
+                patch.object(cosyvoice, "_ws_send"), \
+                patch.object(cosyvoice, "_ws_frames", side_effect=lambda *_: iter([failure])), \
+                patch.object(self.audio.time, "sleep") as sleep:
+            with self.assertRaises(RuntimeError) as caught:
+                self.audio._cosy_synth_for_generation(
+                    "cosyvoice-v3.5-plus-bailian-test", "script",
+                )
+        self.assertEqual(connect.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+        self.assertNotIn(task_id, str(caught.exception))
+        self.assertNotIn("530", str(caught.exception))
+        self.assertNotIn("error_message", str(caught.exception))
+
+    def test_formal_generation_does_not_retry_startup_terminal_failure(self):
+        class _Sock:
+            def close(self):
+                pass
+
+        failure = (
+            0x1,
+            json.dumps({"header": {
+                "event": "task-failed",
+                "task_id": "startup-terminal-wrapper-secret-id",
+                "error_code": "InvalidParameter",
+                "error_message": "voice does not exist",
+            }}).encode(),
+        )
+        with patch.object(cosyvoice, "DASHSCOPE_API_KEY", "k"), \
+                patch.object(cosyvoice, "_ws_connect", return_value=(_Sock(), b"")) as connect, \
+                patch.object(cosyvoice, "_ws_send"), \
+                patch.object(cosyvoice, "_ws_frames", side_effect=lambda *_: iter([failure])), \
+                patch.object(self.audio.time, "sleep") as sleep:
+            with self.assertRaises(cosyvoice.CosyVoiceTaskError) as caught:
+                self.audio._cosy_synth_for_generation(
+                    "cosyvoice-v3.5-plus-bailian-test", "script",
+                )
+        self.assertEqual(connect.call_count, 1)
+        sleep.assert_not_called()
+        self.assertNotIn("startup-terminal-wrapper-secret-id", str(caught.exception))
+        self.assertNotIn("voice does not exist", str(caught.exception))
 
 
     def test_public_code_maps_to_preset(self):
