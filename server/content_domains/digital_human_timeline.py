@@ -25,7 +25,10 @@ MAX_APPEARANCE_INTERVAL = 30.0
 PRESENTER_WINDOW_SECONDS = 3.0
 TARGET_MATERIAL_SECONDS = 5.5
 MAX_MATERIAL_COUNT = 40
-SOURCE_PRIORITY = ("feishu", "public_web", "ai")
+# Customer reference images are handled before remote retrieval by the browser
+# workflow.  Keeping that first step in the authoritative plan makes the full
+# material policy explicit and binds it into plan_digest.
+SOURCE_PRIORITY = ("customer_reference", "feishu", "public_web", "ai")
 
 
 class TimelinePlanError(ValueError):

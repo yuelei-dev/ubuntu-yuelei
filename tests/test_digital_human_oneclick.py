@@ -1387,7 +1387,11 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("Whisper 字幕", page)
         self.assertIn("分析并预览方案", page)
         self.assertIn("确认方案并生成", page)
-        self.assertIn("客户素材 → 飞书素材库 → 全网公开可用素材 → AI 补缺", page)
+        self.assertIn(
+            "客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺",
+            page,
+        )
+        self.assertIn("有参考图的镜头将优先按参考图生成，不再查询飞书或全网素材", page)
         self.assertIn("不上传也可以继续", page)
         self.assertIn('id="voiceSource"', page)
         self.assertIn("已有声音无需再次复刻", page)

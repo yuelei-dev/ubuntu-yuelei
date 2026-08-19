@@ -42,11 +42,11 @@ body .hq-main-scroll-flush{overflow-x:hidden;overflow-y:auto}.hq-content[data-ac
       <div class="field"><label>口播驱动方式 <small>二选一</small></label><div class="count-picker" role="radiogroup" aria-label="口播驱动方式"><label class="count-option"><input type="radio" name="narrationMode" value="text" checked><span>文案 + 音色</span></label><label class="count-option"><input type="radio" name="narrationMode" value="audio"><span>完整录音驱动</span></label></div><p class="count-help">选择完整录音后，不需要再输入文案或选择音色，成片全程使用这段录音。</p></div>
       <div id="voiceSourceField" class="field"><label for="voiceSource">声音来源 <small>已有声音无需再次复刻</small></label><select id="voiceSource" class="voice-source" disabled><option value="">正在读取我的声音…</option></select><p id="voiceStatus" class="voice-status">优先使用资产库中已就绪的个人声音。</p><button id="restartSetup" class="restart-setup" type="button" hidden>放弃上次任务并重新设置</button></div>
       <div id="voiceUpload" class="field voice-upload" hidden><label>重新复刻声音 <small>MP3/WAV/M4A，建议 10–60 秒</small></label><div class="drop"><input id="voice" type="file" accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg"><div><strong id="voiceName">选择一段声音样本</strong><span>仅在没有可用声音或明确需要更换声音时上传</span></div></div></div>
-      <div class="optional-materials"><div class="optional-materials-head"><b>客户素材（可选）</b><span id="customerMaterialCount">0 / 6</span></div><label class="material-picker">选择参考图片<input id="customerMaterials" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><div id="customerMaterialList" class="material-list"></div><p id="customerMaterialStatus" class="material-status">不上传也可以继续；上传图片将按顺序作为主画面的生成参考，其余位置由 AI 补齐。</p></div>
+      <div class="optional-materials"><div class="optional-materials-head"><b>客户参考图（最高优先级，可选）</b><span id="customerMaterialCount">0 / 6</span></div><label class="material-picker">选择参考图片<input id="customerMaterials" type="file" accept="image/jpeg,image/png,image/webp" multiple></label><div id="customerMaterialList" class="material-list"></div><p id="customerMaterialStatus" class="material-status">不上传也可以继续；有参考图的镜头将优先按参考图生成，不再查询飞书或全网素材，其余镜头再按素材库优先级补齐。</p></div>
       <div id="scriptField" class="field"><label for="script">完整口播文案 <small id="count">0 / 6000</small></label><textarea id="script" class="script" maxlength="6000" placeholder="粘贴完整文案。系统会按预计时长在自然断句处拆分，约每 20–30 秒穿插一次真人出镜。"></textarea></div>
       <div id="audioDriveField" class="field" hidden><label>完整口播录音 <small>MP3/WAV/M4A/AAC，6–180 秒，不超过 30MB</small></label><div class="drop"><input id="driveAudio" type="file" accept="audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac"><div><strong id="driveAudioName">选择已录好的完整音频</strong><span id="driveAudioStatus">系统按录音内容切段，最终成片全程保留原录音</span></div></div></div>
       <label class="consent"><input id="consent" type="checkbox"><span id="consentText">我确认拥有这张照片和声音的使用授权，并同意用于本次数字人口播生成。提交后系统将记录本次授权时间及素材校验值。</span></label>
-      <div class="hint">固定的是专业剪辑规则，不是客户内容。素材优先级为客户素材 → 飞书素材库 → 全网公开可用素材 → AI 补缺；最终视频不显示素材来源标签。</div>
+      <div class="hint">固定的是专业剪辑规则，不是客户内容。素材优先级为客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺；最终视频不显示素材来源标签。</div>
       <div id="error" class="error" hidden aria-hidden="true">
         <div class="error-backdrop" data-error-backdrop></div>
         <section class="error-dialog" role="dialog" aria-modal="true" aria-labelledby="errorTitle" aria-describedby="errorMessage" tabindex="-1">
@@ -66,7 +66,7 @@ body .hq-main-scroll-flush{overflow-x:hidden;overflow-y:auto}.hq-content[data-ac
         <div class="step" data-step="compose"><span class="step-no">06</span><div><b>合成并校验成片</b><p>开头、结尾和每隔 20–30 秒真人全屏，其余为内容素材，并生成 Whisper 字幕</p></div><span class="step-state">等待</span><p class="step-error" data-step-error="compose"></p></div>
       </div>
       <div id="segments" class="segments"></div>
-      <div id="sourcePlan" class="source-plan" hidden>素材策略：客户素材优先，其次飞书素材库、全网公开可用素材，最后才使用 AI 补缺；图片和视频可以混合，表格类画面最多出现 1–2 次。</div>
+      <div id="sourcePlan" class="source-plan" hidden>素材策略：有客户参考图的镜头先按参考图生成，不查询飞书或全网；其余镜头依次使用飞书素材库、全网公开可用素材和 AI 补缺。图片和视频可以混合，表格类画面最多出现 1–2 次。</div>
       <div id="result" class="result"><b>成片已完成</b><div class="video-wrap"><video id="preview" controls playsinline></video></div><div class="result-actions"><a id="download" download="huangque-digital-human.mp4">下载 MP4</a><a href="assets.html?cat=video">在资产库查看</a></div></div>
     </div></section>
   </div>

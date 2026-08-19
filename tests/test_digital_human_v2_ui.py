@@ -30,7 +30,13 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("/api/gen/digital-human-v2/material-resolve", self.page)
 
     def test_material_priority_and_no_visible_source_label(self):
-        self.assertIn("客户素材 → 飞书素材库 → 全网公开可用素材 → AI 补缺", self.page)
+        self.assertIn(
+            "客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺",
+            self.page,
+        )
+        self.assertIn("有参考图的镜头将优先按参考图生成，不再查询飞书或全网素材", self.page)
+        self.assertIn("if(customerUploads[index])return aiFallback(item,index)", self.page)
+        self.assertIn("body.reference_upload_ids=[customerUploads[index].upload_id]", self.page)
         self.assertIn("最终视频不显示素材来源标签", self.page)
         self.assertNotIn("CONCEPT / AI FILL", self.page)
 

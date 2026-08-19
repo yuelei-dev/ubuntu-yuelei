@@ -107,6 +107,21 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             "server/content_domains/digital_human_v2.py",
         ])
 
+    def test_feishu_credentials_are_named_but_never_committed(self):
+        feishu = self.manifest["configuration_requirements"]["feishu"]
+        self.assertTrue(feishu["required_for_real_priority_validation"])
+        self.assertEqual(
+            feishu["secret_environment_names"],
+            ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+        )
+        self.assertEqual(
+            feishu["app_token_environment_name"],
+            "DIGITAL_HUMAN_FEISHU_APP_TOKEN",
+        )
+        self.assertTrue(feishu["credentials_must_not_be_committed"])
+        serialized = json.dumps(feishu, ensure_ascii=False)
+        self.assertNotIn("app_secret=", serialized.lower())
+
     def test_release_tools_and_contract_tests_are_content_locked(self):
         executor = self.manifest["executor"]
         self.assertEqual(executor["confirm_target"], "test@8.148.158.106")

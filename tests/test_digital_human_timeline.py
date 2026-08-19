@@ -52,7 +52,10 @@ class DigitalHumanTimelineTests(unittest.TestCase):
         self.assertGreater(long["material_count"], short["material_count"])
         infographics = [item for item in long["materials"] if item["scene_type"] == "infographic"]
         self.assertLessEqual(len(infographics), 2)
-        self.assertEqual(long["source_priority"], ["feishu", "public_web", "ai"])
+        self.assertEqual(
+            long["source_priority"],
+            ["customer_reference", "feishu", "public_web", "ai"],
+        )
 
     def test_material_slots_cover_only_non_presenter_intervals(self):
         result = timeline.plan_text("普通人学习人工智能不用先背很多术语，先从一个真实问题开始就可以。" * 8, 2)
