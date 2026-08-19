@@ -13,6 +13,7 @@ MANIFEST_PATH = (
 VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
+    "server/content_domains/core.py",
     "server/content_domains/digital_human_oneclick.py",
     "server/content_domains/points.py",
     "server/content_domains/digital_human_timeline.py",
@@ -23,6 +24,10 @@ LOCKED_PREIMAGES = {
     "server/content_domains/script_to_video.py": (
         "file", "6b3f8b8c9068705debbd7959406362f19e821ba0",
         "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
+    ),
+    "server/content_domains/core.py": (
+        "file", "63cd17054f33e872b07f81b066108089323ef762",
+        "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
     ),
     "server/content_domains/digital_human_oneclick.py": (
         "file", "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
@@ -63,9 +68,9 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
     def test_scope_and_source_locks_are_exact(self):
         files = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in files}, EXPECTED_SCOPE)
-        self.assertEqual(len(files), 6)
-        self.assertEqual(len({entry["runtime_path"] for entry in files}), 6)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 6)
+        self.assertEqual(len(files), 7)
+        self.assertEqual(len({entry["runtime_path"] for entry in files}), 7)
+        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 7)
         for entry in files:
             data = (ROOT / entry["repository_path"]).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
@@ -86,12 +91,15 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
+            observation["captured_at"], "2026-08-19T09:16:28Z",
+        )
+        self.assertEqual(
             observation["repository_main_commit"],
             "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
-        self.assertEqual(observation["files"], 6)
+        self.assertEqual(observation["files"], 7)
 
     def test_policy_is_test_only_atomic_and_removes_only_new_targets_on_rollback(self):
         policy = self.manifest["deployment_policy"]

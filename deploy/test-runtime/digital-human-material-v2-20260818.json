@@ -21,13 +21,13 @@
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-19T20:20:00Z",
+    "captured_at": "2026-08-19T09:16:28Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
     "repository_main_commit": "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
     "service_state": "active",
     "health_status": 200,
-    "files": 6
+    "files": 7
   },
   "deployment_policy": {
     "fail_closed_on_source_mismatch": true,
@@ -74,6 +74,18 @@
       "target_preimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
       "expected_postimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
       "expected_postimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d"
+    },
+    {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "classification": "runtime_code",
+      "source_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "source_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "63cd17054f33e872b07f81b066108089323ef762",
+      "target_preimage_sha256": "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
+      "expected_postimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "expected_postimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5"
     },
     {
       "repository_path": "server/content_domains/digital_human_oneclick.py",
@@ -144,8 +156,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "73c4b91d4051f3aad394f26723f905b43e45732f",
-      "source_sha256": "309d2052c41d5a373ce054c05cc5fdaddc9b96a74c019d0e4dfeaa3842cc7d42"
+      "source_blob": "be8603a97a2757f8ac6b7099b7b209bd3b83cfb1",
+      "source_sha256": "18b4160ee18c21bfc892d7acee0be1ccea2035ca8878c1e4ac245ddb7760e36b"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
@@ -154,8 +166,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "5f189feca52a01b0ba7fffe97fab5e895cf8a791",
-      "source_sha256": "b17cdcd1fdb0abe770efd41170574975d62ced44545f01754c43d8415358f95a"
+      "source_blob": "b6d8b82fda98f332e803ebe2342d41d7056f6066",
+      "source_sha256": "5f032f87071ab936e79c69634b18d9b6caeab081ca98d7c227ef2cd44169db52"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -165,7 +177,7 @@
   ],
   "release_commands": {
     "pre_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
-    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
+    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/core.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
     "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
@@ -189,7 +201,7 @@
     {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401}
   ],
   "rollback": {
-    "scope": "all six manifest targets as one unit",
+    "scope": "all seven manifest targets as one unit",
     "new_files_removed_only_if_preimage_was_absent": true,
     "production_untouched": true
   }

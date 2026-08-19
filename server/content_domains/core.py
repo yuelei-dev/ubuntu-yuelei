@@ -2716,18 +2716,21 @@ class H(BaseHTTPRequestHandler):
                 feature_flags.require_enabled("audio")
             except feature_flags.FeatureDisabled as e:
                 return self._send(503, {"detail": str(e)})
-            from . import digital_human_oneclick
+            from . import digital_human_oneclick, digital_human_v2
             idem_key = ""
             idem_started = False
             provider_started = False
             response = None
             try:
                 body = self._json_body_strict()
-                digital_human_submission = (
-                    isinstance(body, dict)
-                    and str(body.get("digital_human_pipeline") or "").strip().lower()
-                    == digital_human_oneclick.CONSENT_PURPOSE
+                pipeline = (
+                    str(body.get("digital_human_pipeline") or "").strip().lower()
+                    if isinstance(body, dict) else ""
                 )
+                digital_human_submission = pipeline in {
+                    digital_human_oneclick.CONSENT_PURPOSE,
+                    digital_human_v2.CONSENT_PURPOSE,
+                }
                 idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
                 if digital_human_submission and not idem_key:
                     raise ValueError("数字人一键生成声音复刻必须提供 Idempotency-Key")

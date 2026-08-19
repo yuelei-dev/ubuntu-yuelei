@@ -166,6 +166,156 @@ class DigitalHumanV2Tests(unittest.TestCase):
                 self.legacy.verify_clone_submission(dict(body, **changed), "yuelei")
             self.assertEqual(caught.exception.code, expected_code)
 
+
+    def test_clone_vip_requires_matching_v2_idempotency_before_provider_work(self):
+        core = importlib.import_module("content_domains.core")
+        base = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3",
+        }
+
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            def __init__(self, body, headers):
+                self.body, self.headers, self.sent = body, headers, None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(self.body)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+
+        audio = types.SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            validate_clone_vip_payload=mock.Mock(), mark_clone_training=mock.Mock(),
+            clone_vip_voice_background=mock.Mock(),
+        )
+        verifier = mock.Mock()
+        cases = (
+            (dict(base), {}, "必须提供 Idempotency-Key"),
+            (dict(base, clone_attempt_id="dh-v2-other"),
+             {"Idempotency-Key": "dh-v2-header"}, "必须与 Idempotency-Key 一致"),
+        )
+        for body, headers, detail in cases:
+            with self.subTest(detail=detail), \
+                 mock.patch("content_domains.core._domains", return_value=(audio, types.SimpleNamespace(), types.SimpleNamespace())), \
+                 mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+                 mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+                 mock.patch("content_domains.core._must_change_password", return_value=False), \
+                 mock.patch("content_domains.core.feature_flags.require_enabled"), \
+                 mock.patch.object(self.legacy, "verify_clone_submission", verifier), \
+                 mock.patch("content_domains.core.threading.Thread") as thread:
+                handler = Handler(body, headers); core.H.do_POST(handler)
+                self.assertEqual(400, handler.sent[0])
+                self.assertIn(detail, handler.sent[1]["detail"])
+                thread.assert_not_called()
+        verifier.assert_not_called()
+        audio.validate_clone_vip_payload.assert_not_called()
+        audio.mark_clone_training.assert_not_called()
+
+    def test_clone_vip_replays_v2_idempotency_without_restarting_provider(self):
+        core = importlib.import_module("content_domains.core")
+        db_path = self.root / "clone-v2-idempotency.db"
+        def connection():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            return db
+        key = "dh-v2-voice-clone-stable-001"
+        request = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3",
+            "clone_attempt_id": key,
+        }
+
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            headers = {"Idempotency-Key": key}
+            def __init__(self): self.sent = None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(request)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+
+        validated = dict(request, digital_human_consent_id="dhc_" + "4" * 32)
+        audio = types.SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            validate_clone_vip_payload=mock.Mock(return_value=validated),
+            mark_clone_training=mock.Mock(return_value={"status": "training", "voice_key": "vip_slot_123"}),
+            mark_clone_attempt_running=mock.Mock(return_value=True),
+            clone_vip_voice_background=mock.Mock(),
+        )
+        started = []
+        class Thread:
+            def __init__(self, target, args, daemon): self.target, self.args = target, args
+            def start(self): started.append(self.args)
+
+        with mock.patch("content_domains.core._domains", return_value=(audio, types.SimpleNamespace(), types.SimpleNamespace())), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(self.legacy, "verify_clone_submission", return_value=validated), \
+             mock.patch.object(core, "jdb", connection), \
+             mock.patch("content_domains.core.threading.Thread", Thread):
+            first = Handler(); core.H.do_POST(first)
+            replay = Handler(); core.H.do_POST(replay)
+
+        self.assertEqual(200, first.sent[0])
+        self.assertEqual(first.sent, replay.sent)
+        self.assertEqual(1, audio.mark_clone_training.call_count)
+        self.assertEqual(1, len(started))
+
+    def test_clone_vip_v2_provider_training_recovery_never_restarts_provider(self):
+        core = importlib.import_module("content_domains.core")
+        db_path = self.root / "clone-v2-provider-training.db"
+        def connection():
+            db = sqlite3.connect(db_path)
+            db.row_factory = sqlite3.Row
+            return db
+        key = "dh-v2-voice-clone-provider-training-001"
+        request = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "slot_id": "slot_123", "audio": "dm9pY2U=", "audio_format": "mp3",
+            "clone_attempt_id": key,
+        }
+        verified = dict(request, digital_human_consent_id="dhc_" + "5" * 32)
+        core.submission_idempotency.begin(
+            connection, "yuelei", "/api/gen/audio/clone-vip", key, verified,
+        )
+
+        class Handler:
+            path = "/api/gen/audio/clone-vip"
+            headers = {"Idempotency-Key": key}
+            def __init__(self): self.sent = None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(request)
+            def _send(self, status, payload): self.sent = (status, payload); return self.sent
+
+        audio = types.SimpleNamespace(
+            CloneVipValidationError=type("CloneVipValidationError", (ValueError,), {}),
+            CloneAttemptError=type("CloneAttemptError", (ValueError,), {}),
+            clone_attempt_snapshot=mock.Mock(return_value={
+                "action": "provider_training", "attempt_id": key, "age": 3600,
+            }),
+            check_clone_status=mock.Mock(return_value={
+                "status": "training", "attempt_id": key,
+            }),
+            validate_clone_vip_payload=mock.Mock(), mark_clone_training=mock.Mock(),
+            mark_clone_attempt_running=mock.Mock(), clone_vip_voice_background=mock.Mock(),
+        )
+        with mock.patch("content_domains.core._domains", return_value=(audio, types.SimpleNamespace(), types.SimpleNamespace())), \
+             mock.patch("content_domains.core._dispatch_short_drama", return_value=False), \
+             mock.patch("content_domains.core.verify", return_value={"username": "yuelei"}), \
+             mock.patch("content_domains.core._must_change_password", return_value=False), \
+             mock.patch("content_domains.core.feature_flags.require_enabled"), \
+             mock.patch.object(self.legacy, "verify_clone_submission", return_value=verified), \
+             mock.patch.object(core, "jdb", connection), \
+             mock.patch("content_domains.core.threading.Thread") as thread:
+            handler = Handler(); core.H.do_POST(handler)
+
+        self.assertEqual((409, "idempotency_in_progress"),
+                         (handler.sent[0], handler.sent[1]["code"]))
+        audio.check_clone_status.assert_called_once_with("yuelei", "slot_123", key)
+        audio.mark_clone_training.assert_not_called()
+        thread.assert_not_called()
     def test_gesture_submission_ignores_forged_provider_and_prompt(self):
         plan, consent = self._consent("这是一段用于验证数字人手势安全绑定的完整口播文案。")
         payload = self._metadata(plan, consent, "gesture", 0)
