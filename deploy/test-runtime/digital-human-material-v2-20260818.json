@@ -101,13 +101,13 @@
       "repository_path": "server/content_domains/digital_human_timeline.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_timeline.py",
       "classification": "runtime_code",
-      "source_blob": "0b26f887d5804e1332d3fb6e53a0d2b29b41c3fd",
-      "source_sha256": "80b56b8bd0bf8a6d1ce739f1fd0144da35b3b85943a0d7d14c0c6aeda5d1f18a",
+      "source_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
+      "source_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
       "target_preimage_state": "absent",
       "target_preimage_blob": null,
       "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
-      "expected_postimage_blob": "0b26f887d5804e1332d3fb6e53a0d2b29b41c3fd",
-      "expected_postimage_sha256": "80b56b8bd0bf8a6d1ce739f1fd0144da35b3b85943a0d7d14c0c6aeda5d1f18a"
+      "expected_postimage_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
+      "expected_postimage_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08"
     },
     {
       "repository_path": "server/content_domains/digital_human_v2.py",
@@ -137,13 +137,13 @@
   "release_contract_sources": [
     {
       "repository_path": "tests/test_digital_human_timeline.py",
-      "source_blob": "d0bf998750d57af417265daf98758ac13701c5e6",
-      "source_sha256": "d59015333c66e395e2f5e6b1c59f0831db4b2a5b119da2fee11da18377fcf083"
+      "source_blob": "de1643da880e525ed8bbc032d66678a022d603e2",
+      "source_sha256": "3c611d4439ebdba24c0941d618f6b9f5bd0d595ad0d462a160179e39569ea2f5"
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "ccfd4383c0affce30c8b551bdaacdcf96ba0bab2",
-      "source_sha256": "599ceb8b290c96138441d3bc5b802bc8303ca14aef92f7483c72952daa0d40f6"
+      "source_blob": "fb1b29430640206d85d248d4bf8c960d43a6efa6",
+      "source_sha256": "bcd482bfab17ee24bc599f42ba948ae9e12d8f50079e22f0c7801e59eb7421c7"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
@@ -157,8 +157,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
-      "source_blob": "25107897c092bdda73f2158023afda419d7f4475",
-      "source_sha256": "412a797a8f1f01e2abf475a748462a1eec2e36db7a7e3a527c2bf2e5e646bdd1"
+      "source_blob": "a9087d7b297c15d84f4c5d6361de532fb7e64f60",
+      "source_sha256": "f83e4795e3f5ecb8a0769a52e6d8e1ee2377f1c90a0f06ea78b2cd6804f935a0"
     }
   ],
   "release_commands": {
