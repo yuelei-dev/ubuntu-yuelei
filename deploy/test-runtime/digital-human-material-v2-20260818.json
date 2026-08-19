@@ -163,13 +163,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
-      "source_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
+      "source_blob": "56ec5d8f84782bbbaff15a2b7cd6693dc7ddb231",
+      "source_sha256": "ef5f925a766c2f592634ce36f70386ee9cb001618ebdba9e08c19003b6a2a4bd",
       "target_preimage_state": "file",
       "target_preimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
       "target_preimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
-      "expected_postimage_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
-      "expected_postimage_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9"
+      "expected_postimage_blob": "56ec5d8f84782bbbaff15a2b7cd6693dc7ddb231",
+      "expected_postimage_sha256": "ef5f925a766c2f592634ce36f70386ee9cb001618ebdba9e08c19003b6a2a4bd"
     }
   ],
   "release_contract_sources": [
@@ -185,8 +185,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "2fd66d48c1652bf7c4ee609e9359d13a62ee37ce",
-      "source_sha256": "2e946ae0d49d8adf285789a36d4a74dbe3e1a10c53df65f666aad028ec7cb89b"
+      "source_blob": "bac89b3807c4fd2eaca340762558881289bb8d49",
+      "source_sha256": "63040bee45a88374ec4d94aaf95fa5e627ef942f4b86a3834d7ea4b2e5ad03ea"
     },
     {
       "repository_path": "tests/test_cosyvoice.py",

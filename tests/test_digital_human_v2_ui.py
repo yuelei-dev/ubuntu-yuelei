@@ -57,5 +57,19 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertNotIn("CONCEPT / AI FILL", self.page)
 
 
+    def test_completed_video_resets_atomically_before_next_analysis(self):
+        for marker in (
+            "function prepareNextRun()",
+            "function analyze(){prepareNextRun();",
+            "$('photo').onchange=function(){prepareNextRun();",
+            "$('script').oninput=function(){prepareNextRun();",
+            "state.phase='complete';state.plan=null;state.consent=null;plan=null",
+            "photoData='';customerUploads=[];customerMaterialBusy=false",
+            "$('result').className='result'",
+            "$('analyze').disabled=false;$('start').disabled=true",
+            "state.voiceMode='existing';state.voiceKey=previousVoiceKey",
+            "成片已完成；重新上传或修改资料后可继续分析下一条",
+        ):
+            self.assertIn(marker, self.page)
 if __name__ == "__main__":
     unittest.main()
