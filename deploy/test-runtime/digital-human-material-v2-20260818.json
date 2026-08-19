@@ -17,15 +17,17 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "25bec15445271d2030e730d448d9d2a61735746e",
+    "base_main_commit": "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-18T13:50:00Z",
+    "captured_at": "2026-08-19T09:16:28Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
+    "repository_main_commit": "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
     "service_state": "active",
-    "files": 6
+    "health_status": 200,
+    "files": 7
   },
   "deployment_policy": {
     "fail_closed_on_source_mismatch": true,
@@ -68,22 +70,34 @@
       "source_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
       "source_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
       "target_preimage_state": "file",
-      "target_preimage_blob": "6f264a095fdd0bb0d4d8fb17a34b9c50bf72ef06",
-      "target_preimage_sha256": "955c646c462495ee51f0c074eeb628be421c25dda1037010906ff76e2e0ea680",
+      "target_preimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "target_preimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
       "expected_postimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
       "expected_postimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d"
+    },
+    {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "classification": "runtime_code",
+      "source_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "source_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "63cd17054f33e872b07f81b066108089323ef762",
+      "target_preimage_sha256": "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
+      "expected_postimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "expected_postimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5"
     },
     {
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
-      "source_sha256": "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119",
+      "source_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
+      "source_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
       "target_preimage_state": "file",
-      "target_preimage_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
-      "target_preimage_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
-      "expected_postimage_blob": "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
-      "expected_postimage_sha256": "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119"
+      "target_preimage_blob": "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
+      "target_preimage_sha256": "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119",
+      "expected_postimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
+      "expected_postimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b"
     },
     {
       "repository_path": "server/content_domains/points.py",
@@ -92,8 +106,8 @@
       "source_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
       "source_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
       "target_preimage_state": "file",
-      "target_preimage_blob": "3f273f133fa22a544d4955d8a9bc4b0b34584fae",
-      "target_preimage_sha256": "ffde6ee4e86bfb292809469ea53c0d39134c9c900506c46295dbecc5f2fed294",
+      "target_preimage_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
+      "target_preimage_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
       "expected_postimage_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
       "expected_postimage_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414"
     },
@@ -103,9 +117,9 @@
       "classification": "runtime_code",
       "source_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
       "source_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
-      "target_preimage_state": "absent",
-      "target_preimage_blob": null,
-      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
+      "target_preimage_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
       "expected_postimage_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
       "expected_postimage_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08"
     },
@@ -113,13 +127,13 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
-      "source_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
-      "target_preimage_state": "absent",
-      "target_preimage_blob": null,
-      "target_preimage_sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001",
-      "expected_postimage_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
-      "expected_postimage_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127"
+      "source_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
+      "source_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
+      "target_preimage_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
+      "expected_postimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
+      "expected_postimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
@@ -128,8 +142,8 @@
       "source_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
       "source_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
       "target_preimage_state": "file",
-      "target_preimage_blob": "5b87aab8858b36e813203daf07f18ff6eb30d8bc",
-      "target_preimage_sha256": "e65e87f59afd672d76390bdf7b65e06dcda3d9495f767d4feeb70e8281ef2ff4",
+      "target_preimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
+      "target_preimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
       "expected_postimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
       "expected_postimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d"
     }
@@ -142,8 +156,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "fb1b29430640206d85d248d4bf8c960d43a6efa6",
-      "source_sha256": "bcd482bfab17ee24bc599f42ba948ae9e12d8f50079e22f0c7801e59eb7421c7"
+      "source_blob": "be8603a97a2757f8ac6b7099b7b209bd3b83cfb1",
+      "source_sha256": "18b4160ee18c21bfc892d7acee0be1ccea2035ca8878c1e4ac245ddb7760e36b"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
@@ -152,8 +166,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "dd327d37d512734138e70c7faaae8fd842143784",
-      "source_sha256": "aba1892b21f0f860e82dce01f63dd2f18e485622c31cd50821b1e0f432cb2812"
+      "source_blob": "b6d8b82fda98f332e803ebe2342d41d7056f6066",
+      "source_sha256": "5f032f87071ab936e79c69634b18d9b6caeab081ca98d7c227ef2cd44169db52"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -163,7 +177,7 @@
   ],
   "release_commands": {
     "pre_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
-    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
+    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/core.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
     "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
@@ -187,7 +201,7 @@
     {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401}
   ],
   "rollback": {
-    "scope": "all six manifest targets as one unit",
+    "scope": "all seven manifest targets as one unit",
     "new_files_removed_only_if_preimage_was_absent": true,
     "production_untouched": true
   }

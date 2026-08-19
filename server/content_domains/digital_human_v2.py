@@ -893,6 +893,51 @@ def _load_v2_consent(username, token):
     return record
 
 
+def verify_clone_submission(payload, username):
+    """Bind a v2 voice-clone submission to its signed consent and plan."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    if str(payload.get("digital_human_pipeline") or "").strip().lower() != CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("数字人成片流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != "voice_clone":
+        raise DigitalHumanRequestError("声音复刻步骤标识无效")
+    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    if str(payload.get("digital_human_run_id") or "") != record["run_id"]:
+        raise DigitalHumanRequestError(
+            "授权与本次制作流程不匹配", "consent_binding_mismatch", 403,
+        )
+    digest = str(payload.get("digital_human_plan_digest") or "").strip().lower()
+    if not hmac.compare_digest(digest, record["plan_digest"]):
+        raise DigitalHumanRequestError(
+            "授权与制作方案不匹配", "consent_binding_mismatch", 403,
+        )
+    frozen = _authoritative_plan(payload, username)
+    if not hmac.compare_digest(frozen["plan_digest"], record["plan_digest"]):
+        raise DigitalHumanRequestError(
+            "声音复刻文案与本次授权方案不一致，请重新开始",
+            "consent_plan_mismatch", 409,
+        )
+    if record["voice_mode"] != "clone":
+        raise DigitalHumanRequestError(
+            "当前授权未允许重新复刻声音", "consent_voice_mismatch", 403,
+        )
+    if str(payload.get("slot_id") or "").strip() != record["voice_ref"]:
+        raise DigitalHumanRequestError(
+            "音色槽位与授权记录不一致", "consent_voice_mismatch", 403,
+        )
+    actual = hashlib.sha256(
+        legacy._decode_b64_bytes(payload.get("audio"), "声音样本")
+    ).hexdigest()
+    if not hmac.compare_digest(actual, record["voice_sha256"]):
+        raise DigitalHumanRequestError(
+            "声音样本与授权记录不一致", "consent_voice_mismatch", 403,
+        )
+    cleaned = dict(payload)
+    cleaned.pop("digital_human_consent_token", None)
+    cleaned["digital_human_consent_id"] = record["id"]
+    return cleaned
+
+
 def _binding(payload_text, job_id, expected_stage, record, expected_index=None):
     try:
         payload = json.loads(payload_text or "")

@@ -533,6 +533,9 @@ def verify_clone_submission(payload, username):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    from . import digital_human_v2
+    if pipeline == digital_human_v2.CONSENT_PURPOSE:
+        return digital_human_v2.verify_clone_submission(payload, username)
     has_fields = any(key in payload for key in _CONSENT_METADATA_FIELDS)
     if not pipeline:
         if has_fields:
