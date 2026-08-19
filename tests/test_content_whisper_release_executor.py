@@ -577,6 +577,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 "tests/test_digital_human_v2_ui.py",
                 "tests/test_digital_human_v2_deployment_manifest.py",
                 "tests/test_digital_human_v2_compose.py",
+                "tests/test_cosyvoice.py",
             },
             {
                 entry["repository_path"]

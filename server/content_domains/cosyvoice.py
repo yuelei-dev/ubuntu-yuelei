@@ -43,6 +43,33 @@ PUBLIC_VOICE_PRESETS = {
 }
 
 
+class CosyVoiceTaskError(RuntimeError):
+    """Provider task failure with retry metadata and a user-safe message."""
+
+    def __init__(self, code="", task_id="", retryable=False):
+        self.code = str(code or "").strip()
+        self.task_id = str(task_id or "").strip()
+        self.retryable = bool(retryable)
+        detail = (
+            "CosyVoice 服务暂时繁忙，请稍后重试"
+            if self.retryable
+            else "CosyVoice 合成失败，请检查音色状态后重试"
+        )
+        super().__init__(detail)
+
+
+def _task_failure(header):
+    """Normalize provider failures without exposing provider payloads to users."""
+    header = header if isinstance(header, dict) else {}
+    code = str(header.get("error_code") or "").strip()
+    message = str(header.get("error_message") or "")
+    retryable = code == "InternalError.Algo" and "error code: 530" in message.lower()
+    return CosyVoiceTaskError(
+        code=code, task_id=header.get("task_id"), retryable=retryable,
+    )
+
+
+
 def enabled():
     return bool(DASHSCOPE_API_KEY)
 
@@ -194,11 +221,20 @@ def synth(voice, text, fmt="mp3", sample_rate=22050, rate=1.0, pitch=1.0,
                         "function": "SpeechSynthesizer", "input": {}, "parameters": params},
         }).encode())
         frames = _ws_frames(sock, leftover)
+        started = False
         for op, pl in frames:
-            if op == 0x1 and json.loads(pl)["header"]["event"] == "task-started":
-                break
+            if op == 0x1:
+                event = json.loads(pl)
+                event_name = event["header"]["event"]
+                if event_name == "task-started":
+                    started = True
+                    break
+                if event_name == "task-failed":
+                    raise _task_failure(event.get("header"))
             if op == 0x8:
                 raise RuntimeError("CosyVoice 合成未启动即关闭")
+        if not started:
+            raise RuntimeError("CosyVoice \u5408\u6210\u672a\u542f\u52a8")
         _ws_send(sock, json.dumps({
             "header": {"action": "continue-task", "task_id": task_id, "streaming": "duplex"},
             "payload": {"input": {"text": text}}}).encode())
@@ -215,7 +251,7 @@ def synth(voice, text, fmt="mp3", sample_rate=22050, rate=1.0, pitch=1.0,
                 if event == "task-finished":
                     break
                 if event == "task-failed":
-                    raise RuntimeError("CosyVoice 合成失败: " + json.dumps(ev["header"], ensure_ascii=False)[:200])
+                    raise _task_failure(ev.get("header"))
             elif op == 0x8:
                 break
         if not audio:

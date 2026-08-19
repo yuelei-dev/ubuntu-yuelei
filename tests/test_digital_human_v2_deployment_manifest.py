@@ -18,6 +18,8 @@ EXPECTED_SCOPE = {
     "server/content_domains/points.py",
     "server/content_domains/digital_human_timeline.py",
     "server/content_domains/digital_human_v2.py",
+    "server/content_domains/audio.py",
+    "server/content_domains/cosyvoice.py",
     "site/workbench/digital-human-oneclick.html",
 }
 LOCKED_PREIMAGES = {
@@ -26,12 +28,12 @@ LOCKED_PREIMAGES = {
         "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
     ),
     "server/content_domains/core.py": (
-        "file", "63cd17054f33e872b07f81b066108089323ef762",
-        "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
+        "file", "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+        "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
     ),
     "server/content_domains/digital_human_oneclick.py": (
-        "file", "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
-        "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119",
+        "file", "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
+        "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
     ),
     "server/content_domains/points.py": (
         "file", "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
@@ -42,8 +44,16 @@ LOCKED_PREIMAGES = {
         "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
     ),
     "server/content_domains/digital_human_v2.py": (
-        "file", "a0c26b4617108f5e85b1c79bbf491c57436db083",
-        "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
+        "file", "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
+        "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
+    ),
+    "server/content_domains/audio.py": (
+        "file", "923494c705b557a3860225768d3197cfd09f2f09",
+        "b3633b3f5a6d9f3c94b4869d41b6a9cd8ecaee24de97b61c89fec6612190a959",
+    ),
+    "server/content_domains/cosyvoice.py": (
+        "file", "eea015454e50fd0d7f545bd55c07991f768d5d5c",
+        "c8a988fe30c10abc14c456bad0f7d3fa1a8220139bf4151d2b5211b1f96b4b7f",
     ),
     "site/workbench/digital-human-oneclick.html": (
         "file", "9b8f5e993584dc07abdd6213fd369213b812cbb6",
@@ -68,9 +78,9 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
     def test_scope_and_source_locks_are_exact(self):
         files = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in files}, EXPECTED_SCOPE)
-        self.assertEqual(len(files), 7)
-        self.assertEqual(len({entry["runtime_path"] for entry in files}), 7)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 7)
+        self.assertEqual(len(files), 9)
+        self.assertEqual(len({entry["runtime_path"] for entry in files}), 9)
+        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 9)
         for entry in files:
             data = (ROOT / entry["repository_path"]).read_bytes()
             self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
@@ -91,15 +101,15 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-19T09:16:28Z",
+            observation["captured_at"], "2026-08-19T11:17:38Z",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
+            "572149009e993cb78309f5c62874ec23becc6fae",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
-        self.assertEqual(observation["files"], 7)
+        self.assertEqual(observation["files"], 9)
 
     def test_policy_is_test_only_atomic_and_removes_only_new_targets_on_rollback(self):
         policy = self.manifest["deployment_policy"]
@@ -114,6 +124,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertFalse(policy["copy_environment_database_or_user_data"])
         self.assertFalse(policy["production_server_write_allowed"])
         self.assertTrue(self.manifest["rollback"]["new_files_removed_only_if_preimage_was_absent"])
+        self.assertEqual(self.manifest["rollback"]["scope"], "all nine manifest targets as one unit")
         absent = [entry["repository_path"] for entry in self.manifest["files"]
                   if entry["target_preimage_state"] == "absent"]
         self.assertEqual(absent, [])
@@ -154,6 +165,9 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("result=subtitle_runtime_preflight()", font_command)
         self.assertIn("result.get('no_charge') is True", font_command)
         self.assertNotIn("get('font')", font_command)
+        dependencies = json.dumps(commands["dependencies"], ensure_ascii=False)
+        self.assertIn("content_domains/audio.py", dependencies)
+        self.assertIn("content_domains/cosyvoice.py", dependencies)
         self.assertEqual(len(commands["restart"]), 1)
         self.assertEqual(len(commands["rollback_restart"]), 1)
         rendered = json.dumps(commands["no_charge"], ensure_ascii=False)
@@ -161,6 +175,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_v2", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
+        self.assertIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("heygen", rendered.lower())
         self.assertEqual(
             {200, 401},
