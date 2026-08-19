@@ -43,6 +43,33 @@ PUBLIC_VOICE_PRESETS = {
 }
 
 
+class CosyVoiceTaskError(RuntimeError):
+    """Provider task failure with retry metadata and a user-safe message."""
+
+    def __init__(self, code="", task_id="", retryable=False):
+        self.code = str(code or "").strip()
+        self.task_id = str(task_id or "").strip()
+        self.retryable = bool(retryable)
+        detail = (
+            "CosyVoice 服务暂时繁忙，请稍后重试"
+            if self.retryable
+            else "CosyVoice 合成失败，请检查音色状态后重试"
+        )
+        super().__init__(detail)
+
+
+def _task_failure(header):
+    """Normalize provider failures without exposing provider payloads to users."""
+    header = header if isinstance(header, dict) else {}
+    code = str(header.get("error_code") or "").strip()
+    message = str(header.get("error_message") or "")
+    retryable = code == "InternalError.Algo" and "error code: 530" in message.lower()
+    return CosyVoiceTaskError(
+        code=code, task_id=header.get("task_id"), retryable=retryable,
+    )
+
+
+
 def enabled():
     return bool(DASHSCOPE_API_KEY)
 
@@ -215,7 +242,7 @@ def synth(voice, text, fmt="mp3", sample_rate=22050, rate=1.0, pitch=1.0,
                 if event == "task-finished":
                     break
                 if event == "task-failed":
-                    raise RuntimeError("CosyVoice 合成失败: " + json.dumps(ev["header"], ensure_ascii=False)[:200])
+                    raise _task_failure(ev.get("header"))
             elif op == 0x8:
                 break
         if not audio:

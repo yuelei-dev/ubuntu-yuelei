@@ -29,6 +29,22 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("/api/gen/digital-human-v2/consent", self.page)
         self.assertIn("/api/gen/digital-human-v2/material-resolve", self.page)
 
+    def test_material_resolve_retries_only_network_disconnects(self):
+        self.assertIn("function materialResolveNetworkError(error)", self.page)
+        self.assertIn("delays=[1000,3000]", self.page)
+        self.assertIn(
+            "if(url==='/api/gen/digital-human-v2/material-resolve')"
+            "return requestMaterialResolve(url,options)",
+            self.page,
+        )
+        self.assertIn("素材匹配网络重试", self.page)
+        self.assertIn(
+            "素材匹配网络连接中断，系统自动重试后仍未恢复，"
+            "请点击继续上次未完成的生成",
+            self.page,
+        )
+
+
     def test_material_priority_and_no_visible_source_label(self):
         self.assertIn(
             "客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺",

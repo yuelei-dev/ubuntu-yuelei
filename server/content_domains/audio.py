@@ -1212,6 +1212,32 @@ def validate_audio_payload(payload, username=""):
     return body
 
 
+COSY_SYNTH_RETRY_DELAYS = (1, 2)
+
+
+def _cosy_synth_for_generation(voice, text, **kwargs):
+    """Retry only the provider's known transient 530 failure in this job."""
+    total_attempts = len(COSY_SYNTH_RETRY_DELAYS) + 1
+    for attempt in range(total_attempts):
+        try:
+            return cosyvoice.synth(voice, text, **kwargs)
+        except cosyvoice.CosyVoiceTaskError as error:
+            if not error.retryable:
+                raise
+            attempt_number = attempt + 1
+            print(
+                "[cosyvoice] transient synthesis failure "
+                "code=%s attempt=%d/%d"
+                % (error.code or "unknown", attempt_number, total_attempts)
+            )
+            if attempt >= len(COSY_SYNTH_RETRY_DELAYS):
+                raise RuntimeError(
+                    "语音合成服务暂时繁忙，系统自动重试后仍未成功，请点击继续重试"
+                ) from None
+            time.sleep(COSY_SYNTH_RETRY_DELAYS[attempt])
+    raise RuntimeError("语音合成服务暂时繁忙，请点击继续重试")
+
+
 def gen_audio(payload, publish=True):
     """Generate one audio file.
 
@@ -1236,10 +1262,12 @@ def gen_audio(payload, publish=True):
         # free-form instruction control.  Public legacy preset voices run on
         # cosyvoice-v1, so never send an unsupported instruction to them.
         instruction = DELIVERY_INSTRUCTIONS[delivery] if str(cv_voice).startswith(cosyvoice.CLONE_MODEL) else ""
-        cv_audio = cosyvoice.synth(cv_voice, text, rate=speed,
-                                   pitch=max(0.5, min(2.0, 1.0 + pitch / 24.0)),
-                                   volume=max(0, min(100, 50 + volume // 2)),
-                                   instruction=instruction)
+        cv_audio = _cosy_synth_for_generation(
+            cv_voice, text, rate=speed,
+            pitch=max(0.5, min(2.0, 1.0 + pitch / 24.0)),
+            volume=max(0, min(100, 50 + volume // 2)),
+            instruction=instruction,
+        )
         fn = "audio/aud_%d.mp3" % int(time.time() * 1000)   # 非敏感命名 → 可走 COS 公开直链
         _out_path(fn).write_bytes(cv_audio)
         return _audio_result(fn, voice_key, speed, pitch, volume, text, publish=publish)

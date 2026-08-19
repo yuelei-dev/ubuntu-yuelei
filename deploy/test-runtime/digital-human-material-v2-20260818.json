@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the reviewed duration-driven digital-human v2 runtime to the Yuelei test server only, with full-audio narration, 20-30 second presenter appearances, Feishu-public-web-AI material priority, mixed image/video composition, and atomic rollback.",
+  "purpose": "Deploy the reviewed duration-driven digital-human v2 runtime to the Yuelei test server only, with resilient material resolution, bounded CosyVoice 530 recovery, full-audio narration, mixed image/video composition, and atomic rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -17,17 +17,17 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
+    "base_main_commit": "572149009e993cb78309f5c62874ec23becc6fae",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-19T09:16:28Z",
+    "captured_at": "2026-08-19T11:17:38Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
-    "repository_main_commit": "e99ea276d1b04df7e7278378ee0efcbadcd826f2",
+    "repository_main_commit": "572149009e993cb78309f5c62874ec23becc6fae",
     "service_state": "active",
     "health_status": 200,
-    "files": 7
+    "files": 9
   },
   "deployment_policy": {
     "fail_closed_on_source_mismatch": true,
@@ -82,8 +82,8 @@
       "source_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
       "source_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
       "target_preimage_state": "file",
-      "target_preimage_blob": "63cd17054f33e872b07f81b066108089323ef762",
-      "target_preimage_sha256": "5587befc8f1aba6ea289b49648589dd11ed58f004904ab291d04cfea4280245e",
+      "target_preimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "target_preimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
       "expected_postimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
       "expected_postimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5"
     },
@@ -94,8 +94,8 @@
       "source_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
       "source_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
       "target_preimage_state": "file",
-      "target_preimage_blob": "6f9e460e8c7cee91042028eda69d4a7a7e939b28",
-      "target_preimage_sha256": "c4068c60d83be064ad08d53bf5436502cbafbd8135f5389ee8645348db559119",
+      "target_preimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
+      "target_preimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
       "expected_postimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
       "expected_postimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b"
     },
@@ -130,22 +130,46 @@
       "source_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
       "source_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
       "target_preimage_state": "file",
-      "target_preimage_blob": "a0c26b4617108f5e85b1c79bbf491c57436db083",
-      "target_preimage_sha256": "330891a41ea051ae9cfd9013b340446ce116a1c4c3b9bae051373dc7bbdcc127",
+      "target_preimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
+      "target_preimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
       "expected_postimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
       "expected_postimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12"
+    },
+    {
+      "repository_path": "server/content_domains/audio.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/audio.py",
+      "classification": "runtime_code",
+      "source_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "source_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "923494c705b557a3860225768d3197cfd09f2f09",
+      "target_preimage_sha256": "b3633b3f5a6d9f3c94b4869d41b6a9cd8ecaee24de97b61c89fec6612190a959",
+      "expected_postimage_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "expected_postimage_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651"
+    },
+    {
+      "repository_path": "server/content_domains/cosyvoice.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/cosyvoice.py",
+      "classification": "runtime_code",
+      "source_blob": "1bf7ae1cd4e40aea27cb5e2facd86ba91ca847b8",
+      "source_sha256": "51fa3a0bffe196d268ac463eb606a10ee6164a569e27804120a3c2bf0ea1ab25",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "eea015454e50fd0d7f545bd55c07991f768d5d5c",
+      "target_preimage_sha256": "c8a988fe30c10abc14c456bad0f7d3fa1a8220139bf4151d2b5211b1f96b4b7f",
+      "expected_postimage_blob": "1bf7ae1cd4e40aea27cb5e2facd86ba91ca847b8",
+      "expected_postimage_sha256": "51fa3a0bffe196d268ac463eb606a10ee6164a569e27804120a3c2bf0ea1ab25"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
-      "source_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
+      "source_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
+      "source_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
       "target_preimage_state": "file",
       "target_preimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
       "target_preimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
-      "expected_postimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
-      "expected_postimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d"
+      "expected_postimage_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
+      "expected_postimage_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9"
     }
   ],
   "release_contract_sources": [
@@ -161,13 +185,18 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "6b91447142a4f5408a6f221793030923312c5671",
-      "source_sha256": "5656f1ee9c7f189308070982e739723c70f108c5790c0f0c67ea3b4367230c8f"
+      "source_blob": "2fd66d48c1652bf7c4ee609e9359d13a62ee37ce",
+      "source_sha256": "2e946ae0d49d8adf285789a36d4a74dbe3e1a10c53df65f666aad028ec7cb89b"
+    },
+    {
+      "repository_path": "tests/test_cosyvoice.py",
+      "source_blob": "b2626f4a533298bfb6fb8c6dc9f54900f259fe5d",
+      "source_sha256": "6e66a163799b9fda2ca9839139f98903b6154c92feef95db7feb85bfc6c03ad8"
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "b6d8b82fda98f332e803ebe2342d41d7056f6066",
-      "source_sha256": "5f032f87071ab936e79c69634b18d9b6caeab081ca98d7c227ef2cd44169db52"
+      "source_blob": "9cd804b691bf96154c1550747e93631b402c687b",
+      "source_sha256": "24c15ab5dacf371fd1f03af7421fffb141a7a5aeac7f72e5e8f51aa31be831d8"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -177,7 +206,7 @@
   ],
   "release_commands": {
     "pre_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
-    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/core.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}"], "timeout_seconds": 120}],
+    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/core.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}", "{runtime:/home/ubuntu/content-api/content_domains/audio.py}", "{runtime:/home/ubuntu/content-api/content_domains/cosyvoice.py}"], "timeout_seconds": 120}],
     "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
     "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
@@ -185,6 +214,7 @@
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_ui", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_cosyvoice", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900}
     ],
@@ -201,7 +231,7 @@
     {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401}
   ],
   "rollback": {
-    "scope": "all seven manifest targets as one unit",
+    "scope": "all nine manifest targets as one unit",
     "new_files_removed_only_if_preimage_was_absent": true,
     "production_untouched": true
   }

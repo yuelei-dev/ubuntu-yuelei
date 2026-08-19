@@ -185,11 +185,83 @@ class WebSocketFramingTests(unittest.TestCase):
         )
 
 
+    def test_transient_530_is_typed_retryable_and_user_safe(self):
+        task_id = "cd3596158c5266aa8cc5d4626b29444d"
+        error = cosyvoice._task_failure({
+            "task_id": task_id,
+            "error_code": "InternalError.Algo",
+            "error_message": "[cosyvoice]Engine return error code: 530",
+        })
+        self.assertIsInstance(error, cosyvoice.CosyVoiceTaskError)
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.code, "InternalError.Algo")
+        self.assertEqual(error.task_id, task_id)
+        self.assertNotIn(task_id, str(error))
+        self.assertNotIn("530", str(error))
+        self.assertNotIn("error_code", str(error))
+
+    def test_other_provider_failure_is_not_retryable_or_leaked(self):
+        error = cosyvoice._task_failure({
+            "task_id": "provider-secret-id",
+            "error_code": "InvalidParameter",
+            "error_message": "voice does not exist",
+        })
+        self.assertFalse(error.retryable)
+        self.assertIn("请检查音色状态后重试", str(error))
+        self.assertNotIn("provider-secret-id", str(error))
+        self.assertNotIn("voice does not exist", str(error))
+
+
 class AudioVoiceMappingTests(unittest.TestCase):
     """audio._cosy_voice_for：库里的 provider_voice → CosyVoice 能用的 voice。"""
 
     def setUp(self):
         self.audio = importlib.import_module("content_domains.audio")
+
+    def test_formal_generation_retries_transient_530_in_same_job(self):
+        transient = cosyvoice.CosyVoiceTaskError(
+            code="InternalError.Algo", task_id="provider-id", retryable=True,
+        )
+        with unittest.mock.patch.object(
+            self.audio.cosyvoice, "synth",
+            side_effect=[transient, transient, b"mp3"],
+        ) as synth, unittest.mock.patch.object(self.audio.time, "sleep") as sleep:
+            result = self.audio._cosy_synth_for_generation("voice", "文案")
+        self.assertEqual(result, b"mp3")
+        self.assertEqual(synth.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in sleep.call_args_list],
+            [1, 2],
+        )
+
+    def test_formal_generation_does_not_retry_terminal_failure(self):
+        terminal = cosyvoice.CosyVoiceTaskError(
+            code="InvalidParameter", task_id="provider-id", retryable=False,
+        )
+        with unittest.mock.patch.object(
+            self.audio.cosyvoice, "synth", side_effect=terminal,
+        ) as synth, unittest.mock.patch.object(self.audio.time, "sleep") as sleep:
+            with self.assertRaises(cosyvoice.CosyVoiceTaskError):
+                self.audio._cosy_synth_for_generation("voice", "文案")
+        self.assertEqual(synth.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_formal_generation_exhaustion_is_user_safe(self):
+        transient = cosyvoice.CosyVoiceTaskError(
+            code="InternalError.Algo", task_id="provider-secret-id", retryable=True,
+        )
+        with unittest.mock.patch.object(
+            self.audio.cosyvoice, "synth", side_effect=transient,
+        ) as synth, unittest.mock.patch.object(self.audio.time, "sleep") as sleep:
+            with self.assertRaisesRegex(
+                RuntimeError, "系统自动重试后仍未成功，请点击继续重试",
+            ) as caught:
+                self.audio._cosy_synth_for_generation("voice", "文案")
+        self.assertEqual(synth.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertNotIn("provider-secret-id", str(caught.exception))
+        self.assertNotIn("530", str(caught.exception))
+
 
     def test_public_code_maps_to_preset(self):
         self.assertEqual(self.audio._cosy_voice_for("S_d21F8OR62"), "longwan")
