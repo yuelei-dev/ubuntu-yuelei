@@ -1401,6 +1401,7 @@ def compose(payload, persist_state=None):
                     "[%d:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,"
                     "zoompan=z='min(zoom+0.00035,1.055)':x='iw/2-(iw/zoom/2)':"
                     "y='ih/2-(ih/zoom/2)':d=1:s=1080x1920:fps=30,"
+                    "setsar=1,format=yuv420p,"
                     "tpad=stop_mode=clone:stop_duration=1,trim=duration=%.3f,"
                     "setpts=PTS-STARTPTS[%s]" % (source_index, end - start, label)
                 )
