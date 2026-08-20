@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import pathlib
 import subprocess
@@ -89,6 +90,61 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
             self.assertEqual(result["verification"]["audio_source"], "continuous_presenter_narration")
             self.assertTrue(result["verification"]["audio_stream"])
             self.assertTrue(result["verification"]["black_frame_check"])
+
+    def test_real_compose_normalizes_public_rgba_image_before_concat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            media = root / "fixtures"
+            output = root / "videos"
+            media.mkdir()
+            presenter = media / "presenter.mp4"
+            public_image = media / "public-material.png"
+            self._run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "testsrc2=size=270x480:rate=30:duration=12",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=12",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", str(presenter),
+            ])
+            self._run([
+                "ffmpeg", "-y", "-f", "lavfi", "-i",
+                "color=c=0x276749@0.6:s=724x808,format=rgba",
+                "-frames:v", "1", str(public_image),
+            ])
+            payload = {
+                "_job_id": 902, "segment_count": 1, "material_count": 1,
+                "gesture_count": 1, "copy": "Public material may contain alpha and unusual sample aspect ratio.",
+                "video_files": [presenter.relative_to(root).as_posix()],
+                "material_files": [public_image.relative_to(root).as_posix()],
+                "material_types": ["image"],
+                "video_job_ids": [201], "material_job_ids": [301],
+            }
+            patches = (
+                mock.patch.object(self.domain, "OUT_DIR", root),
+                mock.patch.object(self.legacy, "OUT_DIR", root),
+                mock.patch.object(self.core, "OUT_DIR", root),
+                mock.patch.object(self.video, "OUT_DIR", root),
+                mock.patch.object(self.video, "VIDEO_OUT_DIR", output),
+                mock.patch.object(self.video, "burn_subtitle", side_effect=lambda rel, **_kwargs: rel),
+            )
+            for patcher in patches:
+                patcher.start()
+            try:
+                result = self.domain.compose(payload)
+            finally:
+                for patcher in reversed(patches):
+                    patcher.stop()
+            final = root / result["video_file"]
+            probe = json.loads(subprocess.check_output([
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height,pix_fmt,sample_aspect_ratio",
+                "-of", "json", str(final),
+            ], text=True))
+            stream = probe["streams"][0]
+            self.assertEqual((stream["width"], stream["height"]), (1080, 1920))
+            self.assertEqual(stream["sample_aspect_ratio"], "1:1")
+            self.assertEqual(stream["pix_fmt"], "yuv420p")
+            self.assertEqual(result["child_jobs"], {"videos": [201], "materials": [301]})
 
     def test_real_full_presenter_compose_accepts_zero_materials_after_paid_child(self):
         with tempfile.TemporaryDirectory() as directory:
