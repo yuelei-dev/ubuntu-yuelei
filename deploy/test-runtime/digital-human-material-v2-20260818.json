@@ -91,13 +91,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "f285d6fdebee7915d98a332925850d51065ef883",
-      "source_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5",
+      "source_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
+      "source_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
       "target_preimage_state": "file",
       "target_preimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
       "target_preimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
-      "expected_postimage_blob": "f285d6fdebee7915d98a332925850d51065ef883",
-      "expected_postimage_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5"
+      "expected_postimage_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
+      "expected_postimage_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc"
     },
     {
       "repository_path": "server/content_domains/points.py",

@@ -153,13 +153,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "327dbe086999d7c3df40c89e8318b09bd913f566",
-      "source_sha256": "6730a72e6539b0893efe93dac3b33b953d9490d7fcf5d5b09d26b41894551f8b",
+      "source_blob": "0bf15600e328fc8e514046c481cc086639d02842",
+      "source_sha256": "ec291685394da59427f5a892548ab7d1a78fe56377554f33a14e6a824a6a78dc",
       "target_preimage_state": "file",
       "target_preimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
       "target_preimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
-      "expected_postimage_blob": "327dbe086999d7c3df40c89e8318b09bd913f566",
-      "expected_postimage_sha256": "6730a72e6539b0893efe93dac3b33b953d9490d7fcf5d5b09d26b41894551f8b"
+      "expected_postimage_blob": "0bf15600e328fc8e514046c481cc086639d02842",
+      "expected_postimage_sha256": "ec291685394da59427f5a892548ab7d1a78fe56377554f33a14e6a824a6a78dc"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -189,13 +189,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "f285d6fdebee7915d98a332925850d51065ef883",
-      "source_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5",
+      "source_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
+      "source_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
       "target_preimage_state": "file",
       "target_preimage_blob": "86d02f30c4b1ab9dc426e926c1e7b7d963bdd2a2",
       "target_preimage_sha256": "91848d5bfb3b129e2d08722f5d39119c7c0d6f033178eea1251e04358d2536a5",
-      "expected_postimage_blob": "f285d6fdebee7915d98a332925850d51065ef883",
-      "expected_postimage_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5"
+      "expected_postimage_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
+      "expected_postimage_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
@@ -319,8 +319,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "83d141c07bb3a95087fee676a6edda9146c925e8",
-      "source_sha256": "97c9505d830312fc606688523dfe1ca41819738c9c1fa70200e9d6cffdaf40e8"
+      "source_blob": "8e4e7a1099420617816f2f7db0c532dabc3c87d1",
+      "source_sha256": "74b15478730855acc75c1b47c0e000a4c66b47b107333f67beab1b4d516a4e0a"
     },
     {
       "repository_path": "tests/test_script_to_video_asset_registration.py",
@@ -329,8 +329,8 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "b2f26180b9c391c382b028124e51b64810465576",
-      "source_sha256": "7f995f5831e2083f6d2dedc5eca8de78498d921b5c5e667684dec5ddc81ea6bd"
+      "source_blob": "8f43b0877b4b63ffc2fedcd9e01feb28067b41f9",
+      "source_sha256": "b95e24df2596333e42bb6a0c9b361efd94a1e16a06540ea7a2ef950d79e6ff9b"
     }
   ],
   "paid_submission_contract": {
