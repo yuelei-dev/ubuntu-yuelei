@@ -14,6 +14,13 @@ from types import SimpleNamespace
 from unittest import mock
 
 
+if sys.platform == "win32":
+    sys.modules.setdefault(
+        "fcntl",
+        SimpleNamespace(flock=lambda *_args: None, LOCK_EX=1, LOCK_UN=2),
+    )
+
+
 PNG_2X2 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGMU0bBhYGBgYgADAAWiAHylyrQdAAAAAElFTkSuQmCC"
 )
@@ -1334,7 +1341,196 @@ class DigitalHumanOneClickTests(unittest.TestCase):
         self.assertTrue((self.root / fallback["video_file"]).is_file())
 
 
+class DigitalHumanPrecisionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        server_dir = str(Path(__file__).resolve().parents[1] / "server")
+        if server_dir not in sys.path:
+            sys.path.insert(0, server_dir)
+        cls.domain = importlib.import_module("content_domains.digital_human_v2")
+        cls.video = importlib.import_module("content_domains.video")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.db_path = self.root / "precision.db"
+        self.out_patch = mock.patch.object(self.domain, "OUT_DIR", self.root)
+        self.out_patch.start()
+
+    def tearDown(self):
+        self.out_patch.stop()
+        self.tmp.cleanup()
+
+    def db(self):
+        connection = sqlite3.connect(self.db_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def test_video_upload_is_owner_run_and_digest_bound(self):
+        raw = b"validated-video-bytes"
+        digest = hashlib.sha256(raw).hexdigest()
+        with mock.patch.object(
+                self.domain, "_probe_video", return_value=(21.25, 1080, 1920)):
+            asset = self.domain.store_video_upload(
+                io.BytesIO(raw), len(raw), "yuelei", "dh-run-precision-001",
+                "video/mp4", digest, db_factory=self.db,
+            )
+        self.assertTrue(asset["asset_id"].startswith("dhv_"))
+        self.assertEqual(asset["source_sha256"], digest)
+        self.assertEqual(float(asset["duration"]), 21.25)
+        with self.assertRaisesRegex(
+                self.domain.DigitalHumanRequestError, "不属于当前账号"):
+            self.domain._load_video_asset(
+                asset["asset_id"], "another-user", db_factory=self.db,
+            )
+        with self.assertRaisesRegex(
+                self.domain.DigitalHumanRequestError, "不能更换真人视频"):
+            self.domain.store_video_upload(
+                io.BytesIO(b"different"), len(b"different"), "yuelei",
+                "dh-run-precision-001", "video/mp4",
+                hashlib.sha256(b"different").hexdigest(), db_factory=self.db,
+            )
+
+    def test_precision_plan_exposes_duration_delta_before_paid_create(self):
+        asset = {
+            "asset_id": "dhv_" + "a" * 32,
+            "source_sha256": "b" * 64,
+            "duration": 21.0, "width": 1080, "height": 1920,
+        }
+        plan = self.domain._precision_plan(
+            asset,
+            "明天就是七夕，我给所有单身的兄弟姐妹准备了红包，家人们明天见。",
+        )
+        self.assertEqual(plan["narration_mode"], "precision")
+        self.assertEqual(plan["segment_count"], 1)
+        self.assertEqual(plan["material_count"], 0)
+        self.assertEqual(plan["presenter_windows"], [[0.0, plan["expected_duration"]]])
+        self.assertIn("duration_delta", plan)
+        self.assertIn("duration_mismatch", plan)
+
+    def test_precision_consent_binds_video_script_and_voice(self):
+        source = self.root / "digital_human_video" / "source.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"video")
+        asset = {
+            "asset_id": "dhv_" + "a" * 32,
+            "source_sha256": "b" * 64,
+            "source_file": source.relative_to(self.root).as_posix(),
+            "mime": "video/mp4", "duration": 21.0,
+            "width": 1080, "height": 1920,
+        }
+        script = "这段文案、真人视频和声音必须作为同一次授权完整绑定。"
+        plan = self.domain._precision_plan(asset, script)
+        payload = {
+            "confirmed": True,
+            "consent_version": self.domain.CONSENT_VERSION,
+            "purpose": self.domain.CONSENT_PURPOSE,
+            "run_id": "dh-run-precision-consent-001",
+            "plan_digest": plan["plan_digest"],
+            "script": script, "gesture_count": 0,
+            "narration_mode": "precision",
+            "video_upload_id": asset["asset_id"],
+            "video_sha256": asset["source_sha256"],
+            "voice_mode": "existing", "voice_ref": "voice-1",
+            "voice_sha256": "",
+        }
+        with mock.patch.object(self.domain, "_load_video_asset", return_value=asset):
+            consent = self.domain.create_consent(
+                payload, "yuelei", "test-signing-secret", db_factory=self.db,
+            )
+        self.assertTrue(consent["consent_token"].startswith("dhc_"))
+        connection = self.db()
+        try:
+            row = connection.execute(
+                "SELECT plan_digest,photo_sha256,voice_mode,voice_ref "
+                "FROM digital_human_consents WHERE username=? AND run_id=?",
+                ("yuelei", payload["run_id"]),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row["plan_digest"], plan["plan_digest"])
+        self.assertEqual(row["photo_sha256"], asset["source_sha256"])
+        self.assertEqual((row["voice_mode"], row["voice_ref"]), ("existing", "voice-1"))
+
+    def test_precision_child_uses_authorized_video_without_gesture_job(self):
+        source = self.root / "digital_human_video" / "source.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"video")
+        asset = {
+            "asset_id": "dhv_" + "a" * 32,
+            "source_sha256": "b" * 64,
+            "source_file": source.relative_to(self.root).as_posix(),
+            "mime": "video/mp4", "duration": 21.0,
+            "width": 1080, "height": 1920,
+        }
+        script = "这是一段经过授权的真人视频口型测试文案，生成前必须核对时长。"
+        plan = self.domain._precision_plan(asset, script)
+        record = {
+            "id": "dhc_" + "1" * 32, "username": "yuelei",
+            "run_id": "dh-run-precision-001",
+            "purpose": self.domain.CONSENT_PURPOSE,
+            "consent_version": self.domain.CONSENT_VERSION,
+            "plan_digest": plan["plan_digest"],
+            "photo_sha256": asset["source_sha256"],
+            "voice_mode": "existing", "voice_ref": "voice-1",
+            "voice_sha256": "",
+        }
+        payload = {
+            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+            "digital_human_stage": "talking",
+            "digital_human_run_id": record["run_id"],
+            "digital_human_plan_digest": plan["plan_digest"],
+            "digital_human_consent_token": "signed-token",
+            "digital_human_script": script,
+            "digital_human_narration_mode": "precision",
+            "digital_human_video_upload_id": asset["asset_id"],
+            "digital_human_item_index": 0,
+            "mode": "precision", "text": script, "voice": "voice-1",
+        }
+        with mock.patch.object(self.domain, "_load_v2_consent", return_value=record), \
+             mock.patch.object(self.domain, "_load_video_asset", return_value=asset), \
+             mock.patch.object(self.video, "subtitle_runtime_preflight"):
+            cleaned, verified = self.domain.verify_child_submission_with_record(
+                payload, "yuelei", "video",
+            )
+        self.assertIs(verified, record)
+        self.assertEqual(cleaned["mode"], "precision")
+        self.assertEqual(cleaned["source_video_file"], asset["source_file"])
+        self.assertNotIn("gesture_job_id", cleaned)
+        self.assertNotIn("image_data", cleaned)
+
+    def test_precision_video_pricing_has_independent_live_rule(self):
+        body = {
+            "mode": "precision", "text": "用于计算预扣时长的测试文案",
+            "source_video_file": "digital_human_video/source.mp4",
+        }
+        with mock.patch.object(self.video, "_probe_video_duration", return_value=65), \
+             mock.patch.object(self.video.pricing, "get_price", return_value=30) as price:
+            cost = self.video.video_cost(body)
+        self.assertEqual(cost, 90)
+        price.assert_called_once_with("video.lipsync.precision.block")
+
+
 class DigitalHumanOneClickUiTests(unittest.TestCase):
+    def test_page_exposes_precision_video_plus_script_mode(self):
+        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        for marker in (
+            'name="narrationMode" value="precision"',
+            'id="precisionVideo"',
+            "/api/gen/digital-human-v2/video-upload",
+            "X-HQ-Video-SHA256",
+            "video_upload_id",
+            "digital_human_video_upload_id",
+            "mode:precision?'precision'",
+            "plan.duration_warning",
+            "HeyGen Precision 修改全程口型",
+            "视频中的人物本人已授权修改口型",
+            "交付前请播放抽查人物口型和音画同步",
+        ):
+            self.assertIn(marker, page)
+        self.assertIn("if(precision)return generateTalking([],voiceKey,epoch)", page)
+        self.assertIn("保留原真人视频全程画面", page)
+
     def test_oneclick_image_jobs_use_banana_for_gestures_and_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]

@@ -87,6 +87,56 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
         error = video.HeyGenMCPAuthError("套餐 OAuth 未配置")
         self.assertTrue(video._definitive_heygen_create_rejection(error))
 
+    def test_precision_lipsync_uses_asset_ids_and_precision_mode(self):
+        schema = {
+            "type": "object",
+            "required": ["video", "audio"],
+            "properties": {
+                "video": {}, "audio": {}, "mode": {}, "title": {},
+                "keepTheSameFormat": {}, "enableDynamicDuration": {},
+                "disableMusicTrack": {}, "fpsMode": {},
+            },
+        }
+        with patch.object(video, "_heygen_mcp_lipsync_contract", return_value=schema), \
+             patch.object(video, "_heygen_mcp_call", return_value={
+                 "data": {"lipsync_id": "lip-precision-1"}
+             }) as call:
+            lipsync_id = video._heygen_mcp_create_lipsync(
+                "video-asset-1", "audio-asset-1",
+            )
+        self.assertEqual(lipsync_id, "lip-precision-1")
+        arguments = call.call_args.args[1]
+        self.assertEqual(arguments["mode"], "precision")
+        self.assertEqual(arguments["video"], {
+            "type": "asset_id", "asset_id": "video-asset-1",
+        })
+        self.assertEqual(arguments["audio"], {
+            "type": "asset_id", "asset_id": "audio-asset-1",
+        })
+        self.assertTrue(arguments["keepTheSameFormat"])
+        self.assertTrue(arguments["enableDynamicDuration"])
+
+    def test_precision_lipsync_poll_reads_completed_video(self):
+        with patch.object(video, "_heygen_mcp_call", return_value={
+            "data": {
+                "lipsync_id": "lip-1", "status": "completed",
+                "video_url": "https://files.heygen.ai/lip-1.mp4",
+            }
+        }):
+            result = video._heygen_poll_lipsync("lip-1", deadline_s=1)
+        self.assertEqual(result["video_url"], "https://files.heygen.ai/lip-1.mp4")
+
+    def test_precision_lipsync_contract_fails_before_create(self):
+        with patch.object(video, "_heygen_mcp_rpc", return_value={
+            "tools": [{"name": "create_lipsync", "inputSchema": {
+                "type": "object", "required": ["video"],
+                "properties": {"video": {}},
+            }}]
+        }), patch.object(video, "_heygen_mcp_call") as call:
+            with self.assertRaises(video.HeyGenMCPContractError):
+                video._heygen_mcp_create_lipsync("video-asset", "audio-asset")
+        call.assert_not_called()
+
     def test_mcp_plan_credit_error_is_definitive_and_does_not_leak_detail(self):
         requests = []
 

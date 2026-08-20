@@ -29,7 +29,7 @@ from . import (
     submission_idempotency,
 )
 
-VALID_VIDEO_MODES = {"text", "audio"}
+VALID_VIDEO_MODES = {"text", "audio", "precision"}
 VALID_VIDEO_RATIOS = {"9:16", "16:9", "1:1", "4:5", "5:4"}
 VALID_VIDEO_RESOLUTIONS = {"720p", "1080p"}
 VALID_VIDEO_MOTIONS = {"low", "medium", "high"}
@@ -1723,16 +1723,20 @@ def validate_video_payload(payload, username=None):
         raise ValueError("请求体不是合法 JSON")
     mode = str(payload.get("mode") or "text").strip().lower()
     if mode not in VALID_VIDEO_MODES:
-        raise ValueError("mode 仅支持 text/audio")
+        raise ValueError("mode 仅支持 text/audio/precision")
 
     image_data = str(payload.get("image_data") or "").strip()
     avatar_id = str(payload.get("avatar_id") or "").strip()
-    if not image_data and not avatar_id:
-        raise ValueError("image_data 不能为空")
-    if image_data and avatar_id:
-        raise ValueError("image_data 与 avatar_id 只能选一个")
-    if image_data and not _is_valid_data_url(image_data, VALID_IMAGE_MIMES):
-        raise ValueError("image_data 不是有效的人物形象图片")
+    if mode == "precision":
+        if image_data or avatar_id:
+            raise ValueError("precision 模式使用真人视频，不接受人物图片或形象")
+    else:
+        if not image_data and not avatar_id:
+            raise ValueError("image_data 不能为空")
+        if image_data and avatar_id:
+            raise ValueError("image_data 与 avatar_id 只能选一个")
+        if image_data and not _is_valid_data_url(image_data, VALID_IMAGE_MIMES):
+            raise ValueError("image_data 不是有效的人物形象图片")
     line = None
     if mode == "text":
         if not str(payload.get("text") or "").strip():
@@ -1748,6 +1752,26 @@ def validate_video_payload(payload, username=None):
             raise ValueError("audio_data 不是有效的音频文件")
         if audio_file:
             audio_file = _normalize_audio_file_ref(audio_file, username=username)
+    elif mode == "precision":
+        if not str(payload.get("text") or "").strip():
+            raise ValueError("mode=precision 时 text 必填")
+        if not str(payload.get("voice") or "").strip():
+            raise ValueError("mode=precision 时 voice 必填")
+        if not str(payload.get("digital_human_consent_id") or "").strip():
+            raise ValueError("Precision 真人视频必须经过数字人授权流程")
+        source_video_file = str(payload.get("source_video_file") or "").strip().replace("\\", "/")
+        source_video_mime = str(payload.get("source_video_mime") or "").strip().lower()
+        source_path = _resolve_out_file(source_video_file)
+        if not source_path:
+            raise ValueError("真人视频文件不存在")
+        try:
+            source_video_file = source_path.resolve().relative_to(OUT_DIR.resolve()).as_posix()
+        except Exception:
+            raise ValueError("真人视频必须位于 content_out 目录内") from None
+        if source_path.suffix.lower() not in {".mp4", ".mov", ".webm"}:
+            raise ValueError("真人视频仅支持 MP4、MOV 或 WebM")
+        if source_video_mime not in {"video/mp4", "video/quicktime", "video/webm"}:
+            raise ValueError("真人视频格式无效")
     if avatar_id and username:
         get_video_avatar(username, avatar_id)
 
@@ -1795,6 +1819,9 @@ def validate_video_payload(payload, username=None):
     if mode == "audio":
         cleaned["audio_file"] = audio_file
         cleaned["audio_data"] = audio_data
+    elif mode == "precision":
+        cleaned["source_video_file"] = source_video_file
+        cleaned["source_video_mime"] = source_video_mime
     cleaned["bgm_data"] = bgm_data
     cleaned["bgm_volume"] = bgm_volume
     cleaned.pop("duration", None)
@@ -4231,6 +4258,98 @@ def _heygen_mcp_prepare_assets(image_path, audio_path):
     }
 
 
+def _heygen_mcp_lipsync_contract():
+    """Fail before uploads/paid create when the live Precision schema drifted."""
+    result = _heygen_mcp_rpc("tools/list", {}, timeout=30)
+    tools = result.get("tools")
+    entry = next((item for item in (tools or []) if isinstance(item, dict)
+                  and item.get("name") == "create_lipsync"), None)
+    schema = (entry or {}).get("inputSchema") or (entry or {}).get("input_schema")
+    properties = (schema or {}).get("properties")
+    required = set((schema or {}).get("required") or [])
+    supported = {"video", "audio", "mode", "title", "keepTheSameFormat",
+                 "enableDynamicDuration", "disableMusicTrack", "fpsMode"}
+    if (not isinstance(properties, dict)
+            or not supported.issubset(properties)
+            or not {"video", "audio"}.issubset(required)):
+        raise HeyGenMCPContractError(
+            "HeyGen MCP Precision 口型接口契约已更新，视频任务尚未提交"
+        )
+    return schema
+
+
+def _heygen_mcp_prepare_lipsync_assets(video_path, video_mime, audio_path):
+    video_path = pathlib.Path(video_path)
+    audio_path = pathlib.Path(audio_path)
+    if str(video_mime or "").strip().lower() not in {
+            "video/mp4", "video/quicktime", "video/webm"}:
+        raise ValueError("真人视频格式无效")
+    contract = _heygen_mcp_asset_upload_contract()
+    video_asset_id = _heygen_mcp_begin_asset(video_path, video_mime, contract)
+    audio_asset_id = _heygen_mcp_begin_asset(audio_path, "audio/mpeg", contract)
+    _heygen_mcp_wait_assets([video_asset_id, audio_asset_id])
+    return video_asset_id, audio_asset_id
+
+
+def _heygen_mcp_create_lipsync(video_asset_id, audio_asset_id):
+    _heygen_mcp_lipsync_contract()
+    response = _heygen_mcp_call("create_lipsync", {
+        "video": {"type": "asset_id", "asset_id": video_asset_id},
+        "audio": {"type": "asset_id", "asset_id": audio_asset_id},
+        "title": "huangque_precision_lipsync",
+        "mode": "precision",
+        "keepTheSameFormat": True,
+        "enableDynamicDuration": True,
+        "disableMusicTrack": False,
+        "fpsMode": "passthrough",
+    }, timeout=90)
+    node = _find_nested_dict(
+        response,
+        lambda item: bool(item.get("lipsyncId") or item.get("lipsync_id")
+                          or item.get("id")),
+    )
+    lipsync_id = str((node or {}).get("lipsyncId") or (node or {}).get("lipsync_id")
+                      or (node or {}).get("id") or "").strip()
+    if not lipsync_id:
+        raise RuntimeError("HeyGen MCP Precision 未返回任务编号")
+    return lipsync_id
+
+
+def _heygen_poll_lipsync(lipsync_id, deadline_s=None):
+    deadline = time.time() + (deadline_s or VIDEO_GEN_DEADLINE)
+    last_status = ""
+    while time.time() < deadline:
+        try:
+            response = _heygen_mcp_call(
+                "get_lipsync", {"lipsyncId": lipsync_id}, timeout=90,
+            )
+        except HeyGenNetworkError:
+            time.sleep(HEYGEN_POLL_INTERVAL)
+            continue
+        info = _find_nested_dict(
+            response,
+            lambda item: bool(item.get("status") or item.get("video_url")
+                              or item.get("videoUrl")),
+        ) or response
+        status = str(info.get("status") or info.get("state") or "").strip().lower()
+        if status != last_status:
+            print("[heygen] lipsync_id=%s status=%s" % (lipsync_id, status), flush=True)
+            last_status = status
+        if status in {"completed", "done", "success", "succeeded"}:
+            video_url = str(info.get("video_url") or info.get("videoUrl") or "").strip()
+            if not video_url:
+                raise RuntimeError("HeyGen Precision 完成但未返回视频地址")
+            result = dict(info)
+            result["video_url"] = video_url
+            return result
+        if status in {"failed", "error", "rejected"}:
+            detail = str(info.get("failure_message") or info.get("failureMessage")
+                         or info.get("error") or "上游未返回失败原因")
+            raise HeyGenProviderFailed("HeyGen Precision 口型生成失败: %s" % detail[:180])
+        time.sleep(HEYGEN_POLL_INTERVAL)
+    raise TimeoutError("HeyGen Precision 口型生成超时")
+
+
 def _heygen_create_cinematic_video(avatar_item_id, reference_asset_id, ratio, resolution, duration,
                                    prompt=None, direct=False, enhance_prompt=False):
     _heygen_require_paid_route()
@@ -4837,6 +4956,92 @@ def generate_heygen_video_recoverable(
     _lifecycle_notify(lifecycle, "on_completed", ret)
     return ret
 
+def generate_heygen_lipsync_recoverable(
+        source_video_file, source_video_mime, audio_file, lifecycle):
+    """One paid Precision create at most; resumes by polling the saved lipsync id."""
+    source_fp = _resolve_out_file(source_video_file)
+    audio_fp = _resolve_out_file(audio_file)
+    if not source_fp or not audio_fp:
+        raise ValueError("Precision 口型素材文件不存在")
+    audio_fp = _ensure_heygen_audio_mp3(audio_fp)
+    if _heygen_require_paid_route() != "mcp_oauth":
+        raise HeyGenMCPAuthError(
+            "Precision 口型仅允许使用 HeyGen 套餐 OAuth 通道，已阻止 API 钱包回退"
+        )
+    state = dict((lifecycle or {}).get("state") or {})
+    provider_id = str(state.get("provider_video_id") or "").strip()
+    video_asset_id = str(state.get("image_asset_id") or "").strip()
+    audio_asset_id = str(state.get("audio_asset_id") or "").strip()
+    creating = not provider_id
+    if creating:
+        _heygen_mcp_lipsync_contract()
+        video_asset_id, audio_asset_id = _heygen_mcp_prepare_lipsync_assets(
+            source_fp, source_video_mime, audio_fp,
+        )
+    with heygen_slot("Precision口型" if creating else "Precision口型恢复轮询"):
+        if creating:
+            _lifecycle_notify(lifecycle, "on_submitting", {
+                "provider": "mcp_oauth", "provider_transport": "mcp_lipsync",
+                # Reuse durable columns; image_asset_id stores the source-video asset.
+                "image_asset_id": video_asset_id, "audio_asset_id": audio_asset_id,
+                "actual_resolution": "source",
+            })
+            try:
+                provider_id = _heygen_retry_429(
+                    lambda: _heygen_mcp_create_lipsync(video_asset_id, audio_asset_id),
+                    "Precision口型提交",
+                )
+            except Exception as exc:
+                if _definitive_heygen_create_rejection(exc):
+                    _lifecycle_notify(lifecycle, "on_rejected", {"provider": "mcp_oauth"})
+                raise
+            try:
+                _lifecycle_notify(lifecycle, "on_submitted", {
+                    "provider": "mcp_oauth", "provider_transport": "mcp_lipsync",
+                    "provider_video_id": provider_id,
+                    "image_asset_id": video_asset_id, "audio_asset_id": audio_asset_id,
+                    "actual_resolution": "source",
+                })
+            except BaseException as exc:
+                raise HeyGenBilledError(
+                    "Precision 口型已受理但恢复编号落盘失败(lipsync_id=%s): %s"
+                    % (provider_id, str(exc)[:160])
+                ) from exc
+        try:
+            info = _heygen_poll_lipsync(provider_id, deadline_s=VIDEO_GEN_DEADLINE)
+            video_file = _download_video_file_direct(info["video_url"], "heygen_precision")
+            cover = _extract_first_frame_cover(video_file)
+        except HeyGenProviderFailed:
+            raise
+        except Exception as exc:
+            raise HeyGenBilledError(
+                "Precision 口型已提交 HeyGen(lipsync_id=%s，已计费)，后续失败: %s"
+                % (provider_id, str(exc)[:180])
+            ) from exc
+    duration = (info.get("duration") or info.get("output_duration")
+                or info.get("outputDuration"))
+    if not duration:
+        try:
+            duration = _probe_video_duration(video_file)
+        except Exception:
+            duration = None
+    ret = {
+        "video_id": provider_id, "video_file": video_file,
+        "video_url": _file_url(video_file),
+        "image_asset_id": video_asset_id, "audio_asset_id": audio_asset_id,
+        "source_video_url": info.get("video_url"),
+        "thumbnail_url": info.get("thumbnail_url") or info.get("thumbnailUrl"),
+        "duration": duration, "provider": "mcp_oauth",
+        "provider_transport": "mcp_lipsync", "actual_resolution": "source",
+        "lipsync_mode": "precision",
+    }
+    if cover:
+        ret["image_file"] = cover
+        ret["image_url"] = public_url(cover, "image/jpeg")
+    _lifecycle_notify(lifecycle, "on_completed", ret)
+    return ret
+
+
 # ============ F4 · 口播视频自动字幕（whisper 时间轴 + libass 烧录） ============
 # 仅 text/audio 口播模式生效；motion 动作模仿不做字幕（多无语音，价值低）。
 # whisper 吃 CPU，用信号量把同时转写数限到 WHISPER_MAX_CONCURRENCY（默认 1），避免打满核。
@@ -5253,36 +5458,43 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
 def gen_video(payload, provider_lifecycle=None):
     job_id = payload.get("_job_id")
     mode = (payload.get("mode") or "text").strip()
-    if mode not in {"text", "audio"}:
+    if mode not in {"text", "audio", "precision"}:
         raise ValueError("生成方式不正确")
     # 口播(text/audio)走 HeyGen。
     if not HEYGEN_API_KEY and not _heygen_mcp_enabled():
         raise ValueError("视频生成服务未配置")
     avatar = None
     avatar_id = payload.get("avatar_id")
-    if avatar_id:
-        avatar = get_video_avatar((payload.get("_username") or "").strip(), avatar_id)
-        image_file = avatar.get("image_file")
+    image_file = None
+    reference_video_file = None
+    if mode == "precision":
+        reference_video_file = str(payload.get("source_video_file") or "").strip()
+        source_video_path = _resolve_out_file(reference_video_file)
+        if not source_video_path:
+            raise ValueError("真人视频文件不存在")
     else:
-        image_file = _save_data_file(payload.get("image_data"), "vid_img", [".jpg", ".png", ".webp"])
-    if not image_file:
-        raise ValueError("请先上传人物形象图片")
-    # Fail before TTS and before any provider upload.  Script-to-video also
-    # performs this check before material generation; this second check keeps
-    # direct and historical video jobs safe from deletion between stages.
-    preflight_heygen_image_file(image_file, "avatar")
+        if avatar_id:
+            avatar = get_video_avatar((payload.get("_username") or "").strip(), avatar_id)
+            image_file = avatar.get("image_file")
+        else:
+            image_file = _save_data_file(payload.get("image_data"), "vid_img", [".jpg", ".png", ".webp"])
+        if not image_file:
+            raise ValueError("请先上传人物形象图片")
+        # Fail before TTS and before any provider upload.  Script-to-video also
+        # performs this check before material generation; this second check keeps
+        # direct and historical video jobs safe from deletion between stages.
+        preflight_heygen_image_file(image_file, "avatar")
     text = (payload.get("text") or "").strip()
     voice = (payload.get("voice") or "").strip()
     audio_file = None
     audio_url = None
-    reference_video_file = None
     bgm_file = (_save_data_file(payload.get("bgm_data"), "video_bgm", [".mp3", ".wav", ".m4a"])
                 if payload.get("bgm_data") else None)
     resume_state = dict((provider_lifecycle or {}).get("state") or {})
     resume_audio = str(resume_state.get("audio_file") or "").strip()
     if resume_audio and not _resolve_out_file(resume_audio):
         raise RuntimeError("文案成片恢复音频不存在")
-    if mode == "text":
+    if mode in {"text", "precision"}:
         if not text:
             raise ValueError("请先输入口播文案")
         if not voice:
@@ -5326,15 +5538,28 @@ def gen_video(payload, provider_lifecycle=None):
     if provider_lifecycle is not None:
         _lifecycle_notify(provider_lifecycle, "on_prepared", {
             "audio_file": audio_file, "image_file": image_file,
+            "reference_video_file": reference_video_file,
         })
-        video_result = generate_heygen_video_recoverable(
-            image_file, audio_file, resolution, ratio, motion,
-            provider_lifecycle,
-        )
+        if mode == "precision":
+            video_result = generate_heygen_lipsync_recoverable(
+                reference_video_file, payload.get("source_video_mime"),
+                audio_file, provider_lifecycle,
+            )
+        else:
+            video_result = generate_heygen_video_recoverable(
+                image_file, audio_file, resolution, ratio, motion,
+                provider_lifecycle,
+            )
     else:
-        video_result = generate_heygen_video(
-            image_file, audio_file, resolution, ratio, motion,
-        )
+        if mode == "precision":
+            video_result = generate_heygen_lipsync_recoverable(
+                reference_video_file, payload.get("source_video_mime"),
+                audio_file, {},
+            )
+        else:
+            video_result = generate_heygen_video(
+                image_file, audio_file, resolution, ratio, motion,
+            )
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
@@ -5354,10 +5579,10 @@ def gen_video(payload, provider_lifecycle=None):
     subtitle_position = (payload.get("subtitle_position") or "bottom").strip()
     if subtitle_position not in _SUB_POSITIONS:
         subtitle_position = "bottom"
-    if payload.get("subtitle") and mode in {"text", "audio"} and video_result.get("video_file"):
+    if payload.get("subtitle") and mode in {"text", "audio", "precision"} and video_result.get("video_file"):
         try:
             update_video_asset_phase(job_id, "burning_subtitle")
-            known = text if mode == "text" else None
+            known = text if mode in {"text", "precision"} else None
             subtitled = burn_subtitle(video_result["video_file"], known_text=known, style_key=subtitle_style, job_id=job_id, position=subtitle_position)
             video_result["plain_video_file"] = video_result.get("video_file")
             video_result["video_file"] = subtitled
@@ -5387,6 +5612,7 @@ def gen_video(payload, provider_lifecycle=None):
         "actual_resolution": video_result.get("actual_resolution") or resolution,
         "provider": video_result.get("provider"),
         "provider_transport": video_result.get("provider_transport"),
+        "lipsync_mode": video_result.get("lipsync_mode"),
         "ratio": ratio, "motion": motion,
         "phase": "done",
         "subtitle": subtitle_on,
@@ -6687,6 +6913,17 @@ TALKING_FALLBACK_SEC = 10.0   # 音频探不到时长时的兜底估算秒数
 
 def _talking_estimate_seconds(body):
     mode = str(body.get("mode") or "text").lower()
+    if mode == "precision":
+        text_seconds = max(
+            1.0, len(str(body.get("text") or "")) / TALKING_CHARS_PER_SEC,
+        )
+        try:
+            source_seconds = _probe_video_duration(body.get("source_video_file"))
+        except Exception:
+            source_seconds = 0.0
+        # Precision can stretch the source to the replacement narration. Hold
+        # the larger side so settlement never needs a second charge.
+        return max(text_seconds, source_seconds, TALKING_FALLBACK_SEC)
     if mode == "audio":
         af = (body.get("audio_file") or "").strip()
         if af:
@@ -6713,9 +6950,12 @@ def _talking_estimate_seconds(body):
 
 
 def video_cost(body):
-    """口播预扣：每 30 秒 30 点。text 模式按文本偏保守估算，跑完按成片结算。"""
+    """口播预扣按模式的 30 秒分档，成片后仍按真实时长结算。"""
     secs = _talking_estimate_seconds(body)
-    block_points = pricing.get_price("video.talking.block")
+    price_key = ("video.lipsync.precision.block"
+                 if str(body.get("mode") or "").strip().lower() == "precision"
+                 else "video.talking.block")
+    block_points = pricing.get_price(price_key)
     body["_talking_block_points"] = block_points
     return max(block_points, int(math.ceil(secs / TALKING_BLOCK_SECONDS)) * block_points)
 

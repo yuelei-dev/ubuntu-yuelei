@@ -837,6 +837,7 @@ def dispatch_http(handler, method, verify_token, must_change_password):
                      digital_human_v2.PLAN_PATH,
                      digital_human_v2.CONSENT_PATH,
                      digital_human_v2.AUDIO_UPLOAD_PATH,
+                     digital_human_v2.VIDEO_UPLOAD_PATH,
                      digital_human_v2.MATERIAL_RESOLVE_PATH}:
         return False
     user = verify_token(handler._token())
@@ -893,6 +894,35 @@ def dispatch_http(handler, method, verify_token, must_change_password):
                 handler.headers.get("X-HQ-Run-ID"),
                 handler.headers.get("Content-Type"),
                 handler.headers.get("X-HQ-Audio-SHA256"),
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {
+                "detail": str(exc)[:220], "code": exc.code,
+                **({"retry_after_ms": 5000} if exc.status == 503 else {}),
+            })
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
+        return True
+    if path == digital_human_v2.VIDEO_UPLOAD_PATH:
+        if method != "POST":
+            handler._method_not_allowed()
+            return True
+        try:
+            if handler.headers.get("Transfer-Encoding"):
+                raise digital_human_oneclick.DigitalHumanRequestError(
+                    "真人视频上传必须提供 Content-Length", "video_upload_length_required",
+                )
+            try:
+                length = int(handler.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError) as exc:
+                raise digital_human_oneclick.DigitalHumanRequestError(
+                    "真人视频上传长度无效", "video_upload_length_required",
+                ) from exc
+            handler._send(200, digital_human_v2.video_upload_response(
+                handler.rfile, length, user["username"],
+                handler.headers.get("X-HQ-Run-ID"),
+                handler.headers.get("Content-Type"),
+                handler.headers.get("X-HQ-Video-SHA256"),
             ))
         except digital_human_oneclick.DigitalHumanRequestError as exc:
             handler._send(exc.status, {

@@ -27,6 +27,7 @@ PIPELINE = timeline.PIPELINE
 PLAN_PATH = "/api/gen/digital-human-v2/plan"
 CONSENT_PATH = "/api/gen/digital-human-v2/consent"
 AUDIO_UPLOAD_PATH = "/api/gen/digital-human-v2/audio-upload"
+VIDEO_UPLOAD_PATH = "/api/gen/digital-human-v2/video-upload"
 MATERIAL_RESOLVE_PATH = "/api/gen/digital-human-v2/material-resolve"
 CONSENT_VERSION = "digital-human-material-v2"
 CONSENT_PURPOSE = "digital_human_material_v2"
@@ -52,6 +53,12 @@ _AUDIO_MIMES = {
 }
 _MAX_AUDIO_UPLOAD_BYTES = 30 * 1024 * 1024
 _AUDIO_UPLOAD_TTL_SECONDS = 24 * 60 * 60
+_VIDEO_UPLOAD_ID_RE = re.compile(r"^dhv_[0-9a-f]{32}$")
+_VIDEO_MIMES = {
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/webm": ".webm",
+}
+_MAX_VIDEO_UPLOAD_BYTES = 500 * 1024 * 1024
+_VIDEO_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 _MATERIAL_ASSET_ID_RE = re.compile(r"^dhm_[0-9a-f]{32}$")
 _MAX_MATERIAL_BYTES = 20 * 1024 * 1024
 _MATERIAL_TTL_SECONDS = 24 * 60 * 60
@@ -88,6 +95,26 @@ def _ensure_audio_table(connection):
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_digital_human_audio_owner "
         "ON digital_human_audio_uploads(username, created_at DESC)"
+    )
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS digital_human_video_uploads(
+            asset_id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            source_file TEXT NOT NULL,
+            mime TEXT NOT NULL,
+            duration REAL NOT NULL,
+            width INTEGER NOT NULL,
+            height INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            UNIQUE(username, run_id)
+        )"""
+    )
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_digital_human_video_owner "
+        "ON digital_human_video_uploads(username, created_at DESC)"
     )
     connection.execute(
         """CREATE TABLE IF NOT EXISTS digital_human_material_assets(
@@ -149,6 +176,44 @@ def _load_audio_asset(asset_id, username, now=None, db_factory=None):
         ) from exc
     if not isinstance(asset["slices"], list) or not asset["slices"]:
         raise DigitalHumanRequestError("录音切段记录无效，请重新上传", "audio_upload_invalid", 409)
+    return asset
+
+
+def _safe_video_upload_id(value):
+    value = str(value or "").strip().lower()
+    if not _VIDEO_UPLOAD_ID_RE.fullmatch(value):
+        raise DigitalHumanRequestError(
+            "真人视频上传记录无效，请重新上传", "video_upload_invalid", 409,
+        )
+    return value
+
+
+def _load_video_asset(asset_id, username, now=None, db_factory=None):
+    asset_id = _safe_video_upload_id(asset_id)
+    now = int(time.time() if now is None else now)
+    with closing(_audio_db(db_factory)) as connection:
+        row = connection.execute(
+            "SELECT * FROM digital_human_video_uploads WHERE asset_id=? AND username=?",
+            (asset_id, str(username or "").strip()),
+        ).fetchone()
+    if not row:
+        raise DigitalHumanRequestError(
+            "真人视频不存在或不属于当前账号，请重新上传", "video_upload_invalid", 409,
+        )
+    asset = dict(row)
+    if int(asset["expires_at"]) <= now:
+        raise DigitalHumanRequestError(
+            "真人视频已过期，请重新上传", "video_upload_expired", 409,
+        )
+    try:
+        path = (OUT_DIR / asset["source_file"]).resolve()
+        path.relative_to(OUT_DIR.resolve())
+    except Exception:
+        path = None
+    if not path or not path.is_file() or path.stat().st_size <= 0:
+        raise DigitalHumanRequestError(
+            "真人视频文件已不可用，请重新上传", "video_upload_invalid", 409,
+        )
     return asset
 
 
@@ -333,6 +398,135 @@ def audio_upload_response(stream, length, username, run_id, content_type,
         "duration": round(float(asset["duration"]), 3),
         "transcript": asset["transcript"], "slice_count": len(asset["slices"]),
         "expires_at": int(asset["expires_at"]), "source_sha256": asset["source_sha256"],
+    }
+
+
+def _probe_video(path):
+    process = subprocess.run([
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:format=duration",
+        "-of", "json", str(path),
+    ], check=False, timeout=60, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        data = json.loads((process.stdout or b"").decode("utf-8", "replace"))
+        stream = (data.get("streams") or [])[0]
+        duration = float((data.get("format") or {}).get("duration") or 0)
+        width, height = int(stream.get("width") or 0), int(stream.get("height") or 0)
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+        duration, width, height = 0.0, 0, 0
+    if process.returncode != 0 or duration <= 0 or width < 16 or height < 16:
+        raise DigitalHumanRequestError(
+            "无法读取真人视频，请重新导出后上传", "video_probe_failed",
+        )
+    if duration < timeline.MIN_AUDIO_SECONDS:
+        raise DigitalHumanRequestError(
+            "真人视频不能少于 6 秒", "video_duration_invalid",
+        )
+    if duration > timeline.MAX_DURATION_SECONDS:
+        raise DigitalHumanRequestError(
+            "真人视频不能超过 180 秒", "video_duration_invalid",
+        )
+    return round(duration, 3), width, height
+
+
+def store_video_upload(stream, length, username, run_id, content_type,
+                       claimed_sha256, db_factory=None):
+    if not legacy._RUN_ID_RE.fullmatch(str(run_id or "").strip()):
+        raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
+    if type(length) is not int or length <= 0 or length > _MAX_VIDEO_UPLOAD_BYTES:
+        raise DigitalHumanRequestError(
+            "真人视频必须小于 500MB", "video_upload_size_invalid",
+        )
+    mime = str(content_type or "").split(";", 1)[0].strip().lower()
+    extension = _VIDEO_MIMES.get(mime)
+    if not extension:
+        raise DigitalHumanRequestError(
+            "仅支持 MP4、MOV 或 WebM 真人视频", "video_upload_type_invalid",
+        )
+    claimed = legacy._required_sha256(claimed_sha256, "真人视频")
+    username = str(username or "").strip()
+    run_id = str(run_id).strip()
+    with closing(_audio_db(db_factory)) as connection:
+        existing = connection.execute(
+            "SELECT asset_id,source_sha256 FROM digital_human_video_uploads "
+            "WHERE username=? AND run_id=?", (username, run_id),
+        ).fetchone()
+    if existing:
+        if not hmac.compare_digest(str(existing["source_sha256"]), claimed):
+            raise DigitalHumanRequestError(
+                "同一制作流程不能更换真人视频，请重新开始",
+                "video_upload_binding_conflict", 409,
+            )
+        return _load_video_asset(existing["asset_id"], username, db_factory=db_factory)
+    asset_id = "dhv_" + secrets.token_hex(16)
+    owner = hashlib.sha256(username.encode("utf-8")).hexdigest()[:20]
+    directory = OUT_DIR / "digital_human_video" / owner / asset_id
+    directory.mkdir(parents=True, exist_ok=False)
+    source = directory / ("source" + extension)
+    digest = hashlib.sha256()
+    remaining = length
+    try:
+        with source.open("wb") as output:
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise DigitalHumanRequestError(
+                        "真人视频上传不完整，请重新上传", "video_upload_incomplete",
+                    )
+                output.write(chunk)
+                digest.update(chunk)
+                remaining -= len(chunk)
+        if not hmac.compare_digest(digest.hexdigest(), claimed):
+            raise DigitalHumanRequestError(
+                "真人视频校验失败，请重新上传", "video_upload_digest_mismatch",
+            )
+        duration, width, height = _probe_video(source)
+        now = int(time.time())
+        relative = source.resolve().relative_to(OUT_DIR.resolve()).as_posix()
+        try:
+            with closing(_audio_db(db_factory)) as connection:
+                connection.execute(
+                    """INSERT INTO digital_human_video_uploads(
+                        asset_id,username,run_id,source_sha256,source_file,mime,
+                        duration,width,height,created_at,expires_at
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (asset_id, username, run_id, claimed, relative, mime, duration,
+                     width, height, now, now + _VIDEO_UPLOAD_TTL_SECONDS),
+                )
+                connection.commit()
+        except sqlite3.IntegrityError:
+            with closing(_audio_db(db_factory)) as connection:
+                winner = connection.execute(
+                    "SELECT asset_id,source_sha256 FROM digital_human_video_uploads "
+                    "WHERE username=? AND run_id=?", (username, run_id),
+                ).fetchone()
+            if winner and hmac.compare_digest(str(winner["source_sha256"]), claimed):
+                import shutil
+                shutil.rmtree(str(directory), ignore_errors=True)
+                return _load_video_asset(winner["asset_id"], username, db_factory=db_factory)
+            raise DigitalHumanRequestError(
+                "同一制作流程不能更换真人视频，请重新开始",
+                "video_upload_binding_conflict", 409,
+            )
+        return _load_video_asset(asset_id, username, db_factory=db_factory)
+    except Exception:
+        import shutil
+        shutil.rmtree(str(directory), ignore_errors=True)
+        raise
+
+
+def video_upload_response(stream, length, username, run_id, content_type,
+                          claimed_sha256, db_factory=None):
+    asset = store_video_upload(
+        stream, length, username, run_id, content_type, claimed_sha256,
+        db_factory=db_factory,
+    )
+    return {
+        "ok": True, "video_upload_id": asset["asset_id"],
+        "duration": round(float(asset["duration"]), 3),
+        "width": int(asset["width"]), "height": int(asset["height"]),
+        "expires_at": int(asset["expires_at"]),
+        "source_sha256": asset["source_sha256"],
     }
 
 
@@ -715,6 +909,44 @@ def _audio_plan(asset, selected_gesture_count):
                 plan_digest=timeline._digest(core))
 
 
+def _precision_plan(asset, script):
+    copy = timeline.clean_script(script)
+    expected_duration = timeline.estimate_duration(copy)
+    source_duration = round(float(asset["duration"]), 3)
+    delta = round(expected_duration - source_duration, 3)
+    tolerance = max(1.5, source_duration * 0.08)
+    mismatch = abs(delta) > tolerance
+    warning = ""
+    if mismatch:
+        direction = "长" if delta > 0 else "短"
+        warning = (
+            "预计新配音比原视频%s约 %.1f 秒；Precision 会动态调整时长，"
+            "请确认后再生成。" % (direction, abs(delta))
+        )
+    segment = {
+        "index": 0, "text": copy, "start": 0.0,
+        "end": expected_duration, "duration": expected_duration,
+        "gesture_index": 0, "role": "full_video",
+    }
+    core = {
+        "pipeline": PIPELINE, "workflow_version": timeline.WORKFLOW_VERSION,
+        "narration_mode": "precision",
+        "video_upload_id": asset["asset_id"],
+        "source_video_sha256": asset["source_sha256"],
+        "source_video_duration": source_duration,
+        "source_video_width": int(asset["width"]),
+        "source_video_height": int(asset["height"]),
+        "copy": copy, "ratio": "9:16", "expected_duration": expected_duration,
+        "duration_delta": delta, "duration_mismatch": mismatch,
+        "duration_warning": warning,
+        "gesture_count": 0, "gestures": [], "segments": [segment],
+        "presenter_windows": [[0.0, expected_duration]], "materials": [],
+        "infographic_limit": 0, "source_priority": [],
+    }
+    return dict(core, segment_count=1, material_count=0,
+                plan_digest=timeline._digest(core))
+
+
 def plan_response(payload, username=None):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
@@ -727,6 +959,13 @@ def plan_response(payload, username=None):
                 raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
             asset = _load_audio_asset(payload.get("audio_upload_id"), username)
             return {"ok": True, "plan": _audio_plan(asset, payload.get("gesture_count"))}
+        if mode == "precision":
+            allowed = {"narration_mode", "video_upload_id", "script"}
+            unknown = sorted(set(payload) - allowed)
+            if unknown:
+                raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
+            asset = _load_video_asset(payload.get("video_upload_id"), username)
+            return {"ok": True, "plan": _precision_plan(asset, payload.get("script"))}
         return timeline.plan_response(payload)
     except Exception as exc:
         raise _as_request_error(exc) from exc
@@ -734,8 +973,9 @@ def plan_response(payload, username=None):
 
 def _authoritative_plan(payload, username=None):
     try:
-        if str(payload.get("digital_human_narration_mode") or
-               payload.get("narration_mode") or "text").strip().lower() == "audio":
+        mode = str(payload.get("digital_human_narration_mode") or
+                   payload.get("narration_mode") or "text").strip().lower()
+        if mode == "audio":
             asset = _load_audio_asset(
                 payload.get("digital_human_audio_upload_id") or payload.get("audio_upload_id"),
                 username,
@@ -744,6 +984,14 @@ def _authoritative_plan(payload, username=None):
                 asset,
                 payload.get("digital_human_gesture_count")
                 if "digital_human_gesture_count" in payload else payload.get("gesture_count"),
+            )
+        if mode == "precision":
+            asset = _load_video_asset(
+                payload.get("digital_human_video_upload_id") or payload.get("video_upload_id"),
+                username,
+            )
+            return _precision_plan(
+                asset, payload.get("digital_human_script") or payload.get("script")
             )
         return timeline.plan_text(
             payload.get("digital_human_script") or payload.get("script"),
@@ -761,6 +1009,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
         "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
         "script", "gesture_count", "photo_sha256", "voice_mode", "voice_ref",
         "voice_sha256", "narration_mode", "audio_upload_id",
+        "video_upload_id", "video_sha256",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -772,7 +1021,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     if str(payload.get("purpose") or "") != CONSENT_PURPOSE:
         raise DigitalHumanRequestError("授权用途无效", "consent_purpose_invalid")
     narration_mode = str(payload.get("narration_mode") or "text").strip().lower()
-    if narration_mode not in {"text", "audio"}:
+    if narration_mode not in {"text", "audio", "precision"}:
         raise DigitalHumanRequestError("声音驱动方式无效")
     username = str(username or "").strip()
     if not username:
@@ -783,9 +1032,12 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     try:
         audio_asset = (_load_audio_asset(payload.get("audio_upload_id"), username)
                        if narration_mode == "audio" else None)
+        video_asset = (_load_video_asset(payload.get("video_upload_id"), username)
+                       if narration_mode == "precision" else None)
         frozen = (_audio_plan(audio_asset, payload.get("gesture_count"))
-                  if audio_asset else
-                  timeline.plan_text(payload.get("script"), payload.get("gesture_count")))
+                  if audio_asset else _precision_plan(video_asset, payload.get("script"))
+                  if video_asset else timeline.plan_text(
+                      payload.get("script"), payload.get("gesture_count")))
     except Exception as exc:
         raise _as_request_error(exc) from exc
     plan_digest = legacy._required_sha256(payload.get("plan_digest"), "制作方案")
@@ -794,7 +1046,25 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
             "制作方案与服务端时长拆分结果不一致，请重新分析方案",
             "consent_plan_mismatch", 409,
         )
-    photo_sha256 = legacy._required_sha256(payload.get("photo_sha256"), "人物照片")
+    if narration_mode == "precision":
+        supplied_video_sha = legacy._required_sha256(
+            payload.get("video_sha256"), "真人视频",
+        )
+        if not hmac.compare_digest(supplied_video_sha, video_asset["source_sha256"]):
+            raise DigitalHumanRequestError(
+                "真人视频与上传记录不一致，请重新上传", "consent_video_mismatch", 403,
+            )
+        if str(payload.get("video_upload_id") or "") != video_asset["asset_id"]:
+            raise DigitalHumanRequestError(
+                "真人视频与制作方案不一致，请重新分析", "consent_video_mismatch", 403,
+            )
+        if payload.get("photo_sha256"):
+            raise DigitalHumanRequestError("Precision 模式不应上传人物照片校验值")
+        # The existing consent ledger column is retained for compatibility. In
+        # precision mode it binds the authorized real-person source video hash.
+        photo_sha256 = video_asset["source_sha256"]
+    else:
+        photo_sha256 = legacy._required_sha256(payload.get("photo_sha256"), "人物照片")
     if narration_mode == "audio":
         voice_mode = "audio"
         voice_ref = audio_asset["asset_id"]
@@ -1044,6 +1314,7 @@ def verify_child_submission_with_record(payload, username, kind):
             raise DigitalHumanRequestError("口播步骤编号无效", "consent_plan_mismatch", 409)
         segment = frozen["segments"][item_index]
         audio_mode = frozen.get("narration_mode") == "audio"
+        precision_mode = frozen.get("narration_mode") == "precision"
         expected_voice = ""
         audio_asset = None
         if audio_mode:
@@ -1066,53 +1337,73 @@ def verify_child_submission_with_record(payload, username, kind):
                     "口播声音与授权记录不一致，请重新开始并授权",
                     "consent_voice_mismatch", 403,
                 )
-        try:
-            gesture_job_id = int(payload.get("gesture_job_id"))
-        except (TypeError, ValueError):
-            gesture_job_id = 0
-        if gesture_job_id <= 0:
-            raise DigitalHumanRequestError(
-                "口播缺少本次授权的手势照任务编号",
-                "talking_gesture_binding_invalid", 409,
-            )
-        with closing(jdb()) as connection:
-            row = connection.execute(
-                "SELECT id,kind,status,payload,result FROM jobs WHERE id=? AND username=? "
-                "AND COALESCE(deleted,0)=0", (gesture_job_id, str(username or "").strip()),
-            ).fetchone()
-        if not row or row["kind"] != "image" or row["status"] != "done":
-            raise DigitalHumanRequestError(
-                "口播手势照不存在、未完成或不属于当前账号",
-                "talking_gesture_binding_invalid", 409,
-            )
-        _binding(row["payload"], gesture_job_id, "gesture", record, segment["gesture_index"])
-        try:
-            result = json.loads(row["result"] or "{}")
-        except Exception:
-            result = {}
-        relative_file = legacy._result_file(result, "image")
-        try:
-            gesture_path = (OUT_DIR / relative_file).resolve()
-            gesture_path.relative_to(OUT_DIR.resolve())
-        except Exception:
-            gesture_path = None
-        if not gesture_path or not gesture_path.is_file() or gesture_path.stat().st_size <= 0:
-            raise DigitalHumanRequestError(
-                "口播手势照文件已不可用，请重新生成手势照",
-                "talking_gesture_binding_invalid", 409,
-            )
-        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(gesture_path.suffix.lower())
-        if not mime:
-            raise DigitalHumanRequestError("口播手势照格式不受支持", "talking_gesture_binding_invalid", 409)
-        cleaned.update({
-            "image_data": "data:%s;base64,%s" % (
-                mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
-            ),
-            "motion": "high" if segment["role"] in {"hook", "cta"} else "medium",
-            "speed": 1.04 if segment["role"] in {"hook", "cta"} else 1.0,
-            "pitch": 0, "volume": 1, "delivery": "natural",
-            "digital_human_item_index": item_index,
-        })
+        if precision_mode:
+            video_asset = _load_video_asset(frozen.get("video_upload_id"), username)
+            if (not hmac.compare_digest(video_asset["source_sha256"], record["photo_sha256"])
+                    or not hmac.compare_digest(
+                        video_asset["source_sha256"], frozen.get("source_video_sha256") or "")):
+                raise DigitalHumanRequestError(
+                    "真人视频与授权记录不一致，请重新开始",
+                    "consent_video_mismatch", 403,
+                )
+            cleaned.update({
+                "mode": "precision", "text": segment["text"],
+                "voice": expected_voice,
+                "source_video_file": video_asset["source_file"],
+                "source_video_mime": video_asset["mime"],
+                "motion": "medium", "speed": 1.0, "pitch": 0,
+                "volume": 1, "delivery": "natural",
+                "digital_human_item_index": item_index,
+            })
+            cleaned.pop("gesture_job_id", None)
+        else:
+            try:
+                gesture_job_id = int(payload.get("gesture_job_id"))
+            except (TypeError, ValueError):
+                gesture_job_id = 0
+            if gesture_job_id <= 0:
+                raise DigitalHumanRequestError(
+                    "口播缺少本次授权的手势照任务编号",
+                    "talking_gesture_binding_invalid", 409,
+                )
+            with closing(jdb()) as connection:
+                row = connection.execute(
+                    "SELECT id,kind,status,payload,result FROM jobs WHERE id=? AND username=? "
+                    "AND COALESCE(deleted,0)=0", (gesture_job_id, str(username or "").strip()),
+                ).fetchone()
+            if not row or row["kind"] != "image" or row["status"] != "done":
+                raise DigitalHumanRequestError(
+                    "口播手势照不存在、未完成或不属于当前账号",
+                    "talking_gesture_binding_invalid", 409,
+                )
+            _binding(row["payload"], gesture_job_id, "gesture", record, segment["gesture_index"])
+            try:
+                result = json.loads(row["result"] or "{}")
+            except Exception:
+                result = {}
+            relative_file = legacy._result_file(result, "image")
+            try:
+                gesture_path = (OUT_DIR / relative_file).resolve()
+                gesture_path.relative_to(OUT_DIR.resolve())
+            except Exception:
+                gesture_path = None
+            if not gesture_path or not gesture_path.is_file() or gesture_path.stat().st_size <= 0:
+                raise DigitalHumanRequestError(
+                    "口播手势照文件已不可用，请重新生成手势照",
+                    "talking_gesture_binding_invalid", 409,
+                )
+            mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(gesture_path.suffix.lower())
+            if not mime:
+                raise DigitalHumanRequestError("口播手势照格式不受支持", "talking_gesture_binding_invalid", 409)
+            cleaned.update({
+                "image_data": "data:%s;base64,%s" % (
+                    mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
+                ),
+                "motion": "high" if segment["role"] in {"hook", "cta"} else "medium",
+                "speed": 1.04 if segment["role"] in {"hook", "cta"} else 1.0,
+                "pitch": 0, "volume": 1, "delivery": "natural",
+                "digital_human_item_index": item_index,
+            })
         if audio_mode:
             audio_slice = audio_asset["slices"][item_index]
             if not hmac.compare_digest(
@@ -1137,7 +1428,7 @@ def verify_child_submission_with_record(payload, username, kind):
                     audio_path.read_bytes()).decode("ascii"),
             })
             cleaned.pop("audio_file", None)
-        else:
+        elif not precision_mode:
             cleaned.update({
                 "mode": "text", "text": segment["text"], "voice": expected_voice,
             })
@@ -1274,6 +1565,7 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "digital_human_consent_id", "digital_human_script",
         "digital_human_gesture_count", "digital_human_item_index",
         "digital_human_narration_mode", "digital_human_audio_upload_id",
+        "digital_human_video_upload_id",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -1371,8 +1663,11 @@ def compose(payload, persist_state=None):
     ), encoding="utf-8")
     legacy._run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file), "-c", "copy", str(joined)])
     duration = sum(durations)
-    windows = timeline.presenter_windows(durations, duration)
-    slots = timeline.material_slots(windows, duration, len(materials))
+    precision_mode = str(payload.get("narration_mode") or "").strip().lower() == "precision"
+    windows = ([[0.0, round(duration, 3)]] if precision_mode
+               else timeline.presenter_windows(durations, duration))
+    slots = ([] if precision_mode
+             else timeline.material_slots(windows, duration, len(materials)))
     items = _visual_items(windows, slots)
     command = ["ffmpeg", "-y", "-i", str(joined)]
     for material, media_type, slot in zip(materials, material_types, slots):
@@ -1453,7 +1748,10 @@ def compose(payload, persist_state=None):
             "subtitle": "whisper" if not subtitle_error else "unavailable",
             "audio_source": "continuous_presenter_narration", "audio_stream": True,
             "duration_sync": True, "black_frame_check": True,
-            "presenter_interval_seconds": "20-30", "visible_source_labels": False,
+            "presenter_interval_seconds": ("full_video" if precision_mode else "20-30"),
+            "lipsync": ("heygen_precision" if precision_mode else "heygen_avatar"),
+            "mouth_motion_review": ("required" if precision_mode else "sampled"),
+            "visible_source_labels": False,
         },
         "subtitle_retryable": bool(subtitle_error),
     }
