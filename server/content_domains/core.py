@@ -378,14 +378,15 @@ KIND_GRACE = {"tryon": 2400, "xiaole_video": 1200, "sora_video": 1500, "image": 
               "short_drama_sound_effect": 900,
               "short_drama_preview": 1800, "short_drama_final": 3600,
               "short_drama_remux": 600,
-              "script_to_video": 1200, "canvas_agent": 300}
+              "script_to_video": 1200, "canvas_agent": 300, "director_agent": 300}
 # ⚠️ tryon 【不】跟着 15 分钟走：线上实测线路一中位 909s、**p90 1612s(27 分钟)**。
 #    砍到 15 分钟会把超过一成的换装任务判成失败。要改它得先把那条链路本身提速。
 AVATAR_COST = _env_positive_int("AVATAR_COST", 2)   # 建形象：象征性收费防刷，失败自动退点
 # ⚠️ cost_of() 回落到 COST.get(kind, 0) —— 新增 kind 忘了在这里登记，就是【免费】。
 COST = {"image": 12, "copy": 3, "audio": 10, "video": VIDEO_COST, "tryon": 40,
         "cinematic": VIDEO_COST, "avatar": AVATAR_COST, "breakdown": 8,
-        "script_to_video": VIDEO_COST, "canvas_agent": 3}  # collect/leads/cinematic 走 cost_of() 动态算
+        "script_to_video": VIDEO_COST, "canvas_agent": 3,
+        "director_agent": 0}  # 顾客使用指导免费；collect/leads/cinematic 走 cost_of() 动态算
 # cinematic 的这条已经不生效了 —— 电影化身按成片秒数计费（video.cinematic_cost），
 # cost_of() 里有它自己的分支、必定先 return。留在这里只当保险：万一哪天分支被绕过，
 # 也是按 VIDEO_COST 收费，而不是回落到 0（=免费送 $7 一条的视频）。
@@ -2999,7 +3000,7 @@ class H(BaseHTTPRequestHandler):
             if _must_change_password(user): return self._send(403, {"detail": "请先修改初始密码"})
             try: feature_flags.require_enabled(kind)
             except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
-            if kind == "canvas_agent" and is_shutting_down():
+            if kind in {"canvas_agent", "director_agent"} and is_shutting_down():
                 return self._send(503, {
                     "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
                     "code": "shutting_down", "retry_after_ms": 5000,
@@ -3012,7 +3013,7 @@ class H(BaseHTTPRequestHandler):
             durable_attempt = None
             from . import digital_human_oneclick
             try:
-                body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent"} else self._json_body()
+                body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent", "director_agent"} else self._json_body()
                 if is_still_route:
                     request_body, still_idem_body = _short_drama_domain().short_drama_production.normalize_still_request(body, require_quote=True); idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
                     if not idem_key: raise ValueError("关键帧提交必须提供 Idempotency-Key")
@@ -3101,6 +3102,9 @@ class H(BaseHTTPRequestHandler):
                     body = canvas_agent_domain.validate_payload(
                         body, _short_drama_canvas_access(self)
                     )
+                elif kind == "director_agent":
+                    from . import director_agent as director_agent_domain
+                    body = director_agent_domain.validate_payload(body)
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
@@ -3116,7 +3120,7 @@ class H(BaseHTTPRequestHandler):
                     request_body = dict(body) if isinstance(body, dict) else body
                 # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
                 if not is_still_route and not smart_montage_submission:
-                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown", "copy"} else ""
+                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "director_agent", "script_to_video", "breakdown", "copy"} else ""
                 durable_copy_submission = bool(durable_copy_submission and idem_key)
                 if durable_copy_submission and idem_key:
                     idem_state, idem_response = _idempotency_lookup(
@@ -3145,6 +3149,8 @@ class H(BaseHTTPRequestHandler):
                         body = durable_attempt["payload"]
                 if kind == "canvas_agent" and not idem_key:
                     raise ValueError("画布 Agent 提交必须提供 Idempotency-Key")
+                if kind == "director_agent" and not idem_key:
+                    raise ValueError("编导助手提交必须提供 Idempotency-Key")
                 if kind == "sora_video" and not idem_key: raise ValueError("Sora 视频提交必须提供 Idempotency-Key")
                 if kind == "xiaole_video" and str(body.get("channel") or "").lower() in {"micro", "omni", "minimax"} and not idem_key: raise ValueError("官方视频提交必须提供 Idempotency-Key")
             except feature_flags.FeatureDisabled as e:
