@@ -83,9 +83,12 @@ class DirectorAgentTests(unittest.TestCase):
                 )
                 connection.commit()
             now = 2_000_000_000
+            statements = []
 
             def db():
-                return sqlite3.connect(path)
+                connection = sqlite3.connect(path)
+                connection.set_trace_callback(statements.append)
+                return connection
 
             with closing(sqlite3.connect(path)) as connection:
                 connection.executemany(
@@ -100,9 +103,14 @@ class DirectorAgentTests(unittest.TestCase):
                 connection.commit()
             with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 2), \
                     mock.patch.object(director_agent, "DAILY_LIMIT", 99):
+                statements.clear()
                 limited = director_agent.submission_limit(db, "alice", now=now)
                 self.assertEqual(limited["code"], "director_agent_rate_limited")
                 self.assertEqual(limited["retry_after_ms"], 60000)
+                self.assertEqual(1, len([
+                    item for item in statements
+                    if item.lstrip().upper().startswith("SELECT")
+                ]))
                 self.assertIsNone(
                     director_agent.submission_limit(db, "bob", now=now)
                 )
@@ -124,6 +132,20 @@ class DirectorAgentTests(unittest.TestCase):
                 limited = director_agent.submission_limit(db, "alice", now=later)
                 self.assertEqual(limited["code"], "director_agent_daily_limit")
                 self.assertGreater(limited["retry_after_ms"], 0)
+
+            cross_midnight = day_start + 5
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("DELETE FROM jobs")
+                connection.execute(
+                    "INSERT INTO jobs(username,kind,created_at) VALUES(?,?,?)",
+                    ("alice", "director_agent", day_start - 10),
+                )
+                connection.commit()
+            with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 1), \
+                    mock.patch.object(director_agent, "DAILY_LIMIT", 99):
+                limited = director_agent.submission_limit(
+                    db, "alice", now=cross_midnight)
+                self.assertEqual(limited["code"], "director_agent_rate_limited")
 
     def test_normalize_only_allows_whitelisted_confirmed_actions(self):
         request = director_agent.validate_payload(payload())

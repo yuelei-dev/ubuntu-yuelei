@@ -149,22 +149,21 @@ def submission_limit(db_factory, username, now=None):
         raise ValueError("编导助手缺少认证账号")
     now = int(time.time() if now is None else now)
     day_start, next_day_start = _local_day_bounds(now)
+    window_start = min(day_start, now - 60)
     connection = db_factory()
     try:
-        minute_row = connection.execute(
-            """SELECT COUNT(*) FROM jobs
+        usage_row = connection.execute(
+            """SELECT
+                   COALESCE(SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0)
+               FROM jobs
                WHERE username=? AND kind='director_agent' AND created_at>=?""",
-            (username, now - 60),
-        ).fetchone()
-        daily_row = connection.execute(
-            """SELECT COUNT(*) FROM jobs
-               WHERE username=? AND kind='director_agent' AND created_at>=?""",
-            (username, day_start),
+            (now - 60, day_start, username, window_start),
         ).fetchone()
     finally:
         connection.close()
-    minute_count = int(minute_row[0] if minute_row else 0)
-    daily_count = int(daily_row[0] if daily_row else 0)
+    minute_count = int(usage_row[0] if usage_row else 0)
+    daily_count = int(usage_row[1] if usage_row else 0)
     if minute_count >= RATE_LIMIT_PER_MINUTE:
         return {
             "detail": "编导助手回复过于频繁，请一分钟后再试",
