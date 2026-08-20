@@ -21,7 +21,8 @@ def payload(**overrides):
             "topic": "夏日护肤", "selling_points": "清爽不黏腻", "style": "口播",
             "duration": "30s", "platform": "抖音", "has_script": False,
             "scene_count": 0, "has_breakdown": False, "breakdown_scene_count": 0,
-            "breakdown_url": "", "active_job_status": "idle",
+            "breakdown_url": "", "breakdown_tool": "scenes",
+            "has_reverse_prompt": False, "active_job_status": "idle",
         },
         "history": [], "source_page": "script", "provider": "openai_responses",
         "quoted_cost": 0,
@@ -38,6 +39,10 @@ class DirectorAgentTests(unittest.TestCase):
         text_video = payload()
         text_video["page_context"] = dict(text_video["page_context"], mode="script_to_video")
         self.assertEqual(director_agent.validate_payload(text_video)["page_context"]["mode"], "script_to_video")
+        legacy = payload()
+        del legacy["page_context"]["breakdown_tool"]
+        del legacy["page_context"]["has_reverse_prompt"]
+        self.assertEqual(director_agent.validate_payload(legacy)["page_context"]["breakdown_tool"], "scenes")
         with self.assertRaisesRegex(ValueError, "免费"):
             director_agent.validate_payload(payload(quoted_cost=1))
         with self.assertRaisesRegex(ValueError, "不属于黄雀编导"):
@@ -63,6 +68,7 @@ class DirectorAgentTests(unittest.TestCase):
             "content": "先完善卖点，再生成脚本。", "stage": "understand",
             "actions": [
                 {"type": "fill_field", "field": "selling_points", "value": "三秒吸收", "label": "填入卖点"},
+                {"type": "choose_option", "field": "breakdown_tool", "value": "reverse_prompt", "label": "切换提示词反推"},
                 {"type": "focus", "target": "generate_script", "label": "查看生成按钮"},
             ], "warnings": ["点击页面生成按钮后才会扣点"],
         }, ensure_ascii=False)
@@ -70,6 +76,14 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertEqual(result["type"], "director_agent")
         self.assertFalse(result["plan"]["requires_confirmation"])
         self.assertEqual(result["plan"]["actions"][0]["id"], "action_1")
+        self.assertEqual(result["plan"]["actions"][1]["value"], "reverse_prompt")
+        invalid_option = json.dumps({
+            "content": "选择自定义风格。", "stage": "understand",
+            "actions": [{"type": "choose_option", "field": "style", "value": "不存在", "label": "选择"}],
+            "warnings": [],
+        }, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "选项值无效"):
+            director_agent.normalize_model_result(invalid_option, request)
         mixed_navigation = json.dumps({
             "content": "已填好卖点，去素材库。", "stage": "assets",
             "actions": [

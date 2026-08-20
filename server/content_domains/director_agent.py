@@ -21,9 +21,16 @@ API_BASE = os.environ.get("DIRECTOR_AGENT_API_BASE", "").strip() or None
 API_KEY = os.environ.get("DIRECTOR_AGENT_API_KEY", "").strip() or None
 
 MODES = {"write", "script_to_video", "breakdown"}
+BREAKDOWN_TOOLS = {"scenes", "reverse_prompt"}
 STAGES = {"understand", "script", "breakdown", "assets", "video"}
 FIELD_NAMES = {"topic", "selling_points", "breakdown_url"}
-OPTION_NAMES = {"style", "duration", "platform"}
+OPTION_VALUES = {
+    "style": {"口播", "剧情", "种草"},
+    "duration": {"15s", "30s", "60s"},
+    "platform": {"抖音", "小红书", "视频号"},
+    "breakdown_tool": BREAKDOWN_TOOLS,
+}
+OPTION_NAMES = set(OPTION_VALUES)
 FOCUS_TARGETS = {
     "topic", "selling_points", "generate_script", "breakdown_url",
     "analyze_breakdown", "generate_video", "generate_audio", "export_script",
@@ -86,14 +93,14 @@ SYSTEM_PROMPT = """你是黄雀网站“编导”页面里的顾客引导 Agent�
 {"content":"给顾客的回答","stage":"understand|script|breakdown|assets|video","actions":[],"warnings":[]}
 允许的 actions 只有：
 1. fill_field：预填 topic、selling_points 或 breakdown_url；
-2. choose_option：选择 style、duration 或 platform；
+2. choose_option：选择 style、duration、platform 或 breakdown_tool；style 只能是口播/剧情/种草，duration 只能是 15s/30s/60s，platform 只能是抖音/小红书/视频号，breakdown_tool 只能是 scenes/reverse_prompt；
 3. switch_mode：切换 write、script_to_video 或 breakdown；
 4. focus：聚焦页面白名单控件；
 5. navigate：跳到黄雀站内 ip12、assets、audio、video 或 canvas 页面。
 最多 6 个动作。actions 会在回复后由页面自动执行，所以只有顾客明确要求或意图唯一明确时才返回动作；仅咨询怎么使用时只回答，不要擅自改页面。
 可以自动预填、选择、切换模式、聚焦控件或跳转黄雀站内页面。navigate 必须是唯一动作，不得与填充、选择、切换或聚焦同时返回，避免离开页面时丢失刚填的内容。
 不得提交生成任务、扣点、上传、删除、发布、访问外部链接或执行命令；需要这些操作时只聚焦到原页面确认按钮并说明由顾客确认。
-顾客意图不清楚时先问一个最关键的问题，actions 返回空数组。若当前已有脚本，优先解释如何修改、转配音、转视频或导出；若是拆解模式，优先解释合法公开链接与拆解结果。"""
+顾客意图不清楚时先问一个最关键的问题，actions 返回空数组。若当前已有脚本，优先解释如何修改、转配音、转视频或导出；若是拆解模式，根据 page_context.breakdown_tool 和 has_reverse_prompt 区分分镜拆解与提示词反推，再解释合法公开链接与当前结果。"""
 
 
 def _text(value, limit, field):
@@ -112,7 +119,8 @@ def _page_context(value):
     allowed = {
         "page", "path", "mode", "topic", "selling_points", "style",
         "duration", "platform", "has_script", "scene_count", "has_breakdown",
-        "breakdown_scene_count", "breakdown_url", "active_job_status",
+        "breakdown_scene_count", "breakdown_url", "breakdown_tool",
+        "has_reverse_prompt", "active_job_status",
     }
     if not isinstance(value, dict) or set(value) - allowed:
         raise ValueError("页面上下文格式无效")
@@ -123,9 +131,15 @@ def _page_context(value):
     mode = _text(value.get("mode"), 16, "编导模式")
     if mode not in MODES:
         raise ValueError("编导模式无效")
+    breakdown_tool = _text(value.get("breakdown_tool") or "scenes", 24, "拆解工具")
+    if breakdown_tool not in BREAKDOWN_TOOLS:
+        raise ValueError("拆解工具无效")
     for name in ("has_script", "has_breakdown"):
         if not isinstance(value.get(name), bool):
             raise ValueError("页面状态格式无效")
+    has_reverse_prompt = value.get("has_reverse_prompt", False)
+    if not isinstance(has_reverse_prompt, bool):
+        raise ValueError("反推结果状态格式无效")
     counts = {}
     for name in ("scene_count", "breakdown_scene_count"):
         count = value.get(name)
@@ -146,6 +160,8 @@ def _page_context(value):
         "has_breakdown": value["has_breakdown"],
         "breakdown_scene_count": counts["breakdown_scene_count"],
         "breakdown_url": _text(value.get("breakdown_url"), 2000, "拆解链接"),
+        "breakdown_tool": breakdown_tool,
+        "has_reverse_prompt": has_reverse_prompt,
         "active_job_status": status,
     }
 
@@ -282,10 +298,11 @@ def normalize_model_result(raw, request):
         elif kind == "choose_option":
             if set(action) != {"type", "field", "value", "label"} or action.get("field") not in OPTION_NAMES:
                 raise ValueError("选项动作无效")
-            item.update(field=action["field"], value=_text(action.get("value"), 40, "选项值"),
+            value = _text(action.get("value"), 40, "选项值")
+            if value not in OPTION_VALUES[action["field"]]:
+                raise ValueError("选项值无效")
+            item.update(field=action["field"], value=value,
                         label=_text(action.get("label"), 80, "动作名称") or "选择选项")
-            if not item["value"]:
-                raise ValueError("选项值不能为空")
         elif kind == "switch_mode":
             if set(action) != {"type", "mode", "label"} or action.get("mode") not in MODES:
                 raise ValueError("切换模式动作无效")

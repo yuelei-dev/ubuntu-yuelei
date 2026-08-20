@@ -37,9 +37,13 @@
     var requestedMode=String(activeMode&&activeMode.getAttribute('data-mode')||'');
     var mode=/^(write|script_to_video|breakdown)$/.test(requestedMode)
       ?requestedMode:(isVisible(breakdown)?'breakdown':'write');
+    var activeBreakdownTool=doc.querySelector('#bdToolTabs [data-bd-tool].on');
+    var requestedBreakdownTool=String(activeBreakdownTool&&activeBreakdownTool.getAttribute('data-bd-tool')||'');
+    var breakdownTool=/^(scenes|reverse_prompt)$/.test(requestedBreakdownTool)?requestedBreakdownTool:'scenes';
+    var hasReversePrompt=breakdownTool==='reverse_prompt'&&!!text(doc.getElementById('bdReversePromptText'));
     var sceneCount=countScenes(doc,'#scScenes');
-    var breakdownCount=countScenes(doc,'#scScenes');
-    var meta=doc.getElementById('scMeta'),analysis=doc.getElementById('bdAnalysis');
+    var breakdownCount=breakdownTool==='scenes'?countScenes(doc,'#scScenes'):0;
+    var meta=doc.getElementById('scMeta');
     var busy=['scGen','bdGen','scGenVideo','scGenAudio','bdImageReverse','bdVideoReverse']
       .some(function(id){var node=doc.getElementById(id);return !!(node&&node.disabled);});
     return {
@@ -50,9 +54,10 @@
       duration:activeText(doc,'#segDur').slice(0,20),
       platform:activeText(doc,'#platRow').slice(0,40),
       has_script:mode!=='breakdown'&&isVisible(meta)&&sceneCount>0,scene_count:mode!=='breakdown'?sceneCount:0,
-      has_breakdown:mode==='breakdown'&&isVisible(analysis)&&breakdownCount>0,
+      has_breakdown:mode==='breakdown'&&(breakdownCount>0||hasReversePrompt),
       breakdown_scene_count:mode==='breakdown'?breakdownCount:0,
       breakdown_url:text(doc.getElementById('bdUrl')).slice(0,2000),
+      breakdown_tool:breakdownTool,has_reverse_prompt:mode==='breakdown'&&hasReversePrompt,
       active_job_status:busy?'running':'idle'
     };
   }
@@ -97,7 +102,7 @@
     var nodes=Array.prototype.slice.call(doc.querySelectorAll(selector));
     function parts(node){
       var current=text(node).replace(/\s+/g,'').toLowerCase();
-      var dataValue=String(node.getAttribute&&node.getAttribute('data-mode')||'').toLowerCase();
+      var dataValue=String(node.getAttribute&&(node.getAttribute('data-mode')||node.getAttribute('data-bd-tool'))||'').toLowerCase();
       return {node:node,current:current,dataValue:dataValue};
     }
     for(var i=0;i<nodes.length;i++){
@@ -123,7 +128,7 @@
       dispatchValue(field,action.value); return '已填入'+(action.label||'页面字段');
     }
     if(action.type==='choose_option'){
-      var selectors={style:'#segStyle .sc-opt',duration:'#segDur .sc-opt',platform:'#platRow .sc-chip'};
+      var selectors={style:'#segStyle .sc-opt',duration:'#segDur .sc-opt',platform:'#platRow .sc-chip',breakdown_tool:'#bdToolTabs [data-bd-tool]'};
       if(!selectors[action.field]) throw new Error('页面选项无效');
       choose(doc,selectors[action.field],action.value); return '已选择 '+action.value;
     }

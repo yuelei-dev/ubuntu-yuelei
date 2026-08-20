@@ -14,8 +14,9 @@ function node(value, options) {
   };
 }
 
-function fixture(mode) {
+function fixture(mode, breakdownTool) {
   mode = mode || 'write';
+  breakdownTool = breakdownTool || 'scenes';
   const modeNodes = [
     node('AI写脚本', { attributes: {'data-mode': 'write'} }),
     node('文案成片', { attributes: {'data-mode': 'script_to_video'} }),
@@ -27,9 +28,14 @@ function fixture(mode) {
     bdUrl: node(''), scGen: node(''), bdGen: node(''), scGenVideo: node(''),
     scGenAudio: node(''), scExport: node(''),
   };
+  const breakdownToolNodes = [
+    node('分解拆解', { attributes: {'data-bd-tool': 'scenes'} }),
+    node('提示词反推', { attributes: {'data-bd-tool': 'reverse_prompt'} }),
+  ];
   const options = {
     '#segStyle .on': node('口播'), '#segDur .on': node('30s'), '#platRow .on': node('抖音'),
     '#scModeTabs [data-mode].on': modeNodes.filter((item) => item.getAttribute('data-mode') === mode)[0],
+    '#bdToolTabs [data-bd-tool].on': breakdownToolNodes.filter((item) => item.getAttribute('data-bd-tool') === breakdownTool)[0],
   };
   const lists = {
     '#scScenes .sc-card': [node('scene1'), node('scene2'), node('scene3')],
@@ -37,6 +43,7 @@ function fixture(mode) {
     '#segDur .sc-opt': [node('15s'), options['#segDur .on'], node('60s')],
     '#platRow .sc-chip': [options['#platRow .on'], node('小红书'), node('视频号')],
     '#scModeTabs [data-mode]': modeNodes,
+    '#bdToolTabs [data-bd-tool]': breakdownToolNodes,
   };
   const doc = {
     defaultView: { Event: function Event() {} },
@@ -55,6 +62,8 @@ function fixture(mode) {
   assert.equal(context.topic, '夏日护肤');
   assert.equal(context.scene_count, 3);
   assert.equal(context.has_script, true);
+  assert.equal(context.breakdown_tool, 'scenes');
+  assert.equal(context.has_reverse_prompt, false);
   assert.match(agent.createPageSnapshot(doc).page_revision, /^[a-f0-9]{8}$/);
 }
 {
@@ -65,6 +74,21 @@ function fixture(mode) {
   assert.equal(context.scene_count, 0);
   assert.equal(context.has_script, false);
   assert.equal(context.active_job_status, 'running');
+}
+{
+  const { doc } = fixture('breakdown', 'scenes');
+  const context = agent.createPageContext(doc);
+  assert.equal(context.has_breakdown, true);
+  assert.equal(context.breakdown_scene_count, 3);
+}
+{
+  const { doc, nodes } = fixture('breakdown', 'reverse_prompt');
+  nodes.bdReversePromptText = node('电影感产品特写提示词');
+  const context = agent.createPageContext(doc);
+  assert.equal(context.breakdown_tool, 'reverse_prompt');
+  assert.equal(context.has_reverse_prompt, true);
+  assert.equal(context.has_breakdown, true);
+  assert.equal(context.breakdown_scene_count, 0);
 }
 {
   const { doc } = fixture('script_to_video');
@@ -90,6 +114,8 @@ function fixture(mode) {
   agent.applyAction({type:'choose_option',field:'style',value:'口',label:'模糊选口播'}, doc, {});
   assert.equal(lists['#segStyle .sc-opt'][0].clicked, true);
   assert.equal(lists['#segStyle .sc-opt'][3].clicked, false);
+  agent.applyAction({type:'choose_option',field:'breakdown_tool',value:'reverse_prompt',label:'切换提示词反推'}, doc, {});
+  assert.equal(lists['#bdToolTabs [data-bd-tool]'][1].clicked, true);
   assert.equal(nodes.scGenVideo.focused, true);
   const win = { location: { href: '' } };
   agent.applyAction({type:'navigate',target:'assets',label:'去素材库'}, doc, win);

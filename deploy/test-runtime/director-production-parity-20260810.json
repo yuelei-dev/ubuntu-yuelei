@@ -76,8 +76,8 @@
       "production_blob": "873118b4bfa49f3a2588601d461cd62475841188",
       "preimage_blob": "06715a917bf934f02d802fafff91a98949e92a9d",
       "preimage_sha256": "cb425ccfb266e4d1cd05d4413bcab0f6c2e1f772256746862c266f03f569bfc0",
-      "postimage_blob": "23fb8ea0fc71f925ecb5e5ac144cf3b9bdfde144",
-      "postimage_sha256": "2b86932f2bf4f864cb26c3afe3c762de76a9d7bee489dab1a2e7775dc7817f4f"
+      "postimage_blob": "0506f3b8414020e967a905ebaeb6c22631fe0a03",
+      "postimage_sha256": "bbae441c40ddcbe890767e954b1f2e123e2d76d6f0d50e6a1e52e50e0e5a3a91"
     }
   ],
   "verified_unchanged_dependencies": [
