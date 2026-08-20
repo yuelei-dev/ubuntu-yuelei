@@ -1,6 +1,10 @@
+import hashlib
 import json
 import pathlib
+import sqlite3
 import sys
+import tempfile
+from contextlib import closing
 import unittest
 from unittest import mock
 
@@ -62,6 +66,57 @@ class DirectorAgentTests(unittest.TestCase):
         }]))
         self.assertEqual(clean["history"][0]["role"], "user")
 
+    def test_submission_limit_is_account_scoped_and_durable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "jobs.db"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(
+                    "CREATE TABLE jobs(username TEXT, kind TEXT, created_at INTEGER)"
+                )
+                connection.commit()
+            now = 2_000_000_000
+
+            def db():
+                return sqlite3.connect(path)
+
+            with closing(sqlite3.connect(path)) as connection:
+                connection.executemany(
+                    "INSERT INTO jobs(username,kind,created_at) VALUES(?,?,?)",
+                    [
+                        ("alice", "director_agent", now - 10),
+                        ("alice", "director_agent", now - 20),
+                        ("bob", "director_agent", now - 5),
+                        ("alice", "copy", now - 5),
+                    ],
+                )
+                connection.commit()
+            with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 2), \
+                    mock.patch.object(director_agent, "DAILY_LIMIT", 99):
+                limited = director_agent.submission_limit(db, "alice", now=now)
+                self.assertEqual(limited["code"], "director_agent_rate_limited")
+                self.assertEqual(limited["retry_after_ms"], 60000)
+                self.assertIsNone(
+                    director_agent.submission_limit(db, "bob", now=now)
+                )
+
+            day_start, _ = director_agent._local_day_bounds(now)
+            later = day_start + 3600
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute("DELETE FROM jobs")
+                connection.executemany(
+                    "INSERT INTO jobs(username,kind,created_at) VALUES(?,?,?)",
+                    [
+                        ("alice", "director_agent", day_start + 10),
+                        ("alice", "director_agent", day_start + 20),
+                    ],
+                )
+                connection.commit()
+            with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 99), \
+                    mock.patch.object(director_agent, "DAILY_LIMIT", 2):
+                limited = director_agent.submission_limit(db, "alice", now=later)
+                self.assertEqual(limited["code"], "director_agent_daily_limit")
+                self.assertGreater(limited["retry_after_ms"], 0)
+
     def test_normalize_only_allows_whitelisted_confirmed_actions(self):
         request = director_agent.validate_payload(payload())
         raw = json.dumps({
@@ -113,15 +168,31 @@ class DirectorAgentTests(unittest.TestCase):
                 "type": "message", "content": [{"type": "output_text", "text": output}]
             }]}
 
-        request = director_agent.validate_payload(payload())
+        request = dict(
+            director_agent.validate_payload(payload()), _username="customer-a", _job_id=42
+        )
         with mock.patch.object(director_agent, "_post", side_effect=fake_post):
             result = director_agent.gen_director_agent(request)
         self.assertEqual(result["content"], "先填写选题。")
         self.assertEqual(captured["path"], "/v1/responses")
         self.assertFalse(captured["body"]["store"])
-        self.assertEqual(len(captured["body"]["safety_identifier"]), 32)
+        self.assertEqual(
+            captured["body"]["safety_identifier"],
+            hashlib.sha256(b"director-user:customer-a").hexdigest()[:32],
+        )
         self.assertTrue(captured["body"]["text"]["format"]["strict"])
         self.assertNotIn("API Key", captured["body"]["safety_identifier"])
+
+    def test_server_and_ci_wiring_are_fail_closed(self):
+        core = (ROOT / "server" / "content_domains" / "core.py").read_text("utf-8")
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
+        self.assertIn("director_agent_domain.submission_limit", core)
+        self.assertIn(
+            '"director_agent_enabled": bool(feature_flags.is_enabled("director_agent"))',
+            core,
+        )
+        self.assertIn('"script_to_video", "director_agent"}', core)
+        self.assertIn("node tests/test_director_agent.js", workflow)
 
 
 if __name__ == "__main__":

@@ -79,13 +79,13 @@
       "repository_path": "server/content_domains/core.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
       "classification": "runtime_code",
-      "source_blob": "82d242a0daf022d1e04047ad02989f922aa3f241",
-      "source_sha256": "f70ef99f08fb5a31062411ba6a8b2b25214c323f6d6bc436a318cd5f6cd83c2f",
+      "source_blob": "670c2801a4c5568a41197c4e11e89dec8587299a",
+      "source_sha256": "8022c23b2aca616e456c7b16d40955adfdf0606b23622d52b00a5e4f477f9d5b",
       "target_preimage_state": "file",
       "target_preimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
       "target_preimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
-      "expected_postimage_blob": "82d242a0daf022d1e04047ad02989f922aa3f241",
-      "expected_postimage_sha256": "f70ef99f08fb5a31062411ba6a8b2b25214c323f6d6bc436a318cd5f6cd83c2f"
+      "expected_postimage_blob": "670c2801a4c5568a41197c4e11e89dec8587299a",
+      "expected_postimage_sha256": "8022c23b2aca616e456c7b16d40955adfdf0606b23622d52b00a5e4f477f9d5b"
     },
     {
       "repository_path": "server/content_domains/digital_human_oneclick.py",

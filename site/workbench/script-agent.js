@@ -1,7 +1,7 @@
 (function(root,factory){
   var api=factory();
   if(typeof module==='object'&&module.exports) module.exports=api;
-  if(root){ root.HQDirectorAgent=api; if(root.document) api.mount(root.document,root); }
+  if(root){ root.HQDirectorAgent=api; if(root.document) api.bootstrap(root.document,root); }
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
   'use strict';
   var STORAGE_KEY='hq_director_agent_v1';
@@ -173,6 +173,13 @@
       });
     });
   }
+  function bootstrap(doc,win,mounter){
+    if(!doc||!doc.getElementById('scTopic')||!win||typeof win.fetch!=='function') return Promise.resolve(null);
+    return jsonFetch(win,'/api/gen/health').then(function(health){
+      if(!health||health.director_agent_enabled!==true) return null;
+      return (mounter||mount)(doc,win);
+    }).catch(function(){return null;});
+  }
   function pollJob(win,jobId,onProgress){
     var started=Date.now(),transientFailures=0;
     return new Promise(function(resolve,reject){
@@ -280,5 +287,6 @@
     render(); return {state:state,submit:submit,setOpen:setOpen};
   }
   return {digest:digest,createPageContext:createPageContext,createPageSnapshot:createPageSnapshot,
-    buildPayload:buildPayload,validatePlan:validatePlan,applyAction:applyAction,pollJob:pollJob,mount:mount,routes:ROUTES};
+    buildPayload:buildPayload,validatePlan:validatePlan,applyAction:applyAction,pollJob:pollJob,
+    bootstrap:bootstrap,mount:mount,routes:ROUTES};
 });

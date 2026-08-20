@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import time
 
 from .core import _post
 
@@ -19,6 +20,18 @@ MODEL = os.environ.get("DIRECTOR_AGENT_MODEL", "gpt-5.6-luna").strip() or "gpt-5
 REASONING_EFFORT = os.environ.get("DIRECTOR_AGENT_REASONING_EFFORT", "low").strip() or "low"
 API_BASE = os.environ.get("DIRECTOR_AGENT_API_BASE", "").strip() or None
 API_KEY = os.environ.get("DIRECTOR_AGENT_API_KEY", "").strip() or None
+
+
+def _env_positive_int(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)) or default)
+    except Exception:
+        value = default
+    return max(1, value)
+
+
+RATE_LIMIT_PER_MINUTE = _env_positive_int("DIRECTOR_AGENT_RATE_LIMIT_PER_MINUTE", 12)
+DAILY_LIMIT = _env_positive_int("DIRECTOR_AGENT_DAILY_LIMIT", 120)
 
 MODES = {"write", "script_to_video", "breakdown"}
 BREAKDOWN_TOOLS = {"scenes", "reverse_prompt"}
@@ -113,6 +126,55 @@ def _text(value, limit, field):
 def _contains_media(value):
     raw = json.dumps(value, ensure_ascii=False).lower()
     return any(marker in raw for marker in MEDIA_MARKERS) or bool(BASE64_RE.search(raw))
+
+
+def _local_day_bounds(now):
+    stamp = time.localtime(now)
+    start = int(time.mktime((stamp.tm_year, stamp.tm_mon, stamp.tm_mday,
+                             0, 0, 0, 0, 0, -1)))
+    next_start = int(time.mktime((stamp.tm_year, stamp.tm_mon, stamp.tm_mday + 1,
+                                  0, 0, 0, 0, 0, -1)))
+    return start, next_start
+
+
+def submission_limit(db_factory, username, now=None):
+    """Return a public 429 body when an authenticated account exceeds its quota."""
+    username = _text(username, 160, "认证账号")
+    if not username:
+        raise ValueError("编导助手缺少认证账号")
+    now = int(time.time() if now is None else now)
+    day_start, next_day_start = _local_day_bounds(now)
+    connection = db_factory()
+    try:
+        minute_row = connection.execute(
+            """SELECT COUNT(*) FROM jobs
+               WHERE username=? AND kind='director_agent' AND created_at>=?""",
+            (username, now - 60),
+        ).fetchone()
+        daily_row = connection.execute(
+            """SELECT COUNT(*) FROM jobs
+               WHERE username=? AND kind='director_agent' AND created_at>=?""",
+            (username, day_start),
+        ).fetchone()
+    finally:
+        connection.close()
+    minute_count = int(minute_row[0] if minute_row else 0)
+    daily_count = int(daily_row[0] if daily_row else 0)
+    if minute_count >= RATE_LIMIT_PER_MINUTE:
+        return {
+            "detail": "编导助手回复过于频繁，请一分钟后再试",
+            "code": "director_agent_rate_limited",
+            "retry_after_ms": 60000,
+            "limit": RATE_LIMIT_PER_MINUTE,
+        }
+    if daily_count >= DAILY_LIMIT:
+        return {
+            "detail": "今天的编导助手次数已用完，请明天继续",
+            "code": "director_agent_daily_limit",
+            "retry_after_ms": max(1000, (next_day_start - now) * 1000),
+            "limit": DAILY_LIMIT,
+        }
+    return None
 
 
 def _page_context(value):
@@ -234,7 +296,7 @@ def _responses_chat(request):
         "max_output_tokens": 4000,
         "store": False,
         "safety_identifier": hashlib.sha256(
-            ("director:" + request["session_id"]).encode("utf-8")
+            ("director-user:" + request["_username"]).encode("utf-8")
         ).hexdigest()[:32],
     }
     response = _post(
@@ -336,7 +398,13 @@ def normalize_model_result(raw, request):
 
 
 def gen_director_agent(payload):
-    request = validate_payload(payload)
+    internal = dict(payload or {})
+    username = _text(internal.pop("_username", ""), 160, "认证账号")
+    internal.pop("_job_id", None)
+    if not username:
+        raise ValueError("编导助手缺少认证账号")
+    request = validate_payload(internal)
+    request["_username"] = username
     return normalize_model_result(_responses_chat(request), request)
 
 

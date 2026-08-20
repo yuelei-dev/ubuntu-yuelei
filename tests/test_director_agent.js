@@ -132,9 +132,35 @@ function fixture(mode, breakdownTool) {
 
 const source = require('fs').readFileSync(require('path').join(__dirname, '../site/workbench/script-agent.js'), 'utf8');
 assert.ok(source.includes('currentPlan.actions.map(function(action){return applyAction(action,doc,win);}'));
+assert.ok(source.includes('health.director_agent_enabled!==true'));
 assert.ok(source.includes('涉及扣点或生成时，仍需要你点击原页面按钮确认'));
 
 (async function(){
+  let mounted = 0;
+  const healthDoc = {
+    getElementById(id){ return id === 'scTopic' ? {} : null; },
+  };
+  function healthResponse(data, ok) {
+    return {
+      ok: ok !== false, status: ok === false ? 503 : 200,
+      text(){ return Promise.resolve(JSON.stringify(data)); },
+    };
+  }
+  const disabled = await agent.bootstrap(healthDoc, {
+    fetch(){ return Promise.resolve(healthResponse({director_agent_enabled:false})); },
+  }, function(){ mounted += 1; });
+  assert.equal(disabled, null);
+  assert.equal(mounted, 0);
+  const enabled = await agent.bootstrap(healthDoc, {
+    fetch(){ return Promise.resolve(healthResponse({director_agent_enabled:true})); },
+  }, function(){ mounted += 1; return 'mounted'; });
+  assert.equal(enabled, 'mounted');
+  assert.equal(mounted, 1);
+  const unavailable = await agent.bootstrap(healthDoc, {
+    fetch(){ return Promise.resolve(healthResponse({detail:'maintenance'}, false)); },
+  }, function(){ mounted += 1; });
+  assert.equal(unavailable, null);
+  assert.equal(mounted, 1);
   let calls = 0;
   const win = {fetch(){
     calls += 1;

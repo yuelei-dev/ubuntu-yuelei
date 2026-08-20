@@ -113,6 +113,9 @@ jobs:
       - name: 测试编导页字段保留与上传上限
         run: node tests/test_script_director_fields.js
 
+      - name: 测试编导顾客助手
+        run: node tests/test_director_agent.js
+
       - name: 测试画布 API 与短剧工作区
         run: |
           node tests/test_short_drama_center.js

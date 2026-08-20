@@ -1461,7 +1461,7 @@ def run_job(job_id):
         # 抢到 running 才开心跳（前面几个 return 都还没认领，不该有心跳）。
         # 有了它，reaper 的「没心跳」才真的等于「worker 死了」—— 而不是「正在轮询/烧字幕」。
         stop_heartbeat = _start_job_heartbeat(job_id)
-        if kind in {"audio", "short_drama_sound_effect", "video", "tryon", "xiaole_video", "sora_video", "leads", "cinematic", "avatar", "breakdown", "short_drama_preview", "short_drama_final", "script_to_video"}:
+        if kind in {"audio", "short_drama_sound_effect", "video", "tryon", "xiaole_video", "sora_video", "leads", "cinematic", "avatar", "breakdown", "short_drama_preview", "short_drama_final", "script_to_video", "director_agent"}:
             payload["_username"] = username   # 少一个 kind，handler 就拿不到用户名/job_id：
             payload["_job_id"] = job_id       # gen_avatar 记不了形象归属，gen_cinematic 查不到用户的形象
         result = HANDLERS[kind](payload)
@@ -3313,6 +3313,10 @@ class H(BaseHTTPRequestHandler):
                         _idempotency_abort(user["username"], p, idem_key); _short_drama_domain()._http_error(self, e, operation_terminal=True); return
                 limit_hit = (None if (still_attempt or durable_attempt) else
                              _user_video_submit_limit(kind, body, user["username"], cost))
+                if not limit_hit and kind == "director_agent":
+                    from . import director_agent as director_agent_domain
+                    limit_hit = director_agent_domain.submission_limit(
+                        jdb, user["username"])
                 if limit_hit:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     if is_still_route: limit_hit["operation_terminal"] = True
@@ -4027,6 +4031,7 @@ class H(BaseHTTPRequestHandler):
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_sora_video": MAX_USER_ACTIVE_SORA_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
                                     "sora_video_enabled": bool(video_domain.sora_video_is_open() and OPENAI_KEY and feature_flags.is_enabled("sora_video")),
                                     "omni_video_enabled": bool(video_domain.omni_video_is_open() and feature_flags.is_enabled("omni_video")), "seedance_video_enabled": bool(video_domain.seedance_video_is_open() and feature_flags.is_enabled("seedance_video")), "minimax_h3_video_enabled": bool(video_domain.minimax_h3_video_is_open() and feature_flags.is_enabled("minimax_h3_video")), "reverse_remake_video_offer": (reverse_remake_offer := video_domain.reverse_remake_video_offer(feature_flags, points_domain.cost_of)), "reverse_remake_video_channel": reverse_remake_offer["channel"], "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(), "seedance_upscale_enabled": bool(video_domain.seedance_upscale_is_open() and feature_flags.is_enabled("seedance_video")),
+                                    "director_agent_enabled": bool(feature_flags.is_enabled("director_agent")),
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": pricing.get_price("video.talking.block"), "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
     def do_PUT(self):
