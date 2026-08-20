@@ -35,6 +35,9 @@ class DirectorAgentTests(unittest.TestCase):
         cleaned = director_agent.validate_payload(payload())
         self.assertEqual(cleaned["source_page"], "script")
         self.assertEqual(cleaned["quoted_cost"], 0)
+        text_video = payload()
+        text_video["page_context"] = dict(text_video["page_context"], mode="script_to_video")
+        self.assertEqual(director_agent.validate_payload(text_video)["page_context"]["mode"], "script_to_video")
         with self.assertRaisesRegex(ValueError, "免费"):
             director_agent.validate_payload(payload(quoted_cost=1))
         with self.assertRaisesRegex(ValueError, "不属于黄雀编导"):
@@ -67,6 +70,16 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertEqual(result["type"], "director_agent")
         self.assertFalse(result["plan"]["requires_confirmation"])
         self.assertEqual(result["plan"]["actions"][0]["id"], "action_1")
+        mixed_navigation = json.dumps({
+            "content": "已填好卖点，去素材库。", "stage": "assets",
+            "actions": [
+                {"type": "fill_field", "field": "selling_points", "value": "三秒吸收", "label": "填入卖点"},
+                {"type": "navigate", "target": "assets", "label": "去素材库"},
+            ], "warnings": [],
+        }, ensure_ascii=False)
+        with self.assertRaisesRegex(ValueError, "独立动作"):
+            director_agent.normalize_model_result(mixed_navigation, request)
+
         bad = json.dumps({
             "content": "已完成", "stage": "script",
             "actions": [{"type": "delete", "label": "删除"}], "warnings": [],

@@ -14,22 +14,29 @@ function node(value, options) {
   };
 }
 
-function fixture() {
+function fixture(mode) {
+  mode = mode || 'write';
+  const modeNodes = [
+    node('AI写脚本', { attributes: {'data-mode': 'write'} }),
+    node('文案成片', { attributes: {'data-mode': 'script_to_video'} }),
+    node('拆解视频', { attributes: {'data-mode': 'breakdown'} }),
+  ];
   const nodes = {
-    panelBreakdown: node('', { display: 'none' }), scTopic: node('夏日护肤'),
+    panelBreakdown: node('', { display: mode === 'breakdown' ? '' : 'none' }), scTopic: node('夏日护肤'),
     scSell: node('清爽不黏腻'), scMeta: node('meta'), bdAnalysis: node('', { display: 'none' }),
     bdUrl: node(''), scGen: node(''), bdGen: node(''), scGenVideo: node(''),
     scGenAudio: node(''), scExport: node(''),
   };
   const options = {
     '#segStyle .on': node('口播'), '#segDur .on': node('30s'), '#platRow .on': node('抖音'),
+    '#scModeTabs [data-mode].on': modeNodes.filter((item) => item.getAttribute('data-mode') === mode)[0],
   };
   const lists = {
     '#scScenes .sc-card': [node('scene1'), node('scene2'), node('scene3')],
-    '#segStyle .sc-opt': [options['#segStyle .on'], node('剧情'), node('种草')],
+    '#segStyle .sc-opt': [options['#segStyle .on'], node('剧情'), node('种草'), node('口播技巧')],
     '#segDur .sc-opt': [node('15s'), options['#segDur .on'], node('60s')],
     '#platRow .sc-chip': [options['#platRow .on'], node('小红书'), node('视频号')],
-    '#scModeTabs [data-mode]': [node('AI写脚本', { attributes: {'data-mode': 'write'} }), node('拆解视频', { attributes: {'data-mode': 'breakdown'} })],
+    '#scModeTabs [data-mode]': modeNodes,
   };
   const doc = {
     defaultView: { Event: function Event() {} },
@@ -50,6 +57,14 @@ function fixture() {
   assert.equal(context.has_script, true);
   assert.match(agent.createPageSnapshot(doc).page_revision, /^[a-f0-9]{8}$/);
 }
+{
+  const { doc } = fixture('script_to_video');
+  const context = agent.createPageContext(doc);
+  assert.equal(context.mode, 'script_to_video');
+  assert.equal(context.has_script, true);
+  assert.equal(context.scene_count, 3);
+}
+
 
 {
   const { doc, nodes, lists } = fixture();
@@ -58,6 +73,14 @@ function fixture() {
   agent.applyAction({type:'choose_option',field:'style',value:'剧情',label:'选剧情'}, doc, {});
   assert.equal(lists['#segStyle .sc-opt'][1].clicked, true);
   agent.applyAction({type:'focus',target:'generate_video',label:'看视频按钮'}, doc, {});
+  agent.applyAction({type:'choose_option',field:'style',value:'口播',label:'选口播'}, doc, {});
+  assert.equal(lists['#segStyle .sc-opt'][0].clicked, true);
+  assert.equal(lists['#segStyle .sc-opt'][3].clicked, false);
+  lists['#segStyle .sc-opt'][0].clicked = false;
+  lists['#segStyle .sc-opt'][3].clicked = false;
+  agent.applyAction({type:'choose_option',field:'style',value:'口',label:'模糊选口播'}, doc, {});
+  assert.equal(lists['#segStyle .sc-opt'][0].clicked, true);
+  assert.equal(lists['#segStyle .sc-opt'][3].clicked, false);
   assert.equal(nodes.scGenVideo.focused, true);
   const win = { location: { href: '' } };
   agent.applyAction({type:'navigate',target:'assets',label:'去素材库'}, doc, win);

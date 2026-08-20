@@ -29,7 +29,10 @@
   function countScenes(doc,selector){ return doc.querySelectorAll(selector+' .sc-card').length; }
   function createPageContext(doc){
     var breakdown=doc.getElementById('panelBreakdown');
-    var mode=isVisible(breakdown)?'breakdown':'write';
+    var activeMode=doc.querySelector('#scModeTabs [data-mode].on');
+    var requestedMode=String(activeMode&&activeMode.getAttribute('data-mode')||'');
+    var mode=/^(write|script_to_video|breakdown)$/.test(requestedMode)
+      ?requestedMode:(isVisible(breakdown)?'breakdown':'write');
     var sceneCount=countScenes(doc,'#scScenes');
     var breakdownCount=countScenes(doc,'#scScenes');
     var meta=doc.getElementById('scMeta'),analysis=doc.getElementById('bdAnalysis');
@@ -41,7 +44,7 @@
       style:activeText(doc,'#segStyle').slice(0,40),
       duration:activeText(doc,'#segDur').slice(0,20),
       platform:activeText(doc,'#platRow').slice(0,40),
-      has_script:mode==='write'&&isVisible(meta)&&sceneCount>0,scene_count:mode==='write'?sceneCount:0,
+      has_script:mode!=='breakdown'&&isVisible(meta)&&sceneCount>0,scene_count:mode!=='breakdown'?sceneCount:0,
       has_breakdown:mode==='breakdown'&&isVisible(analysis)&&breakdownCount>0,
       breakdown_scene_count:mode==='breakdown'?breakdownCount:0,
       breakdown_url:text(doc.getElementById('bdUrl')).slice(0,2000),
@@ -85,11 +88,23 @@
   }
   function choose(doc,selector,value){
     var wanted=String(value||'').replace(/\s+/g,'').toLowerCase(),found=null;
-    Array.prototype.forEach.call(doc.querySelectorAll(selector),function(node){
+    if(!wanted) throw new Error('页面选项不能为空');
+    var nodes=Array.prototype.slice.call(doc.querySelectorAll(selector));
+    function parts(node){
       var current=text(node).replace(/\s+/g,'').toLowerCase();
       var dataValue=String(node.getAttribute&&node.getAttribute('data-mode')||'').toLowerCase();
-      if(dataValue===wanted||current===wanted||current.indexOf(wanted)>=0||wanted.indexOf(current)>=0) found=node;
-    });
+      return {node:node,current:current,dataValue:dataValue};
+    }
+    for(var i=0;i<nodes.length;i++){
+      var exact=parts(nodes[i]);
+      if(exact.dataValue===wanted||exact.current===wanted){ found=exact.node; break; }
+    }
+    for(var j=0;!found&&j<nodes.length;j++){
+      var partial=parts(nodes[j]);
+      if(partial.current&&(partial.current.indexOf(wanted)>=0||wanted.indexOf(partial.current)>=0)){
+        found=partial.node; break;
+      }
+    }
     if(!found) throw new Error('页面上没有找到“'+value+'”选项');
     if(typeof found.click==='function') found.click();
     return found;

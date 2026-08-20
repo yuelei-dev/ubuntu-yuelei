@@ -20,7 +20,7 @@ REASONING_EFFORT = os.environ.get("DIRECTOR_AGENT_REASONING_EFFORT", "low").stri
 API_BASE = os.environ.get("DIRECTOR_AGENT_API_BASE", "").strip() or None
 API_KEY = os.environ.get("DIRECTOR_AGENT_API_KEY", "").strip() or None
 
-MODES = {"write", "breakdown"}
+MODES = {"write", "script_to_video", "breakdown"}
 STAGES = {"understand", "script", "breakdown", "assets", "video"}
 FIELD_NAMES = {"topic", "selling_points", "breakdown_url"}
 OPTION_NAMES = {"style", "duration", "platform"}
@@ -87,11 +87,11 @@ SYSTEM_PROMPT = """你是黄雀网站“编导”页面里的顾客引导 Agent�
 允许的 actions 只有：
 1. fill_field：预填 topic、selling_points 或 breakdown_url；
 2. choose_option：选择 style、duration 或 platform；
-3. switch_mode：切换 write 或 breakdown；
+3. switch_mode：切换 write、script_to_video 或 breakdown；
 4. focus：聚焦页面白名单控件；
 5. navigate：跳到黄雀站内 ip12、assets、audio、video 或 canvas 页面。
 最多 6 个动作。actions 会在回复后由页面自动执行，所以只有顾客明确要求或意图唯一明确时才返回动作；仅咨询怎么使用时只回答，不要擅自改页面。
-可以自动预填、选择、切换模式、聚焦控件或跳转黄雀站内页面。若既要填充又要跳转，先填充，navigate 必须放在最后。
+可以自动预填、选择、切换模式、聚焦控件或跳转黄雀站内页面。navigate 必须是唯一动作，不得与填充、选择、切换或聚焦同时返回，避免离开页面时丢失刚填的内容。
 不得提交生成任务、扣点、上传、删除、发布、访问外部链接或执行命令；需要这些操作时只聚焦到原页面确认按钮并说明由顾客确认。
 顾客意图不清楚时先问一个最关键的问题，actions 返回空数组。若当前已有脚本，优先解释如何修改、转配音、转视频或导出；若是拆解模式，优先解释合法公开链接与拆解结果。"""
 
@@ -301,6 +301,9 @@ def normalize_model_result(raw, request):
         else:
             raise ValueError("编导助手返回了不允许的动作")
         normalized.append(item)
+    if any(item["type"] == "navigate" for item in normalized):
+        if len(normalized) != 1:
+            raise ValueError("站内跳转必须作为独立动作，不能与页面修改同时执行")
     warnings = [_text(item, 300, "Agent 提醒") for item in warnings]
     seed = request["session_id"] + request["page_revision"] + raw
     return {
