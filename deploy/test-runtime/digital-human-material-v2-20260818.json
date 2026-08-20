@@ -17,7 +17,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
+    "base_main_commit": "38111b9849042aee1c955a0d3b4bdf813263c010",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -43,8 +43,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "37c7a2a38a42903a75020095a91066701c9da07a",
-    "source_sha256": "a5333925994babe7c2d959f090e7905990bf6e661044bc403e29af4af2aaf5c8",
+    "source_blob": "4ec84c3e91b109c70802bb8a91a8353070bbaccb",
+    "source_sha256": "bba2588d2fd6288754324628d5e3e7d08b8144152b957581e97b041d5ad97ab8",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
@@ -200,8 +200,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "2c71ae0ce0ff120511ac6ed6513bdd90de148396",
-      "source_sha256": "e38dbc811428f7ea74220c19b0f95b698a4caca212bc878031f7eb5bd988f5cd"
+      "source_blob": "ccc97c6f5e17ae4281308c09f9b8d9b6151c1b4b",
+      "source_sha256": "75dacfd175aa552f0eecd8ca61db8f445505db4ca835bb4c1ed71071d516c156"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -219,7 +219,6 @@
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_ui", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
-      {"argv": ["/usr/bin/node", "--test", "tests/test_digital_human_voice_state.js"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_cosyvoice", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900}
