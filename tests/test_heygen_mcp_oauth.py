@@ -328,6 +328,78 @@ class HeyGenMcpOAuthTests(unittest.TestCase):
             "fit": "cover", "expressiveness": "medium", "outputFormat": "mp4",
         })
 
+    def test_plain_video_create_forwards_natural_low_expressiveness(self):
+        with patch.object(video, "_HEYGEN_MCP_CREDENTIALS", "/secure/heygen-mcp.json"), \
+             patch.object(video, "_heygen_mcp_call", return_value={"video_id": "natural-1"}) as call:
+            video_id = video._heygen_create_video(
+                "image-asset", "audio-asset", "1080p", "9:16", "low", direct=True,
+                route="mcp_oauth", image_url="https://files.heygen.com/image.jpg",
+                audio_url="https://files.heygen.com/audio.mp3")
+        self.assertEqual(video_id, "natural-1")
+        self.assertEqual(call.call_args.args[1]["expressiveness"], "low")
+
+    def test_oneclick_profile_is_enforced_at_the_final_provider_boundary(self):
+        payload = {
+            "_username": "yuelei",
+            "mode": "text",
+            "image_data": "data:image/png;base64,AA==",
+            "text": "测试自然口型",
+            "voice": "voice-1",
+            "resolution": "720p",
+            "ratio": "16:9",
+            "motion": "high",
+            "speed": 1.5,
+            "pitch": 4,
+            "volume": 2,
+            "delivery": "energetic",
+            "subtitle": True,
+            "digital_human_pipeline": "digital_human_material_v2",
+            "digital_human_stage": "talking",
+        }
+        with patch.object(video, "HEYGEN_API_KEY", "configured"), \
+             patch.object(video, "_save_data_file", return_value="image/avatar.jpg"), \
+             patch.object(video, "preflight_heygen_image_file"), \
+             patch.object(video, "preflight_heygen_audio_file"), \
+             patch.object(video, "gen_audio", return_value={
+                 "file": "audio/natural.mp3", "url": "https://files/audio.mp3",
+             }) as audio, \
+             patch.object(video, "generate_heygen_video", return_value={
+                 "video_file": "video/natural.mp4",
+                 "video_id": "heygen-natural-1",
+                 "provider": "heygen",
+                 "provider_transport": "mcp_oauth",
+             }) as create, \
+             patch.object(video, "public_url", return_value="https://files/video.mp4"):
+            result = video.gen_video(payload)
+
+        audio.assert_called_once_with({
+            "_username": "yuelei",
+            "text": "测试自然口型",
+            "voice": "voice-1",
+            "speed": 1.0,
+            "pitch": 0,
+            "volume": 1,
+            "delivery": "natural",
+        })
+        create.assert_called_once_with(
+            "image/avatar.jpg", "audio/natural.mp3", "1080p", "9:16", "low",
+        )
+        self.assertEqual(result["motion"], "low")
+        self.assertEqual(result["provider_request_profile"], {
+            "profile_id": "heygen-natural-low-v1",
+            "resolution": "1080p",
+            "aspect_ratio": "9:16",
+            "expressiveness": "low",
+            "narration_mode": "text",
+            "tts": {
+                "speed": 1.0,
+                "pitch": 0,
+                "volume": 1,
+                "delivery": "natural",
+            },
+        })
+        self.assertEqual(payload["motion"], "high")
+
     def test_mcp_assets_use_signed_put_complete_bulk_status_and_get_url(self):
         calls = []
         puts = []
