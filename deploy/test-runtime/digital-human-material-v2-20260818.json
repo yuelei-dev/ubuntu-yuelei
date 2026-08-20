@@ -127,13 +127,13 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
-      "source_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
+      "source_blob": "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
+      "source_sha256": "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d",
       "target_preimage_state": "file",
       "target_preimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
       "target_preimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
-      "expected_postimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
-      "expected_postimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12"
+      "expected_postimage_blob": "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
+      "expected_postimage_sha256": "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d"
     },
     {
       "repository_path": "server/content_domains/audio.py",
@@ -200,8 +200,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
-      "source_blob": "a9087d7b297c15d84f4c5d6361de532fb7e64f60",
-      "source_sha256": "f83e4795e3f5ecb8a0769a52e6d8e1ee2377f1c90a0f06ea78b2cd6804f935a0"
+      "source_blob": "b1ceec0ac728abb0ce7a8106faced040632d43fb",
+      "source_sha256": "c17c3e517b884ce12b661e1648c903d26264ae589885886e31a547defc6d3193"
     }
   ],
   "release_commands": {
