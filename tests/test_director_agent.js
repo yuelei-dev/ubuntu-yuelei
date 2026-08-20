@@ -58,6 +58,15 @@ function fixture(mode) {
   assert.match(agent.createPageSnapshot(doc).page_revision, /^[a-f0-9]{8}$/);
 }
 {
+  const { doc, nodes, lists } = fixture();
+  lists['#scScenes .sc-card'] = [node('示例分镜', { attributes: {'data-placeholder': '1'} })];
+  nodes.scGenVideo.disabled = true;
+  const context = agent.createPageContext(doc);
+  assert.equal(context.scene_count, 0);
+  assert.equal(context.has_script, false);
+  assert.equal(context.active_job_status, 'running');
+}
+{
   const { doc } = fixture('script_to_video');
   const context = agent.createPageContext(doc);
   assert.equal(context.mode, 'script_to_video');
@@ -99,4 +108,21 @@ const source = require('fs').readFileSync(require('path').join(__dirname, '../si
 assert.ok(source.includes('currentPlan.actions.map(function(action){return applyAction(action,doc,win);}'));
 assert.ok(source.includes('涉及扣点或生成时，仍需要你点击原页面按钮确认'));
 
-console.log('director agent frontend tests passed');
+(async function(){
+  let calls = 0;
+  const win = {fetch(){
+    calls += 1;
+    if(calls === 1) return Promise.reject(new Error('temporary network failure'));
+    return Promise.resolve({
+      ok:true,status:200,
+      text(){return Promise.resolve(JSON.stringify({status:'done',result:{content:'ok'}}));},
+    });
+  }};
+  const result = await agent.pollJob(win, 'job_123');
+  assert.equal(result.content, 'ok');
+  assert.equal(calls, 2);
+  console.log('director agent frontend tests passed');
+})().catch(function(error){
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -26,7 +26,11 @@
     if(node.style&&node.style.display==='none') return false;
     return !(node.hidden||node.getAttribute&&node.getAttribute('aria-hidden')==='true');
   }
-  function countScenes(doc,selector){ return doc.querySelectorAll(selector+' .sc-card').length; }
+  function countScenes(doc,selector){
+    return Array.prototype.filter.call(doc.querySelectorAll(selector+' .sc-card'),function(node){
+      return !(node.getAttribute&&node.getAttribute('data-placeholder')==='1');
+    }).length;
+  }
   function createPageContext(doc){
     var breakdown=doc.getElementById('panelBreakdown');
     var activeMode=doc.querySelector('#scModeTabs [data-mode].on');
@@ -36,7 +40,8 @@
     var sceneCount=countScenes(doc,'#scScenes');
     var breakdownCount=countScenes(doc,'#scScenes');
     var meta=doc.getElementById('scMeta'),analysis=doc.getElementById('bdAnalysis');
-    var busy=[doc.getElementById('scGen'),doc.getElementById('bdGen')].some(function(node){return !!(node&&node.disabled);});
+    var busy=['scGen','bdGen','scGenVideo','scGenAudio','bdImageReverse','bdVideoReverse']
+      .some(function(id){var node=doc.getElementById(id);return !!(node&&node.disabled);});
     return {
       page:'script',path:'/workbench/script.html',mode:mode,
       topic:text(doc.getElementById('scTopic')).slice(0,1000),
@@ -164,18 +169,27 @@
     });
   }
   function pollJob(win,jobId,onProgress){
-    var started=Date.now();
+    var started=Date.now(),transientFailures=0;
     return new Promise(function(resolve,reject){
+      function timedOut(){ return Date.now()-started>300000; }
       function tick(){
+        if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
         jsonFetch(win,'/api/gen/job/'+encodeURIComponent(jobId)).then(function(job){
+          transientFailures=0;
           if(job.status==='done'){
             var result=job.result; if(typeof result==='string') result=JSON.parse(result); resolve(result); return;
           }
           if(job.status==='error'||job.status==='failed'){ reject(new Error(job.error||'编导助手处理失败')); return; }
-          if(Date.now()-started>180000){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
+          if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
           if(onProgress) onProgress(Math.floor((Date.now()-started)/1000));
           setTimeout(tick,1400);
-        }).catch(reject);
+        }).catch(function(error){
+          transientFailures+=1;
+          if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
+          if(transientFailures>=3){ reject(error); return; }
+          if(onProgress) onProgress(Math.floor((Date.now()-started)/1000));
+          setTimeout(tick,1400);
+        });
       }
       tick();
     });
@@ -261,5 +275,5 @@
     render(); return {state:state,submit:submit,setOpen:setOpen};
   }
   return {digest:digest,createPageContext:createPageContext,createPageSnapshot:createPageSnapshot,
-    buildPayload:buildPayload,validatePlan:validatePlan,applyAction:applyAction,mount:mount,routes:ROUTES};
+    buildPayload:buildPayload,validatePlan:validatePlan,applyAction:applyAction,pollJob:pollJob,mount:mount,routes:ROUTES};
 });
