@@ -1,8 +1,81 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
 const voice = require('../site/workbench/digital-human-voice-state.js');
 
 const slots = [{slot_id:'slot_ready',status:'ready',voice_id:7,voice_name:'岳磊'}];
+
+function deferred(){
+  let resolve,reject;
+  const promise=new Promise((ok,bad)=>{resolve=ok;reject=bad;});
+  return {promise,resolve,reject};
+}
+
+function pageVoiceRequestGuard(){
+  const page=fs.readFileSync(path.join(__dirname,'../site/workbench/digital-human-oneclick.html'),'utf8');
+  const start=page.indexOf('function createLatestVoiceRequestGuard()');
+  const end=page.indexOf('\nvar voiceRequestGuard=',start);
+  assert.ok(start>=0&&end>start,'page voice request guard must be executable');
+  return vm.runInNewContext('('+page.slice(start,end)+')')();
+}
+
+async function runVoiceSelectionRace(analyzeBeforeResponses){
+  const guard=pageVoiceRequestGuard();
+  const pending=[];
+  const slots=[
+    {slot_id:'voice_a',status:'ready',voice_id:'provider-a',voice_name:'声音 A'},
+    {slot_id:'voice_b',status:'ready',voice_id:'provider-b',voice_name:'声音 B'},
+  ];
+  let state={phase:'complete',voiceMode:'existing',voiceKey:'vip_voice_a'};
+  const dropdown={value:'vip_voice_a'};
+  function request(url){
+    assert.equal(url,'/api/gen/audio/slots');
+    const item=deferred();pending.push(item);return item.promise;
+  }
+  function apply(selection){state=Object.assign({},state,selection);dropdown.value=state.voiceMode==='clone'?'__clone__':state.voiceKey;}
+  function loadVoiceSources(){
+    const ticket=guard.begin();
+    const before={phase:state.phase,voiceMode:state.voiceMode,voiceKey:state.voiceKey};
+    return request('/api/gen/audio/slots').then(data=>{
+      if(!guard.current(ticket))return {stale:true};
+      const result=voice.resolveLoaded(before,data.items||[]);
+      apply(result.selection);
+      return result;
+    });
+  }
+  function prepareNextRun(options){
+    options=options||{};
+    if(state.phase!=='complete')return false;
+    const old={voiceMode:state.voiceMode,voiceKey:state.voiceKey};
+    guard.invalidate();
+    state={phase:'input',voiceMode:old.voiceMode,voiceKey:old.voiceKey};
+    if(options.refreshVoices!==false)loadVoiceSources();
+    return true;
+  }
+  function select(value){
+    prepareNextRun({refreshVoices:false});
+    guard.invalidate();
+    apply(voice.change(state,value).selection);
+    return loadVoiceSources();
+  }
+  function analyze(){return {voiceMode:state.voiceMode,voiceKey:state.voiceKey};}
+
+  const oldLoad=loadVoiceSources();
+  const selectedLoad=select('vip_voice_b');
+  const immediate=analyzeBeforeResponses?analyze():null;
+  pending[0].resolve({items:slots});
+  await oldLoad;
+  assert.equal(state.voiceKey,'vip_voice_b');
+  assert.equal(dropdown.value,'vip_voice_b');
+  if(immediate)assert.deepEqual(immediate,{voiceMode:'existing',voiceKey:'vip_voice_b'});
+  pending[1].resolve({items:slots});
+  await selectedLoad;
+  assert.equal(state.voiceKey,'vip_voice_b');
+  assert.equal(dropdown.value,'vip_voice_b');
+  assert.deepEqual(analyze(),{voiceMode:'existing',voiceKey:'vip_voice_b'});
+}
 
 test('approved refresh preserves and locks the frozen voice', () => {
   const current={phase:'approved',voiceMode:'existing',voiceKey:'vip_slot_ready'};

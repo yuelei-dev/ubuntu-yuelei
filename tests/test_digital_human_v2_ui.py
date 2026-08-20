@@ -59,10 +59,13 @@ class DigitalHumanV2UiTests(unittest.TestCase):
 
     def test_completed_video_resets_atomically_before_next_analysis(self):
         for marker in (
-            "function prepareNextRun()",
+            "function prepareNextRun(options)",
             "function analyze(){prepareNextRun();",
             "$('analyze').onclick=function(){prepareNextRun();if(DigitalHumanMaterialState.canAnalyze",
             "$('photo').onchange=function(){prepareNextRun();",
+            "createLatestVoiceRequestGuard",
+            "prepareNextRun({refreshVoices:false});voiceLoadEpoch++;voiceRequestGuard.invalidate();renderVoiceMode();loadVoiceSources()",
+            "if(options.refreshVoices!==false)loadVoiceSources()",
             "$('script').oninput=function(){prepareNextRun();",
             "state.phase='complete';state.plan=null;state.consent=null;plan=null",
             "photoData='';customerUploads=[];customerMaterialBusy=false",
@@ -72,20 +75,5 @@ class DigitalHumanV2UiTests(unittest.TestCase):
             "成片已完成；重新上传或修改资料后可继续分析下一条",
         ):
             self.assertIn(marker, self.page)
-
-    def test_manual_voice_selection_invalidates_inflight_slot_load(self):
-        render_start = self.page.index("function renderVoiceMode()")
-        load_start = self.page.index("function loadVoiceSources()", render_start)
-        render_block = self.page[render_start:load_start]
-        self.assertIn(
-            "return;}voiceLoadEpoch++;voiceSelectionValid=true",
-            render_block,
-        )
-        self.assertLess(
-            render_block.index("voiceLoadEpoch++"),
-            render_block.index("applyVoiceSelection(result.selection)"),
-        )
-        self.assertIn("loadEpoch===voiceLoadEpoch", self.page)
-
 if __name__ == "__main__":
     unittest.main()

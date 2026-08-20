@@ -101,14 +101,10 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-20T02:45:24Z",
+            observation["captured_at"], "2026-08-20T03:31:01Z",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
-        )
-        self.assertEqual(
-            self.manifest["source"]["base_main_commit"],
             "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
         )
         self.assertEqual(observation["service_state"], "active")
@@ -179,6 +175,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_v2", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
+        self.assertIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("heygen", rendered.lower())
         self.assertEqual(

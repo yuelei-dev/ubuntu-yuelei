@@ -21,7 +21,7 @@
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-20T02:45:24Z",
+    "captured_at": "2026-08-20T03:31:01Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
     "repository_main_commit": "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
@@ -163,13 +163,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "a04f371e5e4d45d76154a79fa72ee661d5010094",
-      "source_sha256": "a3ebd0d2a8caf7fc679cd67923598b393118553268cf4ed69b1c02202aac91c8",
+      "source_blob": "c32f6e01d15b041d7edbc79be76786144d6e87e6",
+      "source_sha256": "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a",
       "target_preimage_state": "file",
       "target_preimage_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
       "target_preimage_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
-      "expected_postimage_blob": "a04f371e5e4d45d76154a79fa72ee661d5010094",
-      "expected_postimage_sha256": "a3ebd0d2a8caf7fc679cd67923598b393118553268cf4ed69b1c02202aac91c8"
+      "expected_postimage_blob": "c32f6e01d15b041d7edbc79be76786144d6e87e6",
+      "expected_postimage_sha256": "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a"
     }
   ],
   "release_contract_sources": [
@@ -185,8 +185,13 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "5a6ced82b757c446d73155a0bf68243372046632",
-      "source_sha256": "6f72651c3466890847f576841f6c94dfdf936e0efd5600d15915194076cc61ca"
+      "source_blob": "a497f920065c572d4a222aaad3ea61d0c41d7439",
+      "source_sha256": "01fc2671130a2e9886b75f4d4991df5fe8299a7135ef78a7d0ac44d3461148ee"
+    },
+    {
+      "repository_path": "tests/test_digital_human_voice_state.js",
+      "source_blob": "d886c09adb3095c84f8364e5063487525506c98d",
+      "source_sha256": "da6cb23c0aca11ed1ffca109fe9ca776691e79079f21f480704614f26a9a648c"
     },
     {
       "repository_path": "tests/test_cosyvoice.py",
@@ -195,8 +200,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "f94501385cb978f552170ebecf04b19238a49768",
-      "source_sha256": "a851c509b6848b61e276d54bb57a51025373a24c82b2258c1fd6a7345cbbbc11"
+      "source_blob": "2c71ae0ce0ff120511ac6ed6513bdd90de148396",
+      "source_sha256": "e38dbc811428f7ea74220c19b0f95b698a4caca212bc878031f7eb5bd988f5cd"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -214,6 +219,7 @@
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_ui", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/node", "--test", "tests/test_digital_human_voice_state.js"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_cosyvoice", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900}
