@@ -61,6 +61,7 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         for marker in (
             "function prepareNextRun()",
             "function analyze(){prepareNextRun();",
+            "$('analyze').onclick=function(){prepareNextRun();if(DigitalHumanMaterialState.canAnalyze",
             "$('photo').onchange=function(){prepareNextRun();",
             "$('script').oninput=function(){prepareNextRun();",
             "state.phase='complete';state.plan=null;state.consent=null;plan=null",
