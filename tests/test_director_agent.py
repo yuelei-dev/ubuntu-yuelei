@@ -12,7 +12,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
-from content_domains import director_agent
+from content_domains import core, director_agent
 
 
 def payload(**overrides):
@@ -73,6 +73,27 @@ class DirectorAgentTests(unittest.TestCase):
             self.assertTrue(director_agent.is_available("global-key"))
         with mock.patch.object(director_agent, "API_KEY", "dedicated-key"):
             self.assertTrue(director_agent.is_available())
+
+    def test_server_availability_fails_closed_for_partial_runtime_overlay(self):
+        with mock.patch.object(core, "HANDLERS", {}), \
+                mock.patch.object(
+                    director_agent, "is_available",
+                    side_effect=AssertionError("must not inspect provider"),
+                ):
+            self.assertFalse(core._director_agent_available())
+        with mock.patch.object(
+                core, "HANDLERS", {"director_agent": object()}), \
+                mock.patch.object(director_agent, "is_available", return_value=True) as available:
+            self.assertTrue(core._director_agent_available())
+            available.assert_called_once_with(core.OPENAI_KEY)
+        with mock.patch.object(
+                core, "HANDLERS", {"director_agent": object()}), \
+                mock.patch.object(
+                    director_agent, "is_available",
+                    side_effect=RuntimeError("provider config failure"),
+                ), mock.patch("builtins.print") as warning:
+            self.assertFalse(core._director_agent_available())
+            warning.assert_called_once()
 
     def test_submission_limit_is_account_scoped_and_durable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -218,7 +239,11 @@ class DirectorAgentTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
         self.assertIn("director_agent_domain.submission_limit", core)
         self.assertIn(
-            'director_agent_domain.is_available(OPENAI_KEY)',
+            'return bool(director_agent_domain.is_available(OPENAI_KEY))',
+            core,
+        )
+        self.assertIn(
+            'if kind == "director_agent" and not _director_agent_available()',
             core,
         )
         self.assertIn('"director_agent_enabled": director_agent_enabled', core)

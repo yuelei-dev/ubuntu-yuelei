@@ -406,6 +406,18 @@ HEYGEN_TIMEOUT = max(60, int(os.environ.get("HEYGEN_TIMEOUT", "1200")))
 # Domain handlers are assembled by content_domains.registry at startup.
 HANDLERS = {}
 
+def _director_agent_available():
+    """Fail closed when a partial runtime overlay lacks Agent dependencies."""
+    if "director_agent" not in HANDLERS:
+        return False
+    try:
+        from . import director_agent as director_agent_domain
+        return bool(director_agent_domain.is_available(OPENAI_KEY))
+    except Exception as error:
+        print("[director_agent] availability check failed: %s" % error, flush=True)
+        return False
+
+
 # ============ 任务库 ============
 def jdb():
     # timeout 10→30 + WAL：content/imggen 两服务共写这张表，50 齐点压测时 10s 写锁等待
@@ -3000,13 +3012,11 @@ class H(BaseHTTPRequestHandler):
             if _must_change_password(user): return self._send(403, {"detail": "请先修改初始密码"})
             try: feature_flags.require_enabled(kind)
             except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
-            if kind == "director_agent":
-                from . import director_agent as director_agent_domain
-                if not director_agent_domain.is_available(OPENAI_KEY):
-                    return self._send(503, {
-                        "detail": "编导助手暂未配置模型服务，请稍后再试",
-                        "code": "director_agent_unavailable", "retry_after_ms": 60000,
-                    })
+            if kind == "director_agent" and not _director_agent_available():
+                return self._send(503, {
+                    "detail": "编导助手暂未配置模型服务，请稍后再试",
+                    "code": "director_agent_unavailable", "retry_after_ms": 60000,
+                })
             if kind in {"canvas_agent", "director_agent"} and is_shutting_down():
                 return self._send(503, {
                     "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
@@ -4034,9 +4044,8 @@ class H(BaseHTTPRequestHandler):
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
             return self._send(200, {"items": items, "cost": search_cost, "points_left": points_left})
         if p == "/api/gen/health":
-            from . import director_agent as director_agent_domain
             director_agent_enabled = bool(feature_flags.is_enabled("director_agent")
-                and director_agent_domain.is_available(OPENAI_KEY))
+                and _director_agent_available())
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "smart_montage_job_workers": SMART_MONTAGE_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS, "job_queue_max": JOB_QUEUE_MAX, "talking_job_queue_max": TALKING_JOB_QUEUE_MAX, "smart_montage_job_queue_max": SMART_MONTAGE_JOB_QUEUE_MAX,
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_sora_video": MAX_USER_ACTIVE_SORA_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
                                     "sora_video_enabled": bool(video_domain.sora_video_is_open() and OPENAI_KEY and feature_flags.is_enabled("sora_video")),
