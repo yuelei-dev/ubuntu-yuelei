@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import verify_content_whisper_deployment as manifest_verify
 
@@ -31,6 +31,12 @@ MANIFEST_REPOSITORY_PATHS = {
     "deploy/test-runtime/digital-human-material-v2-20260818.json",
 }
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
+ALLOWED_DEPLOYMENT_TOOLS = frozenset({
+    "/usr/bin/env",
+    "/usr/bin/python3",
+    "/usr/bin/systemctl",
+})
 
 
 class ReleaseError(RuntimeError):
@@ -231,7 +237,8 @@ class ContentWhisperRelease:
             self, manifest, source_root, runtime_root, backup_root,
             *, runner=None, health_getter=None, checkpoint=None,
             git_runner=None, reviewed_source_commit=None,
-            reviewed_main_commit=None, monotonic=None, sleeper=None):
+            reviewed_main_commit=None, monotonic=None, sleeper=None,
+            deployment_tool_root=None):
         self.manifest = manifest
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime = RuntimeFiles(runtime_root)
@@ -243,6 +250,9 @@ class ContentWhisperRelease:
         self.health_getter = health_getter or self._http_status
         self.monotonic = monotonic or time.monotonic
         self.sleeper = sleeper or time.sleep
+        self.deployment_tool_root = Path(os.path.abspath(
+            deployment_tool_root or os.sep
+        ))
         self.checkpoint = checkpoint or (lambda _name: None)
         self.backup_path = None
         self.backup_entries = []
@@ -375,6 +385,92 @@ class ContentWhisperRelease:
             raise ReleaseError(
                 "reviewed source commit is missing or not contained in live main"
             )
+
+    @staticmethod
+    def _deployment_tools_from_argv(argv):
+        if (not isinstance(argv, list) or not argv
+                or any(not isinstance(value, str) or not value for value in argv)):
+            raise ReleaseError(
+                "deployment command argv must be a non-empty string list"
+            )
+        tools = [argv[0]]
+        if argv[0] == "/usr/bin/env":
+            index = 1
+            while (index < len(argv)
+                   and ENV_ASSIGNMENT_PATTERN.fullmatch(argv[index])):
+                index += 1
+            if index >= len(argv):
+                raise ReleaseError(
+                    "undeclared or unavailable deployment tool: /usr/bin/env"
+                )
+            tools.append(argv[index])
+        return tools
+
+    def _validate_deployment_tool(self, tool):
+        error = "undeclared or unavailable deployment tool: %s" % tool
+        if tool not in ALLOWED_DEPLOYMENT_TOOLS:
+            raise ReleaseError(error)
+        posix_path = PurePosixPath(tool)
+        if not posix_path.is_absolute():
+            raise ReleaseError(error)
+        target = self.deployment_tool_root.joinpath(*posix_path.parts[1:])
+        try:
+            if os.path.commonpath((
+                    str(self.deployment_tool_root), str(target),
+            )) != str(self.deployment_tool_root):
+                raise ReleaseError(error)
+            current = self.deployment_tool_root
+            root_info = os.lstat(current)
+            if (stat.S_ISLNK(root_info.st_mode)
+                    or not stat.S_ISDIR(root_info.st_mode)):
+                raise ReleaseError(error)
+            parts = target.relative_to(self.deployment_tool_root).parts
+            for index, part in enumerate(parts):
+                current = current / part
+                info = os.lstat(current)
+                if index < len(parts) - 1:
+                    if (stat.S_ISLNK(info.st_mode)
+                            or not stat.S_ISDIR(info.st_mode)):
+                        raise ReleaseError(error)
+                    continue
+                if stat.S_ISLNK(info.st_mode):
+                    allowed_directory = (
+                        self.deployment_tool_root / "usr" / "bin"
+                    )
+                    resolved = Path(os.path.realpath(current))
+                    if os.path.commonpath((
+                            str(allowed_directory), str(resolved),
+                    )) != str(allowed_directory):
+                        raise ReleaseError(error)
+                    info = os.stat(current)
+                if (not stat.S_ISREG(info.st_mode)
+                        or (os.name == "posix" and not info.st_mode & (
+                            stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                        ))):
+                    raise ReleaseError(error)
+        except (OSError, ValueError) as exc:
+            raise ReleaseError(error) from exc
+
+    def _preflight_release_commands(self):
+        stages = self.manifest.get("release_commands")
+        if not isinstance(stages, dict) or not stages:
+            raise ReleaseError("manifest release commands are missing")
+        verified = set()
+        for stage, commands in stages.items():
+            if (not isinstance(stage, str)
+                    or not isinstance(commands, list) or not commands):
+                raise ReleaseError(
+                    "manifest release command stage is invalid"
+                )
+            for command in commands:
+                if not isinstance(command, dict):
+                    raise ReleaseError("manifest release command is invalid")
+                for tool in self._deployment_tools_from_argv(
+                        command.get("argv")):
+                    if tool not in verified:
+                        self._validate_deployment_tool(tool)
+                        verified.add(tool)
+        self.checkpoint("tools_preflight_complete")
 
     def _validate_target(self, confirmation):
         target = self.manifest.get("target", {})
@@ -619,11 +715,14 @@ class ContentWhisperRelease:
             reviewed_main_commit or self.reviewed_main_commit,
         )
         self._verify_release_tools()
+        self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
         self.checkpoint("preimage_complete")
         self._run_stage("pre_service_active")
+        self._verify_health("pre-deployment ")
+        self.checkpoint("pre_health")
         self._backup_all()
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
         try:

@@ -11,6 +11,7 @@ MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
 VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
+CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
     "server/content_domains/core.py",
@@ -107,6 +108,10 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             observation["repository_main_commit"],
             "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
         )
+        self.assertEqual(
+            self.manifest["source"]["base_main_commit"],
+            "38111b9849042aee1c955a0d3b4bdf813263c010",
+        )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
         self.assertEqual(observation["files"], 9)
@@ -175,13 +180,35 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_v2", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
-        self.assertIn("tests/test_digital_human_voice_state.js", rendered)
+        self.assertNotIn("/usr/bin/node", rendered)
+        self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("heygen", rendered.lower())
         self.assertEqual(
             {200, 401},
             {int(item["expected_status"]) for item in self.manifest["health_checks"]},
         )
+
+    def test_voice_state_node_test_is_ci_only_and_content_locked(self):
+        ci = CI_PATH.read_text(encoding="utf-8")
+        self.assertIn("uses: actions/setup-node@v6", ci)
+        self.assertIn('node-version: "22"', ci)
+        self.assertIn("node tests/test_digital_human_voice_state.js", ci)
+
+        contract = next(
+            entry for entry in self.manifest["release_contract_sources"]
+            if entry["repository_path"] == "tests/test_digital_human_voice_state.js"
+        )
+        data = (ROOT / contract["repository_path"]).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
+        self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+
+        server_no_charge = json.dumps(
+            self.manifest["release_commands"]["no_charge"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("/usr/bin/node", server_no_charge)
+        self.assertNotIn(contract["repository_path"], server_no_charge)
 
 
 if __name__ == "__main__":
