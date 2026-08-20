@@ -1104,13 +1104,11 @@ def verify_child_submission_with_record(payload, username, kind):
         mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(gesture_path.suffix.lower())
         if not mime:
             raise DigitalHumanRequestError("口播手势照格式不受支持", "talking_gesture_binding_invalid", 409)
+        cleaned.update(legacy.natural_mouth_talking_profile())
         cleaned.update({
             "image_data": "data:%s;base64,%s" % (
                 mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
             ),
-            "motion": "high" if segment["role"] in {"hook", "cta"} else "medium",
-            "speed": 1.04 if segment["role"] in {"hook", "cta"} else 1.0,
-            "pitch": 0, "volume": 1, "delivery": "natural",
             "digital_human_item_index": item_index,
         })
         if audio_mode:

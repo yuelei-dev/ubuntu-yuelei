@@ -21,10 +21,10 @@
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-20T03:31:01Z",
+    "captured_at": "2026-08-20T14:56:44Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
-    "repository_main_commit": "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
+    "repository_main_commit": "aef96d173492d367904ae485c01661671c3adc3a",
     "service_state": "active",
     "health_status": 200,
     "files": 9
@@ -91,13 +91,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
-      "source_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
+      "source_blob": "f285d6fdebee7915d98a332925850d51065ef883",
+      "source_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5",
       "target_preimage_state": "file",
       "target_preimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
       "target_preimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b",
-      "expected_postimage_blob": "f701c2e42a9db13ba0595ac85ff48ae4fc63b8f4",
-      "expected_postimage_sha256": "178ede540a745a8d6970bf519aaa81d9effb91ade44244f370e8f890e857328b"
+      "expected_postimage_blob": "f285d6fdebee7915d98a332925850d51065ef883",
+      "expected_postimage_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5"
     },
     {
       "repository_path": "server/content_domains/points.py",
@@ -127,13 +127,13 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
-      "source_sha256": "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d",
+      "source_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
+      "source_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440",
       "target_preimage_state": "file",
-      "target_preimage_blob": "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
-      "target_preimage_sha256": "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
-      "expected_postimage_blob": "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
-      "expected_postimage_sha256": "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d"
+      "target_preimage_blob": "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
+      "target_preimage_sha256": "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d",
+      "expected_postimage_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
+      "expected_postimage_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440"
     },
     {
       "repository_path": "server/content_domains/audio.py",
@@ -163,13 +163,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "c32f6e01d15b041d7edbc79be76786144d6e87e6",
-      "source_sha256": "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a",
+      "source_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
+      "source_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44",
       "target_preimage_state": "file",
-      "target_preimage_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
-      "target_preimage_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
-      "expected_postimage_blob": "c32f6e01d15b041d7edbc79be76786144d6e87e6",
-      "expected_postimage_sha256": "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a"
+      "target_preimage_blob": "c32f6e01d15b041d7edbc79be76786144d6e87e6",
+      "target_preimage_sha256": "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a",
+      "expected_postimage_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
+      "expected_postimage_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44"
     }
   ],
   "release_contract_sources": [
@@ -200,8 +200,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "ccc97c6f5e17ae4281308c09f9b8d9b6151c1b4b",
-      "source_sha256": "75dacfd175aa552f0eecd8ca61db8f445505db4ca835bb4c1ed71071d516c156"
+      "source_blob": "5446be13ea811e7ee88bedc988db88689f64a517",
+      "source_sha256": "9a84608e52feadde6d68882f8742e09d5d9f0d75a97fa4fb019761ece6792ab1"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",

@@ -45,8 +45,8 @@ LOCKED_PREIMAGES = {
         "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
     ),
     "server/content_domains/digital_human_v2.py": (
-        "file", "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
-        "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
+        "file", "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
+        "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d",
     ),
     "server/content_domains/audio.py": (
         "file", "32f948f451d0f527d992425ae1eaa8bc28583c6f",
@@ -57,8 +57,8 @@ LOCKED_PREIMAGES = {
         "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
-        "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
+        "file", "c32f6e01d15b041d7edbc79be76786144d6e87e6",
+        "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a",
     ),
 }
 
@@ -102,11 +102,11 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-20T03:31:01Z",
+            observation["captured_at"], "2026-08-20T14:56:44Z",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
+            "aef96d173492d367904ae485c01661671c3adc3a",
         )
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
