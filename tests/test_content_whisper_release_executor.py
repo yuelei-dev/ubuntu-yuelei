@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import stat
 import sys
 import tempfile
 import threading
@@ -48,20 +49,25 @@ class FakeRunner:
 
 
 class HealthProbe:
-    def __init__(self, fail_count=0, connection_fail_count=0):
+    def __init__(
+            self, fail_count=0, connection_fail_count=0, fail_after=0):
         self.fail_count = fail_count
         self.connection_fail_count = connection_fail_count
+        self.fail_after = fail_after
         self.calls = []
 
     def __call__(self, url):
         self.calls.append(url)
+        expected = 200 if url.endswith("/health") else 401
+        if len(self.calls) <= self.fail_after:
+            return expected
         if self.connection_fail_count:
             self.connection_fail_count -= 1
             raise ConnectionRefusedError("service is still starting")
         if self.fail_count:
             self.fail_count -= 1
             return 500
-        return 200 if url.endswith("/health") else 401
+        return expected
 
 
 class FakeClock:
@@ -153,7 +159,14 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         self.runtime_root = self.root / "runtime"
         self.backup_root = self.root / "backups"
+        self.tool_root = self.root / "deployment-tools"
         self.runtime_root.mkdir()
+        self.tool_root.mkdir()
+        for tool in self.release_module.ALLOWED_DEPLOYMENT_TOOLS:
+            target = self._tool_path(tool)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"#!/bin/sh\nexit 0\n")
+            os.chmod(target, 0o755)
         self.manifest = copy.deepcopy(self.base_manifest)
         self.manifest["_manifest_path"] = str(MANIFEST_PATH)
         self.original = {}
@@ -188,6 +201,9 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             entry["runtime_path"]
         ).parts[1:])
 
+    def _tool_path(self, tool):
+        return self.tool_root.joinpath(*pathlib.PurePosixPath(tool).parts[1:])
+
     def _snapshot(self):
         result = {}
         for entry in self.manifest["files"]:
@@ -215,6 +231,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             reviewed_main_commit=reviewed_main,
             monotonic=clock.monotonic if clock else None,
             sleeper=clock.sleep if clock else None,
+            deployment_tool_root=self.tool_root,
         )
 
     def _assert_restored_without_residue(self):
@@ -226,6 +243,24 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         staged = self.runtime_root / "home" / "ubuntu" / "content-api" / ".deploy"
         if staged.exists():
             self.assertTrue(staged.is_dir())
+
+    def _assert_tool_preflight_failure(self, manifest, expected):
+        runner = FakeRunner()
+        events = []
+        release = self._release(
+            manifest=manifest, runner=runner, checkpoint=events.append,
+        )
+        with self.assertRaisesRegex(
+                self.release_module.ReleaseError, expected):
+            release.execute(self.release_module.AUTHORIZED_TARGET)
+        self.assertEqual([], runner.calls)
+        self.assertFalse(self.backup_root.exists())
+        self.assertEqual([], release.backup_entries)
+        self.assertIsNone(release.backup_path)
+        self.assertFalse(release.daemon_reload_attempted)
+        self.assertFalse(release.restart_attempted)
+        self.assertFalse(any(name.startswith("write_") for name in events))
+        self.assertEqual(self.original, self._snapshot())
 
     def test_success_installs_all_files_and_restarts_exactly_once(self):
         runner = FakeRunner()
@@ -264,7 +299,12 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             [entry["target_preimage_state"] for entry in self.manifest["files"]],
             [entry["state"] for entry in state["files"]],
         )
-        self.assertEqual(2, len(health.calls))
+        self.assertEqual(4, len(health.calls))
+        self.assertLess(
+            events.index("tools_preflight_complete"),
+            events.index("preimage_complete"),
+        )
+        self.assertLess(events.index("pre_health"), events.index("backup_complete"))
         self.assertLess(events.index("backup_complete"), events.index("write_1"))
         self.assertLess(events.index("write_1"), events.index(LAST_WRITE))
         self.assertLess(events.index(LAST_WRITE), events.index("health"))
@@ -363,7 +403,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
 
     def test_health_failure_restores_and_restarts_old_version_once(self):
         runner = FakeRunner()
-        health = HealthProbe(fail_count=3)
+        health = HealthProbe(fail_count=3, fail_after=2)
         clock = FakeClock()
         self.manifest["health_probe_policy"] = {
             "startup_timeout_seconds": 2,
@@ -381,20 +421,20 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
 
     def test_restart_health_waits_for_delayed_listener_without_rollback(self):
         runner = FakeRunner()
-        health = HealthProbe(connection_fail_count=19)
+        health = HealthProbe(connection_fail_count=19, fail_after=2)
         clock = FakeClock()
         result = self._release(
             runner=runner, health=health, clock=clock,
         ).execute(self.release_module.AUTHORIZED_TARGET)
         self.assertTrue(result["ok"])
-        self.assertEqual(21, len(health.calls))
+        self.assertEqual(23, len(health.calls))
         self.assertEqual([1] * 19, clock.sleeps)
         self.assertEqual(1, runner.calls.count("restart"))
         self.assertNotIn("rollback_restart", runner.calls)
 
     def test_health_wait_is_bounded_and_rollback_gets_a_fresh_deadline(self):
         runner = FakeRunner()
-        health = HealthProbe(connection_fail_count=3)
+        health = HealthProbe(connection_fail_count=3, fail_after=2)
         clock = FakeClock()
         self.manifest["health_probe_policy"] = {
             "startup_timeout_seconds": 2,
@@ -427,7 +467,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 def target_status(path):
                     if path == "/api/gen/health":
                         health_calls["count"] += 1
-                        if rollback and health_calls["count"] <= 3:
+                        if rollback and 2 <= health_calls["count"] <= 4:
                             return 500
                         return 200
                     return 401
@@ -471,7 +511,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                             )
 
                 self.assertEqual([], proxy.hits)
-                expected_target_hits = 5 if rollback else 2
+                expected_target_hits = 7 if rollback else 4
                 self.assertEqual(expected_target_hits, len(target.hits))
                 if rollback:
                     self._assert_restored_without_residue()
@@ -506,6 +546,120 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                     )
                 self.assertEqual([], runner.calls)
                 self.assertFalse(self.backup_root.exists())
+
+    def test_missing_node_fails_before_backup_commands_or_runtime_writes(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["release_commands"]["no_charge"].append({
+            "argv": [
+                "/usr/bin/node", "--test",
+                "tests/test_digital_human_voice_state.js",
+            ],
+            "cwd": "{source:.}",
+            "timeout_seconds": 300,
+        })
+        self._assert_tool_preflight_failure(
+            manifest,
+            "undeclared or unavailable deployment tool: /usr/bin/node",
+        )
+
+    def test_undeclared_deployment_tool_is_rejected_before_side_effects(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["release_commands"]["dependencies"][0]["argv"][0] = (
+            "/usr/local/bin/python3"
+        )
+        self._assert_tool_preflight_failure(
+            manifest,
+            "undeclared or unavailable deployment tool: /usr/local/bin/python3",
+        )
+
+    def test_symlink_escape_and_nonexecutable_tools_are_rejected(self):
+        target = self._tool_path("/usr/bin/python3")
+        real_lstat = self.release_module.os.lstat
+
+        def lstat_with_mode(path, mode):
+            info = real_lstat(path)
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(target):
+                values = list(info)
+                values[0] = mode
+                return os.stat_result(values)
+            return info
+
+        symlink_release = self._release()
+        with self.subTest(kind="symlink_escape"), patch.object(
+                self.release_module.os, "lstat",
+                side_effect=lambda path: lstat_with_mode(
+                    path, stat.S_IFLNK | 0o777,
+                )), patch.object(
+                    self.release_module.os.path, "realpath",
+                    return_value=str(self.root / "outside-python")):
+            with self.assertRaisesRegex(
+                    self.release_module.ReleaseError,
+                    "undeclared or unavailable deployment tool: /usr/bin/python3"):
+                symlink_release._preflight_release_commands()
+
+        nonexecutable_release = self._release()
+
+        def lstat_with_nonexecutable_target(path):
+            info = real_lstat(path)
+            values = list(info)
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(target):
+                values[0] = stat.S_IFREG | 0o644
+            elif stat.S_ISREG(info.st_mode):
+                values[0] = stat.S_IFREG | 0o755
+            return os.stat_result(values)
+
+        with self.subTest(kind="nonexecutable"), patch.object(
+                self.release_module.os, "name", "posix"), patch.object(
+                self.release_module.os, "lstat",
+                side_effect=lstat_with_nonexecutable_target):
+            with self.assertRaisesRegex(
+                    self.release_module.ReleaseError,
+                    "undeclared or unavailable deployment tool: /usr/bin/python3"):
+                nonexecutable_release._preflight_release_commands()
+
+    def test_in_directory_python_symlink_passes_preflight(self):
+        target = self._tool_path("/usr/bin/python3")
+        resolved = self._tool_path("/usr/bin/python3.12")
+        resolved.write_bytes(b"#!/bin/sh\nexit 0\n")
+        os.chmod(resolved, 0o755)
+        real_lstat = self.release_module.os.lstat
+
+        def lstat_with_python_symlink(path):
+            info = real_lstat(path)
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(target):
+                values = list(info)
+                values[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(values)
+            return info
+
+        with patch.object(
+                self.release_module.os, "lstat",
+                side_effect=lstat_with_python_symlink), patch.object(
+                    self.release_module.os.path, "realpath",
+                    return_value=str(resolved)):
+            self._release()._preflight_release_commands()
+
+    def test_allowlisted_python_systemctl_and_env_tools_pass_preflight(self):
+        self._release()._preflight_release_commands()
+
+    def test_predeployment_health_failure_does_not_create_backup_or_rollback(self):
+        runner = FakeRunner()
+        health = HealthProbe(fail_count=3)
+        clock = FakeClock()
+        self.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
+        with self.assertRaisesRegex(
+                self.release_module.ReleaseError,
+                "pre-deployment health readiness timeout"):
+            self._release(
+                runner=runner, health=health, clock=clock,
+            ).execute(self.release_module.AUTHORIZED_TARGET)
+        self.assertEqual(["pre_service_active"], runner.calls)
+        self.assertFalse(self.backup_root.exists())
+        self.assertEqual(self.original, self._snapshot())
+        self.assertNotIn("rollback_restart", runner.calls)
 
     def test_backup_failure_happens_before_first_target_write(self):
         runner = FakeRunner()

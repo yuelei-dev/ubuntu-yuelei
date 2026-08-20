@@ -410,6 +410,14 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 "data:image/png;base64," + base64.b64encode(gesture_file.read_bytes()).decode("ascii"),
                 checked_talking["image_data"],
             )
+            self.assertEqual({
+                "resolution": "1080p", "ratio": "9:16", "motion": "low",
+                "speed": 1.0, "pitch": 0, "volume": 1,
+                "delivery": "natural", "subtitle": False,
+            }, {key: checked_talking[key] for key in (
+                "resolution", "ratio", "motion", "speed", "pitch", "volume",
+                "delivery", "subtitle",
+            )})
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "声音"):
                 self.domain.verify_child_submission(
                     dict(talking, voice="vip_wrong"), "yuelei", "video",
@@ -1364,7 +1372,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "/api/gen/digital-human-v2/audio-upload",
             "/api/gen/digital-human-v2/material-resolve",
             "/api/gen/script_to_video/material-upload",
-            "reference_images:photoData?[photoData]:[]", "motion:item.role==='explain'?'medium':'high'", "speed:1,pitch:0,volume:1", "subtitle:false",
+            "reference_images:photoData?[photoData]:[]", "motion:'low'", "speed:1,pitch:0,volume:1", "delivery:'natural'", "resolution:'1080p'", "ratio:'9:16'", "subtitle:false",
             "body.reference_upload_ids=[customerUploads[index].upload_id]",
             "DigitalHumanMaterialState.restore(state.customerUploads,state.phase)",
             "DigitalHumanOneClickState.persistableMaterials(state,customerUploads,materialRecoveryValid)",
@@ -1664,13 +1672,18 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         thread.assert_not_called()
         tmp.cleanup()
 
-    def test_plan_contains_distinct_delivery_profiles(self):
+    def test_plan_uses_natural_low_motion_profile_for_every_segment(self):
         domain = importlib.import_module("content_domains.digital_human_oneclick")
-        payload = domain.plan("开场先抓住注意力。接着把方案讲清楚。最后给出行动号召。")
+        payload = domain.plan("\u5f00\u573a\u5148\u6293\u4f4f\u6ce8\u610f\u529b\u3002\u63a5\u7740\u628a\u65b9\u6848\u8bb2\u6e05\u695a\u3002\u6700\u540e\u7ed9\u51fa\u884c\u52a8\u53f7\u53ec\u3002")
         profiles = [item["speech_profile"] for item in payload["segments"]]
-        self.assertEqual([item["delivery"] for item in profiles], ["energetic_hook", "clear_explain", "confident_cta"])
-        self.assertNotEqual(profiles[0]["speed"], profiles[1]["speed"])
+        expected = domain.natural_mouth_talking_profile()
+        self.assertEqual([expected, expected, expected], profiles)
 
+    def test_v2_server_uses_the_same_natural_mouth_profile(self):
+        source = (Path(__file__).resolve().parents[1] / "server" / "content_domains" /
+                  "digital_human_v2.py").read_text(encoding="utf-8")
+        self.assertIn("cleaned.update(legacy.natural_mouth_talking_profile())", source)
+        self.assertNotIn('"motion": "high" if segment["role"]', source)
 
     def test_video_page_replaces_the_old_talking_tab_instead_of_adding_a_header_link(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")

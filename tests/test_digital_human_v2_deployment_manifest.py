@@ -11,6 +11,7 @@ MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
 VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
+CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
     "server/content_domains/core.py",
@@ -44,8 +45,8 @@ LOCKED_PREIMAGES = {
         "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
     ),
     "server/content_domains/digital_human_v2.py": (
-        "file", "f7f1a99070c5c9dddf922727cb075a4d1a129a06",
-        "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
+        "file", "8ea0c6ca1e26845ba8428ca6c0ef6d18f03303de",
+        "d2f1987513b09024f3df1cfe2af8b8a295c76f0f5e2ab063271f4cb383c0766d",
     ),
     "server/content_domains/audio.py": (
         "file", "32f948f451d0f527d992425ae1eaa8bc28583c6f",
@@ -56,8 +57,8 @@ LOCKED_PREIMAGES = {
         "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
-        "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
+        "file", "c32f6e01d15b041d7edbc79be76786144d6e87e6",
+        "8143ab2d425bf5f83fed1f9bf39a746a0dc79c562697c30cd4e551072f891a3a",
     ),
 }
 
@@ -101,11 +102,15 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-20T03:31:01Z",
+            observation["captured_at"], "2026-08-20T14:56:44Z",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
+            "aef96d173492d367904ae485c01661671c3adc3a",
+        )
+        self.assertEqual(
+            self.manifest["source"]["base_main_commit"],
+            "38111b9849042aee1c955a0d3b4bdf813263c010",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
@@ -175,13 +180,35 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_v2", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
-        self.assertIn("tests/test_digital_human_voice_state.js", rendered)
+        self.assertNotIn("/usr/bin/node", rendered)
+        self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("heygen", rendered.lower())
         self.assertEqual(
             {200, 401},
             {int(item["expected_status"]) for item in self.manifest["health_checks"]},
         )
+
+    def test_voice_state_node_test_is_ci_only_and_content_locked(self):
+        ci = CI_PATH.read_text(encoding="utf-8")
+        self.assertIn("uses: actions/setup-node@v6", ci)
+        self.assertIn('node-version: "22"', ci)
+        self.assertIn("node tests/test_digital_human_voice_state.js", ci)
+
+        contract = next(
+            entry for entry in self.manifest["release_contract_sources"]
+            if entry["repository_path"] == "tests/test_digital_human_voice_state.js"
+        )
+        data = (ROOT / contract["repository_path"]).read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
+        self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+
+        server_no_charge = json.dumps(
+            self.manifest["release_commands"]["no_charge"],
+            ensure_ascii=False,
+        )
+        self.assertNotIn("/usr/bin/node", server_no_charge)
+        self.assertNotIn(contract["repository_path"], server_no_charge)
 
 
 if __name__ == "__main__":
