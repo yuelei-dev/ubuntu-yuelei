@@ -153,13 +153,13 @@
       "repository_path": "server/content_domains/video.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
       "classification": "runtime_code",
-      "source_blob": "0bf15600e328fc8e514046c481cc086639d02842",
-      "source_sha256": "ec291685394da59427f5a892548ab7d1a78fe56377554f33a14e6a824a6a78dc",
+      "source_blob": "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+      "source_sha256": "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb",
       "target_preimage_state": "file",
       "target_preimage_blob": "45b9fef1acbad1c10bb63e554890265e14acd308",
       "target_preimage_sha256": "1733555a0793d15f3af31098198035687b00704bc877dce241289b3899c4c595",
-      "expected_postimage_blob": "0bf15600e328fc8e514046c481cc086639d02842",
-      "expected_postimage_sha256": "ec291685394da59427f5a892548ab7d1a78fe56377554f33a14e6a824a6a78dc"
+      "expected_postimage_blob": "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+      "expected_postimage_sha256": "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb"
     },
     {
       "repository_path": "server/content_domains/script_to_video.py",
@@ -329,8 +329,8 @@
     },
     {
       "repository_path": "tests/test_heygen_mcp_oauth.py",
-      "source_blob": "8f43b0877b4b63ffc2fedcd9e01feb28067b41f9",
-      "source_sha256": "b95e24df2596333e42bb6a0c9b361efd94a1e16a06540ea7a2ef950d79e6ff9b"
+      "source_blob": "0e416bd575975143ce69255ac62d89db35f8af70",
+      "source_sha256": "cf4686309035d1242d73a210846541f2b6b5c5626cb74c532577ecafb8bc7b07"
     }
   ],
   "paid_submission_contract": {

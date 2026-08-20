@@ -5330,7 +5330,7 @@ def gen_video(payload, provider_lifecycle=None):
             digital_human_oneclick.NATURAL_MOUTH_PROFILE_ID
             if natural_mouth_profile_applied else None
         ),
-        "resolution": resolution,
+        "requested_resolution": resolution,
         "aspect_ratio": ratio,
         "expressiveness": motion,
         "narration_mode": mode,
@@ -5355,6 +5355,14 @@ def gen_video(payload, provider_lifecycle=None):
         video_result = generate_heygen_video(
             image_file, audio_file, resolution, ratio, motion,
         )
+    actual_resolution = video_result.get("actual_resolution") or resolution
+    # The paid provider route can lower a requested 1080p render to the MCP
+    # account ceiling (720p by default).  Keep both values and make the
+    # unqualified receipt field describe the request that was actually sent.
+    provider_request_profile.update({
+        "resolution": actual_resolution,
+        "actual_resolution": actual_resolution,
+    })
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
@@ -5404,7 +5412,7 @@ def gen_video(payload, provider_lifecycle=None):
         "source_video_url": video_result.get("source_video_url"),
         "thumbnail_url": video_result.get("thumbnail_url"), "duration": video_result.get("duration"),
         "resolution": resolution,
-        "actual_resolution": video_result.get("actual_resolution") or resolution,
+        "actual_resolution": actual_resolution,
         "provider": video_result.get("provider"),
         "provider_transport": video_result.get("provider_transport"),
         "provider_request_profile": provider_request_profile,
