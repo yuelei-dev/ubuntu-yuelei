@@ -17,14 +17,14 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "572149009e993cb78309f5c62874ec23becc6fae",
+    "base_main_commit": "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-19T11:17:38Z",
+    "captured_at": "2026-08-20T02:45:24Z",
     "target": "test@8.148.158.106",
     "capture_method": "read-only SSH sha256sum and git hash-object; missing targets checked with test -f",
-    "repository_main_commit": "572149009e993cb78309f5c62874ec23becc6fae",
+    "repository_main_commit": "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
     "service_state": "active",
     "health_status": 200,
     "files": 9
@@ -142,8 +142,8 @@
       "source_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
       "source_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
       "target_preimage_state": "file",
-      "target_preimage_blob": "923494c705b557a3860225768d3197cfd09f2f09",
-      "target_preimage_sha256": "b3633b3f5a6d9f3c94b4869d41b6a9cd8ecaee24de97b61c89fec6612190a959",
+      "target_preimage_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "target_preimage_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
       "expected_postimage_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
       "expected_postimage_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651"
     },
@@ -154,8 +154,8 @@
       "source_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
       "source_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
       "target_preimage_state": "file",
-      "target_preimage_blob": "eea015454e50fd0d7f545bd55c07991f768d5d5c",
-      "target_preimage_sha256": "c8a988fe30c10abc14c456bad0f7d3fa1a8220139bf4151d2b5211b1f96b4b7f",
+      "target_preimage_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "target_preimage_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
       "expected_postimage_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
       "expected_postimage_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8"
     },
@@ -163,13 +163,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "ff71e2265d68f3859cafbe9b9021ed3902e59de2",
-      "source_sha256": "5c81501646cad68df010d0ed9794a668f912de50d05f17c2fb7f4f280e581eb8",
+      "source_blob": "a04f371e5e4d45d76154a79fa72ee661d5010094",
+      "source_sha256": "a3ebd0d2a8caf7fc679cd67923598b393118553268cf4ed69b1c02202aac91c8",
       "target_preimage_state": "file",
-      "target_preimage_blob": "9b8f5e993584dc07abdd6213fd369213b812cbb6",
-      "target_preimage_sha256": "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
-      "expected_postimage_blob": "ff71e2265d68f3859cafbe9b9021ed3902e59de2",
-      "expected_postimage_sha256": "5c81501646cad68df010d0ed9794a668f912de50d05f17c2fb7f4f280e581eb8"
+      "target_preimage_blob": "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
+      "target_preimage_sha256": "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
+      "expected_postimage_blob": "a04f371e5e4d45d76154a79fa72ee661d5010094",
+      "expected_postimage_sha256": "a3ebd0d2a8caf7fc679cd67923598b393118553268cf4ed69b1c02202aac91c8"
     }
   ],
   "release_contract_sources": [
@@ -185,8 +185,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "0113faccb45c92e807b0c3da4b81605a81deee23",
-      "source_sha256": "a1f9fbb092097ea1df59748aa32cec1bcf4f31a7a1a96b963534c0b33c240709"
+      "source_blob": "5a6ced82b757c446d73155a0bf68243372046632",
+      "source_sha256": "6f72651c3466890847f576841f6c94dfdf936e0efd5600d15915194076cc61ca"
     },
     {
       "repository_path": "tests/test_cosyvoice.py",
@@ -195,8 +195,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "9cd804b691bf96154c1550747e93631b402c687b",
-      "source_sha256": "24c15ab5dacf371fd1f03af7421fffb141a7a5aeac7f72e5e8f51aa31be831d8"
+      "source_blob": "f94501385cb978f552170ebecf04b19238a49768",
+      "source_sha256": "a851c509b6848b61e276d54bb57a51025373a24c82b2258c1fd6a7345cbbbc11"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",

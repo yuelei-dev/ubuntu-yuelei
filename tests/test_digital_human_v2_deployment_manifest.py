@@ -48,16 +48,16 @@ LOCKED_PREIMAGES = {
         "aadfe6da5af88c3c87beccaa2ed996902591e9fd146b3e1558cdd5b199598b12",
     ),
     "server/content_domains/audio.py": (
-        "file", "923494c705b557a3860225768d3197cfd09f2f09",
-        "b3633b3f5a6d9f3c94b4869d41b6a9cd8ecaee24de97b61c89fec6612190a959",
+        "file", "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+        "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
     ),
     "server/content_domains/cosyvoice.py": (
-        "file", "eea015454e50fd0d7f545bd55c07991f768d5d5c",
-        "c8a988fe30c10abc14c456bad0f7d3fa1a8220139bf4151d2b5211b1f96b4b7f",
+        "file", "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+        "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "9b8f5e993584dc07abdd6213fd369213b812cbb6",
-        "79862cca18453a812517df7b4c108fb87e3e4740b0c2b244b6e62c0f791db83d",
+        "file", "7599411f067fc826fbe9f2ca5fc3deecb2b54faf",
+        "f4c09d854307312403b4fc494abe8e313efd28c0626b64ac2d22cc089fcbf0f9",
     ),
 }
 
@@ -101,11 +101,15 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["target"], "test@8.148.158.106")
         self.assertIn("read-only SSH", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-19T11:17:38Z",
+            observation["captured_at"], "2026-08-20T02:45:24Z",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "572149009e993cb78309f5c62874ec23becc6fae",
+            "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
+        )
+        self.assertEqual(
+            self.manifest["source"]["base_main_commit"],
+            "df6354df60526f7e2c6bf9e2b64ef7c936ea38bb",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
