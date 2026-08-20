@@ -52,6 +52,22 @@ _STAGE_KINDS = {
     "compose": "script_to_video",
 }
 
+_NATURAL_MOUTH_TALKING_PROFILE = {
+    "resolution": "1080p",
+    "ratio": "9:16",
+    "motion": "low",
+    "speed": 1.0,
+    "pitch": 0,
+    "volume": 1,
+    "delivery": "natural",
+    "subtitle": False,
+}
+
+
+def natural_mouth_talking_profile():
+    """Return the server-owned HeyGen profile used by one-click talking jobs."""
+    return dict(_NATURAL_MOUTH_TALKING_PROFILE)
+
 
 class DigitalHumanRequestError(ValueError):
     def __init__(self, message, code="invalid_request", status=400, invalid_job_ids=None):
@@ -410,11 +426,9 @@ def verify_child_submission_with_record(payload, username, kind):
             raise DigitalHumanRequestError(
                 "口播步骤编号无效", "consent_plan_mismatch", 409,
             )
-        profile = segment["speech_profile"]
+        cleaned.update(natural_mouth_talking_profile())
         cleaned.update({
-            "text": segment["text"], "speed": profile["speed"],
-            "pitch": profile["pitch"], "volume": profile["volume"],
-            "motion": profile["motion"], "delivery": profile["delivery"],
+            "text": segment["text"],
             "digital_human_item_index": segment_index,
         })
         actual_voice = str(payload.get("voice") or "").strip()
@@ -627,11 +641,7 @@ def plan(script, segment_count=DEFAULT_SEGMENT_COUNT):
         "人物保持与参考照片完全一致，竖屏半身口播照，双手在胸前自然展开作对比说明手势；神态专注放松，眼神稳定直视镜头，嘴唇自然闭合",
         "人物保持与参考照片完全一致，竖屏半身口播照，一手轻指前方作总结强调手势，另一手自然放松；神态自信亲切，眼神稳定直视镜头，嘴唇自然闭合",
     )
-    profiles = (
-        {"speed": 1.08, "pitch": 1, "volume": 2, "motion": "high", "delivery": "energetic_hook"},
-        {"speed": 0.98, "pitch": 0, "volume": 1, "motion": "medium", "delivery": "clear_explain"},
-        {"speed": 1.04, "pitch": 1, "volume": 2, "motion": "high", "delivery": "confident_cta"},
-    )
+    profiles = tuple(natural_mouth_talking_profile() for _ in range(3))
     selections = {
         1: (("complete", 1),),
         2: (("hook", 0), ("explain_cta", 2)),
