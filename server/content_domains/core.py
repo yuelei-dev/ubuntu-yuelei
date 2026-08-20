@@ -3000,6 +3000,13 @@ class H(BaseHTTPRequestHandler):
             if _must_change_password(user): return self._send(403, {"detail": "请先修改初始密码"})
             try: feature_flags.require_enabled(kind)
             except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
+            if kind == "director_agent":
+                from . import director_agent as director_agent_domain
+                if not director_agent_domain.is_available(OPENAI_KEY):
+                    return self._send(503, {
+                        "detail": "编导助手暂未配置模型服务，请稍后再试",
+                        "code": "director_agent_unavailable", "retry_after_ms": 60000,
+                    })
             if kind in {"canvas_agent", "director_agent"} and is_shutting_down():
                 return self._send(503, {
                     "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
@@ -4027,11 +4034,14 @@ class H(BaseHTTPRequestHandler):
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
             return self._send(200, {"items": items, "cost": search_cost, "points_left": points_left})
         if p == "/api/gen/health":
+            from . import director_agent as director_agent_domain
+            director_agent_enabled = bool(feature_flags.is_enabled("director_agent")
+                and director_agent_domain.is_available(OPENAI_KEY))
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "smart_montage_job_workers": SMART_MONTAGE_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS, "job_queue_max": JOB_QUEUE_MAX, "talking_job_queue_max": TALKING_JOB_QUEUE_MAX, "smart_montage_job_queue_max": SMART_MONTAGE_JOB_QUEUE_MAX,
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_sora_video": MAX_USER_ACTIVE_SORA_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
                                     "sora_video_enabled": bool(video_domain.sora_video_is_open() and OPENAI_KEY and feature_flags.is_enabled("sora_video")),
                                     "omni_video_enabled": bool(video_domain.omni_video_is_open() and feature_flags.is_enabled("omni_video")), "seedance_video_enabled": bool(video_domain.seedance_video_is_open() and feature_flags.is_enabled("seedance_video")), "minimax_h3_video_enabled": bool(video_domain.minimax_h3_video_is_open() and feature_flags.is_enabled("minimax_h3_video")), "reverse_remake_video_offer": (reverse_remake_offer := video_domain.reverse_remake_video_offer(feature_flags, points_domain.cost_of)), "reverse_remake_video_channel": reverse_remake_offer["channel"], "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(), "seedance_upscale_enabled": bool(video_domain.seedance_upscale_is_open() and feature_flags.is_enabled("seedance_video")),
-                                    "director_agent_enabled": bool(feature_flags.is_enabled("director_agent")),
+                                    "director_agent_enabled": director_agent_enabled,
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": pricing.get_price("video.talking.block"), "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
     def do_PUT(self):

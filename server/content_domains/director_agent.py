@@ -22,6 +22,11 @@ API_BASE = os.environ.get("DIRECTOR_AGENT_API_BASE", "").strip() or None
 API_KEY = os.environ.get("DIRECTOR_AGENT_API_KEY", "").strip() or None
 
 
+def is_available(fallback_key=None):
+    """Return whether a Responses API credential is configured server-side."""
+    return bool(API_KEY or str(fallback_key or "").strip())
+
+
 def _env_positive_int(name, default):
     try:
         value = int(os.environ.get(name, str(default)) or default)

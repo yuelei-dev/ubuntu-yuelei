@@ -66,6 +66,14 @@ class DirectorAgentTests(unittest.TestCase):
         }]))
         self.assertEqual(clean["history"][0]["role"], "user")
 
+    def test_provider_availability_requires_a_server_side_key(self):
+        with mock.patch.object(director_agent, "API_KEY", None):
+            self.assertFalse(director_agent.is_available())
+            self.assertFalse(director_agent.is_available("  "))
+            self.assertTrue(director_agent.is_available("global-key"))
+        with mock.patch.object(director_agent, "API_KEY", "dedicated-key"):
+            self.assertTrue(director_agent.is_available())
+
     def test_submission_limit_is_account_scoped_and_durable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = pathlib.Path(temp_dir) / "jobs.db"
@@ -188,9 +196,13 @@ class DirectorAgentTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
         self.assertIn("director_agent_domain.submission_limit", core)
         self.assertIn(
-            '"director_agent_enabled": bool(feature_flags.is_enabled("director_agent"))',
+            'director_agent_domain.is_available(OPENAI_KEY)',
             core,
         )
+        self.assertIn('"director_agent_enabled": director_agent_enabled', core)
+        self.assertIn('"code": "director_agent_unavailable"', core)
+        self.assertLess(core.index('"code": "director_agent_unavailable"'),
+                        core.index('if kind in {"canvas_agent", "director_agent"}'))
         self.assertIn('"script_to_video", "director_agent"}', core)
         self.assertIn("node tests/test_director_agent.js", workflow)
 
