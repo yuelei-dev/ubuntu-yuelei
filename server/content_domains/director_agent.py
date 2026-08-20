@@ -11,8 +11,6 @@ import os
 import re
 import time
 
-from .core import _post
-
 
 MAX_ACTIONS = 6
 MAX_HISTORY = 10
@@ -22,9 +20,29 @@ API_BASE = os.environ.get("DIRECTOR_AGENT_API_BASE", "").strip() or None
 API_KEY = os.environ.get("DIRECTOR_AGENT_API_KEY", "").strip() or None
 
 
-def is_available(fallback_key=None):
-    """Return whether a Responses API credential is configured server-side."""
-    return bool(API_KEY or str(fallback_key or "").strip())
+def _post(*args, **kwargs):
+    """Import the shared HTTP client lazily so registry startup stays optional."""
+    from . import core
+    return core._post(*args, **kwargs)
+
+
+def provider_config(fallback_base=None, fallback_key=None):
+    """Resolve one endpoint/key pair without crossing credential scopes.
+
+    A dedicated endpoint is usable only with its dedicated key. Without that
+    endpoint the Agent uses the global pair and ignores a stray dedicated key.
+    """
+    if API_BASE:
+        return (API_BASE, API_KEY) if API_KEY else None
+    global_key = str(fallback_key or "").strip()
+    if not global_key:
+        return None
+    return (str(fallback_base or "https://api.openai.com").strip(), global_key)
+
+
+def is_available(fallback_key=None, fallback_base=None):
+    """Return whether one complete, scope-safe provider pair is configured."""
+    return provider_config(fallback_base, fallback_key) is not None
 
 
 def _env_positive_int(name, default):
@@ -142,7 +160,7 @@ def _local_day_bounds(now):
     return start, next_start
 
 
-def submission_limit(db_factory, username, now=None):
+def _submission_limit_snapshot(db_factory, username, now=None):
     """Return a public 429 body when an authenticated account exceeds its quota."""
     username = _text(username, 160, "认证账号")
     if not username:
@@ -179,6 +197,78 @@ def submission_limit(db_factory, username, now=None):
             "limit": DAILY_LIMIT,
         }
     return None
+
+
+def create_job_with_quota(db_factory, username, payload, owner,
+                          max_active_jobs=None, now=None):
+    """Reserve quota and create the job in one serialized transaction."""
+    username = _text(username, 160, "\u8ba4\u8bc1\u8d26\u53f7")
+    if not username:
+        raise ValueError("\u7f16\u5bfc\u52a9\u624b\u7f3a\u5c11\u8ba4\u8bc1\u8d26\u53f7")
+    now = int(time.time() if now is None else now)
+    day_start, next_day_start = _local_day_bounds(now)
+    window_start = min(day_start, now - 60)
+    connection = db_factory()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        usage_row = connection.execute(
+            """SELECT
+                   COALESCE(SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN created_at>=? THEN 1 ELSE 0 END),0)
+               FROM jobs
+               WHERE username=? AND kind='director_agent' AND created_at>=?""",
+            (now - 60, day_start, username, window_start),
+        ).fetchone()
+        minute_count = int(usage_row[0] if usage_row else 0)
+        daily_count = int(usage_row[1] if usage_row else 0)
+        limit_hit = None
+        if minute_count >= RATE_LIMIT_PER_MINUTE:
+            limit_hit = {
+                "detail": "\u7f16\u5bfc\u52a9\u624b\u56de\u590d\u8fc7\u4e8e\u9891\u7e41\uff0c\u8bf7\u4e00\u5206\u949f\u540e\u518d\u8bd5",
+                "code": "director_agent_rate_limited",
+                "retry_after_ms": 60000,
+                "limit": RATE_LIMIT_PER_MINUTE,
+            }
+        elif daily_count >= DAILY_LIMIT:
+            limit_hit = {
+                "detail": "\u4eca\u5929\u7684\u7f16\u5bfc\u52a9\u624b\u6b21\u6570\u5df2\u7528\u5b8c\uff0c\u8bf7\u660e\u5929\u7ee7\u7eed",
+                "code": "director_agent_daily_limit",
+                "retry_after_ms": max(1000, (next_day_start - now) * 1000),
+                "limit": DAILY_LIMIT,
+            }
+        if not limit_hit and max_active_jobs is not None:
+            active_row = connection.execute(
+                """SELECT COUNT(*) FROM jobs
+                   WHERE username=? AND status IN ('pending','running')
+                     AND COALESCE(deleted,0)=0""",
+                (username,),
+            ).fetchone()
+            active_jobs = int(active_row[0] if active_row else 0)
+            if active_jobs >= int(max_active_jobs):
+                limit_hit = {
+                    "detail": "\u60a8\u6709 %d \u4e2a\u4efb\u52a1\u6b63\u5728\u6392\u961f\u751f\u6210\uff0c\u5b8c\u6210\u540e\u518d\u63d0\u4ea4" % active_jobs,
+                    "code": "active_job_cap",
+                    "active_jobs": active_jobs,
+                    "max_active_jobs": int(max_active_jobs),
+                    "retry_after_ms": 4000,
+                    "need": 0,
+                }
+        if limit_hit:
+            connection.rollback()
+            return None, limit_hit
+        cursor = connection.execute(
+            """INSERT INTO jobs(kind,username,cost,payload,created_at,updated_at,owner)
+               VALUES('director_agent',?,?,?,?,?,?)""",
+            (username, 0, json.dumps(payload, ensure_ascii=False), now, now, owner),
+        )
+        job_id = int(cursor.lastrowid)
+        connection.commit()
+        return job_id, None
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _page_context(value):
@@ -283,6 +373,11 @@ def validate_payload(payload):
 
 
 def _responses_chat(request):
+    from . import core
+    provider = provider_config(core.OPENAI_BASE, core.OPENAI_KEY)
+    if provider is None:
+        raise ValueError("\u7f16\u5bfc\u52a9\u624b\u6682\u672a\u914d\u7f6e\u6a21\u578b\u670d\u52a1\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5")
+    api_base, api_key = provider
     context = {
         "page_context": request["page_context"],
         "history": request["history"],
@@ -305,7 +400,7 @@ def _responses_chat(request):
     }
     response = _post(
         "/v1/responses", json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        "application/json", base=API_BASE, key=API_KEY, timeout=120,
+        "application/json", base=api_base, key=api_key, timeout=120,
     )
     if response.get("status") not in (None, "completed"):
         raise ValueError("编导助手思考未完成，请重试")

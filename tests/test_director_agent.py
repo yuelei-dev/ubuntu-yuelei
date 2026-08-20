@@ -1,9 +1,13 @@
+import concurrent.futures
 import hashlib
+import importlib.util
 import json
 import pathlib
 import sqlite3
 import sys
 import tempfile
+import threading
+import types
 from contextlib import closing
 import unittest
 from unittest import mock
@@ -12,6 +16,7 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
+import content_domains
 from content_domains import core, director_agent
 
 
@@ -66,13 +71,36 @@ class DirectorAgentTests(unittest.TestCase):
         }]))
         self.assertEqual(clean["history"][0]["role"], "user")
 
-    def test_provider_availability_requires_a_server_side_key(self):
-        with mock.patch.object(director_agent, "API_KEY", None):
-            self.assertFalse(director_agent.is_available())
-            self.assertFalse(director_agent.is_available("  "))
-            self.assertTrue(director_agent.is_available("global-key"))
-        with mock.patch.object(director_agent, "API_KEY", "dedicated-key"):
-            self.assertTrue(director_agent.is_available())
+    def test_provider_routing_never_crosses_custom_and_global_credentials(self):
+        with (
+            mock.patch.object(director_agent, "API_BASE", None),
+            mock.patch.object(director_agent, "API_KEY", None),
+        ):
+            self.assertEqual(
+                director_agent.provider_config(
+                    "https://global.example/v1", "global-key"),
+                ("https://global.example/v1", "global-key"),
+            )
+        with (
+            mock.patch.object(
+                director_agent, "API_BASE", "https://custom.example/v1"),
+            mock.patch.object(director_agent, "API_KEY", None),
+        ):
+            self.assertIsNone(director_agent.provider_config(
+                "https://global.example/v1", "global-key"))
+            self.assertFalse(director_agent.is_available(
+                fallback_key="global-key",
+                fallback_base="https://global.example/v1"))
+        with (
+            mock.patch.object(
+                director_agent, "API_BASE", "https://custom.example/v1"),
+            mock.patch.object(director_agent, "API_KEY", "dedicated-key"),
+        ):
+            self.assertEqual(
+                director_agent.provider_config(
+                    "https://global.example/v1", "global-key"),
+                ("https://custom.example/v1", "dedicated-key"),
+            )
 
     def test_server_availability_fails_closed_for_partial_runtime_overlay(self):
         with mock.patch.object(core, "HANDLERS", {}), \
@@ -85,7 +113,10 @@ class DirectorAgentTests(unittest.TestCase):
                 core, "HANDLERS", {"director_agent": object()}), \
                 mock.patch.object(director_agent, "is_available", return_value=True) as available:
             self.assertTrue(core._director_agent_available())
-            available.assert_called_once_with(core.OPENAI_KEY)
+            available.assert_called_once_with(
+                fallback_key=core.OPENAI_KEY,
+                fallback_base=core.OPENAI_BASE,
+            )
         with mock.patch.object(
                 core, "HANDLERS", {"director_agent": object()}), \
                 mock.patch.object(
@@ -125,7 +156,7 @@ class DirectorAgentTests(unittest.TestCase):
             with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 2), \
                     mock.patch.object(director_agent, "DAILY_LIMIT", 99):
                 statements.clear()
-                limited = director_agent.submission_limit(db, "alice", now=now)
+                limited = director_agent._submission_limit_snapshot(db, "alice", now=now)
                 self.assertEqual(limited["code"], "director_agent_rate_limited")
                 self.assertEqual(limited["retry_after_ms"], 60000)
                 self.assertEqual(1, len([
@@ -133,7 +164,7 @@ class DirectorAgentTests(unittest.TestCase):
                     if item.lstrip().upper().startswith("SELECT")
                 ]))
                 self.assertIsNone(
-                    director_agent.submission_limit(db, "bob", now=now)
+                    director_agent._submission_limit_snapshot(db, "bob", now=now)
                 )
 
             day_start, _ = director_agent._local_day_bounds(now)
@@ -150,7 +181,7 @@ class DirectorAgentTests(unittest.TestCase):
                 connection.commit()
             with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 99), \
                     mock.patch.object(director_agent, "DAILY_LIMIT", 2):
-                limited = director_agent.submission_limit(db, "alice", now=later)
+                limited = director_agent._submission_limit_snapshot(db, "alice", now=later)
                 self.assertEqual(limited["code"], "director_agent_daily_limit")
                 self.assertGreater(limited["retry_after_ms"], 0)
 
@@ -164,9 +195,111 @@ class DirectorAgentTests(unittest.TestCase):
                 connection.commit()
             with mock.patch.object(director_agent, "RATE_LIMIT_PER_MINUTE", 1), \
                     mock.patch.object(director_agent, "DAILY_LIMIT", 99):
-                limited = director_agent.submission_limit(
+                limited = director_agent._submission_limit_snapshot(
                     db, "alice", now=cross_midnight)
                 self.assertEqual(limited["code"], "director_agent_rate_limited")
+
+    def test_quota_reservation_and_job_creation_are_atomic_under_concurrency(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "jobs.db"
+            with closing(sqlite3.connect(path)) as connection:
+                connection.execute(
+                    """CREATE TABLE jobs(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT, username TEXT, cost INTEGER,
+                        status TEXT DEFAULT 'pending', payload TEXT,
+                        created_at INTEGER, updated_at INTEGER, owner TEXT,
+                        deleted INTEGER DEFAULT 0
+                    )"""
+                )
+                connection.commit()
+
+            def db():
+                connection = sqlite3.connect(path, timeout=10)
+                connection.row_factory = sqlite3.Row
+                return connection
+
+            workers = 10
+            barrier = threading.Barrier(workers)
+
+            def submit(index):
+                barrier.wait()
+                return director_agent.create_job_with_quota(
+                    db, "alice", {"request": index}, "content",
+                    max_active_jobs=99, now=2_000_000_000,
+                )
+
+            with (
+                mock.patch.object(
+                    director_agent, "RATE_LIMIT_PER_MINUTE", 3),
+                mock.patch.object(director_agent, "DAILY_LIMIT", 99),
+                concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers) as executor,
+            ):
+                results = list(executor.map(submit, range(workers)))
+
+            job_ids = [job_id for job_id, limit in results if job_id is not None]
+            limited = [limit for job_id, limit in results if limit is not None]
+            self.assertEqual(len(job_ids), 3)
+            self.assertEqual(len(set(job_ids)), 3)
+            self.assertEqual(len(limited), 7)
+            self.assertEqual(
+                {item["code"] for item in limited},
+                {"director_agent_rate_limited"},
+            )
+            with closing(sqlite3.connect(path)) as connection:
+                row = connection.execute(
+                    "SELECT COUNT(*), COUNT(DISTINCT id) FROM jobs "
+                    "WHERE username=? AND kind='director_agent'",
+                    ("alice",),
+                ).fetchone()
+            self.assertEqual(row, (3, 3))
+
+    def test_registry_skips_optional_agent_when_runtime_file_is_missing(self):
+        required = (
+            "audio", "breakdown", "canvas_agent", "image", "leads",
+            "script_to_video", "short_drama_assembly_render",
+            "short_drama_playback_render", "short_drama_sound_effect",
+            "text", "video",
+        )
+        fake_modules = {}
+        for name in required:
+            handlers = {"copy": object()} if name == "text" else {
+                "required_" + name: object()}
+            fake_modules["content_domains." + name] = types.SimpleNamespace(
+                HANDLERS=handlers)
+        module_name = "content_domains._registry_under_test"
+        spec = importlib.util.spec_from_file_location(
+            module_name,
+            ROOT / "server" / "content_domains" / "registry.py",
+        )
+        registry_under_test = importlib.util.module_from_spec(spec)
+        package_attrs = {
+            name: fake_modules["content_domains." + name]
+            for name in required
+        }
+        with (
+            mock.patch.dict(sys.modules, fake_modules),
+            mock.patch.multiple(
+                content_domains, create=True, **package_attrs),
+        ):
+            sys.modules[module_name] = registry_under_test
+            try:
+                spec.loader.exec_module(registry_under_test)
+            finally:
+                sys.modules.pop(module_name, None)
+        warnings = []
+        handlers = registry_under_test.build_handlers(
+            optional_importer=lambda name: (_ for _ in ()).throw(
+                ModuleNotFoundError(name)),
+            warning=warnings.append,
+        )
+        self.assertNotIn("director_agent", handlers)
+        self.assertIn("copy", handlers)
+        self.assertEqual(len(warnings), 1)
+        loaded = registry_under_test.build_handlers(optional_importer=lambda name:
+            types.SimpleNamespace(HANDLERS={"director_agent": object()}))
+        self.assertIn("director_agent", loaded)
 
     def test_normalize_only_allows_whitelisted_confirmed_actions(self):
         request = director_agent.validate_payload(payload())
@@ -222,7 +355,14 @@ class DirectorAgentTests(unittest.TestCase):
         request = dict(
             director_agent.validate_payload(payload()), _username="customer-a", _job_id=42
         )
-        with mock.patch.object(director_agent, "_post", side_effect=fake_post):
+        with (
+            mock.patch.object(
+                core, "OPENAI_BASE", "https://global.example/v1"),
+            mock.patch.object(core, "OPENAI_KEY", "global-key"),
+            mock.patch.object(director_agent, "API_BASE", None),
+            mock.patch.object(director_agent, "API_KEY", None),
+            mock.patch.object(director_agent, "_post", side_effect=fake_post),
+        ):
             result = director_agent.gen_director_agent(request)
         self.assertEqual(result["content"], "先填写选题。")
         self.assertEqual(captured["path"], "/v1/responses")
@@ -232,14 +372,49 @@ class DirectorAgentTests(unittest.TestCase):
             hashlib.sha256(b"director-user:customer-a").hexdigest()[:32],
         )
         self.assertTrue(captured["body"]["text"]["format"]["strict"])
+        self.assertEqual(captured["kwargs"]["base"], "https://global.example/v1")
+        self.assertEqual(captured["kwargs"]["key"], "global-key")
+
+        captured.clear()
+        with (
+            mock.patch.object(
+                core, "OPENAI_BASE", "https://global.example/v1"),
+            mock.patch.object(core, "OPENAI_KEY", "global-key"),
+            mock.patch.object(
+                director_agent, "API_BASE", "https://custom.example/v1"),
+            mock.patch.object(director_agent, "API_KEY", "dedicated-key"),
+            mock.patch.object(director_agent, "_post", side_effect=fake_post),
+        ):
+            director_agent.gen_director_agent(request)
+        self.assertEqual(captured["kwargs"]["base"], "https://custom.example/v1")
+        self.assertEqual(captured["kwargs"]["key"], "dedicated-key")
+
+        with (
+            mock.patch.object(
+                core, "OPENAI_BASE", "https://global.example/v1"),
+            mock.patch.object(core, "OPENAI_KEY", "global-key"),
+            mock.patch.object(
+                director_agent, "API_BASE", "https://custom.example/v1"),
+            mock.patch.object(director_agent, "API_KEY", None),
+            mock.patch.object(director_agent, "_post") as post,
+        ):
+            with self.assertRaisesRegex(
+                    ValueError, "\u6682\u672a\u914d\u7f6e"):
+                director_agent.gen_director_agent(request)
+            post.assert_not_called()
+
         self.assertNotIn("API Key", captured["body"]["safety_identifier"])
 
     def test_server_and_ci_wiring_are_fail_closed(self):
         core = (ROOT / "server" / "content_domains" / "core.py").read_text("utf-8")
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text("utf-8")
-        self.assertIn("director_agent_domain.submission_limit", core)
+        registry_source = (
+            ROOT / "server" / "content_domains" / "registry.py"
+        ).read_text("utf-8")
+        self.assertIn("director_agent_domain.create_job_with_quota", core)
+        self.assertNotIn("director_agent_domain.submission_limit", core)
         self.assertIn(
-            'return bool(director_agent_domain.is_available(OPENAI_KEY))',
+            "fallback_key=OPENAI_KEY, fallback_base=OPENAI_BASE",
             core,
         )
         self.assertIn(
@@ -251,6 +426,8 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertLess(core.index('"code": "director_agent_unavailable"'),
                         core.index('if kind in {"canvas_agent", "director_agent"}'))
         self.assertIn('"script_to_video", "director_agent"}', core)
+        self.assertNotIn("canvas_agent, director_agent, image", registry_source)
+        self.assertIn('import_module("." + name, __package__)', registry_source)
         self.assertIn("node tests/test_director_agent.js", workflow)
 
 

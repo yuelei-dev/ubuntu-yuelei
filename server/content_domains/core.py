@@ -412,7 +412,8 @@ def _director_agent_available():
         return False
     try:
         from . import director_agent as director_agent_domain
-        return bool(director_agent_domain.is_available(OPENAI_KEY))
+        return bool(director_agent_domain.is_available(
+            fallback_key=OPENAI_KEY, fallback_base=OPENAI_BASE))
     except Exception as error:
         print("[director_agent] availability check failed: %s" % error, flush=True)
         return False
@@ -3330,15 +3331,11 @@ class H(BaseHTTPRequestHandler):
                         _idempotency_abort(user["username"], p, idem_key); _short_drama_domain()._http_error(self, e, operation_terminal=True); return
                 limit_hit = (None if (still_attempt or durable_attempt) else
                              _user_video_submit_limit(kind, body, user["username"], cost))
-                if not limit_hit and kind == "director_agent":
-                    from . import director_agent as director_agent_domain
-                    limit_hit = director_agent_domain.submission_limit(
-                        jdb, user["username"])
                 if limit_hit:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     if is_still_route: limit_hit["operation_terminal"] = True
                     return self._send(429, limit_hit)
-                active_jobs = 0 if (still_attempt or durable_attempt) else _user_active_job_count(user["username"])
+                active_jobs = 0 if (still_attempt or durable_attempt or kind == "director_agent") else _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
@@ -3527,6 +3524,16 @@ class H(BaseHTTPRequestHandler):
                                     "state": "linked", "job_id": int(jid),
                                     "points_left": int(points_left),
                                 })
+                        elif kind == "director_agent":
+                            from . import director_agent as director_agent_domain
+                            jid, limit_hit = director_agent_domain.create_job_with_quota(
+                                jdb, user["username"], body, SERVICE_OWNER,
+                                max_active_jobs=MAX_USER_ACTIVE_JOBS,
+                            )
+                            if limit_hit:
+                                _idempotency_abort(user["username"], p, idem_key)
+                                return self._send(429, limit_hit)
+                            points_left = int(user.get("points") or 0)
                         else:
                             jid, points_left = jobs_store.create_paid_job(
                                 jdb, points_domain.deduct_points,

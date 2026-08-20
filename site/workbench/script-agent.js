@@ -151,15 +151,46 @@
     }
     throw new Error('不允许执行这个动作');
   }
+  function validPendingRequest(value){
+    if(!value||typeof value!=='object'||Array.isArray(value)) return null;
+    var key=String(value.key||''),body=value.body,jobId=value.job_id;
+    if(!/^director-agent-[A-Za-z0-9_-]{8,100}$/.test(key)) return null;
+    if(!body||typeof body!=='object'||Array.isArray(body)) return null;
+    try{ if(JSON.stringify(body).length>24000) return null; }catch(error){ return null; }
+    if(jobId!==null&&jobId!==undefined&&!/^[A-Za-z0-9_-]{1,80}$/.test(String(jobId))) return null;
+    return {
+      key:key,body:body,
+      summary:value.summary&&typeof value.summary==='object'?value.summary:{},
+      job_id:jobId===null||jobId===undefined?null:String(jobId),
+      created_at:Number(value.created_at)||Date.now()
+    };
+  }
+  function createPendingRequest(body,key,prompt,now){
+    var copy=JSON.parse(JSON.stringify(body||{}));
+    return validPendingRequest({
+      key:key,body:copy,job_id:null,created_at:Number(now)||Date.now(),
+      summary:{
+        prompt:String(prompt||'').slice(0,2000),
+        page_revision:String(copy.page_revision||'').slice(0,32),
+        mode:String(copy.page_context&&copy.page_context.mode||'').slice(0,24)
+      }
+    });
+  }
   function readState(storage){
     try{
       var value=JSON.parse(storage.getItem(STORAGE_KEY)||'null');
-      if(value&&Array.isArray(value.messages)) return {messages:value.messages.slice(-20),open:!!value.open};
+      if(value&&Array.isArray(value.messages)) return {
+        messages:value.messages.slice(-20),open:!!value.open,
+        pending_request:validPendingRequest(value.pending_request)
+      };
     }catch(error){}
-    return {messages:[],open:false};
+    return {messages:[],open:false,pending_request:null};
   }
   function saveState(storage,state){
-    try{ storage.setItem(STORAGE_KEY,JSON.stringify({messages:state.messages.slice(-20),open:state.open})); }catch(error){}
+    try{ storage.setItem(STORAGE_KEY,JSON.stringify({
+      messages:state.messages.slice(-20),open:state.open,
+      pending_request:validPendingRequest(state.pending_request)
+    })); }catch(error){}
   }
   function jsonFetch(win,url,options){
     options=options||{}; var headers=options.headers||{};
@@ -168,7 +199,12 @@
       body:options.body===undefined?undefined:JSON.stringify(options.body)}).then(function(response){
       return response.text().then(function(raw){
         var data={}; try{data=raw?JSON.parse(raw):{};}catch(error){}
-        if(!response.ok) throw new Error(data.detail||('请求失败（'+response.status+'）'));
+        if(!response.ok){
+          var requestError=new Error(data.detail||('请求失败（'+response.status+'）'));
+          requestError.status=response.status;
+          requestError.data=data;
+          throw requestError;
+        }
         return data;
       });
     });
@@ -185,27 +221,61 @@
     return new Promise(function(resolve,reject){
       function timedOut(){ return Date.now()-started>300000; }
       function tick(){
-        if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
+        if(timedOut()){ var timeoutError=new Error('编导助手响应超时，请稍后重试'); timeoutError.terminal=false; reject(timeoutError); return; }
         jsonFetch(win,'/api/gen/job/'+encodeURIComponent(jobId)).then(function(job){
           transientFailures=0;
           if(job.status==='done'){
             var result=job.result; if(typeof result==='string') result=JSON.parse(result); resolve(result); return;
           }
-          if(job.status==='error'||job.status==='failed'){ reject(new Error(job.error||'编导助手处理失败')); return; }
+          if(job.status==='error'||job.status==='failed'){ var jobError=new Error(job.error||'编导助手处理失败'); jobError.terminal=true; reject(jobError); return; }
           if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
           if(onProgress) onProgress(Math.floor((Date.now()-started)/1000));
           setTimeout(tick,1400);
         }).catch(function(error){
           transientFailures+=1;
-          if(timedOut()){ reject(new Error('编导助手响应超时，请稍后重试')); return; }
-          if(transientFailures>=3){ reject(error); return; }
+          if(timedOut()){ error.terminal=false; reject(error); return; }
+          if(error.status&&error.status<500){ error.terminal=true; reject(error); return; }
           if(onProgress) onProgress(Math.floor((Date.now()-started)/1000));
-          setTimeout(tick,1400);
+          setTimeout(tick,Math.min(5000,1400*transientFailures));
         });
       }
       tick();
     });
   }
+  function resumeRequest(win,record,onRecord,onProgress){
+    record=validPendingRequest(record);
+    if(!record) return Promise.reject(new Error('未找到可恢复的编导助手请求'));
+    var started=Date.now();
+    function timedOut(){return Date.now()-started>300000;}
+    function accepted(){
+      if(record.job_id) return Promise.resolve(record);
+      return jsonFetch(win,'/api/gen/director_agent',{
+        method:'POST',body:record.body,headers:{'Idempotency-Key':record.key}
+      }).then(function(data){
+        if(!data.job_id) throw new Error(data.detail||'编导助手任务提交失败');
+        record.job_id=String(data.job_id);
+        if(onRecord) onRecord(record);
+        return record;
+      }).catch(function(error){
+        var code=error.data&&error.data.code;
+        var retryable=!error.status||error.status>=500||code==='idempotency_in_progress';
+        if(retryable&&!timedOut()){
+          if(onProgress) onProgress(0,'submitting');
+          return new Promise(function(resolve){
+            setTimeout(function(){resolve(accepted());},1400);
+          });
+        }
+        error.terminal=!retryable;
+        throw error;
+      });
+    }
+    return accepted().then(function(){
+      return pollJob(win,record.job_id,function(seconds){
+        if(onProgress) onProgress(seconds,'polling');
+      });
+    });
+  }
+
   function addStyles(doc){
     if(doc.getElementById('hqDirectorAgentStyle')) return;
     var style=doc.createElement('style'); style.id='hqDirectorAgentStyle';
@@ -259,34 +329,67 @@
       });
       messages.scrollTop=messages.scrollHeight; send.disabled=pending; input.disabled=pending;
     }
+    function handleResult(result){
+      state.pending_request=null; saveState(storage,state);
+      currentPlan=result&&result.plan||null;
+      addMessage('assistant',result&&result.content||'我已经看完当前页面。');
+      if(currentPlan&&currentPlan.actions.length){
+        try{
+          validatePlan(currentPlan,doc);
+          var applied=currentPlan.actions.map(function(action){return applyAction(action,doc,win);});
+          status.textContent=applied.join('；')+'。涉及扣点或生成时，仍需要你点击原页面按钮确认。';
+          currentPlan=null;
+          render();
+        }catch(error){
+          status.textContent=error.message||'自动操作失败，请重新告诉我你的要求';
+        }
+      }else{
+        status.textContent='';
+      }
+    }
+    function runPending(record,resumed){
+      record=validPendingRequest(record);
+      if(!record) return;
+      state.pending_request=record; saveState(storage,state);
+      pending=true;
+      status.textContent=resumed?'正在恢复上次未完成的请求…':'正在结合当前页面判断…';
+      render();
+      resumeRequest(win,record,function(updated){
+        state.pending_request=validPendingRequest(updated);
+        saveState(storage,state);
+      },function(seconds,phase){
+        status.textContent=phase==='submitting'
+          ?'正在确认上次提交结果…'
+          :'编导助手思考中，已用 '+seconds+' 秒…';
+      }).then(handleResult).catch(function(error){
+        if(error.terminal) state.pending_request=null;
+        saveState(storage,state);
+        addMessage('error',error.message||'编导助手请求失败，请稍后重试');
+        status.textContent=state.pending_request
+          ?'原请求已保留，刷新页面后会继续，不会创建新的幂等键。':'';
+      }).finally(function(){pending=false;render();});
+    }
     function submit(value){
       value=String(value||input.value||'').trim(); if(!value||pending) return;
-      var body=buildPayload(value,doc,state,storage),key='director-agent-'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);
-      input.value=''; currentPlan=null; addMessage('user',value); pending=true; status.textContent='正在结合当前页面判断…'; render();
-      jsonFetch(win,'/api/gen/director_agent',{method:'POST',body:body,headers:{'Idempotency-Key':key}}).then(function(data){
-        if(!data.job_id) throw new Error(data.detail||'编导助手任务提交失败');
-        return pollJob(win,data.job_id,function(seconds){status.textContent='编导助手思考中，已用 '+seconds+' 秒…';});
-      }).then(function(result){
-        currentPlan=result&&result.plan||null;
-        addMessage('assistant',result&&result.content||'我已经看完当前页面。');
-        if(currentPlan&&currentPlan.actions.length){
-          try{
-            validatePlan(currentPlan,doc);
-            var applied=currentPlan.actions.map(function(action){return applyAction(action,doc,win);});
-            status.textContent=applied.join('；')+'。涉及扣点或生成时，仍需要你点击原页面按钮确认。';
-            currentPlan=null;
-            render();
-          }catch(error){ status.textContent=error.message||'自动操作失败，请重新告诉我你的要求'; }
-        }else{
-          status.textContent='';
-        }
-      }).catch(function(error){addMessage('error',error.message||'编导助手请求失败，请稍后重试');status.textContent='';}).finally(function(){pending=false;render();});
+      var body=buildPayload(value,doc,state,storage);
+      var key='director-agent-'+Date.now().toString(36)+Math.random().toString(36).slice(2,10);
+      var record=createPendingRequest(body,key,value);
+      if(!record){ addMessage('error','编导助手请求摘要保存失败，请重试'); return; }
+      input.value=''; currentPlan=null; addMessage('user',value);
+      state.pending_request=record; saveState(storage,state);
+      runPending(record,false);
     }
     launch.onclick=function(){setOpen(!state.open);}; close.onclick=function(){setOpen(false);}; send.onclick=function(){submit();};
     input.addEventListener('keydown',function(event){if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();submit();}});
-    render(); return {state:state,submit:submit,setOpen:setOpen};
+    render();
+    if(state.pending_request) runPending(state.pending_request,true);
+    return {
+      state:state,submit:submit,setOpen:setOpen,resume:function(){runPending(state.pending_request,true);}
+    };
   }
   return {digest:digest,createPageContext:createPageContext,createPageSnapshot:createPageSnapshot,
     buildPayload:buildPayload,validatePlan:validatePlan,applyAction:applyAction,pollJob:pollJob,
+    validPendingRequest:validPendingRequest,createPendingRequest:createPendingRequest,
+    readState:readState,saveState:saveState,resumeRequest:resumeRequest,
     bootstrap:bootstrap,mount:mount,routes:ROUTES};
 });

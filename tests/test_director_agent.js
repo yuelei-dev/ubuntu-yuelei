@@ -130,10 +130,37 @@ function fixture(mode, breakdownTool) {
   assert.throws(() => agent.validatePlan({page_revision:'deadbeef',actions:[]}, doc), /页面内容已变化/);
 }
 
+{
+  const values = {};
+  const storage = {
+    getItem(key){ return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null; },
+    setItem(key,value){ values[key] = String(value); },
+  };
+  const pending = agent.createPendingRequest(
+    {prompt:'resume me',page_revision:'a1b2c3d4',page_context:{mode:'write'}},
+    'director-agent-recovery123',
+    'resume me',
+    12345
+  );
+  assert.equal(pending.summary.prompt, 'resume me');
+  assert.equal(pending.job_id, null);
+  agent.saveState(storage,{messages:[{role:'user',content:'resume me'}],open:true,pending_request:pending});
+  const restored = agent.readState(storage);
+  assert.equal(restored.pending_request.key, 'director-agent-recovery123');
+  assert.equal(restored.pending_request.body.page_revision, 'a1b2c3d4');
+  assert.equal(restored.open, true);
+  assert.equal(agent.validPendingRequest({
+    key:'bad',body:{},job_id:null,created_at:1
+  }), null);
+}
+
 const source = require('fs').readFileSync(require('path').join(__dirname, '../site/workbench/script-agent.js'), 'utf8');
 assert.ok(source.includes('currentPlan.actions.map(function(action){return applyAction(action,doc,win);}'));
 assert.ok(source.includes('health.director_agent_enabled!==true'));
 assert.ok(source.includes('涉及扣点或生成时，仍需要你点击原页面按钮确认'));
+assert.ok(source.indexOf('state.pending_request=record; saveState(storage,state);') <
+  source.indexOf('runPending(record,false);'));
+assert.ok(source.includes('if(state.pending_request) runPending(state.pending_request,true);'));
 
 (async function(){
   let mounted = 0;
@@ -173,8 +200,68 @@ assert.ok(source.includes('涉及扣点或生成时，仍需要你点击原页�
   const result = await agent.pollJob(win, 'job_123');
   assert.equal(result.content, 'ok');
   assert.equal(calls, 2);
+  const postKeys = [];
+  let postCalls = 0;
+  let persistedJob = '';
+  const recoveryRecord = agent.createPendingRequest(
+    {prompt:'same request',page_revision:'a1b2c3d4',page_context:{mode:'write'}},
+    'director-agent-response-lost-123',
+    'same request',
+    54321
+  );
+  const recoveryWin = {fetch(url, options){
+    if(url === '/api/gen/director_agent'){
+      postCalls += 1;
+      postKeys.push(options.headers['Idempotency-Key']);
+      assert.equal(options.body, JSON.stringify(recoveryRecord.body));
+      if(postCalls === 1) return Promise.reject(new Error('response lost'));
+      return Promise.resolve({
+        ok:true,status:200,
+        text(){return Promise.resolve(JSON.stringify({job_id:77}));},
+      });
+    }
+    assert.equal(url, '/api/gen/job/77');
+    return Promise.resolve({
+      ok:true,status:200,
+      text(){return Promise.resolve(JSON.stringify({
+        status:'done',result:{content:'recovered'}
+      }));},
+    });
+  }};
+  const recovered = await agent.resumeRequest(
+    recoveryWin,
+    recoveryRecord,
+    function(updated){ persistedJob = updated.job_id; }
+  );
+  assert.equal(recovered.content, 'recovered');
+  assert.equal(postCalls, 2);
+  assert.deepEqual(postKeys, [
+    'director-agent-response-lost-123',
+    'director-agent-response-lost-123'
+  ]);
+  assert.equal(persistedJob, '77');
+
+  const pollingRecord = agent.createPendingRequest(
+    {prompt:'poll existing',page_revision:'a1b2c3d4',page_context:{mode:'write'}},
+    'director-agent-existing-job-123',
+    'poll existing',
+    67890
+  );
+  pollingRecord.job_id = '88';
+  let existingCalls = 0;
+  const existing = await agent.resumeRequest({fetch(url){
+    existingCalls += 1;
+    assert.equal(url, '/api/gen/job/88');
+    return Promise.resolve({
+      ok:true,status:200,
+      text(){return Promise.resolve(JSON.stringify({status:'done',result:{content:'continued'}}));},
+    });
+  }}, pollingRecord);
+  assert.equal(existing.content, 'continued');
+  assert.equal(existingCalls, 1);
   console.log('director agent frontend tests passed');
 })().catch(function(error){
+
   console.error(error);
   process.exitCode = 1;
 });
