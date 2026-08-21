@@ -1349,20 +1349,17 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
 
-    def test_oneclick_image_jobs_use_banana_for_gestures_and_materials(self):
+    def test_oneclick_image_jobs_use_banana_only_for_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
-        gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]
-        materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(images,voiceKey,epoch)")]
+        materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(voiceKey,epoch)")]
 
-        self.assertIn("provider:'banana'", gestures)
-        self.assertIn("model:'nb2'", gestures)
-        self.assertIn("quality:'std'", gestures)
-        self.assertIn("reference_images:photoData?[photoData]:[]", gestures)
         self.assertIn("provider:'banana'", materials)
         self.assertIn("model:'nb2'", materials)
         self.assertIn("quality:'std'", materials)
-        self.assertNotIn("provider:'xiaole'", gestures + materials)
-        self.assertNotIn("provider:'openai'", gestures + materials)
+        self.assertNotIn("function generateImages", page)
+        self.assertNotIn("dh-gesture-v2", page)
+        self.assertNotIn("provider:'xiaole'", materials)
+        self.assertNotIn("provider:'openai'", materials)
 
     def test_page_exposes_required_inputs_and_real_pipeline_calls(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
@@ -1390,7 +1387,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "DigitalHumanMaterialState.restoreStartButton($('start'),state.phase)",
             "DigitalHumanSetupState.runJobs({items:items",
             "epoch:epoch,currentEpoch:function(){return generationEpoch;}",
-            "return generateImages(epoch)",
+            "return generateMaterials(epoch)",
             "digital_human_material_v2", "video_job_ids", "material_job_ids",
             "material_asset_ids", "/api/gen/digital-human-v2/consent",
             "digital_human_consent_token",
@@ -1426,7 +1423,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("return DigitalHumanSetupState.runJobs({items:items", page)
         self.assertIn("DigitalHumanSubmit.describe(error)", page)
         self.assertIn("安全检查重试 '+attempt+'/2", page)
-        self.assertIn("{gesture:'gestures',material:'materials',video:'talking'}", page)
+        self.assertIn("{material:'materials',video:'talking'}", page)
         voice_state = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-voice-state.js").read_text(encoding="utf-8")
         self.assertNotIn("error.code==='voice_clone_in_progress'", voice_state)
         self.assertIn("throw error;", voice_state)
@@ -1434,18 +1431,17 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("function restoredCloneDecision(response,markers)", voice_state)
         self.assertIn("DigitalHumanVoiceState.runCloneRecovery", page)
         self.assertNotIn("if(data.status==='ready')", page)
-        for step in ("plan", "voice", "gestures", "materials", "talking", "compose"):
+        for step in ("plan", "voice", "materials", "talking", "compose"):
             self.assertIn('data-step-error="%s"' % step, page)
         self.assertIn("DigitalHumanSetupState.validatePhotoAttachment", page)
-        self.assertIn("function validateGestureRecovery(photo,epoch)", page)
+        self.assertIn("function validatePhotoRecovery(photo,epoch)", page)
         self.assertLess(
-            page.index("validateGestureRecovery(photo,epoch)", page.index("function start()")),
+            page.index("validatePhotoRecovery(photo,epoch)", page.index("function start()")),
             page.index("heygenPreflight(epoch)", page.index("function start()")),
         )
         self.assertIn("state.materialAssets=Array.isArray(state.materialAssets)?state.materialAssets:[]", page)
-        self.assertIn("setStep('gestures','failed','需重新附加')", page)
+        self.assertIn("setStep('talking','failed','需重新附加')", page)
         self.assertIn("restoreFailedSteps(photoRecovery,restoredMaterials.valid||materialJobsRecoverable)", page)
-        self.assertIn("DigitalHumanOneClickState.invalidateGestureRecovery(state,error)", page)
         self.assertIn("上次数字人口播子任务失败，点击继续后仅重试失败项", page)
         self.assertIn("上次成片合成任务失败，点击继续后仅重试合成", page)
         self.assertIn("state.voiceSha256||digest!==state.voiceSha256", page)
@@ -1467,7 +1463,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("state.phase==='approved'&&clone&&!state.voiceCloneAccepted&&!voice", page)
         self.assertIn("请重新附加本次授权的原声音样本后重试", page)
         self.assertIn("尚未创建任务、未扣点", (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-submit.js").read_text(encoding="utf-8"))
-        self.assertIn('data-step-error="gestures"', page)
+        self.assertNotIn('data-step-error="gestures"', page)
         self.assertIn("scrollIntoView", page)
         self.assertIn("提交后系统将记录本次授权时间及素材校验值", page)
         domain = (Path(__file__).resolve().parents[1] / "server" / "content_domains" / "digital_human_oneclick.py").read_text(encoding="utf-8")
@@ -1487,11 +1483,10 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertLess(page.index('id="analyze"'), page.index('id="photo"'))
         self.assertLess(page.index('id="start"'), page.index('id="script"'))
         self.assertIn(".action-dock{position:sticky", page)
-        self.assertIn("资料填好后，先分析并预览 3 段方案", page)
+        self.assertIn("资料填好后，先分析时长与镜头方案", page)
         self.assertIn("建议腰部以上，双手自然放在身体前方", page)
-        self.assertIn('name="segmentCount" value="1"', page)
-        self.assertIn('name="segmentCount" value="2"', page)
-        self.assertIn('name="segmentCount" value="3" checked', page)
+        self.assertIn("原图将直接用于全部真人出镜片段", page)
+        self.assertNotIn('name="segmentCount"', page)
 
     def test_video_flush_workspace_remains_vertically_scrollable(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
