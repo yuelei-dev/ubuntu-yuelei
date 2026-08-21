@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 import pathlib
+import subprocess
 import unittest
 
 
@@ -28,6 +30,26 @@ LOCKED_PREIMAGES = {
         "cb425ccfb266e4d1cd05d4413bcab0f6c2e1f772256746862c266f03f569bfc0",
     ),
 }
+
+
+def _verify_historical_postimage_lock(entry):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", entry["postimage_blob"],
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    data = result.stdout
+    actual_blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    if actual_blob != entry["postimage_blob"]:
+        raise AssertionError("historical postimage Git blob lock mismatch")
+    if hashlib.sha256(data).hexdigest() != entry["postimage_sha256"]:
+        raise AssertionError("historical postimage SHA-256 lock mismatch")
+
 
 class DirectorProductionParityTests(unittest.TestCase):
     @classmethod
@@ -57,8 +79,13 @@ class DirectorProductionParityTests(unittest.TestCase):
             },
         )
         for entry in entries:
-            self.assertRegex(entry["postimage_sha256"], r"^[0-9a-f]{64}$")
-            self.assertRegex(entry["postimage_blob"], r"^[0-9a-f]{40}$")
+            _verify_historical_postimage_lock(entry)
+
+    def test_tampered_historical_postimage_lock_is_rejected(self):
+        tampered = dict(self.manifest["files"][0])
+        tampered["postimage_sha256"] = "0" * 64
+        with self.assertRaisesRegex(AssertionError, "SHA-256 lock mismatch"):
+            _verify_historical_postimage_lock(tampered)
 
     def test_preimages_are_the_reviewed_locked_values(self):
         actual = {
