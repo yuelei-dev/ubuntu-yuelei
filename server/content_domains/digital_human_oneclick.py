@@ -62,11 +62,32 @@ _NATURAL_MOUTH_TALKING_PROFILE = {
     "delivery": "natural",
     "subtitle": False,
 }
+NATURAL_MOUTH_PROFILE_ID = "heygen-natural-low-v1"
+_NATURAL_MOUTH_PIPELINES = {
+    CONSENT_PURPOSE,
+    "digital_human_material_v2",
+}
 
 
 def natural_mouth_talking_profile():
     """Return the server-owned HeyGen profile used by one-click talking jobs."""
     return dict(_NATURAL_MOUTH_TALKING_PROFILE)
+
+
+def is_natural_mouth_talking_job(payload):
+    """Identify both supported one-click pipelines at the provider boundary."""
+    body = payload or {}
+    pipeline = str(body.get("digital_human_pipeline") or "").strip().lower()
+    stage = str(body.get("digital_human_stage") or "").strip().lower()
+    return pipeline in _NATURAL_MOUTH_PIPELINES and stage == "talking"
+
+
+def enforce_natural_mouth_talking_profile(payload):
+    """Return a copy with the server-owned profile applied when applicable."""
+    cleaned = dict(payload or {})
+    if is_natural_mouth_talking_job(cleaned):
+        cleaned.update(natural_mouth_talking_profile())
+    return cleaned
 
 
 class DigitalHumanRequestError(ValueError):
