@@ -22,6 +22,7 @@ import random   # 429 退避重试的抖动：不加抖动，同一批 worker �
 from .audio import gen_audio, normalize_audio_delivery
 from .image_mentions import resolve_image_mentions, validate_image_mentions
 from . import (
+    digital_human_oneclick,
     pricing,
     provider_keys,
     short_drama_media_sanitize,
@@ -5251,6 +5252,8 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
                 pass
 
 def gen_video(payload, provider_lifecycle=None):
+    natural_mouth_profile_applied = digital_human_oneclick.is_natural_mouth_talking_job(payload)
+    payload = digital_human_oneclick.enforce_natural_mouth_talking_profile(payload)
     job_id = payload.get("_job_id")
     mode = (payload.get("mode") or "text").strip()
     if mode not in {"text", "audio"}:
@@ -5322,10 +5325,27 @@ def gen_video(payload, provider_lifecycle=None):
         ratio = "9:16"
     if motion not in {"low", "medium", "high"}:
         motion = "medium"
+    provider_request_profile = {
+        "profile_id": (
+            digital_human_oneclick.NATURAL_MOUTH_PROFILE_ID
+            if natural_mouth_profile_applied else None
+        ),
+        "requested_resolution": resolution,
+        "aspect_ratio": ratio,
+        "expressiveness": motion,
+        "narration_mode": mode,
+        "tts": ({
+            "speed": payload.get("speed", 1.0),
+            "pitch": payload.get("pitch", 0),
+            "volume": payload.get("volume", 0),
+            "delivery": payload.get("delivery", "natural"),
+        } if mode == "text" else None),
+    }
     created_avatar = None
     if provider_lifecycle is not None:
         _lifecycle_notify(provider_lifecycle, "on_prepared", {
             "audio_file": audio_file, "image_file": image_file,
+            "provider_request_profile": provider_request_profile,
         })
         video_result = generate_heygen_video_recoverable(
             image_file, audio_file, resolution, ratio, motion,
@@ -5335,6 +5355,14 @@ def gen_video(payload, provider_lifecycle=None):
         video_result = generate_heygen_video(
             image_file, audio_file, resolution, ratio, motion,
         )
+    actual_resolution = video_result.get("actual_resolution") or resolution
+    # The paid provider route can lower a requested 1080p render to the MCP
+    # account ceiling (720p by default).  Keep both values and make the
+    # unqualified receipt field describe the request that was actually sent.
+    provider_request_profile.update({
+        "resolution": actual_resolution,
+        "actual_resolution": actual_resolution,
+    })
     bgm_error = None
     if bgm_file and video_result.get("video_file"):
         try:
@@ -5384,9 +5412,10 @@ def gen_video(payload, provider_lifecycle=None):
         "source_video_url": video_result.get("source_video_url"),
         "thumbnail_url": video_result.get("thumbnail_url"), "duration": video_result.get("duration"),
         "resolution": resolution,
-        "actual_resolution": video_result.get("actual_resolution") or resolution,
+        "actual_resolution": actual_resolution,
         "provider": video_result.get("provider"),
         "provider_transport": video_result.get("provider_transport"),
+        "provider_request_profile": provider_request_profile,
         "ratio": ratio, "motion": motion,
         "phase": "done",
         "subtitle": subtitle_on,

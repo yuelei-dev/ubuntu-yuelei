@@ -1343,6 +1343,12 @@ class DigitalHumanOneClickTests(unittest.TestCase):
 
 
 class DigitalHumanOneClickUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        server_dir = str(Path(__file__).resolve().parents[1] / "server")
+        if server_dir not in sys.path:
+            sys.path.insert(0, server_dir)
+
     def test_oneclick_image_jobs_use_banana_for_gestures_and_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         gestures = page[page.index("function generateImages(epoch)"):page.index("function generateMaterials(epoch)")]
@@ -1678,6 +1684,38 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         profiles = [item["speech_profile"] for item in payload["segments"]]
         expected = domain.natural_mouth_talking_profile()
         self.assertEqual([expected, expected, expected], profiles)
+
+    def test_provider_boundary_enforces_profile_for_both_oneclick_pipelines(self):
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        for pipeline in (domain.CONSENT_PURPOSE, "digital_human_material_v2"):
+            with self.subTest(pipeline=pipeline):
+                original = {
+                    "digital_human_pipeline": pipeline,
+                    "digital_human_stage": "talking",
+                    "resolution": "720p",
+                    "ratio": "16:9",
+                    "motion": "high",
+                    "speed": 1.5,
+                    "pitch": 4,
+                    "volume": 2,
+                    "delivery": "energetic",
+                    "subtitle": True,
+                }
+                enforced = domain.enforce_natural_mouth_talking_profile(original)
+                self.assertEqual(domain.natural_mouth_talking_profile(), {
+                    key: enforced[key]
+                    for key in domain.natural_mouth_talking_profile()
+                })
+                self.assertEqual("high", original["motion"])
+
+    def test_provider_boundary_does_not_change_non_talking_jobs(self):
+        domain = importlib.import_module("content_domains.digital_human_oneclick")
+        original = {
+            "digital_human_pipeline": domain.CONSENT_PURPOSE,
+            "digital_human_stage": "material",
+            "motion": "high",
+        }
+        self.assertEqual(original, domain.enforce_natural_mouth_talking_profile(original))
 
     def test_v2_server_uses_the_same_natural_mouth_profile(self):
         source = (Path(__file__).resolve().parents[1] / "server" / "content_domains" /
