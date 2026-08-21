@@ -7,12 +7,12 @@ const setup=require('../site/workbench/digital-human-setup-state.js');
 const voice=require('../site/workbench/digital-human-voice-state.js');
 const pageState=require('../site/workbench/digital-human-oneclick-state.js');
 
-const stages=['gesture','material','video'];
+const stages=['material','video'];
 
 function createHarness(saved){
   let persisted=JSON.parse(JSON.stringify(saved));
-  const submissions={gesture:0,material:0,video:0,compose:0,voiceClone:0};
-  const next={gesture:100,material:200,video:300,compose:400};
+  const submissions={material:0,video:0,compose:0,voiceClone:0};
+  const next={material:200,video:300,compose:400};
   function restore(){
     const state=JSON.parse(JSON.stringify(persisted));
     const restored=material.restore(state.customerUploads,state.phase,2000);
@@ -65,14 +65,14 @@ function createHarness(saved){
 }
 
 function approvedState(){return {
-  version:6,phase:'approved',voiceMode:'existing',voiceKey:'vip_ready_slot',
+  version:8,phase:'approved',voiceMode:'existing',voiceKey:'vip_ready_slot',
   voiceCloneSubmitted:false,voiceCloneAccepted:false,voiceCloneProgress:false,
   customerUploads:[],photoSha256:'a'.repeat(64),voiceSha256:'',consent:{consent_token:'token'},
-  jobs:{gesture:[],material:[],video:[]},keys:{gesture:[],material:[],video:[],compose:''},
-  failed:{gesture:[],material:[],video:[]},compose_job:0,compose_failed:false,
+  jobs:{material:[],video:[]},keys:{material:[],video:[],compose:''},
+  failed:{material:[],video:[]},compose_job:0,compose_failed:false,
 };}
 
-test('full restored one-click journey keeps 3/6/3/1 submissions across real serialized refreshes',async()=>{
+test('full restored one-click journey keeps 6/3/1 submissions across real serialized refreshes',async()=>{
   const harness=createHarness(approvedState());
   let context=harness.restore();
   assert.equal(context.restored.valid,true);
@@ -81,14 +81,12 @@ test('full restored one-click journey keeps 3/6/3/1 submissions across real seri
     [{slot_id:'ready_slot',status:'ready',voice_id:'provider-id'}],
   ).valid,true);
 
-  await harness.runBucket(context,'gesture',3);
-  context=harness.restore();
   await harness.runBucket(context,'material',6);
   context=harness.restore();
   await harness.runBucket(context,'video',3);
   context=harness.restore();
   await harness.runCompose(context);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:3,compose:1,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:3,compose:1,voiceClone:0});
   context=harness.restore();
   for(const bucket of stages){
     assert.equal(context.state.jobs[bucket].length,bucket==='material'?6:3);
@@ -98,29 +96,26 @@ test('full restored one-click journey keeps 3/6/3/1 submissions across real seri
   assert.equal(Number(context.state.compose_job)>0,true);
   assert.equal(context.state.compose_failed,false);
 
-  await harness.runBucket(context,'gesture',3);
   await harness.runBucket(context,'material',6);
   await harness.runBucket(context,'video',3);
   await harness.runCompose(context);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:3,compose:1,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:3,compose:1,voiceClone:0});
 });
 
 test('terminal talking and compose failures pause once, then retry only the failed stage',async()=>{
   const harness=createHarness(approvedState());
   let context=harness.restore();
-  await harness.runBucket(context,'gesture',3);
-  context=harness.restore();
   await harness.runBucket(context,'material',6);
   context=harness.restore();
   const terminal=Object.assign(new Error('talking terminal'),{terminalJob:true});
   await assert.rejects(harness.runBucket(context,'video',3,id=>id===303?Promise.reject(terminal):Promise.resolve({jobId:id,status:'done'})),/terminal/);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:3,compose:0,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:3,compose:0,voiceClone:0});
   context=harness.restore();
   assert.deepEqual(context.state.jobs.video,[301,302,303]);
   assert.deepEqual(context.state.failed.video,[false,false,true]);
   const completedTalkingIds=context.state.jobs.video.slice(0,2);
   await harness.runBucket(context,'video',3);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:4,compose:0,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:4,compose:0,voiceClone:0});
   context=harness.restore();
   assert.deepEqual(context.state.jobs.video.slice(0,2),completedTalkingIds);
   assert.equal(context.state.jobs.video[2],304);
@@ -128,12 +123,12 @@ test('terminal talking and compose failures pause once, then retry only the fail
 
   const terminalCompose=Object.assign(new Error('compose terminal'),{terminalJob:true});
   await assert.rejects(harness.runCompose(context,()=>Promise.reject(terminalCompose)),/compose terminal/);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:4,compose:1,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:4,compose:1,voiceClone:0});
   context=harness.restore();
   assert.equal(context.state.compose_job,401);
   assert.equal(context.state.compose_failed,true);
   await harness.runCompose(context);
-  assert.deepEqual(harness.submissions,{gesture:3,material:6,video:4,compose:2,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:6,video:4,compose:2,voiceClone:0});
   context=harness.restore();
   assert.equal(context.state.compose_job,402);
   assert.equal(context.state.compose_failed,false);
@@ -147,7 +142,7 @@ test('approved recovery gates fail before any paid child submission',async()=>{
   materialHarness.save(context.state,context.restored.items,context.restored.valid);
   context=materialHarness.restore();
   assert.equal(context.restored.valid,false);
-  assert.deepEqual(materialHarness.submissions,{gesture:0,material:0,video:0,compose:0,voiceClone:0});
+  assert.deepEqual(materialHarness.submissions,{material:0,video:0,compose:0,voiceClone:0});
 
   const photo=setup.resolvePhotoRecovery(approvedState(),false);
   assert.equal(photo.valid,false);
@@ -155,15 +150,15 @@ test('approved recovery gates fail before any paid child submission',async()=>{
 
   const uncertain=voice.restoredCloneDecision({result:{status:'ready'}},{accepted:false,progress:true});
   assert.equal(uncertain.action,'reattach');
-  assert.deepEqual(materialHarness.submissions,{gesture:0,material:0,video:0,compose:0,voiceClone:0});
+  assert.deepEqual(materialHarness.submissions,{material:0,video:0,compose:0,voiceClone:0});
 });
 
 test('expired uploads do not block six durable materials while one failed talking job alone retries',async()=>{
   const expired={upload_id:'img_'+('b'.repeat(32)),name:'expired.png',expires_at:1000};
   const saved=Object.assign(approvedState(),{
     customerUploads:[expired],
-    jobs:{gesture:[101,102,103],material:[201,202,203,204,205,206],video:[301,302,303]},
-    failed:{gesture:[false,false,false],material:[false,false,false,false,false,false],video:[false,false,true]},
+    jobs:{material:[201,202,203,204,205,206],video:[301,302,303]},
+    failed:{material:[false,false,false,false,false,false],video:[false,false,true]},
   });
   const harness=createHarness(saved);
   let context=harness.restore();
@@ -172,7 +167,7 @@ test('expired uploads do not block six durable materials while one failed talkin
   await harness.runBucket(context,'material',6);
   context=harness.restore();
   await harness.runBucket(context,'video',3);
-  assert.deepEqual(harness.submissions,{gesture:0,material:0,video:1,compose:0,voiceClone:0});
+  assert.deepEqual(harness.submissions,{material:0,video:1,compose:0,voiceClone:0});
 });
 
 test('page wires recovery gates before paid generation and uses page terminal recovery',()=>{
@@ -183,14 +178,13 @@ test('page wires recovery gates before paid generation and uses page terminal re
     'DigitalHumanSetupState.resolvePhotoRecovery(state,!!photoData||!!photo)',
     "state.phase==='approved'&&clone&&!state.voiceCloneAccepted&&!voice",
     "!state.consent&&!$('consent').checked",
-    'validateGestureRecovery(photo,epoch)',
+    'validatePhotoRecovery(photo,epoch)',
     'validateMaterialRecovery(epoch)',
     'validateVideoRecovery(epoch)',
     'heygenPreflight(epoch)',
     'prepareConsent(photo,voice,clone,epoch)',
-    'generateImages(epoch)',
     'generateMaterials(epoch)',
-    'generateTalking(images,voiceKey,epoch)',
+    'generateTalking(voiceKey,epoch)',
     'compose(epoch)',
   ];
   let last=-1;
@@ -203,5 +197,5 @@ test('page wires recovery gates before paid generation and uses page terminal re
   assert.match(page,/return DigitalHumanOneClickState\.resumeJob\(\{jobId:Number\(state\.compose_job\)\|\|0/);
   assert.doesNotMatch(page,/DigitalHumanRecovery\.resume\(/);
   assert.match(page,/restoreFailedSteps\(photoRecovery,restoredMaterials\.valid\|\|materialJobsRecoverable\)/);
-  assert.match(page,/DigitalHumanOneClickState\.invalidateGestureRecovery\(state,error\)/);
+  assert.doesNotMatch(page,/invalidateGestureRecovery/);
 });

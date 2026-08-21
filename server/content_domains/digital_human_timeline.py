@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Authoritative planning for the duration-driven digital-human workflow.
 
-The number selected by the customer is the number of gesture candidates.  It
-does not control the length of the narration or the number of presenter
-appearances.  Presenter appearances are derived from the expected final
+The customer's authorized portrait is used directly for every presenter
+appearance.  Presenter appearances are derived from the expected final
 duration and are placed at narration boundaries roughly every 20-30 seconds.
 """
 import hashlib
@@ -13,9 +12,7 @@ import re
 
 
 PIPELINE = "digital_human_material_v2"
-WORKFLOW_VERSION = 2
-MIN_GESTURE_COUNT = 1
-MAX_GESTURE_COUNT = 3
+WORKFLOW_VERSION = 3
 MAX_SCRIPT_CHARS = 6000
 MAX_DURATION_SECONDS = 180.0
 MIN_AUDIO_SECONDS = 6.0
@@ -36,14 +33,6 @@ class TimelinePlanError(ValueError):
         super().__init__(message)
         self.code = code
         self.status = int(status)
-
-
-def gesture_count(value):
-    if value in (None, ""):
-        return MAX_GESTURE_COUNT
-    if type(value) is not int or not MIN_GESTURE_COUNT <= value <= MAX_GESTURE_COUNT:
-        raise TimelinePlanError("手势形象数量只能选择 1、2 或 3")
-    return value
 
 
 def clean_script(value):
@@ -220,9 +209,8 @@ def _digest(value):
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def plan_text(script, selected_gesture_count=MAX_GESTURE_COUNT):
+def plan_text(script):
     copy = clean_script(script)
-    gestures = gesture_count(selected_gesture_count)
     duration = estimate_duration(copy)
     part_count = narration_segment_count(duration)
     parts = _split_by_weight(copy, part_count)
@@ -248,11 +236,9 @@ def plan_text(script, selected_gesture_count=MAX_GESTURE_COUNT):
             "start": round(cursor, 3),
             "end": round(cursor + part_duration, 3),
             "duration": part_duration,
-            "gesture_index": index % gestures,
             "role": roles[min(index, 2)] if len(parts) <= 3 else ("hook" if index == 0 else "cta" if index == len(parts) - 1 else "explain"),
         })
         cursor += part_duration
-    gestures_plan = [{"index": index, "role": roles[min(index, 2)]} for index in range(gestures)]
     excerpts = _sentences(copy) or [copy]
     materials = []
     for slot in planned_material_slots:
@@ -278,8 +264,6 @@ def plan_text(script, selected_gesture_count=MAX_GESTURE_COUNT):
         "copy": copy,
         "ratio": "9:16",
         "expected_duration": duration,
-        "gesture_count": gestures,
-        "gestures": gestures_plan,
         "segments": segments,
         "presenter_windows": windows,
         "materials": materials,
@@ -292,7 +276,7 @@ def plan_text(script, selected_gesture_count=MAX_GESTURE_COUNT):
 def plan_response(payload):
     if not isinstance(payload, dict):
         raise TimelinePlanError("请求体必须是 JSON 对象")
-    allowed = {"script", "copy", "text", "gesture_count", "narration_mode"}
+    allowed = {"script", "copy", "text", "narration_mode"}
     unknown = sorted(set(payload) - allowed)
     if unknown:
         raise TimelinePlanError("方案提交包含不支持字段：" + ", ".join(unknown))
@@ -302,8 +286,5 @@ def plan_response(payload):
             "录音驱动请先上传完整音频后再分析",
             "audio_upload_required",
         )
-    result = plan_text(
-        payload.get("script") or payload.get("copy") or payload.get("text"),
-        payload.get("gesture_count"),
-    )
+    result = plan_text(payload.get("script") or payload.get("copy") or payload.get("text"))
     return {"ok": True, "plan": result}

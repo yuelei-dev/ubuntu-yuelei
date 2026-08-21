@@ -15,11 +15,15 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("/api/gen/digital-human-v2/audio-upload", self.page)
         self.assertIn("不需要再输入文案或选择音色", self.page)
 
-    def test_gesture_candidates_are_not_presenter_segment_count(self):
-        self.assertIn("手势形象数量", self.page)
-        self.assertIn("只决定候选形象，不决定视频时长", self.page)
-        self.assertIn("plan.gestures", self.page)
-        self.assertIn("item.gesture_index", self.page)
+    def test_authorized_portrait_directly_drives_presenter_segments(self):
+        self.assertIn("原图将直接用于全部真人出镜片段", self.page)
+        self.assertIn("reference_images:photoData?[photoData]:[]", self.page)
+        self.assertIn("使用原图生成数字人口播", self.page)
+        self.assertNotIn("手势形象数量", self.page)
+        self.assertNotIn("plan.gestures", self.page)
+        self.assertNotIn("item.gesture_index", self.page)
+        self.assertNotIn("function generateImages", self.page)
+        self.assertNotIn('data-step="gestures"', self.page)
 
     def test_duration_driven_presenter_and_material_contract_is_visible(self):
         self.assertIn("每隔约 20–30 秒全屏真人出镜", self.page)

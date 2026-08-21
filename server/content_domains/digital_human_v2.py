@@ -8,6 +8,7 @@ child job to one consent record, and performs only the zero-cost local compose.
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -34,16 +35,10 @@ CONSENT_TTL_SECONDS = legacy.CONSENT_TTL_SECONDS
 DigitalHumanRequestError = legacy.DigitalHumanRequestError
 
 _STAGE_KINDS = {
-    "gesture": "image",
     "material": "image",
     "talking": "video",
     "compose": "script_to_video",
 }
-_GESTURE_PROMPTS = (
-    "人物保持与参考照片完全一致，竖屏腰部以上口播照，双手自然放在身体前方，右手轻抬作开场讲解手势",
-    "人物保持与参考照片完全一致，竖屏腰部以上口播照，双手在身体前方自然展开作对比说明手势",
-    "人物保持与参考照片完全一致，竖屏腰部以上口播照，一手轻指前方作总结强调手势，另一手自然放松",
-)
 _AUDIO_UPLOAD_ID_RE = re.compile(r"^dha_[0-9a-f]{32}$")
 _AUDIO_MIMES = {
     "audio/mpeg": ".mp3", "audio/mp3": ".mp3", "audio/wav": ".wav",
@@ -584,7 +579,7 @@ def resolve_material_response(payload, username, db_factory=None):
     allowed = {
         "digital_human_pipeline", "digital_human_stage", "digital_human_run_id",
         "digital_human_plan_digest", "digital_human_consent_token",
-        "digital_human_script", "digital_human_gesture_count",
+        "digital_human_script",
         "digital_human_narration_mode", "digital_human_audio_upload_id",
         "digital_human_item_index",
     }
@@ -660,8 +655,7 @@ def _as_request_error(exc):
     )
 
 
-def _audio_plan(asset, selected_gesture_count):
-    gestures = timeline.gesture_count(selected_gesture_count)
+def _audio_plan(asset):
     duration = round(float(asset["duration"]), 3)
     slices = list(asset["slices"])
     segment_durations = [round(float(item["duration"]), 3) for item in slices]
@@ -671,7 +665,6 @@ def _audio_plan(asset, selected_gesture_count):
     infographic_indexes = {max(0, len(planned_slots) // 3)} if planned_slots else set()
     if infographic_limit == 2 and planned_slots:
         infographic_indexes.add(min(len(planned_slots) - 1, (len(planned_slots) * 2) // 3))
-    roles = ("hook", "explain", "cta")
     segments = []
     for index, item in enumerate(slices):
         role = "hook" if index == 0 else "cta" if index == len(slices) - 1 else "explain"
@@ -680,11 +673,9 @@ def _audio_plan(asset, selected_gesture_count):
             "start": round(float(item["start"]), 3),
             "end": round(float(item["end"]), 3),
             "duration": round(float(item["duration"]), 3),
-            "gesture_index": index % gestures, "role": role,
+            "role": role,
             "audio_slice_sha256": item["sha256"],
         })
-    gestures_plan = [{"index": index, "role": roles[min(index, 2)]}
-                     for index in range(gestures)]
     materials = []
     excerpts = [item["text"] for item in segments if item["text"]] or [asset["transcript"]]
     for slot in planned_slots:
@@ -705,8 +696,7 @@ def _audio_plan(asset, selected_gesture_count):
         "narration_mode": "audio", "audio_upload_id": asset["asset_id"],
         "source_audio_sha256": asset["source_sha256"],
         "copy": asset["transcript"], "ratio": "9:16",
-        "expected_duration": duration, "gesture_count": gestures,
-        "gestures": gestures_plan, "segments": segments,
+        "expected_duration": duration, "segments": segments,
         "presenter_windows": windows, "materials": materials,
         "infographic_limit": infographic_limit,
         "source_priority": list(timeline.SOURCE_PRIORITY),
@@ -721,12 +711,12 @@ def plan_response(payload, username=None):
     mode = str(payload.get("narration_mode") or "text").strip().lower()
     try:
         if mode == "audio":
-            allowed = {"narration_mode", "audio_upload_id", "gesture_count"}
+            allowed = {"narration_mode", "audio_upload_id"}
             unknown = sorted(set(payload) - allowed)
             if unknown:
                 raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
             asset = _load_audio_asset(payload.get("audio_upload_id"), username)
-            return {"ok": True, "plan": _audio_plan(asset, payload.get("gesture_count"))}
+            return {"ok": True, "plan": _audio_plan(asset)}
         return timeline.plan_response(payload)
     except Exception as exc:
         raise _as_request_error(exc) from exc
@@ -740,16 +730,8 @@ def _authoritative_plan(payload, username=None):
                 payload.get("digital_human_audio_upload_id") or payload.get("audio_upload_id"),
                 username,
             )
-            return _audio_plan(
-                asset,
-                payload.get("digital_human_gesture_count")
-                if "digital_human_gesture_count" in payload else payload.get("gesture_count"),
-            )
-        return timeline.plan_text(
-            payload.get("digital_human_script") or payload.get("script"),
-            payload.get("digital_human_gesture_count")
-            if "digital_human_gesture_count" in payload else payload.get("gesture_count"),
-        )
+            return _audio_plan(asset)
+        return timeline.plan_text(payload.get("digital_human_script") or payload.get("script"))
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
@@ -759,7 +741,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     allowed = {
         "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
-        "script", "gesture_count", "photo_sha256", "voice_mode", "voice_ref",
+        "script", "photo_sha256", "voice_mode", "voice_ref",
         "voice_sha256", "narration_mode", "audio_upload_id",
     }
     unknown = sorted(set(payload) - allowed)
@@ -783,9 +765,9 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     try:
         audio_asset = (_load_audio_asset(payload.get("audio_upload_id"), username)
                        if narration_mode == "audio" else None)
-        frozen = (_audio_plan(audio_asset, payload.get("gesture_count"))
+        frozen = (_audio_plan(audio_asset)
                   if audio_asset else
-                  timeline.plan_text(payload.get("script"), payload.get("gesture_count")))
+                  timeline.plan_text(payload.get("script")))
     except Exception as exc:
         raise _as_request_error(exc) from exc
     plan_digest = legacy._required_sha256(payload.get("plan_digest"), "制作方案")
@@ -970,9 +952,46 @@ def _binding(payload_text, job_id, expected_stage, record, expected_index=None):
             )
 
 
-def _gesture_prompt(index):
-    return (_GESTURE_PROMPTS[index] +
-            "；神态亲切自然，眼神稳定直视镜头，嘴唇自然闭合。服装、发型、眼镜、面部特征和背景保持一致，双手完整可见，真实摄影，不添加文字。")
+def _authorized_portrait_jpeg(value, expected_sha256):
+    """Verify the authorized upload and return a canonical HeyGen JPEG.
+
+    The digest is checked against the original bytes before conversion.  This
+    lets JPEG, PNG and WebP uploads drive HeyGen directly while preventing a
+    client from swapping the portrait after consent.
+    """
+    raw = legacy._decode_b64_bytes(value, "人物照片")
+    if len(raw) > 35 * 1024 * 1024:
+        raise DigitalHumanRequestError("人物照片不能超过 35MB", "portrait_too_large")
+    actual = hashlib.sha256(raw).hexdigest()
+    if not hmac.compare_digest(actual, expected_sha256):
+        raise DigitalHumanRequestError(
+            "人物照片与授权记录不一致，请重新开始并授权",
+            "consent_photo_mismatch", 403,
+        )
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(raw)) as source:
+            if str(source.format or "").upper() not in {"JPEG", "PNG", "WEBP"}:
+                raise ValueError("unsupported portrait format")
+            if int(source.width) * int(source.height) > 40_000_000:
+                raise ValueError("portrait dimensions are too large")
+            source.verify()
+        with Image.open(io.BytesIO(raw)) as source:
+            source.load()
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            output = io.BytesIO()
+            image.save(output, format="JPEG", quality=95, optimize=True)
+    except ImportError as exc:
+        raise DigitalHumanRequestError(
+            "人物照片完整性校验组件不可用，请稍后重试",
+            "portrait_validator_unavailable", 503,
+        ) from exc
+    except Exception as exc:
+        raise DigitalHumanRequestError(
+            "人物照片已损坏或格式不受支持，请上传 JPEG、PNG 或 WebP",
+            "portrait_content_invalid",
+        ) from exc
+    return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
 
 
 def verify_child_submission_with_record(payload, username, kind):
@@ -1004,29 +1023,7 @@ def verify_child_submission_with_record(payload, username, kind):
         item_index = int(raw_index)
     except (TypeError, ValueError):
         item_index = -1
-    if stage == "gesture":
-        if not 0 <= item_index < frozen["gesture_count"]:
-            raise DigitalHumanRequestError("手势照步骤编号无效", "consent_plan_mismatch", 409)
-        references = payload.get("reference_images")
-        if not isinstance(references, list) or len(references) != 1:
-            raise DigitalHumanRequestError(
-                "手势照必须且只能使用本次授权的一张人物照片",
-                "consent_photo_mismatch", 403,
-            )
-        actual = hashlib.sha256(legacy._decode_b64_bytes(references[0], "人物照片")).hexdigest()
-        if not hmac.compare_digest(actual, record["photo_sha256"]):
-            raise DigitalHumanRequestError(
-                "人物照片与授权记录不一致，请重新开始并授权",
-                "consent_photo_mismatch", 403,
-            )
-        cleaned.pop("reference_images", None)
-        cleaned["images"] = [references[0]]
-        cleaned.update({
-            "prompt": _gesture_prompt(item_index), "provider": "banana",
-            "model": "nb2", "quality": "std",
-            "digital_human_item_index": item_index,
-        })
-    elif stage == "material":
+    if stage == "material":
         if not 0 <= item_index < frozen["material_count"]:
             raise DigitalHumanRequestError("正文素材步骤编号无效", "consent_plan_mismatch", 409)
         material = frozen["materials"][item_index]
@@ -1066,48 +1063,16 @@ def verify_child_submission_with_record(payload, username, kind):
                     "口播声音与授权记录不一致，请重新开始并授权",
                     "consent_voice_mismatch", 403,
                 )
-        try:
-            gesture_job_id = int(payload.get("gesture_job_id"))
-        except (TypeError, ValueError):
-            gesture_job_id = 0
-        if gesture_job_id <= 0:
+        references = cleaned.pop("reference_images", None)
+        if not isinstance(references, list) or len(references) != 1:
             raise DigitalHumanRequestError(
-                "口播缺少本次授权的手势照任务编号",
-                "talking_gesture_binding_invalid", 409,
+                "数字人口播必须且只能使用本次授权的一张人物照片",
+                "consent_photo_mismatch", 403,
             )
-        with closing(jdb()) as connection:
-            row = connection.execute(
-                "SELECT id,kind,status,payload,result FROM jobs WHERE id=? AND username=? "
-                "AND COALESCE(deleted,0)=0", (gesture_job_id, str(username or "").strip()),
-            ).fetchone()
-        if not row or row["kind"] != "image" or row["status"] != "done":
-            raise DigitalHumanRequestError(
-                "口播手势照不存在、未完成或不属于当前账号",
-                "talking_gesture_binding_invalid", 409,
-            )
-        _binding(row["payload"], gesture_job_id, "gesture", record, segment["gesture_index"])
-        try:
-            result = json.loads(row["result"] or "{}")
-        except Exception:
-            result = {}
-        relative_file = legacy._result_file(result, "image")
-        try:
-            gesture_path = (OUT_DIR / relative_file).resolve()
-            gesture_path.relative_to(OUT_DIR.resolve())
-        except Exception:
-            gesture_path = None
-        if not gesture_path or not gesture_path.is_file() or gesture_path.stat().st_size <= 0:
-            raise DigitalHumanRequestError(
-                "口播手势照文件已不可用，请重新生成手势照",
-                "talking_gesture_binding_invalid", 409,
-            )
-        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(gesture_path.suffix.lower())
-        if not mime:
-            raise DigitalHumanRequestError("口播手势照格式不受支持", "talking_gesture_binding_invalid", 409)
         cleaned.update(legacy.natural_mouth_talking_profile())
         cleaned.update({
-            "image_data": "data:%s;base64,%s" % (
-                mime, base64.b64encode(gesture_path.read_bytes()).decode("ascii"),
+            "image_data": _authorized_portrait_jpeg(
+                references[0], record["photo_sha256"],
             ),
             "digital_human_item_index": item_index,
         })
@@ -1270,7 +1235,7 @@ def prepare_compose_payload(payload, username, consent_record=None):
         "material_job_ids", "material_asset_ids", "digital_human_pipeline", "digital_human_stage",
         "digital_human_run_id", "digital_human_plan_digest",
         "digital_human_consent_id", "digital_human_script",
-        "digital_human_gesture_count", "digital_human_item_index",
+        "digital_human_item_index",
         "digital_human_narration_mode", "digital_human_audio_upload_id",
     }
     unknown = sorted(set(payload) - allowed)
@@ -1442,7 +1407,6 @@ def compose(payload, persist_state=None):
         "pipeline": PIPELINE, "video_file": final_rel,
         "url": "/api/gen/file/" + final_rel, "duration": round(final_duration, 3),
         "width": width, "height": height,
-        "gesture_count": int(payload.get("gesture_count") or 0),
         "video_count": len(videos), "material_count": len(materials),
         "presenter_windows": windows,
         "child_jobs": {"videos": payload.get("video_job_ids"), "materials": payload.get("material_job_ids")},
