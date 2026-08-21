@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -26,32 +27,43 @@ def _load_executor():
 
 
 class FakeHooks:
-    def __init__(self):
+    def __init__(self, fail_on=None):
         self.calls = []
+        self.fail_on = fail_on
+
+    def _record(self, value):
+        self.calls.append(value)
+        if self.fail_on and value.startswith(self.fail_on):
+            raise RuntimeError("injected hook failure: " + value)
 
     def validate_node(self, path):
-        self.calls.append("node:" + pathlib.Path(path).name)
+        self._record("node:" + pathlib.Path(path).name)
 
     def validate_import(self, python_root, modules):
-        self.calls.append("compile")
+        self._record("compile")
         if not pathlib.Path(python_root).is_dir() or not modules:
             raise AssertionError("invalid import validation contract")
 
     def service_active(self, service):
-        self.calls.append("active:" + service)
+        self._record("active:" + service)
         return True
 
     def restart(self, service):
-        self.calls.append("restart:" + service)
+        self._record("restart:" + service)
 
     def probe_feature(self, url, feature, enabled):
-        self.calls.append("feature:%s:%s" % (feature, enabled))
+        self._record("feature:%s:%s" % (feature, enabled))
 
     def probe(self, url, method, expected_status):
-        self.calls.append("probe:%s:%s" % (method, expected_status))
+        self._record("probe:%s:%s" % (method, expected_status))
+
+    def probe_static(self, url, expected_status, expected_sha256):
+        self._record("static:%s:%s" % (
+            expected_status, expected_sha256,
+        ))
 
     def acceptance(self, specification):
-        self.calls.append("acceptance")
+        self._record("acceptance")
         if not specification.get("token_environment"):
             raise AssertionError("acceptance is not authenticated")
 
@@ -147,12 +159,12 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
             )
         return values
 
-    def _execute(self, checkpoint=None):
+    def _execute(self, checkpoint=None, hooks=None):
         manifest_path = self.root / "manifest.json"
         manifest_path.write_text(
             json.dumps(self.manifest, ensure_ascii=False), encoding="utf-8"
         )
-        hooks = FakeHooks()
+        hooks = hooks or FakeHooks()
         result = self.module.execute_locked_release(
             manifest_path, ROOT, self.runtime, self.backups,
             hooks=hooks, verify_repository=False,
@@ -185,10 +197,16 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
         )
         self.assertEqual("1" * 40, audit["reviewed_head"])
         self.assertEqual("2" * 40, audit["merged_main"])
+        self.assertEqual(
+            self.manifest["release_executor"]["git_blob"],
+            audit["executor_git_blob"],
+        )
         self.assertEqual(7, len(audit["files"]))
+        self.assertEqual(7, len(audit["final_files"]))
         self.assertTrue(all(
             {"mode", "uid", "gid"}.issubset(item) for item in audit["files"]
         ))
+        self.assertEqual(2, sum(call.startswith("static:") for call in hooks.calls))
 
     def test_absent_feature_row_is_removed_on_rollback(self):
         database = self._target(
@@ -220,6 +238,7 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
             *("after_replace_%d" % index for index in range(7)),
             "after_compile", "after_restart", "after_health_disabled",
             "after_activate", "after_health_enabled", "after_acceptance",
+            "after_final_audit",
         ]
         for stage in stages:
             with self.subTest(stage=stage):
@@ -231,6 +250,100 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
                     self._execute(checkpoint=inject)
                 self.assertEqual(self.original, self._snapshot())
                 self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_real_static_hook_failure_restores_seven_files_and_feature_row(self):
+        with self.assertRaisesRegex(RuntimeError, "static"):
+            self._execute(hooks=FakeHooks(fail_on="static:"))
+        self.assertEqual(self.original, self._snapshot())
+        self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_authenticated_acceptance_polls_original_zero_cost_job_to_done(self):
+        responses = [
+            {"job_id": 77, "cost": 0, "points_left": 321},
+            {"job_id": 77, "cost": 0, "points_left": 321},
+            {"id": 77, "kind": "director_agent", "cost": 0,
+             "status": "pending"},
+            {"id": 77, "kind": "director_agent", "cost": 0,
+             "status": "done",
+             "result": {"type": "director_agent", "content": "ok"}},
+        ]
+        requests = []
+
+        class Response:
+            status = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(self.payload).encode("utf-8")
+
+        class Opener:
+            def open(self, request, timeout):
+                requests.append(request)
+                return Response(responses.pop(0))
+
+        specification = copy.deepcopy(
+            self.manifest["release_executor"]["authenticated_acceptance"]
+        )
+        with (
+            mock.patch.dict(os.environ, {
+                specification["token_environment"]: "release-token",
+            }),
+            mock.patch.object(
+                self.module.urllib.request, "build_opener",
+                return_value=Opener(),
+            ),
+            mock.patch.object(self.module.secrets, "token_hex", return_value="a" * 32),
+            mock.patch.object(self.module.time, "sleep"),
+        ):
+            self.module.SystemHooks().acceptance(specification)
+
+        self.assertEqual([], responses)
+        self.assertEqual(["POST", "POST", "GET", "GET"], [
+            request.get_method() for request in requests
+        ])
+        keys = [request.get_header("Idempotency-key") for request in requests]
+        self.assertEqual(1, len(set(keys)))
+        self.assertEqual("release-pr276-" + "a" * 32, keys[0])
+
+    def test_static_probe_checks_the_served_response_bytes(self):
+        data = b"locked static response"
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return data
+
+        opener = mock.Mock()
+        opener.open.return_value = Response()
+        with mock.patch.object(
+            self.module.urllib.request, "build_opener", return_value=opener,
+        ):
+            hooks = self.module.SystemHooks()
+            hooks.probe_static(
+                "https://test.example/static.js", 200,
+                hashlib.sha256(data).hexdigest(),
+            )
+            with self.assertRaisesRegex(
+                self.module.ReleaseError, "static bytes",
+            ):
+                hooks.probe_static(
+                    "https://test.example/static.js", 200, "0" * 64,
+                )
 
 
 if __name__ == "__main__":

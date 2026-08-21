@@ -26,8 +26,8 @@
   },
   "release_executor": {
     "repository_path": "scripts/deploy_locked_manifest.py",
-    "git_blob": "9565f2677090c7ae80a48a194a2d86aa71e7a3a5",
-    "sha256": "1eda0104035a7b521aa790cad3358189664df70700126efb456db63d520a2d33",
+    "git_blob": "3fa522c20d7edddb5f0ea017ca2b8c6c6cdac7e0",
+    "sha256": "2310c002965c46086c7149d43d8882e066ba3745c7a066d384caf5e18de487b3",
     "runtime_python_root": "/home/ubuntu/content-api",
     "runtime_package": "content_domains",
     "import_modules": [

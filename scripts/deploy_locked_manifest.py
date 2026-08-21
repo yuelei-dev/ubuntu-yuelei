@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Fail-closed deployment of a small, hash-locked runtime overlay.
 
-The command is intentionally local to the target host.  It never opens SSH and
-it never calls an authenticated or paid endpoint.  Every source/runtime hash
-and every candidate import is checked before the first target replacement.
-After that point, any failure restores every file from the same backup set.
+The command is intentionally local to the target host and never opens SSH.
+Every source/runtime hash and every candidate import is checked before the
+first target replacement.  A manifest may require an authenticated, zero-cost
+acceptance request; after the backup point, any failure restores every file and
+feature row from the same snapshot.
 """
 
 import argparse
@@ -12,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -131,6 +133,23 @@ class SystemHooks:
                 % (status, expected_status)
             )
 
+    def probe_static(self, url, expected_status, expected_sha256):
+        request = urllib.request.Request(url, method="GET")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=10) as response:
+                status = response.status
+                data = response.read()
+        except urllib.error.HTTPError as error:
+            status, data = error.code, error.read()
+        if status != expected_status:
+            raise ReleaseError(
+                "static release probe returned HTTP %s, expected %s"
+                % (status, expected_status)
+            )
+        if _sha256(data) != expected_sha256:
+            raise ReleaseError("served static bytes do not match release source")
+
     def probe_feature(self, url, feature, expected_enabled):
         deadline = time.monotonic() + 15
         while True:
@@ -158,7 +177,7 @@ class SystemHooks:
         token = str(os.environ.get(token_name, "")).strip()
         if not token:
             raise ReleaseError("authenticated acceptance token is missing")
-        key = "release-pr276-%d" % int(time.time())
+        key = "release-pr276-" + secrets.token_hex(16)
         body = json.dumps(
             specification["request"], ensure_ascii=False,
         ).encode("utf-8")
@@ -186,12 +205,33 @@ class SystemHooks:
         replay = request_json(specification["submit_url"], "POST")
         if not first.get("job_id") or replay.get("job_id") != first["job_id"]:
             raise ReleaseError("same-key acceptance did not replay original job")
+        if int(first.get("cost") or 0) != 0 or int(replay.get("cost") or 0) != 0:
+            raise ReleaseError("Director Agent acceptance must remain zero-cost")
         status_url = specification["job_url_template"].format(
             job_id=int(first["job_id"]),
         )
-        job = request_json(status_url)
-        if int(job.get("id") or job.get("job_id") or 0) != int(first["job_id"]):
-            raise ReleaseError("authenticated acceptance job is not queryable")
+        deadline = time.monotonic() + int(
+            specification.get("job_timeout_seconds", 120)
+        )
+        while True:
+            job = request_json(status_url)
+            if int(job.get("id") or job.get("job_id") or 0) != int(first["job_id"]):
+                raise ReleaseError("authenticated acceptance job is not queryable")
+            if job.get("kind") != "director_agent" or int(job.get("cost") or 0) != 0:
+                raise ReleaseError("authenticated acceptance returned the wrong job")
+            status = str(job.get("status") or "")
+            if status == "done":
+                result = job.get("result")
+                if not isinstance(result, dict) or result.get("type") != "director_agent":
+                    raise ReleaseError("Director Agent acceptance result is invalid")
+                return
+            if status in {"error", "failed"}:
+                raise ReleaseError("Director Agent acceptance job failed")
+            if status not in {"pending", "running"}:
+                raise ReleaseError("Director Agent acceptance status is invalid")
+            if time.monotonic() >= deadline:
+                raise ReleaseError("Director Agent acceptance job timed out")
+            time.sleep(1)
 
 
 def _locked_value(item, prefix, suffix):
@@ -275,6 +315,20 @@ def _atomic_install(source, target, mode, replace, uid=None, gid=None):
         temporary.unlink(missing_ok=True)
 
 
+def _write_audit(path, payload):
+    path = pathlib.Path(path)
+    temporary = path.with_name(".%s.hq-audit-%s" % (path.name, os.getpid()))
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _validate_director_sources(source_root, manifest, hooks):
     executor = manifest["release_executor"]
     for item in manifest["files"]:
@@ -325,6 +379,8 @@ def _execute_director_release(
         reviewed_head = reviewed_head or "reviewed-test-double"
 
     executor_source = (source_root / executor["repository_path"]).resolve()
+    if source_root not in executor_source.parents:
+        raise ReleaseError("release executor path escapes source root")
     executor_data = executor_source.read_bytes()
     if (_sha256(executor_data) != executor.get("sha256")
             or _git_blob(executor_data) != executor.get("git_blob")):
@@ -383,6 +439,7 @@ def _execute_director_release(
     audit = {
         "reviewed_head": reviewed_head, "merged_main": release_head,
         "executor_sha256": _sha256(executor_data),
+        "executor_git_blob": _git_blob(executor_data),
         "feature_preimage": feature_snapshot, "files": [],
     }
     for index, (item, _, target, mode, uid, gid) in enumerate(entries):
@@ -390,16 +447,26 @@ def _execute_director_release(
         if item["target_preimage_state"] == "file":
             saved = backup / ("%02d-%s" % (index, target.name))
             shutil.copy2(target, saved)
+            if os.name != "nt":
+                os.chown(saved, uid, gid)
+            saved_stat = saved.stat()
+            if (_sha256(saved.read_bytes()) != _locked_value(
+                    item, "preimage", "sha256")
+                    or (saved_stat.st_mode & 0o777) != mode
+                    or (os.name != "nt" and (
+                        saved_stat.st_uid != uid or saved_stat.st_gid != gid
+                    ))):
+                raise ReleaseError("runtime backup verification failed")
         backups.append(saved)
         audit["files"].append({
             "runtime_path": item["runtime_path"],
             "state": item["target_preimage_state"],
             "backup_file": saved.name if saved else None, "mode": mode,
             "uid": uid, "gid": gid,
+            "preimage_sha256": _locked_value(item, "preimage", "sha256"),
+            "postimage_sha256": _locked_value(item, "postimage", "sha256"),
         })
-    (backup / "audit.json").write_text(
-        json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8",
-    )
+    _write_audit(backup / "audit.json", audit)
     checkpoint("after_backup")
 
     service = manifest["target"]["service"]
@@ -433,10 +500,27 @@ def _execute_director_release(
             executor["health_url"], executor["health_feature_field"], True,
         )
         for probe in executor.get("static_probes", []):
-            hooks.probe(probe["url"], "GET", probe.get("expected_status", 200))
+            hooks.probe_static(
+                probe["url"], probe.get("expected_status", 200),
+                probe["expected_sha256"],
+            )
         checkpoint("after_health_enabled")
         hooks.acceptance(executor["authenticated_acceptance"])
         checkpoint("after_acceptance")
+        audit["status"] = "deployed"
+        audit["feature_postimage"] = _capture_feature_row(
+            feature_db, feature["feature"],
+        )
+        audit["final_files"] = [
+            {
+                "runtime_path": item["runtime_path"],
+                "state": "file",
+                "sha256": _sha256(target.read_bytes()),
+            }
+            for item, _, target, _, _, _ in entries
+        ]
+        _write_audit(backup / "audit.json", audit)
+        checkpoint("after_final_audit")
     except BaseException as forward_error:
         rollback_errors = []
         try:
@@ -489,10 +573,7 @@ def _execute_director_release(
                 }
                 for item, _, target, _, _, _ in entries
             ]
-            (backup / "audit.json").write_text(
-                json.dumps(audit, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_audit(backup / "audit.json", audit)
         except BaseException as error:
             rollback_errors.append("audit:" + type(error).__name__)
         if rollback_errors:
@@ -502,13 +583,6 @@ def _execute_director_release(
             ) from forward_error
         raise
 
-    audit["status"] = "deployed"
-    audit["feature_postimage"] = _capture_feature_row(
-        feature_db, feature["feature"],
-    )
-    (backup / "audit.json").write_text(
-        json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8",
-    )
     return {"status": "deployed", "head": release_head, "backup": str(backup)}
 
 

@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "1400ab9700df8bcbc1164725d3bf94eeac614613",
+    "code_source_commit": "9ec4d250af6dc2c0b7443ae9a2443dd1c7c38483",
     "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head",
     "source_commit_binding": "record the exact merged main commit in the release audit before preflight"
   },
@@ -38,8 +38,8 @@
   "release_executor": {
     "contract": "director_agent_seven_file_v1",
     "repository_path": "scripts/deploy_locked_manifest.py",
-    "git_blob": "9565f2677090c7ae80a48a194a2d86aa71e7a3a5",
-    "sha256": "1eda0104035a7b521aa790cad3358189664df70700126efb456db63d520a2d33",
+    "git_blob": "3fa522c20d7edddb5f0ea017ca2b8c6c6cdac7e0",
+    "sha256": "2310c002965c46086c7149d43d8882e066ba3745c7a066d384caf5e18de487b3",
     "runtime_python_root": "/home/ubuntu/content-api",
     "import_modules": [
       "content_domains.core",
@@ -54,15 +54,18 @@
     "static_probes": [
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
-        "expected_status": 200
+        "expected_status": 200,
+        "expected_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152"
       },
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
-        "expected_status": 200
+        "expected_status": 200,
+        "expected_sha256": "a50ef194cd8c5f951f12b9fa04e8f753e2fda0fafe7fd35d6e8c9d2002ee7e64"
       }
     ],
     "authenticated_acceptance": {
       "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "job_timeout_seconds": 120,
       "submit_url": "https://yuelei.huangquechuanmei.com/api/gen/director_agent",
       "job_url_template": "https://yuelei.huangquechuanmei.com/api/gen/job/{job_id}",
       "request": {
@@ -208,7 +211,7 @@
     "require GET /api/gen/health HTTP 200 while director_agent_enabled remains false",
     "set feature_flags.director_agent=true with actor release:pr276",
     "require GET /api/gen/health HTTP 200 with director_agent_enabled true",
-    "run authenticated submission, same-idempotency replay, refresh-resume and concurrent-limit acceptance",
+    "run an authenticated zero-cost submission, same-idempotency replay and poll the original job to a valid Director Agent result",
     "write final hashes, service state, feature state and acceptance results to audit.json"
   ],
   "feature_activation": {
@@ -230,11 +233,16 @@
     "all seven runtime paths exactly match expected_postimage_sha256",
     "huangque-content.service is active after one restart",
     "health reports director_agent_enabled=true only after activation",
+    "the served script.html and script-agent.js bytes exactly match their locked source SHA-256 values",
+    "same Idempotency-Key replays the original zero-cost job_id",
+    "the original job reaches done with a valid Director Agent result"
+  ],
+  "premerge_evidence": [
     "registry startup succeeds when the optional Agent file is absent",
     "custom Base without dedicated Key reports director_agent unavailable",
-    "same Idempotency-Key replays the original job_id",
     "browser refresh continues the persisted job_id without a second POST",
-    "concurrent submissions cannot exceed the configured minute or active-job limit"
+    "concurrent submissions cannot exceed the configured minute or active-job limit",
+    "every file, compile, restart, health, activation, static, acceptance and final-audit failure restores all seven files and the feature row"
   ],
   "rollback": {
     "trigger": "any install, compile, restart, health, activation or acceptance failure",
