@@ -4,6 +4,7 @@ import importlib.util
 import json
 import pathlib
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -429,6 +430,72 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertNotIn("canvas_agent, director_agent, image", registry_source)
         self.assertIn('import_module("." + name, __package__)', registry_source)
         self.assertIn("node tests/test_director_agent.js", workflow)
+
+    def test_release_manifest_binds_all_seven_runtime_files(self):
+        manifest_path = (
+            ROOT / "deploy" / "test-runtime" /
+            "director-agent-v1-20260820.json"
+        )
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        expected_paths = {
+            "server/content_domains/core.py",
+            "server/content_domains/director_agent.py",
+            "server/content_domains/feature_flags.py",
+            "server/content_domains/registry.py",
+            "server/func_names.py",
+            "site/workbench/script-agent.js",
+            "site/workbench/script.html",
+        }
+        files = manifest["files"]
+        self.assertEqual({item["repository_path"] for item in files}, expected_paths)
+        self.assertEqual(len({item["runtime_path"] for item in files}), 7)
+
+        safe_directory = ROOT.as_posix()
+        for item in files:
+            source = item["repository_path"]
+            blob = subprocess.check_output(
+                ["git", "-c", f"safe.directory={safe_directory}",
+                 "rev-parse", f"HEAD:{source}"],
+                cwd=ROOT,
+                text=True,
+            ).strip()
+            contents = subprocess.check_output(
+                ["git", "-c", f"safe.directory={safe_directory}",
+                 "cat-file", "blob", f"HEAD:{source}"],
+                cwd=ROOT,
+            )
+            digest = hashlib.sha256(contents).hexdigest()
+            self.assertEqual(item["source_blob"], blob)
+            self.assertEqual(item["source_sha256"], digest)
+            self.assertEqual(item["expected_postimage_blob"], blob)
+            self.assertEqual(item["expected_postimage_sha256"], digest)
+            if item["target_preimage_state"] == "file":
+                self.assertRegex(item["target_preimage_blob"], r"^[0-9a-f]{40}$")
+                self.assertRegex(item["target_preimage_sha256"], r"^[0-9a-f]{64}$")
+            else:
+                self.assertEqual(item["target_preimage_state"], "absent")
+                self.assertIsNone(item["target_preimage_blob"])
+                self.assertIsNone(item["target_preimage_sha256"])
+
+        policy = manifest["deployment_policy"]
+        self.assertTrue(policy["require_merged_main"])
+        self.assertTrue(policy["backup_all_targets_before_first_write"])
+        self.assertTrue(policy["fail_closed_on_preimage_mismatch"])
+        self.assertTrue(policy["rollback_all_files_and_feature_state_as_one_unit"])
+        self.assertFalse(policy["production_server_write_allowed"])
+
+        sequence = "\n".join(manifest["release_sequence"])
+        self.assertLess(sequence.index("capture all seven live preimages"),
+                        sequence.index("atomically install all seven"))
+        self.assertLess(sequence.index("director_agent_enabled remains false"),
+                        sequence.index("set feature_flags.director_agent=true"))
+        self.assertIn("release:pr276", " ".join(
+            manifest["feature_activation"]["command"]
+        ))
+        rollback = "\n".join(manifest["rollback"]["sequence"])
+        self.assertIn("all seven preimage states", rollback)
+        self.assertIn("exact prior director_agent feature_flags row", rollback)
+        self.assertIn("restart huangque-content.service exactly once", rollback)
 
 
 if __name__ == "__main__":
