@@ -116,25 +116,25 @@
       "repository_path": "server/content_domains/digital_human_timeline.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_timeline.py",
       "classification": "runtime_code",
-      "source_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
-      "source_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
+      "source_blob": "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+      "source_sha256": "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e",
       "target_preimage_state": "file",
       "target_preimage_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
       "target_preimage_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
-      "expected_postimage_blob": "c091ef9592409db774c72ec6a53f816240afdae5",
-      "expected_postimage_sha256": "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08"
+      "expected_postimage_blob": "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+      "expected_postimage_sha256": "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e"
     },
     {
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
-      "source_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440",
+      "source_blob": "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
+      "source_sha256": "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68",
       "target_preimage_state": "file",
       "target_preimage_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
       "target_preimage_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440",
-      "expected_postimage_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
-      "expected_postimage_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440"
+      "expected_postimage_blob": "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
+      "expected_postimage_sha256": "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68"
     },
     {
       "repository_path": "server/content_domains/audio.py",
@@ -176,30 +176,30 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
-      "source_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44",
+      "source_blob": "cdb4b99cc44302602c92c9c26b906ffe766438cc",
+      "source_sha256": "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf",
       "target_preimage_state": "file",
       "target_preimage_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
       "target_preimage_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44",
-      "expected_postimage_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
-      "expected_postimage_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44"
+      "expected_postimage_blob": "cdb4b99cc44302602c92c9c26b906ffe766438cc",
+      "expected_postimage_sha256": "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf"
     }
   ],
   "release_contract_sources": [
     {
       "repository_path": "tests/test_digital_human_timeline.py",
-      "source_blob": "de1643da880e525ed8bbc032d66678a022d603e2",
-      "source_sha256": "3c611d4439ebdba24c0941d618f6b9f5bd0d595ad0d462a160179e39569ea2f5"
+      "source_blob": "807d5325b6e022024d17a73cf30c13bfb7875f5f",
+      "source_sha256": "9711ace93ee7ca41938ef12bffda448dc370a9d42d5bdedfda66857a32b0fa2f"
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "be8603a97a2757f8ac6b7099b7b209bd3b83cfb1",
-      "source_sha256": "18b4160ee18c21bfc892d7acee0be1ccea2035ca8878c1e4ac245ddb7760e36b"
+      "source_blob": "cef247bbc12874b7cef7ca599cab5b242d177ae2",
+      "source_sha256": "7826c7f152c639b2a36eba5606c85c9f26bd7374d19e8443f24c85226e4d14c3"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "a497f920065c572d4a222aaad3ea61d0c41d7439",
-      "source_sha256": "01fc2671130a2e9886b75f4d4991df5fe8299a7135ef78a7d0ac44d3461148ee"
+      "source_blob": "464ce5163eb7f63e1f6015ee51818b53ea2e9c35",
+      "source_sha256": "fbf9d63a4958b0918177025704ae20f3224b8844bae9d6678ad66e003263b0ec"
     },
     {
       "repository_path": "tests/test_digital_human_voice_state.js",
@@ -223,8 +223,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
-      "source_blob": "b1ceec0ac728abb0ce7a8106faced040632d43fb",
-      "source_sha256": "c17c3e517b884ce12b661e1648c903d26264ae589885886e31a547defc6d3193"
+      "source_blob": "66385a804210c3c7df42ffcfe76594c7c94cb536",
+      "source_sha256": "93de1c0feb21e4d934dd244897f1b91aec9a0f414d5b3dd5c7de62f098561cc5"
     }
   ],
   "release_commands": {

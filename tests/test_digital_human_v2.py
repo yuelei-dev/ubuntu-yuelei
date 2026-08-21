@@ -8,7 +8,6 @@ import sys
 import tempfile
 import types
 import unittest
-from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -69,8 +68,8 @@ class DigitalHumanV2Tests(unittest.TestCase):
         connection.row_factory = sqlite3.Row
         return connection
 
-    def _consent(self, script, gestures=2):
-        plan = self.domain.timeline.plan_text(script, gestures)
+    def _consent(self, script, portrait=PNG_2X2):
+        plan = self.domain.timeline.plan_text(script)
         payload = {
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
@@ -78,8 +77,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "run_id": "dh-v2-run-test-001",
             "plan_digest": plan["plan_digest"],
             "script": script,
-            "gesture_count": gestures,
-            "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
+            "photo_sha256": hashlib.sha256(portrait).hexdigest(),
             "voice_mode": "existing",
             "voice_ref": "voice-owned-1",
             "voice_sha256": "",
@@ -98,7 +96,6 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "digital_human_plan_digest": plan["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
             "digital_human_script": plan["copy"],
-            "digital_human_gesture_count": plan["gesture_count"],
             "digital_human_item_index": index,
         }
 
@@ -114,7 +111,6 @@ class DigitalHumanV2Tests(unittest.TestCase):
                 "run_id": "dh-v2-run-test-002",
                 "plan_digest": "0" * 64,
                 "script": plan["copy"],
-                "gesture_count": plan["gesture_count"],
                 "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
                 "voice_mode": "existing", "voice_ref": "voice-owned-1",
                 "voice_sha256": "", "narration_mode": "text",
@@ -124,7 +120,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
     def test_v2_voice_clone_routes_through_legacy_entrypoint_and_keeps_bindings(self):
         sample = b"authorized-v2-voice-sample"
         script = "这是用于验证新版数字人声音复刻授权绑定的完整口播文案。"
-        plan = self.domain.timeline.plan_text(script, 2)
+        plan = self.domain.timeline.plan_text(script)
         consent = self.domain.create_consent({
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
@@ -132,7 +128,6 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "run_id": "dh-v2-run-clone-001",
             "plan_digest": plan["plan_digest"],
             "script": script,
-            "gesture_count": 2,
             "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
             "voice_mode": "clone",
             "voice_ref": "slot-v2-owned-1",
@@ -146,7 +141,6 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "digital_human_plan_digest": plan["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
             "digital_human_script": plan["copy"],
-            "digital_human_gesture_count": plan["gesture_count"],
             "digital_human_narration_mode": "text",
             "slot_id": "slot-v2-owned-1",
             "audio": base64.b64encode(sample).decode("ascii"),
@@ -316,49 +310,61 @@ class DigitalHumanV2Tests(unittest.TestCase):
         audio.check_clone_status.assert_called_once_with("yuelei", "slot_123", key)
         audio.mark_clone_training.assert_not_called()
         thread.assert_not_called()
-    def test_gesture_submission_ignores_forged_provider_and_prompt(self):
-        plan, consent = self._consent("这是一段用于验证数字人手势安全绑定的完整口播文案。")
+    def test_removed_gesture_stage_is_rejected_before_paid_work(self):
+        plan, consent = self._consent("这是一段用于验证旧手势步骤已经删除的完整口播文案。")
         payload = self._metadata(plan, consent, "gesture", 0)
-        payload.update({
-            "provider": "openai", "model": "forged", "quality": "hd",
-            "prompt": "forged", "reference_images": [base64.b64encode(PNG_2X2).decode("ascii")],
-        })
-        cleaned, record = self.domain.verify_child_submission_with_record(
-            payload, "yuelei", "image",
-        )
-        self.assertEqual(cleaned["provider"], "banana")
-        self.assertEqual(cleaned["model"], "nb2")
-        self.assertEqual(cleaned["quality"], "std")
-        self.assertNotEqual(cleaned["prompt"], "forged")
-        self.assertEqual(record["purpose"], self.domain.CONSENT_PURPOSE)
+        payload["reference_images"] = [base64.b64encode(PNG_2X2).decode("ascii")]
+        with self.assertRaises(self.domain.DigitalHumanRequestError):
+            self.domain.verify_child_submission_with_record(payload, "yuelei", "image")
 
-    def test_talking_submission_cycles_gesture_and_preserves_one_voice(self):
+    def test_talking_submission_uses_authorized_portrait_and_preserves_one_voice(self):
         script = "普通人学习人工智能，不用先背很多术语，从一个真实问题开始就可以。" * 8
-        plan, consent = self._consent(script, gestures=2)
+        plan, consent = self._consent(script)
         segment = plan["segments"][1]
-        gesture_index = segment["gesture_index"]
-        image_rel = "images/gesture.png"
-        image_path = self.root / image_rel
-        image_path.parent.mkdir(parents=True, exist_ok=True)
-        image_path.write_bytes(PNG_2X2)
-        gesture_payload = self._metadata(plan, consent, "gesture", gesture_index)
-        gesture_payload.pop("digital_human_consent_token")
-        gesture_payload["digital_human_consent_id"] = consent["consent_id"]
-        connection = sqlite3.connect(self.jobs_db)
-        connection.execute(
-            "INSERT INTO jobs(id,username,kind,status,payload,result) VALUES(?,?,?,?,?,?)",
-            (21, "yuelei", "image", "done", json.dumps(gesture_payload), json.dumps({"file": image_rel})),
-        )
-        connection.commit()
-        connection.close()
         talking = self._metadata(plan, consent, "talking", 1)
-        talking.update({"voice": "voice-owned-1", "gesture_job_id": 21, "text": "forged"})
+        talking.update({
+            "voice": "voice-owned-1", "text": "forged",
+            "reference_images": [
+                "data:image/png;base64," + base64.b64encode(PNG_2X2).decode("ascii")
+            ],
+        })
         cleaned, _record = self.domain.verify_child_submission_with_record(
             talking, "yuelei", "video",
         )
         self.assertEqual(cleaned["text"], segment["text"])
         self.assertEqual(cleaned["voice"], "voice-owned-1")
-        self.assertTrue(cleaned["image_data"].startswith("data:image/png;base64,"))
+        self.assertTrue(cleaned["image_data"].startswith("data:image/jpeg;base64,"))
+        self.assertNotIn("reference_images", cleaned)
+
+        swapped = dict(talking, reference_images=[base64.b64encode(b"other").decode("ascii")])
+        with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+            self.domain.verify_child_submission_with_record(swapped, "yuelei", "video")
+        self.assertEqual(caught.exception.code, "consent_photo_mismatch")
+
+    def test_webp_portrait_is_canonicalized_before_heygen_submission(self):
+        from PIL import Image
+        buffer = io.BytesIO()
+        Image.new("RGB", (32, 48), (25, 60, 90)).save(buffer, format="WEBP")
+        portrait = buffer.getvalue()
+        plan, consent = self._consent(
+            "这是一段用于验证 WebP 人物照片可以直接驱动数字人口播的完整文案。",
+            portrait=portrait,
+        )
+        talking = self._metadata(plan, consent, "talking", 0)
+        talking.update({
+            "voice": "voice-owned-1",
+            "reference_images": [
+                "data:image/webp;base64," + base64.b64encode(portrait).decode("ascii")
+            ],
+        })
+
+        cleaned, _record = self.domain.verify_child_submission_with_record(
+            talking, "yuelei", "video",
+        )
+
+        self.assertTrue(cleaned["image_data"].startswith("data:image/jpeg;base64,"))
+        canonical = base64.b64decode(cleaned["image_data"].split(",", 1)[1])
+        self.assertTrue(canonical.startswith(b"\xff\xd8\xff"))
 
     def test_full_audio_plan_and_talking_use_exact_owned_slice(self):
         raw_audio = b"real-complete-audio-for-binding"
@@ -380,7 +386,6 @@ class DigitalHumanV2Tests(unittest.TestCase):
             )
         plan = self.domain.plan_response({
             "narration_mode": "audio", "audio_upload_id": uploaded["audio_upload_id"],
-            "gesture_count": 1,
         }, "yuelei")["plan"]
         self.assertEqual(plan["narration_mode"], "audio")
         self.assertEqual(plan["segment_count"], 2)
@@ -389,38 +394,21 @@ class DigitalHumanV2Tests(unittest.TestCase):
         consent = self.domain.create_consent({
             "confirmed": True, "consent_version": self.domain.CONSENT_VERSION,
             "purpose": self.domain.CONSENT_PURPOSE, "run_id": "dh-v2-run-audio-001",
-            "plan_digest": plan["plan_digest"], "script": "", "gesture_count": 1,
+            "plan_digest": plan["plan_digest"], "script": "",
             "photo_sha256": hashlib.sha256(PNG_2X2).hexdigest(),
             "voice_mode": "audio", "voice_ref": "", "voice_sha256": "",
             "narration_mode": "audio", "audio_upload_id": uploaded["audio_upload_id"],
         }, "yuelei", "test-signing-secret", db_factory=self._consent_connection)
-        image_rel = "images/audio-gesture.png"
-        image_path = self.root / image_rel
-        image_path.parent.mkdir(parents=True, exist_ok=True)
-        image_path.write_bytes(PNG_2X2)
-        gesture_payload = {
-            "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
-            "digital_human_stage": "gesture", "digital_human_consent_id": consent["consent_id"],
-            "digital_human_run_id": consent["run_id"],
-            "digital_human_plan_digest": plan["plan_digest"],
-            "digital_human_item_index": 0,
-        }
-        with closing(self._jobs_connection()) as connection:
-            connection.execute(
-                "INSERT INTO jobs(id,username,kind,status,payload,result) VALUES(?,?,?,?,?,?)",
-                (31, "yuelei", "image", "done", json.dumps(gesture_payload),
-                 json.dumps({"file": image_rel})),
-            )
-            connection.commit()
         talking = {
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
             "digital_human_stage": "talking", "digital_human_run_id": consent["run_id"],
             "digital_human_plan_digest": plan["plan_digest"],
             "digital_human_consent_token": consent["consent_token"],
-            "digital_human_script": plan["copy"], "digital_human_gesture_count": 1,
+            "digital_human_script": plan["copy"],
             "digital_human_item_index": 0, "digital_human_narration_mode": "audio",
             "digital_human_audio_upload_id": uploaded["audio_upload_id"],
-            "gesture_job_id": 31, "mode": "audio", "audio_data": "forged",
+            "reference_images": [base64.b64encode(PNG_2X2).decode("ascii")],
+            "mode": "audio", "audio_data": "forged",
         }
         expected_slice = self.domain._load_audio_asset(
             uploaded["audio_upload_id"], "yuelei",
@@ -447,7 +435,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
                 }],
             }
             with self.subTest(duration=duration):
-                plan = self.domain._audio_plan(asset, 1)
+                plan = self.domain._audio_plan(asset)
                 self.assertEqual(plan["expected_duration"], duration)
                 self.assertEqual(plan["material_count"], expected_count)
 

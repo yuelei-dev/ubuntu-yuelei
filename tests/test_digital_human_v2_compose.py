@@ -57,7 +57,7 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
             ])
             payload = {
                 "_job_id": 901, "segment_count": 1, "material_count": 2,
-                "gesture_count": 1, "copy": "真实合成检查，开头结尾真人出镜，中间混合图片和视频素材。",
+                "copy": "真实合成检查，开头结尾真人出镜，中间混合图片和视频素材。",
                 "video_files": [presenter.relative_to(root).as_posix()],
                 "material_files": [image.relative_to(root).as_posix(), clip.relative_to(root).as_posix()],
                 "material_types": ["image", "video"],
@@ -113,7 +113,7 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
             ])
             payload = {
                 "_job_id": 902, "segment_count": 1, "material_count": 1,
-                "gesture_count": 1, "copy": "Public material may contain alpha and unusual sample aspect ratio.",
+                "copy": "Public material may contain alpha and unusual sample aspect ratio.",
                 "video_files": [presenter.relative_to(root).as_posix()],
                 "material_files": [public_image.relative_to(root).as_posix()],
                 "material_types": ["image"],
@@ -175,7 +175,7 @@ class DigitalHumanV2ComposeTests(unittest.TestCase):
                     states = []
                     payload = {
                         "_job_id": 910 + index, "segment_count": 1, "material_count": 0,
-                        "gesture_count": 1, "copy": "最短合法视频应当全程使用真人画面。",
+                        "copy": "最短合法视频应当全程使用真人画面。",
                         "video_files": [presenter.relative_to(root).as_posix()],
                         "material_files": [], "material_types": [],
                         "video_job_ids": [201 + index], "material_job_ids": [],
