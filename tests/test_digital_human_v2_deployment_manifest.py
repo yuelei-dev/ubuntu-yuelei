@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 import pathlib
+import subprocess
 import unittest
 
 
@@ -64,10 +66,33 @@ LOCKED_PREIMAGES = {
     ),
 }
 
+
+def _read_locked_git_blob(blob_id):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", blob_id,
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
+
+
 class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+    def _assert_historical_content_lock(self, lock):
+        data = _read_locked_git_blob(lock["source_blob"])
+        actual_blob = hashlib.sha1(
+            b"blob %d\0" % len(data) + data
+        ).hexdigest()
+        self.assertEqual(actual_blob, lock["source_blob"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), lock["source_sha256"])
 
     def test_scope_and_historical_source_locks_are_exact(self):
         files = self.manifest["files"]
@@ -75,8 +100,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(len(files), 10)
         self.assertEqual(len({entry["runtime_path"] for entry in files}), 10)
         for entry in files:
-            self.assertRegex(entry["source_sha256"], r"^[0-9a-f]{64}$")
-            self.assertRegex(entry["source_blob"], r"^[0-9a-f]{40}$")
+            self._assert_historical_content_lock(entry)
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
 
@@ -146,11 +170,9 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(executor["confirm_target"], "test@8.148.158.106")
         self.assertFalse(executor["remote_connection_capability"])
         for tool in (executor, executor["verifier"], executor["requirements_verifier"]):
-            self.assertRegex(tool["source_sha256"], r"^[0-9a-f]{64}$")
-            self.assertRegex(tool["source_blob"], r"^[0-9a-f]{40}$")
+            self._assert_historical_content_lock(tool)
         for contract in self.manifest["release_contract_sources"]:
-            self.assertRegex(contract["source_sha256"], r"^[0-9a-f]{64}$")
-            self.assertRegex(contract["source_blob"], r"^[0-9a-f]{40}$")
+            self._assert_historical_content_lock(contract)
 
     def test_all_no_charge_checks_run_before_the_single_restart(self):
         commands = self.manifest["release_commands"]
@@ -190,8 +212,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             entry for entry in self.manifest["release_contract_sources"]
             if entry["repository_path"] == "tests/test_digital_human_voice_state.js"
         )
-        self.assertRegex(contract["source_sha256"], r"^[0-9a-f]{64}$")
-        self.assertRegex(contract["source_blob"], r"^[0-9a-f]{40}$")
+        self._assert_historical_content_lock(contract)
 
         server_no_charge = json.dumps(
             self.manifest["release_commands"]["no_charge"],

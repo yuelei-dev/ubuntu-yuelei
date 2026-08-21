@@ -52,4 +52,3 @@ The same browser run exercised these additional states:
 Across the desktop, stale-revision, and refresh-recovery submissions, the
 fixture recorded three Director Agent POSTs with three distinct idempotency
 keys and zero paid or mutating POSTs.
-
