@@ -378,14 +378,15 @@ KIND_GRACE = {"tryon": 2400, "xiaole_video": 1200, "sora_video": 1500, "image": 
               "short_drama_sound_effect": 900,
               "short_drama_preview": 1800, "short_drama_final": 3600,
               "short_drama_remux": 600,
-              "script_to_video": 1200, "canvas_agent": 300}
+              "script_to_video": 1200, "canvas_agent": 300, "director_agent": 300}
 # ⚠️ tryon 【不】跟着 15 分钟走：线上实测线路一中位 909s、**p90 1612s(27 分钟)**。
 #    砍到 15 分钟会把超过一成的换装任务判成失败。要改它得先把那条链路本身提速。
 AVATAR_COST = _env_positive_int("AVATAR_COST", 2)   # 建形象：象征性收费防刷，失败自动退点
 # ⚠️ cost_of() 回落到 COST.get(kind, 0) —— 新增 kind 忘了在这里登记，就是【免费】。
 COST = {"image": 12, "copy": 3, "audio": 10, "video": VIDEO_COST, "tryon": 40,
         "cinematic": VIDEO_COST, "avatar": AVATAR_COST, "breakdown": 8,
-        "script_to_video": VIDEO_COST, "canvas_agent": 3}  # collect/leads/cinematic 走 cost_of() 动态算
+        "script_to_video": VIDEO_COST, "canvas_agent": 3,
+        "director_agent": 0}  # 顾客使用指导免费；collect/leads/cinematic 走 cost_of() 动态算
 # cinematic 的这条已经不生效了 —— 电影化身按成片秒数计费（video.cinematic_cost），
 # cost_of() 里有它自己的分支、必定先 return。留在这里只当保险：万一哪天分支被绕过，
 # 也是按 VIDEO_COST 收费，而不是回落到 0（=免费送 $7 一条的视频）。
@@ -404,6 +405,19 @@ HEYGEN_TIMEOUT = max(60, int(os.environ.get("HEYGEN_TIMEOUT", "1200")))
 
 # Domain handlers are assembled by content_domains.registry at startup.
 HANDLERS = {}
+
+def _director_agent_available():
+    """Fail closed when a partial runtime overlay lacks Agent dependencies."""
+    if "director_agent" not in HANDLERS:
+        return False
+    try:
+        from . import director_agent as director_agent_domain
+        return bool(director_agent_domain.is_available(
+            fallback_key=OPENAI_KEY, fallback_base=OPENAI_BASE))
+    except Exception as error:
+        print("[director_agent] availability check failed: %s" % error, flush=True)
+        return False
+
 
 # ============ 任务库 ============
 def jdb():
@@ -1460,7 +1474,7 @@ def run_job(job_id):
         # 抢到 running 才开心跳（前面几个 return 都还没认领，不该有心跳）。
         # 有了它，reaper 的「没心跳」才真的等于「worker 死了」—— 而不是「正在轮询/烧字幕」。
         stop_heartbeat = _start_job_heartbeat(job_id)
-        if kind in {"audio", "short_drama_sound_effect", "video", "tryon", "xiaole_video", "sora_video", "leads", "cinematic", "avatar", "breakdown", "short_drama_preview", "short_drama_final", "script_to_video"}:
+        if kind in {"audio", "short_drama_sound_effect", "video", "tryon", "xiaole_video", "sora_video", "leads", "cinematic", "avatar", "breakdown", "short_drama_preview", "short_drama_final", "script_to_video", "director_agent"}:
             payload["_username"] = username   # 少一个 kind，handler 就拿不到用户名/job_id：
             payload["_job_id"] = job_id       # gen_avatar 记不了形象归属，gen_cinematic 查不到用户的形象
         result = HANDLERS[kind](payload)
@@ -2999,7 +3013,12 @@ class H(BaseHTTPRequestHandler):
             if _must_change_password(user): return self._send(403, {"detail": "请先修改初始密码"})
             try: feature_flags.require_enabled(kind)
             except feature_flags.FeatureDisabled as e: return self._send(503, {"detail": str(e)})
-            if kind == "canvas_agent" and is_shutting_down():
+            if kind == "director_agent" and not _director_agent_available():
+                return self._send(503, {
+                    "detail": "编导助手暂未配置模型服务，请稍后再试",
+                    "code": "director_agent_unavailable", "retry_after_ms": 60000,
+                })
+            if kind in {"canvas_agent", "director_agent"} and is_shutting_down():
                 return self._send(503, {
                     "detail": "服务正在更新，请稍等几秒后重试（未扣点）",
                     "code": "shutting_down", "retry_after_ms": 5000,
@@ -3009,10 +3028,11 @@ class H(BaseHTTPRequestHandler):
             still_access = _short_drama_canvas_access(self) if is_still_route else None
             smart_montage_submission = False
             durable_copy_submission = False
+            durable_director_submission = False
             durable_attempt = None
             from . import digital_human_oneclick
             try:
-                body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent"} else self._json_body()
+                body = self._json_body_strict() if is_still_route or kind in {"video", "tryon", "sora_video", "cinematic", "avatar", "script_to_video", "copy", "canvas_agent", "director_agent"} else self._json_body()
                 if is_still_route:
                     request_body, still_idem_body = _short_drama_domain().short_drama_production.normalize_still_request(body, require_quote=True); idem_key = _idempotency_key(self.headers.get("Idempotency-Key"))
                     if not idem_key: raise ValueError("关键帧提交必须提供 Idempotency-Key")
@@ -3101,6 +3121,9 @@ class H(BaseHTTPRequestHandler):
                     body = canvas_agent_domain.validate_payload(
                         body, _short_drama_canvas_access(self)
                     )
+                elif kind == "director_agent":
+                    from . import director_agent as director_agent_domain
+                    body = director_agent_domain.validate_payload(body)
                 elif kind == "image":
                     from . import image as image_domain
                     body = image_domain.validate_image_payload(body)
@@ -3116,9 +3139,13 @@ class H(BaseHTTPRequestHandler):
                     request_body = dict(body) if isinstance(body, dict) else body
                 # cinematic 也纳入：它提交即扣 $7，是最该防重复提交的一档（同一单任务路径，无额外风险）
                 if not is_still_route and not smart_montage_submission:
-                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "script_to_video", "breakdown", "copy"} else ""
+                    idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "director_agent", "script_to_video", "breakdown", "copy"} else ""
                 durable_copy_submission = bool(durable_copy_submission and idem_key)
-                if durable_copy_submission and idem_key:
+                durable_director_submission = bool(
+                    kind == "director_agent" and idem_key
+                )
+                if ((durable_copy_submission or durable_director_submission)
+                        and idem_key):
                     idem_state, idem_response = _idempotency_lookup(
                         user["username"], p, idem_key, request_body,
                     )
@@ -3145,6 +3172,8 @@ class H(BaseHTTPRequestHandler):
                         body = durable_attempt["payload"]
                 if kind == "canvas_agent" and not idem_key:
                     raise ValueError("画布 Agent 提交必须提供 Idempotency-Key")
+                if kind == "director_agent" and not idem_key:
+                    raise ValueError("编导助手提交必须提供 Idempotency-Key")
                 if kind == "sora_video" and not idem_key: raise ValueError("Sora 视频提交必须提供 Idempotency-Key")
                 if kind == "xiaole_video" and str(body.get("channel") or "").lower() in {"micro", "omni", "minimax"} and not idem_key: raise ValueError("官方视频提交必须提供 Idempotency-Key")
             except feature_flags.FeatureDisabled as e:
@@ -3286,7 +3315,8 @@ class H(BaseHTTPRequestHandler):
                             if durable_attempt is not None:
                                 body = durable_attempt["payload"]
                                 cost = int(durable_attempt["cost"])
-                    elif durable_copy_submission:
+                    elif (durable_copy_submission
+                          or durable_director_submission):
                         # The pre-validation lookup above is authoritative.  A
                         # missing row is created below with its frozen payload;
                         # a processing row already loaded ``durable_attempt``.
@@ -3298,7 +3328,9 @@ class H(BaseHTTPRequestHandler):
                 if idem_state == "replay": replay = dict(idem_response or {}); return self._send(int(replay.pop("_http_status", 200)), replay)
                 if idem_state == "conflict": return self._send(409, {"detail": "同一个 Idempotency-Key 不能用于不同请求", "code": "idempotency_conflict"})
                 if (idem_state == "processing" and not is_still_route
-                        and (not (smart_montage_submission or durable_copy_submission)
+                        and (not (smart_montage_submission
+                                  or durable_copy_submission
+                                  or durable_director_submission)
                              or durable_attempt is None)):
                     return self._send(409, {"detail": "相同请求正在受理，请稍后查询", "code": "idempotency_in_progress", "retry_after_ms": 1000})
                 if is_still_route and not still_attempt:
@@ -3311,7 +3343,7 @@ class H(BaseHTTPRequestHandler):
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     if is_still_route: limit_hit["operation_terminal"] = True
                     return self._send(429, limit_hit)
-                active_jobs = 0 if (still_attempt or durable_attempt) else _user_active_job_count(user["username"])
+                active_jobs = 0 if (still_attempt or durable_attempt or kind == "director_agent") else _user_active_job_count(user["username"])
                 if active_jobs >= MAX_USER_ACTIVE_JOBS:
                     video_domain.abort_xiaole_reference_submission(staged_ref_keys, user["username"], p, idem_key, lambda: _idempotency_abort(user["username"], p, idem_key)) if staged_ref_keys else _idempotency_abort(user["username"], p, idem_key)
                     return self._send(429, {"detail": "您有 %d 个任务正在排队/生成，完成后再提交" % active_jobs,
@@ -3332,17 +3364,21 @@ class H(BaseHTTPRequestHandler):
                 durable_linked_recovery = False
                 durable_recovered_job_status = None
                 try:
-                    if ((smart_montage_submission or durable_copy_submission)
+                    if ((smart_montage_submission or durable_copy_submission
+                         or durable_director_submission)
                             and durable_attempt is None):
                         if smart_montage_submission:
                             script_to_video_domain.materialize_smart_montage_uploads(
                                 body, user["username"],
                             )
-                        charge_key = (_smart_charge_key(
-                            user["username"], p, idem_key,
-                        ) if smart_montage_submission else _durable_charge_key(
-                            "copy", user["username"], p, idem_key,
-                        ))
+                        charge_key = (
+                            _smart_charge_key(user["username"], p, idem_key)
+                            if smart_montage_submission else
+                            _durable_charge_key(
+                                "director" if durable_director_submission else "copy",
+                                user["username"], p, idem_key,
+                            )
+                        )
                         attempt_state, attempt_value = _idempotency_begin_attempt(
                             user["username"], p, idem_key, request_body,
                             body, cost, charge_key,
@@ -3395,25 +3431,31 @@ class H(BaseHTTPRequestHandler):
                         )
                         still_attempt = _short_drama_domain().short_drama_production.get_charge_attempt(
                             jdb, user["username"], idem_key)
-                    elif ((smart_montage_submission or durable_copy_submission)
+                    elif ((smart_montage_submission or durable_copy_submission
+                            or durable_director_submission)
                           and durable_attempt.get("state") == "linked"):
                         jid = int(durable_attempt["job_id"])
                         points_left = int(durable_attempt["points_left"])
-                        with closing(jdb()) as connection:
-                            linked_row = connection.execute(
-                                "SELECT kind,username,cost,status FROM jobs WHERE id=?",
-                                (jid,),
-                            ).fetchone()
-                        if (not linked_row or linked_row["kind"] != kind
-                                or linked_row["username"] != user["username"]
-                                or int(linked_row["cost"] or 0) != int(cost)):
-                            raise RuntimeError(
-                                "durable paid job link is invalid"
+                        if durable_director_submission:
+                            linked_job = director_agent_domain.recover_linked_job(
+                                jdb, user["username"], durable_attempt,
                             )
+                            linked_status = linked_job["status"]
+                        else:
+                            with closing(jdb()) as connection:
+                                linked_row = connection.execute(
+                                    "SELECT kind,username,cost,status FROM jobs WHERE id=?",
+                                    (jid,),
+                                ).fetchone()
+                            if (not linked_row or linked_row["kind"] != kind
+                                    or linked_row["username"] != user["username"]
+                                    or int(linked_row["cost"] or 0) != int(cost)):
+                                raise RuntimeError(
+                                    "durable job link is invalid"
+                                )
+                            linked_status = str(linked_row["status"] or "")
                         durable_linked_recovery = True
-                        durable_recovered_job_status = str(
-                            linked_row["status"] or ""
-                        )
+                        durable_recovered_job_status = linked_status
                     else:
                         paid_before_charge = (
                             (lambda: video_domain.mark_seedance_reference_charging(
@@ -3422,7 +3464,58 @@ class H(BaseHTTPRequestHandler):
                                 "job-charge:%s:%s:%s" % (user["username"], p, idem_key),
                             )) if staged_ref_keys else None
                         )
-                        if smart_montage_submission or durable_copy_submission:
+                        if durable_director_submission:
+                            if durable_attempt.get("state") != "frozen":
+                                raise RuntimeError(
+                                    "durable free job state is invalid"
+                                )
+                            charge_key = durable_attempt[
+                                "charge_transaction_key"
+                            ]
+                            points_left = int(user.get("points") or 0)
+                            try:
+                                jid, limit_hit = director_agent_domain.create_job_with_quota(
+                                    jdb, user["username"], body, SERVICE_OWNER,
+                                    max_active_jobs=MAX_USER_ACTIVE_JOBS,
+                                    idempotency={
+                                        "endpoint": p,
+                                        "key": idem_key,
+                                        "charge_transaction_key": charge_key,
+                                    },
+                                    points_left=points_left,
+                                )
+                            except Exception:
+                                recovered_attempt = _idempotency_attempt(
+                                    user["username"], p, idem_key,
+                                    request_body,
+                                )
+                                if (not recovered_attempt
+                                        or recovered_attempt.get("state") != "linked"):
+                                    raise
+                                durable_attempt = recovered_attempt
+                                jid = int(durable_attempt["job_id"])
+                                points_left = int(
+                                    durable_attempt["points_left"]
+                                )
+                                linked_job = director_agent_domain.recover_linked_job(
+                                    jdb, user["username"], durable_attempt,
+                                )
+                                durable_linked_recovery = True
+                                durable_recovered_job_status = linked_job[
+                                    "status"
+                                ]
+                            else:
+                                if limit_hit:
+                                    _idempotency_abort(
+                                        user["username"], p, idem_key,
+                                    )
+                                    return self._send(429, limit_hit)
+                                durable_attempt.update({
+                                    "state": "linked", "job_id": int(jid),
+                                    "points_left": int(points_left),
+                                })
+                        elif (smart_montage_submission
+                              or durable_copy_submission):
                             if durable_attempt.get("state") not in {"frozen", "charged"}:
                                 raise RuntimeError(
                                     "durable paid charge state is invalid"
@@ -3700,7 +3793,8 @@ class H(BaseHTTPRequestHandler):
                         _idempotency_complete(user["username"], p, idem_key, dict(queue_response, _http_status=429))
                     return self._send(429, queue_response)
             if (durable_linked_recovery
-                    and durable_recovered_job_status == "error"):
+                    and durable_recovered_job_status == "error"
+                    and kind != "director_agent"):
                 with closing(jdb()) as connection:
                     failed_row = connection.execute(
                         "SELECT error FROM jobs WHERE id=?", (jid,),
@@ -4017,10 +4111,13 @@ class H(BaseHTTPRequestHandler):
                       "stats": {"like": it.get("like"), "comment": it.get("comment")}} for it in (r.get("items") or [])]
             return self._send(200, {"items": items, "cost": search_cost, "points_left": points_left})
         if p == "/api/gen/health":
+            director_agent_enabled = bool(feature_flags.is_enabled("director_agent")
+                and _director_agent_available())
             return self._send(200, {"ok": True, "service": "huangque-content", "caps": list(HANDLERS), "job_workers": JOB_WORKERS, "fast_job_workers": FAST_JOB_WORKERS, "talking_job_workers": TALKING_JOB_WORKERS, "smart_montage_job_workers": SMART_MONTAGE_JOB_WORKERS, "image_job_workers": IMAGE_JOB_WORKERS, "job_queue_max": JOB_QUEUE_MAX, "talking_job_queue_max": TALKING_JOB_QUEUE_MAX, "smart_montage_job_queue_max": SMART_MONTAGE_JOB_QUEUE_MAX,
                                     "max_user_active_jobs": MAX_USER_ACTIVE_JOBS, "max_user_active_xiaole_video": MAX_USER_ACTIVE_XIAOLE_VIDEO, "max_user_active_sora_video": MAX_USER_ACTIVE_SORA_VIDEO, "max_user_active_tryon": MAX_USER_ACTIVE_TRYON, "max_user_active_cinematic": MAX_USER_ACTIVE_CINEMATIC,
                                     "sora_video_enabled": bool(video_domain.sora_video_is_open() and OPENAI_KEY and feature_flags.is_enabled("sora_video")),
                                     "omni_video_enabled": bool(video_domain.omni_video_is_open() and feature_flags.is_enabled("omni_video")), "seedance_video_enabled": bool(video_domain.seedance_video_is_open() and feature_flags.is_enabled("seedance_video")), "minimax_h3_video_enabled": bool(video_domain.minimax_h3_video_is_open() and feature_flags.is_enabled("minimax_h3_video")), "reverse_remake_video_offer": (reverse_remake_offer := video_domain.reverse_remake_video_offer(feature_flags, points_domain.cost_of)), "reverse_remake_video_channel": reverse_remake_offer["channel"], "seedance_reference_images_enabled": video_domain.seedance_reference_upload_is_open(), "seedance_upscale_enabled": bool(video_domain.seedance_upscale_is_open() and feature_flags.is_enabled("seedance_video")),
+                                    "director_agent_enabled": director_agent_enabled,
                                     "max_user_running_talking": MAX_USER_RUNNING_TALKING, "max_user_running_image": MAX_USER_RUNNING_IMAGE, "video_cost": pricing.get_price("video.talking.block"), "video_batch_max": min(video_domain.VIDEO_BATCH_MAX, MAX_USER_ACTIVE_JOBS), "has_openai": bool(OPENAI_KEY), "has_tikhub": bool(tikhub.KEY), "tikhub_base": tikhub.BASE})
         self._send(404, {"detail": "not found"})
     def do_PUT(self):

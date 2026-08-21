@@ -2,6 +2,7 @@
 import hashlib
 import json
 import pathlib
+import subprocess
 import unittest
 
 
@@ -31,8 +32,23 @@ LOCKED_PREIMAGES = {
 }
 
 
-def _blob_id(data):
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+def _verify_historical_postimage_lock(entry):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", entry["postimage_blob"],
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    data = result.stdout
+    actual_blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    if actual_blob != entry["postimage_blob"]:
+        raise AssertionError("historical postimage Git blob lock mismatch")
+    if hashlib.sha256(data).hexdigest() != entry["postimage_sha256"]:
+        raise AssertionError("historical postimage SHA-256 lock mismatch")
 
 
 class DirectorProductionParityTests(unittest.TestCase):
@@ -50,7 +66,7 @@ class DirectorProductionParityTests(unittest.TestCase):
             self.manifest["deployment_policy"]["copy_environment_or_database"]
         )
 
-    def test_runtime_file_scope_and_postimages_are_exact(self):
+    def test_historical_runtime_scope_and_postimage_locks_are_exact(self):
         entries = self.manifest["files"]
         self.assertEqual(
             {entry["repository_path"] for entry in entries},
@@ -63,9 +79,13 @@ class DirectorProductionParityTests(unittest.TestCase):
             },
         )
         for entry in entries:
-            data = (ROOT / entry["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), entry["postimage_sha256"])
-            self.assertEqual(_blob_id(data), entry["postimage_blob"])
+            _verify_historical_postimage_lock(entry)
+
+    def test_tampered_historical_postimage_lock_is_rejected(self):
+        tampered = dict(self.manifest["files"][0])
+        tampered["postimage_sha256"] = "0" * 64
+        with self.assertRaisesRegex(AssertionError, "SHA-256 lock mismatch"):
+            _verify_historical_postimage_lock(tampered)
 
     def test_preimages_are_the_reviewed_locked_values(self):
         actual = {

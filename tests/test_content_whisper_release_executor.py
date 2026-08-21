@@ -8,6 +8,7 @@ import json
 import os
 import pathlib
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,13 +29,36 @@ TARGET_COUNT = len(json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))["files"
 LAST_WRITE = "write_%d" % TARGET_COUNT
 
 
-def _load_executor():
-    if str(SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(SCRIPTS))
-    spec = importlib.util.spec_from_file_location("whisper_release", EXECUTOR_PATH)
+def _load_executor(source_root=ROOT):
+    scripts = source_root / "scripts"
+    executor_path = source_root / EXECUTOR_PATH.relative_to(ROOT)
+    if str(scripts) not in sys.path:
+        sys.path.insert(0, str(scripts))
+    sys.modules.pop("verify_content_whisper_deployment", None)
+    spec = importlib.util.spec_from_file_location("whisper_release", executor_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _read_locked_git_blob(lock):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", lock["source_blob"],
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    data = result.stdout
+    actual_blob = hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    if actual_blob != lock["source_blob"]:
+        raise AssertionError("historical Git blob lock mismatch")
+    if hashlib.sha256(data).hexdigest() != lock["source_sha256"]:
+        raise AssertionError("historical SHA-256 lock mismatch")
+    return data
 
 
 class FakeRunner:
@@ -151,7 +175,6 @@ class FakeGitRunner:
 class ContentWhisperReleaseExecutorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.release_module = _load_executor()
         cls.base_manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
     def setUp(self):
@@ -160,15 +183,41 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         self.runtime_root = self.root / "runtime"
         self.backup_root = self.root / "backups"
         self.tool_root = self.root / "deployment-tools"
+        self.source_root = self.root / "historical-source"
         self.runtime_root.mkdir()
         self.tool_root.mkdir()
+        self.source_root.mkdir()
+        self.manifest = copy.deepcopy(self.base_manifest)
+        historical_manifest_path = self.source_root / MANIFEST_PATH.relative_to(ROOT)
+        historical_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        historical_manifest_path.write_bytes(MANIFEST_PATH.read_bytes())
+        self.manifest["_manifest_path"] = str(historical_manifest_path)
+        # Exercise release mechanics against the immutable historical source
+        # bytes named by the manifest. Never rewrite its reviewed lock values.
+        historical_locks = [
+            *self.manifest["files"],
+            self.manifest["executor"],
+            self.manifest["executor"]["verifier"],
+            self.manifest["executor"]["requirements_verifier"],
+            *self.manifest["release_contract_sources"],
+        ]
+        materialized = {}
+        for lock in historical_locks:
+            source = _read_locked_git_blob(lock)
+            path = lock["repository_path"]
+            if path in materialized:
+                self.assertEqual(materialized[path], source)
+                continue
+            target = self.source_root / pathlib.PurePosixPath(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
+            materialized[path] = source
+        self.release_module = _load_executor(self.source_root)
         for tool in self.release_module.ALLOWED_DEPLOYMENT_TOOLS:
             target = self._tool_path(tool)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"#!/bin/sh\nexit 0\n")
             os.chmod(target, 0o755)
-        self.manifest = copy.deepcopy(self.base_manifest)
-        self.manifest["_manifest_path"] = str(MANIFEST_PATH)
         self.original = {}
         for entry in self.manifest["files"]:
             target = self._target(entry)
@@ -220,7 +269,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             reviewed_main=REVIEWED_MAIN, use_real_health=False, clock=None):
         return self.release_module.ContentWhisperRelease(
             manifest or self.manifest,
-            ROOT,
+            self.source_root,
             self.runtime_root,
             self.backup_root,
             runner=runner or FakeRunner(),
@@ -289,7 +338,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         )
         for entry in self.manifest["files"]:
             self.assertEqual(
-                (ROOT / entry["repository_path"]).read_bytes(),
+                (self.source_root / entry["repository_path"]).read_bytes(),
                 self._target(entry).read_bytes(),
             )
         state = json.loads(
@@ -326,7 +375,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             if entry["repository_path"] in already_paths
         ]
         for entry in already:
-            source = (ROOT / entry["repository_path"]).read_bytes()
+            source = (self.source_root / entry["repository_path"]).read_bytes()
             self._target(entry).write_bytes(source)
             self.original[entry["runtime_path"]] = source
         runner = FakeRunner()
@@ -368,7 +417,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             (backup / "backup-state.json").read_text(encoding="utf-8")
         )
         for entry in already:
-            source = (ROOT / entry["repository_path"]).read_bytes()
+            source = (self.source_root / entry["repository_path"]).read_bytes()
             record = next(
                 item for item in state["files"]
                 if item["runtime_path"] == entry["runtime_path"]
@@ -381,13 +430,13 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             )
         for entry in self.manifest["files"]:
             self.assertEqual(
-                (ROOT / entry["repository_path"]).read_bytes(),
+                (self.source_root / entry["repository_path"]).read_bytes(),
                 self._target(entry).read_bytes(),
             )
 
     def test_all_postimages_are_audited_without_writes_or_restart(self):
         for entry in self.manifest["files"]:
-            source = (ROOT / entry["repository_path"]).read_bytes()
+            source = (self.source_root / entry["repository_path"]).read_bytes()
             target = self._target(entry)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(source)
@@ -425,7 +474,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
                 "server/content_domains/digital_human_oneclick.py"
             )
         )
-        source = (ROOT / video["repository_path"]).read_bytes()
+        source = (self.source_root / video["repository_path"]).read_bytes()
         self._target(video).write_bytes(source)
         self.original[video["runtime_path"]] = source
         index = self.manifest["files"].index(video) + 1
@@ -455,7 +504,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
 
     def test_exact_postimage_is_rejected_when_policy_is_disabled(self):
         video = self.manifest["files"][0]
-        source = (ROOT / video["repository_path"]).read_bytes()
+        source = (self.source_root / video["repository_path"]).read_bytes()
         self._target(video).write_bytes(source)
         self.manifest["deployment_policy"][
             "allow_exact_postimage_as_existing"

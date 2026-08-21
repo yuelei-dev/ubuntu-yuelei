@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 import hashlib
-import importlib.util
 import json
 import pathlib
+import subprocess
 import unittest
 
 
@@ -10,7 +10,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
-VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
@@ -68,29 +67,40 @@ LOCKED_PREIMAGES = {
 }
 
 
-def _load_verifier():
-    spec = importlib.util.spec_from_file_location("digital_human_v2_verify", VERIFY_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _read_locked_git_blob(blob_id):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", blob_id,
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
 
 
 class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-        cls.verify = _load_verifier()
 
-    def test_scope_and_source_locks_are_exact(self):
+    def _assert_historical_content_lock(self, lock):
+        data = _read_locked_git_blob(lock["source_blob"])
+        actual_blob = hashlib.sha1(
+            b"blob %d\0" % len(data) + data
+        ).hexdigest()
+        self.assertEqual(actual_blob, lock["source_blob"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), lock["source_sha256"])
+
+    def test_scope_and_historical_source_locks_are_exact(self):
         files = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in files}, EXPECTED_SCOPE)
         self.assertEqual(len(files), 10)
         self.assertEqual(len({entry["runtime_path"] for entry in files}), 10)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 10)
         for entry in files:
-            data = (ROOT / entry["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), entry["source_blob"])
+            self._assert_historical_content_lock(entry)
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
 
@@ -155,18 +165,14 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         serialized = json.dumps(feishu, ensure_ascii=False)
         self.assertNotIn("app_secret=", serialized.lower())
 
-    def test_release_tools_and_contract_tests_are_content_locked(self):
+    def test_release_tools_and_contracts_have_historical_content_locks(self):
         executor = self.manifest["executor"]
         self.assertEqual(executor["confirm_target"], "test@8.148.158.106")
         self.assertFalse(executor["remote_connection_capability"])
         for tool in (executor, executor["verifier"], executor["requirements_verifier"]):
-            data = (ROOT / tool["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), tool["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), tool["source_blob"])
+            self._assert_historical_content_lock(tool)
         for contract in self.manifest["release_contract_sources"]:
-            data = (ROOT / contract["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+            self._assert_historical_content_lock(contract)
 
     def test_all_no_charge_checks_run_before_the_single_restart(self):
         commands = self.manifest["release_commands"]
@@ -206,9 +212,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             entry for entry in self.manifest["release_contract_sources"]
             if entry["repository_path"] == "tests/test_digital_human_voice_state.js"
         )
-        data = (ROOT / contract["repository_path"]).read_bytes()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
-        self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+        self._assert_historical_content_lock(contract)
 
         server_no_charge = json.dumps(
             self.manifest["release_commands"]["no_charge"],

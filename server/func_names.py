@@ -164,6 +164,7 @@ PATH_FUNCS = [
     ("/api/gen/audio", "AI 配音 · 提交"),
     ("/api/gen/tryon", "换装换背景 · 提交"),
     ("/api/gen/copy", "编导 · 文案脚本 · 提交"),
+    ("/api/gen/director_agent", "编导 · 顾客助手 · 对话"),
     ("/api/gen/collect", "内容爬取 · 提交"),
     ("/api/gen/breakdown", "爆款拆解 · 提交"),
     ("/api/gen/asset", "资产库"),
