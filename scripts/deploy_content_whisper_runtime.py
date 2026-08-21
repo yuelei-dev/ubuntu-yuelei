@@ -106,13 +106,20 @@ class RuntimeFiles:
         target = self.path(runtime_path)
         return manifest_verify._read_regular_file_no_follow(self.root, target)
 
-    def mode(self, runtime_path):
+    def metadata(self, runtime_path):
         target = self.path(runtime_path)
         manifest_verify._lstat_no_symlink_chain(self.root, target)
         info = os.lstat(target)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise ReleaseError("target is not a regular file: %s" % target)
-        return stat.S_IMODE(info.st_mode)
+        return {
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": getattr(info, "st_uid", None),
+            "gid": getattr(info, "st_gid", None),
+        }
+
+    def mode(self, runtime_path):
+        return self.metadata(runtime_path)["mode"]
 
     def _ensure_parent_directories(self, target):
         current = self.root
@@ -144,7 +151,7 @@ class RuntimeFiles:
             raise
         return descriptor
 
-    def atomic_write(self, runtime_path, data, mode):
+    def atomic_write(self, runtime_path, data, mode, uid=None, gid=None):
         target = self.path(runtime_path)
         self._ensure_parent_directories(target)
         try:
@@ -171,6 +178,11 @@ class RuntimeFiles:
                 written = os.write(descriptor, view)
                 view = view[written:]
             os.fsync(descriptor)
+            descriptor_info = os.fstat(descriptor)
+            if (hasattr(os, "fchown") and uid is not None and gid is not None
+                    and (descriptor_info.st_uid != int(uid)
+                         or descriptor_info.st_gid != int(gid))):
+                os.fchown(descriptor, int(uid), int(gid))
             if hasattr(os, "fchmod"):
                 os.fchmod(descriptor, int(mode))
             os.close(descriptor)
@@ -256,6 +268,8 @@ class ContentWhisperRelease:
         self.checkpoint = checkpoint or (lambda _name: None)
         self.backup_path = None
         self.backup_entries = []
+        self.start_states = []
+        self.modified_runtime_paths = set()
         self.daemon_reload_attempted = False
         self.restart_attempted = False
 
@@ -542,24 +556,38 @@ class ContentWhisperRelease:
             raise ReleaseError("backup directory must be a real directory")
         return backup
 
-    def _backup_all(self):
+    def _backup_all(self, start_states):
         self.backup_path = self._create_backup_directory()
+        state_by_runtime_path = {
+            item["runtime_path"]: item for item in start_states
+        }
         entries = []
         for index, entry in enumerate(self.manifest["files"], 1):
             data = self.runtime.read(entry["runtime_path"])
+            start_state = state_by_runtime_path[entry["runtime_path"]]
             record = {
                 "repository_path": entry["repository_path"],
                 "runtime_path": entry["runtime_path"],
+                "disposition": start_state["disposition"],
                 "state": "absent" if data is None else "file",
                 "mode": None,
+                "uid": None,
+                "gid": None,
                 "backup_file": None,
                 "sha256": manifest_verify._sha256(
                     manifest_verify.ABSENT_BYTES if data is None else data
                 ),
                 "blob": None if data is None else manifest_verify._blob_id(data),
             }
+            if any(record[key] != start_state[key]
+                   for key in ("state", "sha256", "blob")):
+                raise ReleaseError(
+                    "target changed while backup started: %s" %
+                    entry["runtime_path"]
+                )
             if data is not None:
-                record["mode"] = self.runtime.mode(entry["runtime_path"])
+                metadata = self.runtime.metadata(entry["runtime_path"])
+                record.update(metadata)
                 record["backup_file"] = "%02d.bin" % index
                 backup_file = self.backup_path / record["backup_file"]
                 with open(backup_file, "xb") as stream:
@@ -579,15 +607,37 @@ class ContentWhisperRelease:
         )
         self.checkpoint("backup_complete")
 
-    def _install_all(self, payloads):
+    def _install_all(self, payloads, start_states):
+        state_by_runtime_path = {
+            item["runtime_path"]: item for item in start_states
+        }
+        backup_by_runtime_path = {
+            item["runtime_path"]: item for item in self.backup_entries
+        }
+        installed = 0
         for index, entry in enumerate(self.manifest["files"], 1):
+            start_state = state_by_runtime_path[entry["runtime_path"]]
+            if start_state["disposition"] in {
+                    "already_installed", "unchanged"}:
+                manifest_verify.verify_targets(
+                    {"files": [entry]}, self.runtime.root, "postimage",
+                )
+                self.checkpoint("skip_%d" % index)
+                continue
             manifest_verify.verify_targets(
                 {"files": [entry]}, self.runtime.root, "preimage",
             )
             data, mode = payloads[entry["repository_path"]]
-            self.runtime.atomic_write(entry["runtime_path"], data, mode)
+            backup = backup_by_runtime_path[entry["runtime_path"]]
+            self.modified_runtime_paths.add(entry["runtime_path"])
+            self.runtime.atomic_write(
+                entry["runtime_path"], data, mode,
+                uid=backup["uid"], gid=backup["gid"],
+            )
+            installed += 1
             self.checkpoint("write_%d" % index)
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "postimage")
+        return installed
 
     def _run_stage(self, stage):
         commands = self.manifest["release_commands"].get(stage)
@@ -664,6 +714,8 @@ class ContentWhisperRelease:
     def _restore_all(self):
         failures = []
         for record in self.backup_entries:
+            if record["runtime_path"] not in self.modified_runtime_paths:
+                continue
             try:
                 if record["state"] == "absent":
                     self.runtime.remove(record["runtime_path"])
@@ -671,6 +723,7 @@ class ContentWhisperRelease:
                     data = (self.backup_path / record["backup_file"]).read_bytes()
                     self.runtime.atomic_write(
                         record["runtime_path"], data, int(record["mode"]),
+                        uid=record["uid"], gid=record["gid"],
                     )
             except Exception as exc:
                 failures.append("%s: %s" % (record["runtime_path"], exc))
@@ -682,7 +735,19 @@ class ContentWhisperRelease:
                 digest = manifest_verify._sha256(
                     manifest_verify.ABSENT_BYTES if data is None else data
                 )
-                if state != record["state"] or digest != record["sha256"]:
+                blob = None if data is None else manifest_verify._blob_id(data)
+                mismatch = (
+                    state != record["state"]
+                    or digest != record["sha256"]
+                    or blob != record["blob"]
+                )
+                if data is not None:
+                    metadata = self.runtime.metadata(record["runtime_path"])
+                    mismatch = mismatch or any(
+                        metadata[key] != record[key]
+                        for key in ("mode", "uid", "gid")
+                    )
+                if mismatch:
                     failures.append(
                         "rollback verification mismatch: %s" % record["runtime_path"]
                     )
@@ -718,23 +783,28 @@ class ContentWhisperRelease:
         self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
-        manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
-        self.checkpoint("preimage_complete")
+        self.start_states = manifest_verify.classify_start_states(
+            self.manifest, self.runtime.root,
+        )
+        self.checkpoint("start_state_complete")
         self._run_stage("pre_service_active")
         self._verify_health("pre-deployment ")
         self.checkpoint("pre_health")
-        self._backup_all()
-        manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
+        self._backup_all(self.start_states)
+        if manifest_verify.classify_start_states(
+                self.manifest, self.runtime.root) != self.start_states:
+            raise ReleaseError("deployment targets changed after backup")
         try:
-            self._install_all(payloads)
-            for stage in (
-                    "dependencies", "cache", "offline", "font", "no_charge"):
-                self._run_stage(stage)
-            self.daemon_reload_attempted = True
-            self._run_stage("daemon_reload")
-            self.restart_attempted = True
-            self._run_stage("restart")
-            self._run_stage("service_active")
+            installed = self._install_all(payloads, self.start_states)
+            if installed:
+                for stage in (
+                        "dependencies", "cache", "offline", "font", "no_charge"):
+                    self._run_stage(stage)
+                self.daemon_reload_attempted = True
+                self._run_stage("daemon_reload")
+                self.restart_attempted = True
+                self._run_stage("restart")
+                self._run_stage("service_active")
             self._verify_health()
             self.checkpoint("health")
         except Exception as release_error:
@@ -748,11 +818,23 @@ class ContentWhisperRelease:
             raise ReleaseError(
                 "release failed and all manifest targets were restored: %s" % release_error
             ) from release_error
+        already_installed = sum(
+            item["disposition"] == "already_installed"
+            for item in self.start_states
+        )
+        unchanged = sum(
+            item["disposition"] == "unchanged"
+            for item in self.start_states
+        )
         return {
             "ok": True,
+            "status": "deployed" if installed else "already_deployed",
             "backup": str(self.backup_path),
             "files": len(self.manifest["files"]),
-            "restart_count": 1,
+            "installed_files": installed,
+            "already_installed_files": already_installed,
+            "unchanged_files": unchanged,
+            "restart_count": 1 if installed else 0,
         }
 
 
