@@ -1,0 +1,270 @@
+{
+  "schema_version": 1,
+  "purpose": "Deploy the reviewed Seedream 5.0 standard one-click material fallback on top of the already deployed digital-human v2 runtime, preserving exact mixed-state backup and rollback semantics.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "service": "huangque-content.service"
+  },
+  "configuration_requirements": {
+    "feishu": {
+      "required_for_real_priority_validation": true,
+      "credential_source": "Feishu Open Platform > self-built app > Credentials and Basic Info",
+      "secret_environment_names": ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+      "app_token_environment_name": "DIGITAL_HUMAN_FEISHU_APP_TOKEN",
+      "credentials_must_not_be_committed": true
+    }
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "base_main_commit": "f6009eba98f8e199cbca0710c16157c1952a6982",
+    "review_lock": "exact independently reviewed PR head must be contained in live main before release"
+  },
+  "preimage_observation": {
+    "captured_at": "2026-08-21 (user-supplied current evidence; exact timestamp not provided)",
+    "target": "test@8.148.158.106",
+    "capture_method": "user-supplied read-only runtime SHA-256 and Git blob evidence after Director v2 deployment; no server connection from this PR task",
+    "repository_main_commit": null,
+    "repository_git_metadata": "absent",
+    "service_state": "active",
+    "health_status": 200,
+    "files": 10
+  },
+  "deployment_policy": {
+    "fail_closed_on_source_mismatch": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "allow_exact_postimage_as_existing": true,
+    "backup_all_targets_before_first_write": true,
+    "record_missing_targets_in_backup_manifest": true,
+    "atomic_replace": true,
+    "restart_service_at_most_once": true,
+    "skip_restart_when_no_files_change": true,
+    "rollback_all_targets_as_one_unit": true,
+    "remove_only_targets_recorded_missing_during_rollback": true,
+    "copy_environment_database_or_user_data": false,
+    "production_server_write_allowed": false
+  },
+  "executor": {
+    "repository_path": "scripts/deploy_content_whisper_runtime.py",
+    "source_blob": "c9dd02ba92e03a476751ae15e03f4e1c5f68886a",
+    "source_sha256": "fbc4a9200d4b769aee37cb8de18ea614521e92baa19744d5e2a954021085c36f",
+    "verifier": {
+      "repository_path": "scripts/verify_content_whisper_deployment.py",
+      "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
+      "source_sha256": "37376c1f6fdca007d06ddfeb2820d87a51df6db8471533d0b2a77aadeee509bc"
+    },
+    "requirements_verifier": {
+      "repository_path": "scripts/verify_content_python_requirements.py",
+      "source_blob": "372a71c2fe6b8b0152307860b47e6415260a8267",
+      "source_sha256": "e1010b5e498ad05914ac0f48d986eb233abfebd866b6937b0b4f89beb7cb1bc5"
+    },
+    "confirm_target": "test@8.148.158.106",
+    "remote_connection_capability": false
+  },
+  "absent_target_digest": {
+    "canonical_bytes": "ABSENT\n",
+    "sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001"
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/script_to_video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/script_to_video.py",
+      "classification": "runtime_code",
+      "source_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "source_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "target_preimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
+      "expected_postimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "expected_postimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d"
+    },
+    {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "classification": "runtime_code",
+      "source_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "source_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "target_preimage_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
+      "expected_postimage_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "expected_postimage_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_oneclick.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
+      "classification": "runtime_code",
+      "source_blob": "44bded5ddcfdc049fdb1dcb4c39ae9e9dbe35635",
+      "source_sha256": "ad21190220a72cd8ff86e311d5068bf7156a8332b423c9fe60e2347a09a154c4",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
+      "target_preimage_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
+      "expected_postimage_blob": "44bded5ddcfdc049fdb1dcb4c39ae9e9dbe35635",
+      "expected_postimage_sha256": "ad21190220a72cd8ff86e311d5068bf7156a8332b423c9fe60e2347a09a154c4"
+    },
+    {
+      "repository_path": "server/content_domains/points.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/points.py",
+      "classification": "runtime_code",
+      "source_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
+      "source_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
+      "target_preimage_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
+      "expected_postimage_blob": "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
+      "expected_postimage_sha256": "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_timeline.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_timeline.py",
+      "classification": "runtime_code",
+      "source_blob": "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+      "source_sha256": "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+      "target_preimage_sha256": "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e",
+      "expected_postimage_blob": "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+      "expected_postimage_sha256": "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_v2.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "classification": "runtime_code",
+      "source_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "source_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
+      "target_preimage_sha256": "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68",
+      "expected_postimage_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "expected_postimage_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214"
+    },
+    {
+      "repository_path": "server/content_domains/audio.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/audio.py",
+      "classification": "runtime_code",
+      "source_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "source_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "target_preimage_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
+      "expected_postimage_blob": "32f948f451d0f527d992425ae1eaa8bc28583c6f",
+      "expected_postimage_sha256": "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651"
+    },
+    {
+      "repository_path": "server/content_domains/cosyvoice.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/cosyvoice.py",
+      "classification": "runtime_code",
+      "source_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "source_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "target_preimage_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
+      "expected_postimage_blob": "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
+      "expected_postimage_sha256": "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8"
+    },
+    {
+      "repository_path": "server/content_domains/video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/video.py",
+      "classification": "runtime_code",
+      "source_blob": "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+      "source_sha256": "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+      "target_preimage_sha256": "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb",
+      "expected_postimage_blob": "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+      "expected_postimage_sha256": "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+      "classification": "static_runtime",
+      "source_blob": "bb8fc593d957e2f6a728c39ff31321f293a5ca21",
+      "source_sha256": "2c20b69b86d78a6d186c01987f97856b0b228f50551297029a0bbb9aa3d311c4",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "cdb4b99cc44302602c92c9c26b906ffe766438cc",
+      "target_preimage_sha256": "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf",
+      "expected_postimage_blob": "bb8fc593d957e2f6a728c39ff31321f293a5ca21",
+      "expected_postimage_sha256": "2c20b69b86d78a6d186c01987f97856b0b228f50551297029a0bbb9aa3d311c4"
+    }
+  ],
+  "release_contract_sources": [
+    {
+      "repository_path": "tests/test_digital_human_timeline.py",
+      "source_blob": "807d5325b6e022024d17a73cf30c13bfb7875f5f",
+      "source_sha256": "9711ace93ee7ca41938ef12bffda448dc370a9d42d5bdedfda66857a32b0fa2f"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2.py",
+      "source_blob": "583b77f4ec166d3bdf9cffec5b33dded1ee417de",
+      "source_sha256": "a8081be96ed40fd7ea1979252153cfb6480f116a92a6c619d3ad1174d9bef05b"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_ui.py",
+      "source_blob": "811f053c6f0a80c1dc900398d596ddaa059b64eb",
+      "source_sha256": "3290c51e046602276089b8fdf77b7634650313616c63d2b2948fe89340a67633"
+    },
+    {
+      "repository_path": "tests/test_digital_human_voice_state.js",
+      "source_blob": "d886c09adb3095c84f8364e5063487525506c98d",
+      "source_sha256": "da6cb23c0aca11ed1ffca109fe9ca776691e79079f21f480704614f26a9a648c"
+    },
+    {
+      "repository_path": "tests/test_cosyvoice.py",
+      "source_blob": "797149f8ba349609e47c9c940d8792760a73569a",
+      "source_sha256": "8a33dcf51ea5bb2d524d99928559dca1cf903d68f4f2f249e0da8c7f6d08e8ea"
+    },
+    {
+      "repository_path": "tests/test_heygen_mcp_oauth.py",
+      "source_blob": "0e416bd575975143ce69255ac62d89db35f8af70",
+      "source_sha256": "cf4686309035d1242d73a210846541f2b6b5c5626cb74c532577ecafb8bc7b07"
+    },
+    {
+      "repository_path": "tests/test_digital_human_oneclick.py",
+      "source_blob": "8ec91cee6196f15f547607cf4a060a567d3c5707",
+      "source_sha256": "4b626cea42008e656fbb292e2e7f7fb0f075e9e62e2237d1f7e3812f11a4680d"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
+      "source_blob": "662da9e97cb97dc653297adebfea3cd115a7cf60",
+      "source_sha256": "2e349fd1805692e1843386d3481dc9933aa402c1d56ea2f09bcb86e2409b8bb3"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_compose.py",
+      "source_blob": "66385a804210c3c7df42ffcfe76594c7c94cb536",
+      "source_sha256": "93de1c0feb21e4d934dd244897f1b91aec9a0f414d5b3dd5c7de62f098561cc5"
+    }
+  ],
+  "release_commands": {
+    "pre_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
+    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/core.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_timeline.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_oneclick.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}", "{runtime:/home/ubuntu/content-api/content_domains/points.py}", "{runtime:/home/ubuntu/content-api/content_domains/audio.py}", "{runtime:/home/ubuntu/content-api/content_domains/cosyvoice.py}", "{runtime:/home/ubuntu/content-api/content_domains/video.py}"], "timeout_seconds": 120}],
+    "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "no_charge": [
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_oneclick", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_ui", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_cosyvoice", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_heygen_mcp_oauth", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900}
+    ],
+    "daemon_reload": [{"argv": ["/usr/bin/systemctl", "daemon-reload"], "timeout_seconds": 30}],
+    "restart": [{"argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"], "timeout_seconds": 180}],
+    "service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
+    "rollback_daemon_reload": [{"argv": ["/usr/bin/systemctl", "daemon-reload"], "timeout_seconds": 30}],
+    "rollback_restart": [{"argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"], "timeout_seconds": 180}],
+    "rollback_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}]
+  },
+  "health_probe_policy": {"startup_timeout_seconds": 60, "interval_seconds": 1},
+  "health_checks": [
+    {"url": "http://127.0.0.1:8096/api/gen/health", "expected_status": 200},
+    {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401}
+  ],
+  "rollback": {
+    "scope": "all ten manifest targets as one unit",
+    "new_files_removed_only_if_preimage_was_absent": true,
+    "production_untouched": true
+  }
+}

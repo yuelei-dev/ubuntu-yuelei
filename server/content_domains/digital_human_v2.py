@@ -1027,15 +1027,17 @@ def verify_child_submission_with_record(payload, username, kind):
         if not 0 <= item_index < frozen["material_count"]:
             raise DigitalHumanRequestError("正文素材步骤编号无效", "consent_plan_mismatch", 409)
         material = frozen["materials"][item_index]
-        references = cleaned.pop("reference_images", None)
+        references = cleaned.get("reference_images")
         cleaned.pop("images", None)
         if references is not None:
-            cleaned["images"] = references
+            cleaned["reference_images"] = references
         cleaned.update({
-            "prompt": material["prompt"], "provider": "banana",
-            "model": "nb2", "quality": "std",
+            "prompt": material["prompt"], "provider": "seedream",
+            "variant": "std", "quality": "std", "count": 1,
+            "ratio": "9:16",
             "digital_human_item_index": item_index,
         })
+        cleaned.pop("model", None)
     elif stage == "talking":
         if not 0 <= item_index < frozen["segment_count"]:
             raise DigitalHumanRequestError("口播步骤编号无效", "consent_plan_mismatch", 409)

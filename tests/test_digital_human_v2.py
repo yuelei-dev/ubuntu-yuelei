@@ -317,6 +317,36 @@ class DigitalHumanV2Tests(unittest.TestCase):
         with self.assertRaises(self.domain.DigitalHumanRequestError):
             self.domain.verify_child_submission_with_record(payload, "yuelei", "image")
 
+    def test_material_submission_forces_seedream_standard_route(self):
+        script = "普通人学习人工智能时，应先明确问题，再选择与内容匹配的工具。" * 8
+        plan, consent = self._consent(script)
+        self.assertGreater(plan["material_count"], 0)
+        reference = base64.b64encode(PNG_2X2).decode("ascii")
+        material = self._metadata(plan, consent, "material", 0)
+        material.update({
+            "provider": "banana", "model": "nb2", "variant": "pro",
+            "quality": "hd", "count": 2, "ratio": "1:1",
+            "prompt": "forged prompt", "images": ["forged"],
+            "reference_images": [reference],
+        })
+
+        cleaned, _record = self.domain.verify_child_submission_with_record(
+            material, "yuelei", "image",
+        )
+
+        self.assertEqual("seedream", cleaned["provider"])
+        self.assertEqual("std", cleaned["variant"])
+        self.assertEqual("std", cleaned["quality"])
+        self.assertEqual(1, cleaned["count"])
+        self.assertEqual("9:16", cleaned["ratio"])
+        self.assertEqual([reference], cleaned["reference_images"])
+        self.assertNotIn("images", cleaned)
+        self.assertNotIn("model", cleaned)
+        self.assertEqual(
+            self.points.pricing.get_price("image.seedream.std.std"),
+            self.points.cost_of("image", cleaned),
+        )
+
     def test_talking_submission_uses_authorized_portrait_and_preserves_one_voice(self):
         script = "普通人学习人工智能，不用先背很多术语，从一个真实问题开始就可以。" * 8
         plan, consent = self._consent(script)

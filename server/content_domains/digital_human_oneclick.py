@@ -546,15 +546,19 @@ def verify_child_submission_with_record(payload, username, kind):
         cleaned["prompt"] = material["prompt"]
         cleaned["digital_human_item_index"] = material_index
         # Only references expanded from the established one-click payload are
-        # forwarded. A forged client-side Banana `images` field must not bypass
-        # the existing upload/reference contract.
-        references = cleaned.pop("reference_images", None)
+        # forwarded. Seedream reads the generic `reference_images` field, so do
+        # not translate trusted customer uploads into Banana's `images` field.
+        # A forged client-side `images` field must not bypass the upload contract.
+        references = cleaned.get("reference_images")
         cleaned.pop("images", None)
         if references is not None:
-            cleaned["images"] = references
-        cleaned["provider"] = "banana"
-        cleaned["model"] = "nb2"
+            cleaned["reference_images"] = references
+        cleaned["provider"] = "seedream"
+        cleaned["variant"] = "std"
+        cleaned.pop("model", None)
         cleaned["quality"] = "std"
+        cleaned["count"] = 1
+        cleaned["ratio"] = "9:16"
     cleaned.pop("digital_human_script", None)
     return cleaned, record
 
