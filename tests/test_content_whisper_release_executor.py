@@ -292,7 +292,10 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             self.release_module.AUTHORIZED_TARGET
         )
         self.assertTrue(result["ok"])
+        self.assertEqual("deployed", result["status"])
         self.assertEqual(TARGET_COUNT, result["files"])
+        self.assertEqual(TARGET_COUNT, result["installed_files"])
+        self.assertEqual(0, result["already_installed_files"])
         self.assertEqual(1, result["restart_count"])
         self.assertEqual(1, runner.calls.count("restart"))
         self.assertNotIn("rollback_restart", runner.calls)
@@ -319,48 +322,173 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             [entry["target_preimage_state"] for entry in self.manifest["files"]],
             [entry["state"] for entry in state["files"]],
         )
+        self.assertTrue(all(
+            {"mode", "uid", "gid"}.issubset(entry)
+            for entry in state["files"]
+        ))
         self.assertEqual(4, len(health.calls))
         self.assertLess(
             events.index("tools_preflight_complete"),
-            events.index("preimage_complete"),
+            events.index("start_state_complete"),
         )
         self.assertLess(events.index("pre_health"), events.index("backup_complete"))
         self.assertLess(events.index("backup_complete"), events.index("write_1"))
         self.assertLess(events.index("write_1"), events.index(LAST_WRITE))
         self.assertLess(events.index(LAST_WRITE), events.index("health"))
 
-    def test_mixed_state_with_one_already_postimage_is_backed_up_and_deployed(self):
-        video = next(
+    def test_mixed_state_with_exact_postimages_is_backed_up_and_deployed(self):
+        already_paths = {
+            "server/content_domains/digital_human_oneclick.py",
+            "server/content_domains/video.py",
+        }
+        already = [
             entry for entry in self.manifest["files"]
-            if entry["repository_path"] == "server/content_domains/script_to_video.py"
-        )
-        source = (ROOT / video["repository_path"]).read_bytes()
-        target = self._target(video)
-        target.write_bytes(source)
-        video["target_preimage_sha256"] = hashlib.sha256(source).hexdigest()
-        video["target_preimage_blob"] = self._blob(source)
-        self.original[video["runtime_path"]] = source
+            if entry["repository_path"] in already_paths
+        ]
+        for entry in already:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            self._target(entry).write_bytes(source)
+            self.original[entry["runtime_path"]] = source
+        runner = FakeRunner()
+        events = []
+        indexes = {
+            self.manifest["files"].index(entry) + 1 for entry in already
+        }
 
-        result = self._release().execute(
+        release = self._release(
+            runner=runner, checkpoint=events.append,
+        )
+        writes = []
+        atomic_write = release.runtime.atomic_write
+
+        def tracked_write(runtime_path, *args, **kwargs):
+            writes.append(runtime_path)
+            return atomic_write(runtime_path, *args, **kwargs)
+
+        release.runtime.atomic_write = tracked_write
+        result = release.execute(
             self.release_module.AUTHORIZED_TARGET
         )
 
+        self.assertEqual(TARGET_COUNT - 2, result["installed_files"])
+        self.assertEqual(2, result["already_installed_files"])
+        self.assertEqual(1, result["restart_count"])
+        self.assertEqual(
+            {"skip_%d" % index for index in indexes},
+            {name for name in events if name.startswith("skip_")},
+        )
+        self.assertTrue(all(
+            "write_%d" % index not in events for index in indexes
+        ))
+        self.assertTrue({
+            entry["runtime_path"] for entry in already
+        }.isdisjoint(writes))
         backup = pathlib.Path(result["backup"])
         state = json.loads(
             (backup / "backup-state.json").read_text(encoding="utf-8")
         )
-        record = next(
-            entry for entry in state["files"]
-            if entry["runtime_path"] == video["runtime_path"]
-        )
-        self.assertEqual(record["sha256"], hashlib.sha256(source).hexdigest())
-        self.assertEqual(record["blob"], self._blob(source))
-        self.assertEqual((backup / record["backup_file"]).read_bytes(), source)
+        for entry in already:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            record = next(
+                item for item in state["files"]
+                if item["runtime_path"] == entry["runtime_path"]
+            )
+            self.assertEqual("already_installed", record["disposition"])
+            self.assertEqual(record["sha256"], hashlib.sha256(source).hexdigest())
+            self.assertEqual(record["blob"], self._blob(source))
+            self.assertEqual(
+                (backup / record["backup_file"]).read_bytes(), source
+            )
         for entry in self.manifest["files"]:
             self.assertEqual(
                 (ROOT / entry["repository_path"]).read_bytes(),
                 self._target(entry).read_bytes(),
             )
+
+    def test_all_postimages_are_audited_without_writes_or_restart(self):
+        for entry in self.manifest["files"]:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            target = self._target(entry)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
+            self.original[entry["runtime_path"]] = source
+        runner = FakeRunner()
+        health = HealthProbe()
+        events = []
+
+        release = self._release(
+            runner=runner, health=health, checkpoint=events.append,
+        )
+        release.runtime.atomic_write = lambda *_args, **_kwargs: self.fail(
+            "all-postimage execution must not write a runtime target"
+        )
+        result = release.execute(self.release_module.AUTHORIZED_TARGET)
+
+        self.assertEqual("already_deployed", result["status"])
+        self.assertEqual(0, result["installed_files"])
+        self.assertEqual(TARGET_COUNT, result["already_installed_files"])
+        self.assertEqual(0, result["restart_count"])
+        self.assertEqual(["pre_service_active"], runner.calls)
+        self.assertEqual(4, len(health.calls))
+        self.assertFalse(any(name.startswith("write_") for name in events))
+        self.assertEqual(
+            TARGET_COUNT,
+            len([name for name in events if name.startswith("skip_")]),
+        )
+        self.assertTrue(pathlib.Path(result["backup"]).is_dir())
+        self.assertEqual(self.original, self._snapshot())
+
+    def test_mixed_state_failure_restores_only_modified_targets(self):
+        video = next(
+            entry for entry in self.manifest["files"]
+            if entry["repository_path"] == (
+                "server/content_domains/digital_human_oneclick.py"
+            )
+        )
+        source = (ROOT / video["repository_path"]).read_bytes()
+        self._target(video).write_bytes(source)
+        self.original[video["runtime_path"]] = source
+        index = self.manifest["files"].index(video) + 1
+        events = []
+
+        release = self._release(
+            runner=FakeRunner("dependencies"),
+            checkpoint=events.append,
+        )
+        writes = []
+        atomic_write = release.runtime.atomic_write
+
+        def tracked_write(runtime_path, *args, **kwargs):
+            writes.append(runtime_path)
+            return atomic_write(runtime_path, *args, **kwargs)
+
+        release.runtime.atomic_write = tracked_write
+        with self.assertRaisesRegex(
+                self.release_module.ReleaseError,
+                "all manifest targets were restored"):
+            release.execute(self.release_module.AUTHORIZED_TARGET)
+
+        self.assertIn("skip_%d" % index, events)
+        self.assertNotIn("write_%d" % index, events)
+        self.assertNotIn(video["runtime_path"], writes)
+        self._assert_restored_without_residue()
+
+    def test_exact_postimage_is_rejected_when_policy_is_disabled(self):
+        video = self.manifest["files"][0]
+        source = (ROOT / video["repository_path"]).read_bytes()
+        self._target(video).write_bytes(source)
+        self.manifest["deployment_policy"][
+            "allow_exact_postimage_as_existing"
+        ] = False
+        runner = FakeRunner()
+
+        with self.assertRaisesRegex(RuntimeError, "not an allowed"):
+            self._release(runner=runner).execute(
+                self.release_module.AUTHORIZED_TARGET
+            )
+
+        self.assertEqual([], runner.calls)
+        self.assertFalse(self.backup_root.exists())
 
     def test_first_middle_and_last_write_failures_restore_every_target(self):
         for fault in ("write_1", "write_%d" % (TARGET_COUNT // 2 + 1), LAST_WRITE):
@@ -699,7 +827,7 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
         first = self._target(self.manifest["files"][0])
         first.write_bytes(b"drift")
         runner = FakeRunner()
-        with self.assertRaisesRegex(RuntimeError, "preimage mismatch"):
+        with self.assertRaisesRegex(RuntimeError, "not an allowed"):
             self._release(runner=runner).execute(
                 self.release_module.AUTHORIZED_TARGET
             )
