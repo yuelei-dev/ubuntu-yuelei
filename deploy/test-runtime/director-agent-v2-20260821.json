@@ -37,7 +37,7 @@
   },
   "release_executor": {
     "contract": "director_agent_seven_file_v2",
-    "repository_path": "scripts/deploy_locked_manifest.py",
+    "repository_path": "scripts/deploy_director_locked_manifest.py",
     "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
     "sha256": "a319b3edf1ac66d44e1c3e1b10defc753eeb7a7b8e172f1f12cd89ebf17e0aa4",
     "runtime_python_root": "/home/ubuntu/content-api",

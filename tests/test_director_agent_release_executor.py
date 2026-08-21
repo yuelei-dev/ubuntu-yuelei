@@ -14,7 +14,7 @@ from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXECUTOR = ROOT / "scripts" / "deploy_locked_manifest.py"
+EXECUTOR = ROOT / "scripts" / "deploy_director_locked_manifest.py"
 MANIFEST = (
     ROOT / "deploy" / "test-runtime" / "director-agent-v2-20260821.json"
 )

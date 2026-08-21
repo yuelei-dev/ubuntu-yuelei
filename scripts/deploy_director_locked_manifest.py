@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import sqlite3
@@ -27,6 +28,11 @@ from contextlib import closing
 
 class ReleaseError(RuntimeError):
     pass
+
+
+_DIRECTOR_REVISION_PATTERN = re.compile(r"[a-f0-9]{8,32}")
+_NODE_FALLBACK = "/home/ubuntu/.local/hq-node/bin/node"
+_NODE_FALLBACK_ENVIRONMENT = "HQ_NODE_BINARY"
 
 
 def _sha256(data):
@@ -74,7 +80,80 @@ def _load_manifest(path):
     executor = manifest.get("release_executor")
     if not isinstance(executor, dict):
         raise ReleaseError("manifest has no executable release contract")
+    _validate_director_contract(manifest)
     return manifest
+
+
+def _validate_director_contract(manifest):
+    executor = manifest.get("release_executor", {})
+    if executor.get("contract") != "director_agent_seven_file_v2":
+        return
+    acceptance = executor.get("authenticated_acceptance")
+    if not isinstance(acceptance, dict):
+        raise ReleaseError("Director Agent acceptance contract is missing")
+    request = acceptance.get("request")
+    revision = request.get("page_revision") if isinstance(request, dict) else None
+    if (not isinstance(revision, str)
+            or _DIRECTOR_REVISION_PATTERN.fullmatch(revision) is None):
+        raise ReleaseError(
+            "Director Agent acceptance page_revision must match [a-f0-9]{8,32}"
+        )
+    policy = executor.get("rollback_health_policy")
+    if not isinstance(policy, dict):
+        raise ReleaseError("Director Agent rollback health policy is missing")
+    timeout = policy.get("timeout_seconds")
+    interval = policy.get("interval_seconds")
+    if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or timeout <= 0 or timeout > 120):
+        raise ReleaseError("Director Agent rollback health timeout is invalid")
+    if (not isinstance(interval, (int, float)) or isinstance(interval, bool)
+            or interval <= 0 or interval > timeout):
+        raise ReleaseError("Director Agent rollback health interval is invalid")
+
+
+def _resolve_node_binary(environment=None):
+    environment = os.environ if environment is None else environment
+    path_node = shutil.which("node", path=environment.get("PATH"))
+    if path_node:
+        return path_node
+    configured = str(environment.get(_NODE_FALLBACK_ENVIRONMENT, "")).strip()
+    candidates = []
+    if configured:
+        if not pathlib.PurePath(configured).is_absolute():
+            raise ReleaseError(
+                "%s must be an absolute path" % _NODE_FALLBACK_ENVIRONMENT
+            )
+        candidates.append(configured)
+    candidates.append(_NODE_FALLBACK)
+    for candidate in candidates:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    checked = ", ".join(candidates)
+    raise ReleaseError(
+        "Node.js executable not found: PATH has no node; checked %s (%s)"
+        % (_NODE_FALLBACK_ENVIRONMENT, checked)
+    )
+
+
+def _http_error_detail(data):
+    text = bytes(data or b"").decode("utf-8", errors="replace").strip()
+    if not text:
+        return "no response body"
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        return text[:500]
+    if isinstance(payload, dict):
+        nested = payload.get("error")
+        values = nested if isinstance(nested, dict) else payload
+        code = values.get("code") or values.get("error_code")
+        message = values.get("message") or values.get("detail")
+        if code and message:
+            return "%s / %s" % (code, message)
+        if code or message:
+            return str(code or message)
+    return text[:500]
 
 
 def _verify_repository(source_root, manifest):
@@ -170,7 +249,7 @@ class SystemHooks:
             time.sleep(1)
 
     def validate_node(self, path):
-        _run(["node", "--check", str(path)])
+        _run([_resolve_node_binary(), "--check", str(path)])
 
     def acceptance(self, specification):
         token_name = specification["token_environment"]
@@ -193,13 +272,20 @@ class SystemHooks:
                 method=method,
             )
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            with opener.open(request, timeout=30) as response:
-                if response.status != 200:
-                    raise ReleaseError(
-                        "authenticated acceptance returned HTTP %s"
-                        % response.status
-                    )
-                return json.loads(response.read().decode("utf-8"))
+            try:
+                with opener.open(request, timeout=30) as response:
+                    data = response.read()
+                    if response.status != 200:
+                        raise ReleaseError(
+                            "authenticated acceptance returned HTTP %s: %s"
+                            % (response.status, _http_error_detail(data))
+                        )
+                    return json.loads(data.decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                raise ReleaseError(
+                    "authenticated acceptance returned HTTP %s: %s"
+                    % (error.code, _http_error_detail(error.read()))
+                ) from error
 
         first = request_json(specification["submit_url"], "POST")
         replay = request_json(specification["submit_url"], "POST")
@@ -345,6 +431,29 @@ def _validate_director_sources(source_root, manifest, hooks):
             for marker in executor.get("html_required_markers", []):
                 if marker not in content:
                     raise ReleaseError("candidate HTML marker is missing")
+
+
+def _wait_for_rollback_health(hooks, service, url, policy):
+    timeout = float(policy["timeout_seconds"])
+    interval = float(policy["interval_seconds"])
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while True:
+        try:
+            if not hooks.service_active(service):
+                raise ReleaseError("restored service is not active")
+            hooks.probe(url, "GET", 200)
+            return
+        except Exception as error:
+            last_error = error
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ReleaseError(
+                "rollback service health readiness timed out after %ss; "
+                "last error: %s: %s"
+                % (timeout, type(last_error).__name__, last_error)
+            ) from last_error
+        time.sleep(min(interval, remaining))
 
 
 def _verify_director_checkout(source_root, manifest, reviewed_head, merged_main):
@@ -545,9 +654,12 @@ def _execute_director_release(
                 rollback_errors.append("file:" + type(error).__name__)
         try:
             hooks.restart(service)
-            if not hooks.service_active(service):
-                raise ReleaseError("restored service is not active")
-            hooks.probe(executor["health_url"], "GET", 200)
+            policy = executor.get("rollback_health_policy", {
+                "timeout_seconds": 15, "interval_seconds": 1,
+            })
+            _wait_for_rollback_health(
+                hooks, service, executor["health_url"], policy,
+            )
         except BaseException as error:
             rollback_errors.append("service:" + type(error).__name__)
         audit["status"] = (
@@ -656,8 +768,9 @@ def execute_locked_release(
     target_root = pathlib.Path(target_root).resolve()
     backup_root = pathlib.Path(backup_root).resolve()
 
-    if (manifest["release_executor"].get("contract")
-            == "director_agent_seven_file_v1"):
+    if manifest["release_executor"].get("contract") in {
+        "director_agent_seven_file_v1", "director_agent_seven_file_v2",
+    }:
         return _execute_director_release(
             manifest, source_root, target_root, backup_root,
             hooks=hooks, replace=replace,
