@@ -3028,6 +3028,7 @@ class H(BaseHTTPRequestHandler):
             still_access = _short_drama_canvas_access(self) if is_still_route else None
             smart_montage_submission = False
             durable_copy_submission = False
+            durable_director_submission = False
             durable_attempt = None
             from . import digital_human_oneclick
             try:
@@ -3140,7 +3141,11 @@ class H(BaseHTTPRequestHandler):
                 if not is_still_route and not smart_montage_submission:
                     idem_key = _idempotency_key(self.headers.get("Idempotency-Key")) if kind in {"image", "banana", "audio", "video", "tryon", "xiaole_video", "sora_video", "cinematic", "canvas_agent", "director_agent", "script_to_video", "breakdown", "copy"} else ""
                 durable_copy_submission = bool(durable_copy_submission and idem_key)
-                if durable_copy_submission and idem_key:
+                durable_director_submission = bool(
+                    kind == "director_agent" and idem_key
+                )
+                if ((durable_copy_submission or durable_director_submission)
+                        and idem_key):
                     idem_state, idem_response = _idempotency_lookup(
                         user["username"], p, idem_key, request_body,
                     )
@@ -3310,7 +3315,8 @@ class H(BaseHTTPRequestHandler):
                             if durable_attempt is not None:
                                 body = durable_attempt["payload"]
                                 cost = int(durable_attempt["cost"])
-                    elif durable_copy_submission:
+                    elif (durable_copy_submission
+                          or durable_director_submission):
                         # The pre-validation lookup above is authoritative.  A
                         # missing row is created below with its frozen payload;
                         # a processing row already loaded ``durable_attempt``.
@@ -3322,7 +3328,9 @@ class H(BaseHTTPRequestHandler):
                 if idem_state == "replay": replay = dict(idem_response or {}); return self._send(int(replay.pop("_http_status", 200)), replay)
                 if idem_state == "conflict": return self._send(409, {"detail": "同一个 Idempotency-Key 不能用于不同请求", "code": "idempotency_conflict"})
                 if (idem_state == "processing" and not is_still_route
-                        and (not (smart_montage_submission or durable_copy_submission)
+                        and (not (smart_montage_submission
+                                  or durable_copy_submission
+                                  or durable_director_submission)
                              or durable_attempt is None)):
                     return self._send(409, {"detail": "相同请求正在受理，请稍后查询", "code": "idempotency_in_progress", "retry_after_ms": 1000})
                 if is_still_route and not still_attempt:
@@ -3356,17 +3364,21 @@ class H(BaseHTTPRequestHandler):
                 durable_linked_recovery = False
                 durable_recovered_job_status = None
                 try:
-                    if ((smart_montage_submission or durable_copy_submission)
+                    if ((smart_montage_submission or durable_copy_submission
+                         or durable_director_submission)
                             and durable_attempt is None):
                         if smart_montage_submission:
                             script_to_video_domain.materialize_smart_montage_uploads(
                                 body, user["username"],
                             )
-                        charge_key = (_smart_charge_key(
-                            user["username"], p, idem_key,
-                        ) if smart_montage_submission else _durable_charge_key(
-                            "copy", user["username"], p, idem_key,
-                        ))
+                        charge_key = (
+                            _smart_charge_key(user["username"], p, idem_key)
+                            if smart_montage_submission else
+                            _durable_charge_key(
+                                "director" if durable_director_submission else "copy",
+                                user["username"], p, idem_key,
+                            )
+                        )
                         attempt_state, attempt_value = _idempotency_begin_attempt(
                             user["username"], p, idem_key, request_body,
                             body, cost, charge_key,
@@ -3419,25 +3431,31 @@ class H(BaseHTTPRequestHandler):
                         )
                         still_attempt = _short_drama_domain().short_drama_production.get_charge_attempt(
                             jdb, user["username"], idem_key)
-                    elif ((smart_montage_submission or durable_copy_submission)
+                    elif ((smart_montage_submission or durable_copy_submission
+                            or durable_director_submission)
                           and durable_attempt.get("state") == "linked"):
                         jid = int(durable_attempt["job_id"])
                         points_left = int(durable_attempt["points_left"])
-                        with closing(jdb()) as connection:
-                            linked_row = connection.execute(
-                                "SELECT kind,username,cost,status FROM jobs WHERE id=?",
-                                (jid,),
-                            ).fetchone()
-                        if (not linked_row or linked_row["kind"] != kind
-                                or linked_row["username"] != user["username"]
-                                or int(linked_row["cost"] or 0) != int(cost)):
-                            raise RuntimeError(
-                                "durable paid job link is invalid"
+                        if durable_director_submission:
+                            linked_job = director_agent_domain.recover_linked_job(
+                                jdb, user["username"], durable_attempt,
                             )
+                            linked_status = linked_job["status"]
+                        else:
+                            with closing(jdb()) as connection:
+                                linked_row = connection.execute(
+                                    "SELECT kind,username,cost,status FROM jobs WHERE id=?",
+                                    (jid,),
+                                ).fetchone()
+                            if (not linked_row or linked_row["kind"] != kind
+                                    or linked_row["username"] != user["username"]
+                                    or int(linked_row["cost"] or 0) != int(cost)):
+                                raise RuntimeError(
+                                    "durable job link is invalid"
+                                )
+                            linked_status = str(linked_row["status"] or "")
                         durable_linked_recovery = True
-                        durable_recovered_job_status = str(
-                            linked_row["status"] or ""
-                        )
+                        durable_recovered_job_status = linked_status
                     else:
                         paid_before_charge = (
                             (lambda: video_domain.mark_seedance_reference_charging(
@@ -3446,7 +3464,58 @@ class H(BaseHTTPRequestHandler):
                                 "job-charge:%s:%s:%s" % (user["username"], p, idem_key),
                             )) if staged_ref_keys else None
                         )
-                        if smart_montage_submission or durable_copy_submission:
+                        if durable_director_submission:
+                            if durable_attempt.get("state") != "frozen":
+                                raise RuntimeError(
+                                    "durable free job state is invalid"
+                                )
+                            charge_key = durable_attempt[
+                                "charge_transaction_key"
+                            ]
+                            points_left = int(user.get("points") or 0)
+                            try:
+                                jid, limit_hit = director_agent_domain.create_job_with_quota(
+                                    jdb, user["username"], body, SERVICE_OWNER,
+                                    max_active_jobs=MAX_USER_ACTIVE_JOBS,
+                                    idempotency={
+                                        "endpoint": p,
+                                        "key": idem_key,
+                                        "charge_transaction_key": charge_key,
+                                    },
+                                    points_left=points_left,
+                                )
+                            except Exception:
+                                recovered_attempt = _idempotency_attempt(
+                                    user["username"], p, idem_key,
+                                    request_body,
+                                )
+                                if (not recovered_attempt
+                                        or recovered_attempt.get("state") != "linked"):
+                                    raise
+                                durable_attempt = recovered_attempt
+                                jid = int(durable_attempt["job_id"])
+                                points_left = int(
+                                    durable_attempt["points_left"]
+                                )
+                                linked_job = director_agent_domain.recover_linked_job(
+                                    jdb, user["username"], durable_attempt,
+                                )
+                                durable_linked_recovery = True
+                                durable_recovered_job_status = linked_job[
+                                    "status"
+                                ]
+                            else:
+                                if limit_hit:
+                                    _idempotency_abort(
+                                        user["username"], p, idem_key,
+                                    )
+                                    return self._send(429, limit_hit)
+                                durable_attempt.update({
+                                    "state": "linked", "job_id": int(jid),
+                                    "points_left": int(points_left),
+                                })
+                        elif (smart_montage_submission
+                              or durable_copy_submission):
                             if durable_attempt.get("state") not in {"frozen", "charged"}:
                                 raise RuntimeError(
                                     "durable paid charge state is invalid"
@@ -3524,16 +3593,6 @@ class H(BaseHTTPRequestHandler):
                                     "state": "linked", "job_id": int(jid),
                                     "points_left": int(points_left),
                                 })
-                        elif kind == "director_agent":
-                            from . import director_agent as director_agent_domain
-                            jid, limit_hit = director_agent_domain.create_job_with_quota(
-                                jdb, user["username"], body, SERVICE_OWNER,
-                                max_active_jobs=MAX_USER_ACTIVE_JOBS,
-                            )
-                            if limit_hit:
-                                _idempotency_abort(user["username"], p, idem_key)
-                                return self._send(429, limit_hit)
-                            points_left = int(user.get("points") or 0)
                         else:
                             jid, points_left = jobs_store.create_paid_job(
                                 jdb, points_domain.deduct_points,
@@ -3734,7 +3793,8 @@ class H(BaseHTTPRequestHandler):
                         _idempotency_complete(user["username"], p, idem_key, dict(queue_response, _http_status=429))
                     return self._send(429, queue_response)
             if (durable_linked_recovery
-                    and durable_recovered_job_status == "error"):
+                    and durable_recovered_job_status == "error"
+                    and kind != "director_agent"):
                 with closing(jdb()) as connection:
                     failed_row = connection.execute(
                         "SELECT error FROM jobs WHERE id=?", (jid,),

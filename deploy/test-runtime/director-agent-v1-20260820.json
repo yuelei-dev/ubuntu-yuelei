@@ -11,6 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "1400ab9700df8bcbc1164725d3bf94eeac614613",
     "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head",
     "source_commit_binding": "record the exact merged main commit in the release audit before preflight"
   },
@@ -34,30 +35,89 @@
     "rollback_all_files_and_feature_state_as_one_unit": true,
     "copy_environment_or_database": false
   },
+  "release_executor": {
+    "contract": "director_agent_seven_file_v1",
+    "repository_path": "scripts/deploy_locked_manifest.py",
+    "git_blob": "9565f2677090c7ae80a48a194a2d86aa71e7a3a5",
+    "sha256": "1eda0104035a7b521aa790cad3358189664df70700126efb456db63d520a2d33",
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": [
+      "content_domains.core",
+      "content_domains.director_agent",
+      "func_names"
+    ],
+    "html_required_markers": [
+      "script-agent.js"
+    ],
+    "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "health_feature_field": "director_agent_enabled",
+    "static_probes": [
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
+        "expected_status": 200
+      },
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
+        "expected_status": 200
+      }
+    ],
+    "authenticated_acceptance": {
+      "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "submit_url": "https://yuelei.huangquechuanmei.com/api/gen/director_agent",
+      "job_url_template": "https://yuelei.huangquechuanmei.com/api/gen/job/{job_id}",
+      "request": {
+        "prompt": "发布验收：告诉我如何填写选题，不要执行付费生成。",
+        "session_id": "release_pr276_acceptance",
+        "page_revision": "release20260821",
+        "page_context": {
+          "page": "script",
+          "path": "/workbench/script.html",
+          "mode": "write",
+          "topic": "",
+          "selling_points": "",
+          "style": "口播",
+          "duration": "30s",
+          "platform": "抖音",
+          "has_script": false,
+          "scene_count": 0,
+          "has_breakdown": false,
+          "breakdown_scene_count": 0,
+          "breakdown_url": "",
+          "breakdown_tool": "scenes",
+          "has_reverse_prompt": false,
+          "active_job_status": "idle"
+        },
+        "history": [],
+        "source_page": "script",
+        "provider": "openai_responses",
+        "quoted_cost": 0
+      }
+    }
+  },
   "files": [
     {
       "repository_path": "server/content_domains/core.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
       "classification": "backend_runtime",
-      "source_blob": "e6f6139e900351f3cc487b88cae19d6b6ac9cec5",
-      "source_sha256": "1722189db0b4a8a8ffc5cdc7ed8ce2fc91eab515429a7df4d5b4842986411d75",
+      "source_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "source_sha256": "df180c6ec6c2524f39dd6866c5513b55830452419ed6d0fb34aa0d1f3483eb66",
       "target_preimage_state": "file",
       "target_preimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
       "target_preimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
-      "expected_postimage_blob": "e6f6139e900351f3cc487b88cae19d6b6ac9cec5",
-      "expected_postimage_sha256": "1722189db0b4a8a8ffc5cdc7ed8ce2fc91eab515429a7df4d5b4842986411d75"
+      "expected_postimage_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "expected_postimage_sha256": "df180c6ec6c2524f39dd6866c5513b55830452419ed6d0fb34aa0d1f3483eb66"
     },
     {
       "repository_path": "server/content_domains/director_agent.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/director_agent.py",
       "classification": "backend_runtime",
-      "source_blob": "533adfcc8e7deaa4e3f9981716b1c3149cc451f3",
-      "source_sha256": "abc9f1e78366a0719575da6036c7015688947d374189a0fe84faf57bc1f8f524",
+      "source_blob": "488d3fd444d823bfd4c2dc8efbc16f14a2797531",
+      "source_sha256": "c898b21bb5a3783ba5f297ce829ad6d17bd6ac4c78e71e8690bea07a57d3bf66",
       "target_preimage_state": "absent",
       "target_preimage_blob": null,
       "target_preimage_sha256": null,
-      "expected_postimage_blob": "533adfcc8e7deaa4e3f9981716b1c3149cc451f3",
-      "expected_postimage_sha256": "abc9f1e78366a0719575da6036c7015688947d374189a0fe84faf57bc1f8f524"
+      "expected_postimage_blob": "488d3fd444d823bfd4c2dc8efbc16f14a2797531",
+      "expected_postimage_sha256": "c898b21bb5a3783ba5f297ce829ad6d17bd6ac4c78e71e8690bea07a57d3bf66"
     },
     {
       "repository_path": "server/content_domains/feature_flags.py",
@@ -152,6 +212,9 @@
     "write final hashes, service state, feature state and acceptance results to audit.json"
   ],
   "feature_activation": {
+    "feature": "director_agent",
+    "database_path": "/home/ubuntu/content-api/feature_flags.db",
+    "actor": "release:pr276",
     "default_enabled": false,
     "after_restart_only": true,
     "command": [

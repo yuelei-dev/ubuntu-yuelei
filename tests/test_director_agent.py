@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
 import content_domains
-from content_domains import core, director_agent
+from content_domains import core, director_agent, submission_idempotency
 
 
 def payload(**overrides):
@@ -255,6 +255,87 @@ class DirectorAgentTests(unittest.TestCase):
                     ("alice",),
                 ).fetchone()
             self.assertEqual(row, (3, 3))
+
+    def test_job_commit_before_response_recovers_same_job_for_every_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = pathlib.Path(temp_dir) / "jobs.db"
+
+            def db():
+                connection = sqlite3.connect(path, timeout=10)
+                connection.row_factory = sqlite3.Row
+                return connection
+
+            with closing(db()) as connection:
+                connection.execute(
+                    """CREATE TABLE jobs(
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        kind TEXT, username TEXT, cost INTEGER,
+                        status TEXT DEFAULT 'pending', payload TEXT,
+                        created_at INTEGER, updated_at INTEGER, owner TEXT,
+                        deleted INTEGER DEFAULT 0
+                    )"""
+                )
+                connection.commit()
+
+            endpoint = "/api/gen/director_agent"
+            key = "director-crash-recovery-0001"
+            request = payload()
+            charge_key = "job-charge:director:" + "a" * 64
+            state, attempt = submission_idempotency.begin_attempt(
+                db, "alice", endpoint, key, request, request, 0, charge_key,
+            )
+            self.assertEqual("new", state)
+            self.assertEqual("frozen", attempt["state"])
+
+            job_id, limit_hit = director_agent.create_job_with_quota(
+                db, "alice", request, "content", max_active_jobs=99,
+                now=2_000_000_000,
+                idempotency={
+                    "endpoint": endpoint,
+                    "key": key,
+                    "charge_transaction_key": charge_key,
+                },
+                points_left=321,
+            )
+            self.assertIsNone(limit_hit)
+
+            # Fault injection: the job transaction committed, but the process
+            # died before core could persist response_json or send a response.
+            self.assertEqual(
+                ("processing", None),
+                submission_idempotency.lookup(
+                    db, "alice", endpoint, key, request,
+                ),
+            )
+            linked = submission_idempotency.load_attempt(
+                db, "alice", endpoint, key, request,
+            )
+            self.assertEqual("linked", linked["state"])
+            self.assertEqual(job_id, linked["job_id"])
+            self.assertEqual(321, linked["points_left"])
+
+            for status in ("pending", "running", "done", "error"):
+                with closing(db()) as connection:
+                    connection.execute(
+                        "UPDATE jobs SET status=? WHERE id=?", (status, job_id),
+                    )
+                    connection.commit()
+                recovered = director_agent.recover_linked_job(
+                    db, "alice", submission_idempotency.load_attempt(
+                        db, "alice", endpoint, key, request,
+                    ),
+                )
+                self.assertEqual(
+                    {"job_id": job_id, "status": status}, recovered,
+                )
+
+            with closing(db()) as connection:
+                self.assertEqual(
+                    1,
+                    connection.execute(
+                        "SELECT COUNT(*) FROM jobs WHERE kind='director_agent'"
+                    ).fetchone()[0],
+                )
 
     def test_registry_skips_optional_agent_when_runtime_file_is_missing(self):
         required = (

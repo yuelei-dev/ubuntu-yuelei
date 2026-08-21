@@ -11,6 +11,8 @@ import os
 import re
 import time
 
+from . import submission_idempotency
+
 
 MAX_ACTIONS = 6
 MAX_HISTORY = 10
@@ -199,8 +201,26 @@ def _submission_limit_snapshot(db_factory, username, now=None):
     return None
 
 
+def _link_free_job(connection, username, idempotency, job_id, points_left):
+    """Bind the zero-cost durable attempt before the job transaction commits."""
+    submission_idempotency.ensure_table(connection)
+    job_id, points_left, now = int(job_id), int(points_left), int(time.time())
+    cursor = connection.execute(
+        "UPDATE submission_idempotency SET attempt_state='linked',job_id=?,"
+        "points_left=?,updated_at=? WHERE username=? AND endpoint=? AND idem_key=? "
+        "AND response_json IS NULL AND charge_transaction_key=? "
+        "AND attempt_payload_json IS NOT NULL AND attempt_cost=0 "
+        "AND attempt_state='frozen' AND job_id IS NULL",
+        (job_id, points_left, now, username, idempotency["endpoint"],
+         idempotency["key"], idempotency["charge_transaction_key"]),
+    )
+    if cursor.rowcount != 1:
+        raise RuntimeError("durable free job could not be linked")
+
+
 def create_job_with_quota(db_factory, username, payload, owner,
-                          max_active_jobs=None, now=None):
+                          max_active_jobs=None, now=None, idempotency=None,
+                          points_left=0):
     """Reserve quota and create the job in one serialized transaction."""
     username = _text(username, 160, "\u8ba4\u8bc1\u8d26\u53f7")
     if not username:
@@ -262,6 +282,10 @@ def create_job_with_quota(db_factory, username, payload, owner,
             (username, 0, json.dumps(payload, ensure_ascii=False), now, now, owner),
         )
         job_id = int(cursor.lastrowid)
+        if idempotency is not None:
+            _link_free_job(
+                connection, username, idempotency, job_id, points_left,
+            )
         connection.commit()
         return job_id, None
     except Exception:
@@ -269,6 +293,25 @@ def create_job_with_quota(db_factory, username, payload, owner,
         raise
     finally:
         connection.close()
+
+
+def recover_linked_job(db_factory, username, attempt):
+    """Resolve the original Director Agent job for a linked retry."""
+    if not attempt or attempt.get("state") != "linked":
+        return None
+    job_id = int(attempt["job_id"])
+    connection = db_factory()
+    try:
+        row = connection.execute(
+            "SELECT id,kind,username,cost,status FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    if (not row or row["kind"] != "director_agent"
+            or row["username"] != username or int(row["cost"] or 0) != 0):
+        raise RuntimeError("durable free job link is invalid")
+    return {"job_id": job_id, "status": str(row["status"] or "")}
 
 
 def _page_context(value):
