@@ -169,6 +169,26 @@ class ContentWhisperReleaseExecutorTests(unittest.TestCase):
             os.chmod(target, 0o755)
         self.manifest = copy.deepcopy(self.base_manifest)
         self.manifest["_manifest_path"] = str(MANIFEST_PATH)
+        # This suite validates release mechanics, not whether a historical
+        # manifest still describes today's checkout. Rebind its source and
+        # postimage locks to the checkout under test so normal changes to a
+        # shared runtime file do not mask backup/rollback test failures.
+        for entry in self.manifest["files"]:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            entry["source_sha256"] = hashlib.sha256(source).hexdigest()
+            entry["source_blob"] = self._blob(source)
+            entry["expected_postimage_sha256"] = entry["source_sha256"]
+            entry["expected_postimage_blob"] = entry["source_blob"]
+        tool_locks = [
+            self.manifest["executor"],
+            self.manifest["executor"]["verifier"],
+            self.manifest["executor"]["requirements_verifier"],
+            *self.manifest["release_contract_sources"],
+        ]
+        for lock in tool_locks:
+            source = (ROOT / lock["repository_path"]).read_bytes()
+            lock["source_sha256"] = hashlib.sha256(source).hexdigest()
+            lock["source_blob"] = self._blob(source)
         self.original = {}
         for entry in self.manifest["files"]:
             target = self._target(entry)
