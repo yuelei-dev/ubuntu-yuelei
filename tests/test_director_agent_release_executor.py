@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import copy
 import hashlib
+import io
 import importlib.util
 import json
 import os
@@ -15,6 +16,9 @@ from unittest import mock
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "scripts" / "deploy_locked_manifest.py"
 MANIFEST = (
+    ROOT / "deploy" / "test-runtime" / "director-agent-v2-20260821.json"
+)
+HISTORICAL_MANIFEST = (
     ROOT / "deploy" / "test-runtime" / "director-agent-v1-20260820.json"
 )
 
@@ -176,7 +180,7 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
     def test_manifest_loads_and_executes_real_seven_file_contract(self):
         loaded = self.module._load_manifest(MANIFEST)
         self.assertEqual(
-            "director_agent_seven_file_v1",
+            "director_agent_seven_file_v2",
             loaded["release_executor"]["contract"],
         )
         result, hooks = self._execute()
@@ -207,6 +211,83 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
             {"mode", "uid", "gid"}.issubset(item) for item in audit["files"]
         ))
         self.assertEqual(2, sum(call.startswith("static:") for call in hooks.calls))
+
+    def test_successor_manifest_preserves_all_historical_file_locks(self):
+        historical = json.loads(HISTORICAL_MANIFEST.read_text(encoding="utf-8"))
+        lock_fields = {
+            "repository_path", "runtime_path", "source_blob", "source_sha256",
+            "target_preimage_state", "target_preimage_blob",
+            "target_preimage_sha256", "expected_postimage_blob",
+            "expected_postimage_sha256",
+        }
+        expected = [
+            {key: entry.get(key) for key in lock_fields}
+            for entry in historical["files"]
+        ]
+        actual = [
+            {key: entry.get(key) for key in lock_fields}
+            for entry in self.base_manifest["files"]
+        ]
+        self.assertEqual(expected, actual)
+        self.assertEqual(
+            "release20260821",
+            historical["release_executor"]["authenticated_acceptance"]
+            ["request"]["page_revision"],
+        )
+
+    def test_successor_manifest_locks_current_executor_exactly(self):
+        data = EXECUTOR.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(data).hexdigest(),
+            self.base_manifest["release_executor"]["sha256"],
+        )
+        self.assertEqual(
+            self._blob(data),
+            self.base_manifest["release_executor"]["git_blob"],
+        )
+
+    def test_invalid_acceptance_revision_fails_before_backup_or_hooks(self):
+        self.manifest["release_executor"]["authenticated_acceptance"]["request"][
+            "page_revision"
+        ] = "release20260821"
+        hooks = FakeHooks()
+        with self.assertRaisesRegex(
+            self.module.ReleaseError, "page_revision must match",
+        ):
+            self._execute(hooks=hooks)
+        self.assertEqual([], hooks.calls)
+        self.assertFalse(self.backups.exists())
+        self.assertEqual(self.original, self._snapshot())
+
+    def test_node_resolution_prefers_path_node(self):
+        with mock.patch.object(
+            self.module.shutil, "which", return_value="/usr/bin/node",
+        ) as which:
+            resolved = self.module._resolve_node_binary({"PATH": "/usr/bin"})
+        self.assertEqual("/usr/bin/node", resolved)
+        which.assert_called_once_with("node", path="/usr/bin")
+
+    def test_node_resolution_uses_controlled_fallback(self):
+        with mock.patch.object(
+            self.module.shutil, "which",
+            side_effect=[None, "/home/ubuntu/.local/hq-node/bin/node"],
+        ) as which:
+            resolved = self.module._resolve_node_binary({"PATH": "/usr/sbin"})
+        self.assertEqual("/home/ubuntu/.local/hq-node/bin/node", resolved)
+        self.assertEqual([
+            mock.call("node", path="/usr/sbin"),
+            mock.call("/home/ubuntu/.local/hq-node/bin/node"),
+        ], which.call_args_list)
+
+    def test_node_resolution_fails_closed_when_all_candidates_are_missing(self):
+        with mock.patch.object(
+            self.module.shutil, "which", side_effect=[None, None],
+        ):
+            with self.assertRaisesRegex(
+                self.module.ReleaseError,
+                "Node.js executable not found.*hq-node/bin/node",
+            ):
+                self.module._resolve_node_binary({"PATH": "/usr/sbin"})
 
     def test_absent_feature_row_is_removed_on_rollback(self):
         database = self._target(
@@ -254,6 +335,78 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
     def test_real_static_hook_failure_restores_seven_files_and_feature_row(self):
         with self.assertRaisesRegex(RuntimeError, "static"):
             self._execute(hooks=FakeHooks(fail_on="static:"))
+        self.assertEqual(self.original, self._snapshot())
+        self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_rollback_retries_slow_service_and_records_success(self):
+        class SlowStartHooks(FakeHooks):
+            def __init__(self):
+                super().__init__(fail_on="acceptance")
+                self.active_calls = 0
+
+            def service_active(self, service):
+                self._record("active:" + service)
+                self.active_calls += 1
+                return self.active_calls <= 2 or self.active_calls >= 5
+
+        clock = {"now": 0.0}
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        hooks = SlowStartHooks()
+        with (
+            mock.patch.object(self.module.time, "monotonic", side_effect=monotonic),
+            mock.patch.object(self.module.time, "sleep", side_effect=sleep),
+            self.assertRaisesRegex(RuntimeError, "acceptance"),
+        ):
+            self._execute(hooks=hooks)
+        audit_path = next(self.backups.glob("director-agent-*/audit.json"))
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual("rolled_back", audit["status"])
+        self.assertEqual([], audit["rollback_errors"])
+        self.assertGreaterEqual(hooks.active_calls, 5)
+        self.assertEqual(self.original, self._snapshot())
+        self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_rollback_health_timeout_remains_fail_closed(self):
+        class NeverReadyHooks(FakeHooks):
+            def __init__(self):
+                super().__init__(fail_on="acceptance")
+                self.active_calls = 0
+
+            def service_active(self, service):
+                self._record("active:" + service)
+                self.active_calls += 1
+                return self.active_calls <= 2
+
+        self.manifest["release_executor"]["rollback_health_policy"] = {
+            "timeout_seconds": 2, "interval_seconds": 1,
+        }
+        clock = {"now": 0.0}
+
+        def monotonic():
+            return clock["now"]
+
+        def sleep(seconds):
+            clock["now"] += seconds
+
+        with (
+            mock.patch.object(self.module.time, "monotonic", side_effect=monotonic),
+            mock.patch.object(self.module.time, "sleep", side_effect=sleep),
+            self.assertRaisesRegex(
+                self.module.ReleaseError,
+                "forward release failed and rollback failed: service:ReleaseError",
+            ),
+        ):
+            self._execute(hooks=NeverReadyHooks())
+        audit_path = next(self.backups.glob("director-agent-*/audit.json"))
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        self.assertEqual("rollback_failed", audit["status"])
+        self.assertEqual(["service:ReleaseError"], audit["rollback_errors"])
         self.assertEqual(self.original, self._snapshot())
         self.assertEqual(self.original_feature, self._feature_row())
 
@@ -312,6 +465,35 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
         keys = [request.get_header("Idempotency-key") for request in requests]
         self.assertEqual(1, len(set(keys)))
         self.assertEqual("release-pr276-" + "a" * 32, keys[0])
+
+    def test_authenticated_acceptance_http_error_includes_backend_diagnostics(self):
+        specification = copy.deepcopy(
+            self.manifest["release_executor"]["authenticated_acceptance"]
+        )
+        body = json.dumps({
+            "error": {
+                "code": "HQ-REQUEST-001",
+                "message": "页面版本无效",
+            },
+        }, ensure_ascii=False).encode("utf-8")
+        error = self.module.urllib.error.HTTPError(
+            specification["submit_url"], 400, "Bad Request", {}, io.BytesIO(body),
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = error
+        with (
+            mock.patch.dict(os.environ, {
+                specification["token_environment"]: "release-token",
+            }),
+            mock.patch.object(
+                self.module.urllib.request, "build_opener", return_value=opener,
+            ),
+            self.assertRaisesRegex(
+                self.module.ReleaseError,
+                "HTTP 400: HQ-REQUEST-001 / 页面版本无效",
+            ),
+        ):
+            self.module.SystemHooks().acceptance(specification)
 
     def test_static_probe_checks_the_served_response_bytes(self):
         data = b"locked static response"
