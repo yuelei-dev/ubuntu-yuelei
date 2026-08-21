@@ -113,7 +113,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["repository_git_metadata"], "absent")
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "f550f660f2b21f78ede85d351fbc5e4a222cd966",
+            "f55920b60275fe43ffda98acdc1a4c12ca96689b",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)

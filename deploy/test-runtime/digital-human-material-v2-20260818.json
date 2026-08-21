@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the reviewed duration-driven digital-human v2 runtime and natural-mouth HeyGen provider boundary to the Yuelei test server only, with accurate requested-versus-actual resolution receipts and atomic rollback.",
+  "purpose": "Deploy the reviewed duration-driven digital-human v2 runtime, natural-mouth HeyGen boundary, and Seedream 5.0 standard material fallback to the Yuelei test server only, with atomic rollback.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -17,7 +17,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "f550f660f2b21f78ede85d351fbc5e4a222cd966",
+    "base_main_commit": "f55920b60275fe43ffda98acdc1a4c12ca96689b",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -92,13 +92,13 @@
       "repository_path": "server/content_domains/digital_human_oneclick.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_oneclick.py",
       "classification": "runtime_code",
-      "source_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
-      "source_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
+      "source_blob": "44bded5ddcfdc049fdb1dcb4c39ae9e9dbe35635",
+      "source_sha256": "ad21190220a72cd8ff86e311d5068bf7156a8332b423c9fe60e2347a09a154c4",
       "target_preimage_state": "file",
       "target_preimage_blob": "f285d6fdebee7915d98a332925850d51065ef883",
       "target_preimage_sha256": "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5",
-      "expected_postimage_blob": "351d278b5c3bd243974fc0f235b076e8723f0b85",
-      "expected_postimage_sha256": "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc"
+      "expected_postimage_blob": "44bded5ddcfdc049fdb1dcb4c39ae9e9dbe35635",
+      "expected_postimage_sha256": "ad21190220a72cd8ff86e311d5068bf7156a8332b423c9fe60e2347a09a154c4"
     },
     {
       "repository_path": "server/content_domains/points.py",
@@ -128,13 +128,13 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
-      "source_sha256": "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68",
+      "source_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "source_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
       "target_preimage_state": "file",
       "target_preimage_blob": "4cbe682402b193142407e704d392eb4fdac53ee6",
       "target_preimage_sha256": "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440",
-      "expected_postimage_blob": "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
-      "expected_postimage_sha256": "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68"
+      "expected_postimage_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "expected_postimage_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214"
     },
     {
       "repository_path": "server/content_domains/audio.py",
@@ -176,13 +176,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "cdb4b99cc44302602c92c9c26b906ffe766438cc",
-      "source_sha256": "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf",
+      "source_blob": "bb8fc593d957e2f6a728c39ff31321f293a5ca21",
+      "source_sha256": "2c20b69b86d78a6d186c01987f97856b0b228f50551297029a0bbb9aa3d311c4",
       "target_preimage_state": "file",
       "target_preimage_blob": "7f94156277667ddf353a5374b2f2bef556d4c5d1",
       "target_preimage_sha256": "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44",
-      "expected_postimage_blob": "cdb4b99cc44302602c92c9c26b906ffe766438cc",
-      "expected_postimage_sha256": "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf"
+      "expected_postimage_blob": "bb8fc593d957e2f6a728c39ff31321f293a5ca21",
+      "expected_postimage_sha256": "2c20b69b86d78a6d186c01987f97856b0b228f50551297029a0bbb9aa3d311c4"
     }
   ],
   "release_contract_sources": [
@@ -193,13 +193,13 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "cef247bbc12874b7cef7ca599cab5b242d177ae2",
-      "source_sha256": "7826c7f152c639b2a36eba5606c85c9f26bd7374d19e8443f24c85226e4d14c3"
+      "source_blob": "583b77f4ec166d3bdf9cffec5b33dded1ee417de",
+      "source_sha256": "a8081be96ed40fd7ea1979252153cfb6480f116a92a6c619d3ad1174d9bef05b"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "464ce5163eb7f63e1f6015ee51818b53ea2e9c35",
-      "source_sha256": "fbf9d63a4958b0918177025704ae20f3224b8844bae9d6678ad66e003263b0ec"
+      "source_blob": "811f053c6f0a80c1dc900398d596ddaa059b64eb",
+      "source_sha256": "3290c51e046602276089b8fdf77b7634650313616c63d2b2948fe89340a67633"
     },
     {
       "repository_path": "tests/test_digital_human_voice_state.js",
@@ -218,8 +218,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "80bc14921e0e15af4c51717dd84eccd47953ab76",
-      "source_sha256": "4866f8870b2c227071f133d1a27b8744c1b3fc6637c01a4bd2d34eb30dafdad5"
+      "source_blob": "38a74c173d83a34d4ad359a9a0e43b8faab2f00f",
+      "source_sha256": "5aaba7947453f920da2e8f8d54450aa78f075a7fbd39fa6c5080fc9dfa1d93ea"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",

@@ -313,33 +313,30 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             checked_material = self.domain.verify_child_submission(
                 material, "yuelei", "image",
             )
-            self.assertEqual(checked_material["provider"], "banana")
-            self.assertEqual(checked_material["model"], "nb2")
+            self.assertEqual(checked_material["provider"], "seedream")
+            self.assertEqual(checked_material["variant"], "std")
             self.assertEqual(checked_material["quality"], "std")
+            self.assertEqual(checked_material["count"], 1)
+            self.assertEqual(checked_material["ratio"], "9:16")
             self.assertEqual(
-                checked_material["images"], [material_reference],
+                checked_material["reference_images"], [material_reference],
             )
-            self.assertNotIn("reference_images", checked_material)
-            validated_reference = self.banana_provider.validate_payload(checked_material)
-            self.assertEqual("image/jpeg", validated_reference["images"][0]["mime_type"])
+            self.assertNotIn("images", checked_material)
+            self.assertNotIn("model", checked_material)
             self.assertEqual(
                 self.points.cost_of("image", checked_material),
-                self.points.pricing.get_price("image.banana.nb2.std"),
+                self.points.pricing.get_price("image.seedream.std.std"),
             )
             if sys.platform != "win32":
                 image_domain = importlib.import_module("content_domains.image")
                 validated_material = image_domain.validate_image_payload(
                     checked_material,
                 )
-                self.assertEqual(validated_material["provider"], "banana")
-                self.assertEqual(validated_material["model"], "nb2")
+                self.assertEqual(validated_material["provider"], "seedream")
+                self.assertEqual(validated_material["variant"], "std")
                 self.assertEqual(
-                    [item["data"] for item in validated_material["images"]],
+                    validated_material["reference_images"],
                     [material_reference],
-                )
-                self.assertEqual(
-                    ["image/jpeg"],
-                    [item["mime_type"] for item in validated_material["images"]],
                 )
             with self.assertRaisesRegex(self.domain.DigitalHumanRequestError, "照片"):
                 self.domain.verify_child_submission(
@@ -430,7 +427,7 @@ class DigitalHumanOneClickTests(unittest.TestCase):
                 "talking_gesture_binding_invalid", wrong_gesture.exception.code,
             )
 
-    def test_banana_references_reject_invalid_content_and_preserve_upload_mime(self):
+    def test_provider_references_reject_invalid_content_and_preserve_upload_bytes(self):
         invalid = b"not-an-image"
         invalid_payload = self._consent_payload(
             run_id="dh-run-invalid-image-001",
@@ -485,13 +482,16 @@ class DigitalHumanOneClickTests(unittest.TestCase):
             )
         with mock.patch.object(self.domain, "cdb", self._consent_connection):
             checked = self.domain.verify_child_submission(expanded, "yuelei", "image")
-        validated = self.banana_provider.validate_payload(checked)
-        self.assertNotIn("reference_images", checked)
-        self.assertEqual("banana", validated["provider"])
-        self.assertEqual("nb2", validated["model"])
-        self.assertEqual("std", validated["quality"])
-        self.assertEqual("image/webp", validated["images"][0]["mime_type"])
-        self.assertEqual(WEBP_2X2, base64.b64decode(validated["images"][0]["data"]))
+        self.assertNotIn("images", checked)
+        self.assertNotIn("model", checked)
+        self.assertEqual("seedream", checked["provider"])
+        self.assertEqual("std", checked["variant"])
+        self.assertEqual("std", checked["quality"])
+        self.assertEqual(1, checked["count"])
+        self.assertEqual("9:16", checked["ratio"])
+        self.assertEqual(
+            WEBP_2X2, base64.b64decode(checked["reference_images"][0]),
+        )
 
     def test_clone_consent_binds_audio_hash_and_slot(self):
         sample = b"voice-sample"
@@ -1349,15 +1349,19 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         if server_dir not in sys.path:
             sys.path.insert(0, server_dir)
 
-    def test_oneclick_image_jobs_use_banana_only_for_materials(self):
+    def test_oneclick_image_jobs_use_seedream_standard_for_materials(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         materials = page[page.index("function generateMaterials(epoch)"):page.index("function generateTalking(voiceKey,epoch)")]
 
-        self.assertIn("provider:'banana'", materials)
-        self.assertIn("model:'nb2'", materials)
+        self.assertIn("provider:'seedream'", materials)
+        self.assertIn("variant:'std'", materials)
         self.assertIn("quality:'std'", materials)
+        self.assertIn("count:1", materials)
+        self.assertIn("ratio:'9:16'", materials)
         self.assertNotIn("function generateImages", page)
         self.assertNotIn("dh-gesture-v2", page)
+        self.assertNotIn("provider:'banana'", materials)
+        self.assertNotIn("model:'nb2'", materials)
         self.assertNotIn("provider:'xiaole'", materials)
         self.assertNotIn("provider:'openai'", materials)
 

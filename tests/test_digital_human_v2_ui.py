@@ -60,6 +60,19 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("最终视频不显示素材来源标签", self.page)
         self.assertNotIn("CONCEPT / AI FILL", self.page)
 
+    def test_ai_material_fallback_uses_seedream_standard(self):
+        materials = self.page[
+            self.page.index("function generateMaterials(epoch)"):
+            self.page.index("function generateTalking(voiceKey,epoch)")
+        ]
+        for marker in (
+            "provider:'seedream'", "variant:'std'", "quality:'std'",
+            "count:1", "ratio:'9:16'",
+        ):
+            self.assertIn(marker, materials)
+        self.assertNotIn("provider:'banana'", materials)
+        self.assertNotIn("model:'nb2'", materials)
+
 
     def test_completed_video_resets_atomically_before_next_analysis(self):
         for marker in (
