@@ -9,6 +9,9 @@ from pathlib import Path, PurePosixPath
 
 
 ABSENT_BYTES = b"ABSENT\n"
+NEEDS_INSTALL = "needs_install"
+ALREADY_POSTIMAGE = "already_postimage"
+DRIFTED = "drifted"
 
 
 def _sha256(data):
@@ -151,6 +154,62 @@ def _actual_target_digest(runtime_root, target):
     if data is None:
         return "absent", _sha256(ABSENT_BYTES), None
     return "file", _sha256(data), _blob_id(data)
+
+
+def _matches_target(state, digest, blob, expected_state, expected_digest,
+                    expected_blob):
+    if state != expected_state or digest != expected_digest:
+        return False
+    return state != "file" or blob == expected_blob
+
+
+def classify_targets(manifest, runtime_root):
+    """Classify targets without accepting any content outside exact locks."""
+    allow_postimage = (
+        manifest.get("deployment_policy", {}).get(
+            "allow_exact_postimage_as_existing", False
+        ) is True
+    )
+    classified = []
+    for entry in manifest["files"]:
+        target = _safe_runtime_path(runtime_root, entry["runtime_path"])
+        state, digest, blob = _actual_target_digest(runtime_root, target)
+        matches_preimage = _matches_target(
+            state, digest, blob,
+            entry["target_preimage_state"],
+            entry["target_preimage_sha256"],
+            entry.get("target_preimage_blob"),
+        )
+        matches_postimage = _matches_target(
+            state, digest, blob,
+            "file",
+            entry["expected_postimage_sha256"],
+            entry["expected_postimage_blob"],
+        )
+        if allow_postimage and matches_postimage:
+            classification = ALREADY_POSTIMAGE
+        elif matches_preimage:
+            classification = NEEDS_INSTALL
+        else:
+            classification = DRIFTED
+        classified.append({
+            "repository_path": entry["repository_path"],
+            "runtime_path": entry["runtime_path"],
+            "classification": classification,
+            "state": state,
+            "sha256": digest,
+            "blob": blob,
+        })
+    return classified
+
+
+def verify_installable_targets(manifest, runtime_root):
+    classified = classify_targets(manifest, runtime_root)
+    drifted = [item for item in classified if item["classification"] == DRIFTED]
+    if drifted:
+        raise RuntimeError("target drifted outside exact preimage/postimage locks: %s" %
+                           drifted[0]["runtime_path"])
+    return classified
 
 
 def verify_targets(manifest, runtime_root, phase):

@@ -107,12 +107,19 @@ class RuntimeFiles:
         return manifest_verify._read_regular_file_no_follow(self.root, target)
 
     def mode(self, runtime_path):
+        return self.metadata(runtime_path)["mode"]
+
+    def metadata(self, runtime_path):
         target = self.path(runtime_path)
         manifest_verify._lstat_no_symlink_chain(self.root, target)
         info = os.lstat(target)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise ReleaseError("target is not a regular file: %s" % target)
-        return stat.S_IMODE(info.st_mode)
+        return {
+            "mode": stat.S_IMODE(info.st_mode),
+            "uid": getattr(info, "st_uid", None),
+            "gid": getattr(info, "st_gid", None),
+        }
 
     def _ensure_parent_directories(self, target):
         current = self.root
@@ -144,7 +151,7 @@ class RuntimeFiles:
             raise
         return descriptor
 
-    def atomic_write(self, runtime_path, data, mode):
+    def atomic_write(self, runtime_path, data, mode, uid=None, gid=None):
         target = self.path(runtime_path)
         self._ensure_parent_directories(target)
         try:
@@ -173,6 +180,9 @@ class RuntimeFiles:
             os.fsync(descriptor)
             if hasattr(os, "fchmod"):
                 os.fchmod(descriptor, int(mode))
+            if (uid is not None and gid is not None
+                    and hasattr(os, "fchown") and os.name == "posix"):
+                os.fchown(descriptor, int(uid), int(gid))
             os.close(descriptor)
             descriptor = None
             if not hasattr(os, "fchmod"):
@@ -256,6 +266,9 @@ class ContentWhisperRelease:
         self.checkpoint = checkpoint or (lambda _name: None)
         self.backup_path = None
         self.backup_entries = []
+        self.target_classifications = []
+        self.changed_entries = []
+        self.attempted_entries = []
         self.daemon_reload_attempted = False
         self.restart_attempted = False
 
@@ -559,7 +572,8 @@ class ContentWhisperRelease:
                 "blob": None if data is None else manifest_verify._blob_id(data),
             }
             if data is not None:
-                record["mode"] = self.runtime.mode(entry["runtime_path"])
+                metadata = self.runtime.metadata(entry["runtime_path"])
+                record.update(metadata)
                 record["backup_file"] = "%02d.bin" % index
                 backup_file = self.backup_path / record["backup_file"]
                 with open(backup_file, "xb") as stream:
@@ -579,15 +593,44 @@ class ContentWhisperRelease:
         )
         self.checkpoint("backup_complete")
 
-    def _install_all(self, payloads):
+    def _install_needed(self, payloads, classifications):
+        by_path = {item["runtime_path"]: item for item in classifications}
+        backups_by_path = {
+            item["runtime_path"]: item for item in self.backup_entries
+        }
+        self.changed_entries = []
+        self.attempted_entries = []
         for index, entry in enumerate(self.manifest["files"], 1):
-            manifest_verify.verify_targets(
-                {"files": [entry]}, self.runtime.root, "preimage",
-            )
+            classification = by_path[entry["runtime_path"]]["classification"]
+            if classification == manifest_verify.ALREADY_POSTIMAGE:
+                self.checkpoint("skip_%d" % index)
+                continue
+            current = manifest_verify.verify_installable_targets(
+                {"files": [entry], "deployment_policy":
+                 self.manifest.get("deployment_policy", {})},
+                self.runtime.root,
+            )[0]
+            if current["classification"] != manifest_verify.NEEDS_INSTALL:
+                raise ReleaseError(
+                    "target classification changed before write: %s" %
+                    entry["runtime_path"]
+                )
             data, mode = payloads[entry["repository_path"]]
-            self.runtime.atomic_write(entry["runtime_path"], data, mode)
+            original = backups_by_path[entry["runtime_path"]]
+            self.attempted_entries.append(entry)
+            self.runtime.atomic_write(
+                entry["runtime_path"], data, mode,
+                original.get("uid"), original.get("gid"),
+            )
+            self.changed_entries.append(entry)
             self.checkpoint("write_%d" % index)
         manifest_verify.verify_targets(self.manifest, self.runtime.root, "postimage")
+
+    def _has_backend_changes(self):
+        return any(
+            entry.get("classification") == "runtime_code"
+            for entry in self.changed_entries
+        )
 
     def _run_stage(self, stage):
         commands = self.manifest["release_commands"].get(stage)
@@ -663,7 +706,12 @@ class ContentWhisperRelease:
 
     def _restore_all(self):
         failures = []
+        attempted_paths = {
+            entry["runtime_path"] for entry in self.attempted_entries
+        }
         for record in self.backup_entries:
+            if record["runtime_path"] not in attempted_paths:
+                continue
             try:
                 if record["state"] == "absent":
                     self.runtime.remove(record["runtime_path"])
@@ -671,6 +719,7 @@ class ContentWhisperRelease:
                     data = (self.backup_path / record["backup_file"]).read_bytes()
                     self.runtime.atomic_write(
                         record["runtime_path"], data, int(record["mode"]),
+                        record.get("uid"), record.get("gid"),
                     )
             except Exception as exc:
                 failures.append("%s: %s" % (record["runtime_path"], exc))
@@ -686,6 +735,15 @@ class ContentWhisperRelease:
                     failures.append(
                         "rollback verification mismatch: %s" % record["runtime_path"]
                     )
+                elif state == "file":
+                    metadata = self.runtime.metadata(record["runtime_path"])
+                    if any(
+                            metadata.get(key) != record.get(key)
+                            for key in ("mode", "uid", "gid")):
+                        failures.append(
+                            "rollback metadata mismatch: %s" %
+                            record["runtime_path"]
+                        )
             except Exception as exc:
                 failures.append(
                     "rollback verification %s: %s" %
@@ -718,23 +776,49 @@ class ContentWhisperRelease:
         self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
-        manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
+        classifications = manifest_verify.verify_installable_targets(
+            self.manifest, self.runtime.root,
+        )
+        self.target_classifications = classifications
         self.checkpoint("preimage_complete")
         self._run_stage("pre_service_active")
         self._verify_health("pre-deployment ")
         self.checkpoint("pre_health")
+        if all(
+                item["classification"] == manifest_verify.ALREADY_POSTIMAGE
+                for item in classifications):
+            manifest_verify.verify_targets(
+                self.manifest, self.runtime.root, "postimage",
+            )
+            self._verify_health()
+            self.checkpoint("health")
+            return {
+                "ok": True,
+                "backup": None,
+                "files": len(self.manifest["files"]),
+                "installed": 0,
+                "already_postimage": len(self.manifest["files"]),
+                "already_deployed": True,
+                "restart_count": 0,
+            }
         self._backup_all()
-        manifest_verify.verify_targets(self.manifest, self.runtime.root, "preimage")
+        after_backup = manifest_verify.verify_installable_targets(
+            self.manifest, self.runtime.root,
+        )
+        if after_backup != classifications:
+            raise ReleaseError("target classification changed during backup")
         try:
-            self._install_all(payloads)
-            for stage in (
-                    "dependencies", "cache", "offline", "font", "no_charge"):
-                self._run_stage(stage)
-            self.daemon_reload_attempted = True
-            self._run_stage("daemon_reload")
-            self.restart_attempted = True
-            self._run_stage("restart")
-            self._run_stage("service_active")
+            self._install_needed(payloads, classifications)
+            if self.changed_entries:
+                for stage in (
+                        "dependencies", "cache", "offline", "font", "no_charge"):
+                    self._run_stage(stage)
+            if self._has_backend_changes():
+                self.daemon_reload_attempted = True
+                self._run_stage("daemon_reload")
+                self.restart_attempted = True
+                self._run_stage("restart")
+                self._run_stage("service_active")
             self._verify_health()
             self.checkpoint("health")
         except Exception as release_error:
@@ -752,7 +836,10 @@ class ContentWhisperRelease:
             "ok": True,
             "backup": str(self.backup_path),
             "files": len(self.manifest["files"]),
-            "restart_count": 1,
+            "installed": len(self.changed_entries),
+            "already_postimage": len(self.manifest["files"]) - len(self.changed_entries),
+            "already_deployed": not self.changed_entries,
+            "restart_count": 1 if self._has_backend_changes() else 0,
         }
 
 

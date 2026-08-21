@@ -33,6 +33,7 @@
   "deployment_policy": {
     "fail_closed_on_source_mismatch": true,
     "fail_closed_on_preimage_mismatch": true,
+    "allow_exact_postimage_as_existing": true,
     "backup_all_targets_before_first_write": true,
     "record_missing_targets_in_backup_manifest": true,
     "atomic_replace": true,
@@ -44,12 +45,12 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "4ec84c3e91b109c70802bb8a91a8353070bbaccb",
-    "source_sha256": "bba2588d2fd6288754324628d5e3e7d08b8144152b957581e97b041d5ad97ab8",
+    "source_blob": "2930bbc72a37e70970241e145d63d881c665683a",
+    "source_sha256": "5ae4c02e006f51404b54b09433d64a99590a0f563fbecabc31265abcab73c509",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
-      "source_blob": "33f8144a4acec4979bbde5c1335b4a72f5bac382",
-      "source_sha256": "b514582d10604908614643a54b748c1e161c6fd920775fb680479be3d5d69027"
+      "source_blob": "f1663997b74805d488d4867c0fe5139aab3444ab",
+      "source_sha256": "546e4478720793e9b280e1135c6b2b91f2382d8cca871fb532a9a22ebded4f9d"
     },
     "requirements_verifier": {
       "repository_path": "scripts/verify_content_python_requirements.py",
@@ -218,8 +219,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "80bc14921e0e15af4c51717dd84eccd47953ab76",
-      "source_sha256": "4866f8870b2c227071f133d1a27b8744c1b3fc6637c01a4bd2d34eb30dafdad5"
+      "source_blob": "8f9c19123ceab4de9bb6f509e6bfab1680ef5d78",
+      "source_sha256": "f282dd05a918ca39d700c6707895ab3af252151591283d9be55b006785b4ecd8"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",

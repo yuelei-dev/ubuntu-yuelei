@@ -125,6 +125,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(self.manifest["target"]["host"], "8.148.158.106")
         self.assertTrue(policy["fail_closed_on_source_mismatch"])
         self.assertTrue(policy["fail_closed_on_preimage_mismatch"])
+        self.assertTrue(policy["allow_exact_postimage_as_existing"])
         self.assertTrue(policy["backup_all_targets_before_first_write"])
         self.assertTrue(policy["atomic_replace"])
         self.assertTrue(policy["rollback_all_targets_as_one_unit"])
