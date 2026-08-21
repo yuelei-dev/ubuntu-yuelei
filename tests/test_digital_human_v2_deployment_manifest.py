@@ -1,16 +1,23 @@
 # -*- coding: utf-8 -*-
 import hashlib
-import importlib.util
 import json
 import pathlib
+import subprocess
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = (
+    ROOT / "deploy" / "test-runtime" /
+    "digital-human-material-seedream-v3-20260821.json"
+)
+HISTORICAL_MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
-VERIFY_PATH = ROOT / "scripts" / "verify_content_whisper_deployment.py"
+HISTORICAL_MANIFEST_BLOB = "e7d139001c065f6a3e8ec7137057abdc86bf5d06"
+HISTORICAL_MANIFEST_SHA256 = (
+    "44006751e15f56c946d8dfadeb4ad74f497dab44ceda66512bdb9603b919e453"
+)
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
@@ -30,24 +37,24 @@ LOCKED_PREIMAGES = {
         "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
     ),
     "server/content_domains/core.py": (
-        "file", "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
-        "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
+        "file", "db05b6d0c122186798d8ef80bff77648eeb12711",
+        "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
     ),
     "server/content_domains/digital_human_oneclick.py": (
-        "file", "f285d6fdebee7915d98a332925850d51065ef883",
-        "d58d6b676e6e90761ba485a75ea6ea0c138e76d591887b9ee5b986c3c27cf1e5",
+        "file", "351d278b5c3bd243974fc0f235b076e8723f0b85",
+        "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
     ),
     "server/content_domains/points.py": (
         "file", "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
         "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
     ),
     "server/content_domains/digital_human_timeline.py": (
-        "file", "c091ef9592409db774c72ec6a53f816240afdae5",
-        "f81f0f5ad61587d7b32930e198c61325f18496e75fdb7abec77f19d69c6b4d08",
+        "file", "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
+        "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e",
     ),
     "server/content_domains/digital_human_v2.py": (
-        "file", "4cbe682402b193142407e704d392eb4fdac53ee6",
-        "a6254202bf4c366b8b0c148a7e549bbec2206c7aff567096840492d522e36440",
+        "file", "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
+        "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68",
     ),
     "server/content_domains/audio.py": (
         "file", "32f948f451d0f527d992425ae1eaa8bc28583c6f",
@@ -58,39 +65,66 @@ LOCKED_PREIMAGES = {
         "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
     ),
     "server/content_domains/video.py": (
-        "file", "327dbe086999d7c3df40c89e8318b09bd913f566",
-        "6730a72e6539b0893efe93dac3b33b953d9490d7fcf5d5b09d26b41894551f8b",
+        "file", "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
+        "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "7f94156277667ddf353a5374b2f2bef556d4c5d1",
-        "d701ce8d61f8bcdcad6f5f09e421f109efa9b8550bfc5940e786b3304dc53d44",
+        "file", "cdb4b99cc44302602c92c9c26b906ffe766438cc",
+        "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf",
     ),
 }
 
 
-def _load_verifier():
-    spec = importlib.util.spec_from_file_location("digital_human_v2_verify", VERIFY_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def _read_locked_git_blob(blob_id):
+    result = subprocess.run(
+        [
+            "git", "-c", "safe.directory=" + ROOT.as_posix(),
+            "cat-file", "blob", blob_id,
+        ],
+        cwd=ROOT,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout
 
 
 class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-        cls.verify = _load_verifier()
 
-    def test_scope_and_source_locks_are_exact(self):
+    def _assert_historical_content_lock(self, lock):
+        data = _read_locked_git_blob(lock["source_blob"])
+        actual_blob = hashlib.sha1(
+            b"blob %d\0" % len(data) + data
+        ).hexdigest()
+        self.assertEqual(actual_blob, lock["source_blob"])
+        self.assertEqual(hashlib.sha256(data).hexdigest(), lock["source_sha256"])
+
+    def _assert_blob_and_sha256(self, blob_id, sha256):
+        data = _read_locked_git_blob(blob_id)
+        actual_blob = hashlib.sha1(
+            b"blob %d\0" % len(data) + data
+        ).hexdigest()
+        self.assertEqual(actual_blob, blob_id)
+        self.assertEqual(hashlib.sha256(data).hexdigest(), sha256)
+
+    def test_historical_v2_manifest_bytes_remain_exact(self):
+        data = HISTORICAL_MANIFEST_PATH.read_bytes()
+        actual_blob = hashlib.sha1(
+            b"blob %d\0" % len(data) + data
+        ).hexdigest()
+        self.assertEqual(HISTORICAL_MANIFEST_BLOB, actual_blob)
+        self.assertEqual(HISTORICAL_MANIFEST_SHA256, hashlib.sha256(data).hexdigest())
+
+    def test_scope_and_historical_source_locks_are_exact(self):
         files = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in files}, EXPECTED_SCOPE)
         self.assertEqual(len(files), 10)
         self.assertEqual(len({entry["runtime_path"] for entry in files}), 10)
-        self.assertEqual(len(self.verify.verify_sources(self.manifest, ROOT)), 10)
         for entry in files:
-            data = (ROOT / entry["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), entry["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), entry["source_blob"])
+            self._assert_historical_content_lock(entry)
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
 
@@ -103,21 +137,52 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             for entry in self.manifest["files"]
         }
         self.assertEqual(actual, LOCKED_PREIMAGES)
+        for _, blob_id, sha256 in actual.values():
+            self.assertEqual(40, len(blob_id))
+            self.assertEqual(64, len(sha256))
+            self._assert_blob_and_sha256(blob_id, sha256)
         observation = self.manifest["preimage_observation"]
         self.assertEqual(observation["target"], "test@8.148.158.106")
-        self.assertIn("read-only SSH", observation["capture_method"])
+        self.assertIn("user-supplied read-only", observation["capture_method"])
         self.assertEqual(
-            observation["captured_at"], "2026-08-20T17:40:32Z",
+            observation["captured_at"],
+            "2026-08-21 (user-supplied current evidence; exact timestamp not provided)",
         )
         self.assertIsNone(observation["repository_main_commit"])
         self.assertEqual(observation["repository_git_metadata"], "absent")
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "f55920b60275fe43ffda98acdc1a4c12ca96689b",
+            "f6009eba98f8e199cbca0710c16157c1952a6982",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
         self.assertEqual(observation["files"], 10)
+
+    def test_tampered_successor_preimage_lock_is_rejected(self):
+        entry = next(
+            item for item in self.manifest["files"]
+            if item["repository_path"]
+            == "server/content_domains/digital_human_oneclick.py"
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_blob_and_sha256(
+                entry["target_preimage_blob"], "0" * 64,
+            )
+
+    def test_successor_changes_only_seedream_business_files(self):
+        changed_paths = {
+            entry["repository_path"]
+            for entry in self.manifest["files"]
+            if entry["target_preimage_blob"] != entry["expected_postimage_blob"]
+        }
+        self.assertEqual(
+            changed_paths,
+            {
+                "server/content_domains/digital_human_oneclick.py",
+                "server/content_domains/digital_human_v2.py",
+                "site/workbench/digital-human-oneclick.html",
+            },
+        )
 
     def test_policy_is_test_only_atomic_and_removes_only_new_targets_on_rollback(self):
         policy = self.manifest["deployment_policy"]
@@ -125,8 +190,11 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(self.manifest["target"]["host"], "8.148.158.106")
         self.assertTrue(policy["fail_closed_on_source_mismatch"])
         self.assertTrue(policy["fail_closed_on_preimage_mismatch"])
+        self.assertTrue(policy["allow_exact_postimage_as_existing"])
         self.assertTrue(policy["backup_all_targets_before_first_write"])
         self.assertTrue(policy["atomic_replace"])
+        self.assertTrue(policy["restart_service_at_most_once"])
+        self.assertTrue(policy["skip_restart_when_no_files_change"])
         self.assertTrue(policy["rollback_all_targets_as_one_unit"])
         self.assertTrue(policy["remove_only_targets_recorded_missing_during_rollback"])
         self.assertFalse(policy["copy_environment_database_or_user_data"])
@@ -152,18 +220,14 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         serialized = json.dumps(feishu, ensure_ascii=False)
         self.assertNotIn("app_secret=", serialized.lower())
 
-    def test_release_tools_and_contract_tests_are_content_locked(self):
+    def test_release_tools_and_contracts_have_historical_content_locks(self):
         executor = self.manifest["executor"]
         self.assertEqual(executor["confirm_target"], "test@8.148.158.106")
         self.assertFalse(executor["remote_connection_capability"])
         for tool in (executor, executor["verifier"], executor["requirements_verifier"]):
-            data = (ROOT / tool["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), tool["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), tool["source_blob"])
+            self._assert_historical_content_lock(tool)
         for contract in self.manifest["release_contract_sources"]:
-            data = (ROOT / contract["repository_path"]).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
-            self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+            self._assert_historical_content_lock(contract)
 
     def test_all_no_charge_checks_run_before_the_single_restart(self):
         commands = self.manifest["release_commands"]
@@ -182,6 +246,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         rendered = json.dumps(commands["no_charge"], ensure_ascii=False)
         self.assertIn("tests.test_digital_human_timeline", rendered)
         self.assertIn("tests.test_digital_human_v2", rendered)
+        self.assertIn("tests.test_digital_human_oneclick", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
         self.assertNotIn("/usr/bin/node", rendered)
@@ -203,9 +268,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             entry for entry in self.manifest["release_contract_sources"]
             if entry["repository_path"] == "tests/test_digital_human_voice_state.js"
         )
-        data = (ROOT / contract["repository_path"]).read_bytes()
-        self.assertEqual(hashlib.sha256(data).hexdigest(), contract["source_sha256"])
-        self.assertEqual(self.verify._blob_id(data), contract["source_blob"])
+        self._assert_historical_content_lock(contract)
 
         server_no_charge = json.dumps(
             self.manifest["release_commands"]["no_charge"],

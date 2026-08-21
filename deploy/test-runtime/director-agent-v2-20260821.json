@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "purpose": "Successor deployment contract for the Director customer-guide Agent with deterministic Node preflight, acceptance validation and bounded rollback readiness.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service",
+    "backend_root": "/home/ubuntu/content-api",
+    "static_root": "/var/www/huangquechuanmei"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "9ec4d250af6dc2c0b7443ae9a2443dd1c7c38483",
+    "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head",
+    "source_commit_binding": "record the exact merged main commit in the release audit before preflight"
+  },
+  "expected_preimage": {
+    "development_base_commit": "38111b9849042aee1c955a0d3b4bdf813263c010",
+    "remote_capture_required_before_first_write": true,
+    "current_session_remote_verified": false,
+    "current_session_note": "The test host rejected the available SSH identity. Release must capture all seven live states and abort unless every state and digest exactly matches this manifest.",
+    "core_evidence": "The core.py preimage also matches the read-only test capture recorded by digital-human-material-v2-20260818.json."
+  },
+  "deployment_policy": {
+    "production_server_write_allowed": false,
+    "require_merged_main": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "fail_closed_on_missing_source": true,
+    "backup_all_targets_before_first_write": true,
+    "atomic_replace_each_file": true,
+    "install_all_files_before_restart": true,
+    "restart_backend_once": true,
+    "activate_feature_only_after_hash_health_and_static_checks": true,
+    "rollback_all_files_and_feature_state_as_one_unit": true,
+    "copy_environment_or_database": false
+  },
+  "release_executor": {
+    "contract": "director_agent_seven_file_v2",
+    "repository_path": "scripts/deploy_director_locked_manifest.py",
+    "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
+    "sha256": "a319b3edf1ac66d44e1c3e1b10defc753eeb7a7b8e172f1f12cd89ebf17e0aa4",
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": [
+      "content_domains.core",
+      "content_domains.director_agent",
+      "func_names"
+    ],
+    "html_required_markers": [
+      "script-agent.js"
+    ],
+    "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "health_feature_field": "director_agent_enabled",
+    "rollback_health_policy": {
+      "timeout_seconds": 20,
+      "interval_seconds": 1
+    },
+    "static_probes": [
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
+        "expected_status": 200,
+        "expected_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152"
+      },
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
+        "expected_status": 200,
+        "expected_sha256": "a50ef194cd8c5f951f12b9fa04e8f753e2fda0fafe7fd35d6e8c9d2002ee7e64"
+      }
+    ],
+    "authenticated_acceptance": {
+      "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "job_timeout_seconds": 120,
+      "submit_url": "https://yuelei.huangquechuanmei.com/api/gen/director_agent",
+      "job_url_template": "https://yuelei.huangquechuanmei.com/api/gen/job/{job_id}",
+      "request": {
+        "prompt": "发布验收：告诉我如何填写选题，不要执行付费生成。",
+        "session_id": "release_pr276_acceptance",
+        "page_revision": "4685745a85c98723",
+        "page_context": {
+          "page": "script",
+          "path": "/workbench/script.html",
+          "mode": "write",
+          "topic": "",
+          "selling_points": "",
+          "style": "口播",
+          "duration": "30s",
+          "platform": "抖音",
+          "has_script": false,
+          "scene_count": 0,
+          "has_breakdown": false,
+          "breakdown_scene_count": 0,
+          "breakdown_url": "",
+          "breakdown_tool": "scenes",
+          "has_reverse_prompt": false,
+          "active_job_status": "idle"
+        },
+        "history": [],
+        "source_page": "script",
+        "provider": "openai_responses",
+        "quoted_cost": 0
+      }
+    }
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/core.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
+      "classification": "backend_runtime",
+      "source_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "source_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
+      "target_preimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
+      "expected_postimage_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
+      "expected_postimage_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425"
+    },
+    {
+      "repository_path": "server/content_domains/director_agent.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/director_agent.py",
+      "classification": "backend_runtime",
+      "source_blob": "488d3fd444d823bfd4c2dc8efbc16f14a2797531",
+      "source_sha256": "255b287235a4e2500bebd29508416c7c758d70b471c1713e983cfccc6a9a4c11",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": null,
+      "expected_postimage_blob": "488d3fd444d823bfd4c2dc8efbc16f14a2797531",
+      "expected_postimage_sha256": "255b287235a4e2500bebd29508416c7c758d70b471c1713e983cfccc6a9a4c11"
+    },
+    {
+      "repository_path": "server/content_domains/feature_flags.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/feature_flags.py",
+      "classification": "backend_runtime",
+      "source_blob": "b6260eb6c2b95667c9551431f5fe64c2c22f27f4",
+      "source_sha256": "683fb7d7b9fae6c3b1ca1bb13e17f8102ea19e7bc6507f3119a9195602c553c4",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "cf017a63f7d06969528cc13c85a89732fb4e101a",
+      "target_preimage_sha256": "ddd6f0c9fa9f7c5c3e9a55a69f02047571411b0e318e9e74f94fcbf6f1709db4",
+      "expected_postimage_blob": "b6260eb6c2b95667c9551431f5fe64c2c22f27f4",
+      "expected_postimage_sha256": "683fb7d7b9fae6c3b1ca1bb13e17f8102ea19e7bc6507f3119a9195602c553c4"
+    },
+    {
+      "repository_path": "server/content_domains/registry.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/registry.py",
+      "classification": "backend_runtime",
+      "source_blob": "2510233c24bb82cc51ae7bfdad0d9868166a771f",
+      "source_sha256": "e995a099eac8f76d148659164e9ae3d58059a9179816971fdc03554203bf8621",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "9ec48350ca55ff6291c3f17702bc389a869544b8",
+      "target_preimage_sha256": "04553b177ddf758fbf2a470151d483f963c5d42a207d817008d9bb7eb3a3acd7",
+      "expected_postimage_blob": "2510233c24bb82cc51ae7bfdad0d9868166a771f",
+      "expected_postimage_sha256": "e995a099eac8f76d148659164e9ae3d58059a9179816971fdc03554203bf8621"
+    },
+    {
+      "repository_path": "server/func_names.py",
+      "runtime_path": "/home/ubuntu/content-api/func_names.py",
+      "classification": "backend_runtime",
+      "source_blob": "7b18e76ea8ce3f9b4b1e13e719cf7e29eec2b59a",
+      "source_sha256": "bba0d3e834b8450412fbe4700ad01de654b8e6e06f8a283cb19f182ceb6a27d8",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "163e62e352d8dee1dc45fe2a39e7b341317a5e37",
+      "target_preimage_sha256": "fcb645dfb2bc8f358fe355b54e49128336c5c3686f16b86c8a68c4c0316c3d8e",
+      "expected_postimage_blob": "7b18e76ea8ce3f9b4b1e13e719cf7e29eec2b59a",
+      "expected_postimage_sha256": "bba0d3e834b8450412fbe4700ad01de654b8e6e06f8a283cb19f182ceb6a27d8"
+    },
+    {
+      "repository_path": "site/workbench/script-agent.js",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/script-agent.js",
+      "classification": "static_runtime",
+      "source_blob": "dc9e3d6fe4e30c3682b61461cff883001f78e723",
+      "source_sha256": "a50ef194cd8c5f951f12b9fa04e8f753e2fda0fafe7fd35d6e8c9d2002ee7e64",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": null,
+      "expected_postimage_blob": "dc9e3d6fe4e30c3682b61461cff883001f78e723",
+      "expected_postimage_sha256": "a50ef194cd8c5f951f12b9fa04e8f753e2fda0fafe7fd35d6e8c9d2002ee7e64"
+    },
+    {
+      "repository_path": "site/workbench/script.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/script.html",
+      "classification": "static_runtime",
+      "source_blob": "cc01341d5832d44ac58a3fca7be727eec5cbeeff",
+      "source_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "49631f3e7e1058d0153981e8c12dde917b0b9b2b",
+      "target_preimage_sha256": "1da2e4670557f18e3b2698c98a08b9d73b1578918b99852f1f2692cd1f2e66fb",
+      "expected_postimage_blob": "cc01341d5832d44ac58a3fca7be727eec5cbeeff",
+      "expected_postimage_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152"
+    }
+  ],
+  "unified_backup": {
+    "root": "/opt/huangque-deploy-backups",
+    "directory_pattern": "director-agent-v2-{merged_main_commit}-{utc_timestamp}",
+    "before_first_write": [
+      "capture live existence, SHA-256, mode, owner and group for every runtime_path",
+      "copy every existing target preserving mode, owner and group",
+      "record absent targets so rollback removes only files created by this release",
+      "capture the director_agent feature_flags row, including the no-row state",
+      "write the release commit, reviewed PR Head and seven-file inventory to audit.json"
+    ],
+    "abort_if_any_capture_or_backup_fails": true
+  },
+  "environment_contract": {
+    "custom_base_rule": "DIRECTOR_AGENT_API_BASE requires a non-empty DIRECTOR_AGENT_API_KEY; never inherit OPENAI_API_KEY",
+    "global_base_rule": "without DIRECTOR_AGENT_API_BASE use OPENAI_BASE and OPENAI_API_KEY together",
+    "feature_stays_disabled_if_provider_pair_is_incomplete": true,
+    "environment_file_changes_in_release": false
+  },
+  "release_sequence": [
+    "verify clean merged-main checkout and reviewed PR Head ancestry",
+    "capture all seven live preimages and fail closed on any state or digest mismatch",
+    "create and verify the unified backup before the first write",
+    "atomically install all seven source blobs and verify all seven postimage SHA-256 values",
+    "run Python compilation for the five backend files and node --check for script-agent.js using PATH node or the controlled hq-node fallback",
+    "restart huangque-content.service exactly once and require active state",
+    "require GET /api/gen/health HTTP 200 while director_agent_enabled remains false",
+    "set feature_flags.director_agent=true with actor release:pr276",
+    "require GET /api/gen/health HTTP 200 with director_agent_enabled true",
+    "run an authenticated zero-cost submission, same-idempotency replay and poll the original job to a valid Director Agent result",
+    "write final hashes, service state, feature state and acceptance results to audit.json"
+  ],
+  "feature_activation": {
+    "feature": "director_agent",
+    "database_path": "/home/ubuntu/content-api/feature_flags.db",
+    "actor": "release:pr276",
+    "default_enabled": false,
+    "after_restart_only": true,
+    "command": [
+      "/usr/bin/python3",
+      "-c",
+      "from content_domains import feature_flags; feature_flags.set_enabled('director_agent', True, 'release:pr276')"
+    ],
+    "cwd": "/home/ubuntu/content-api",
+    "success_condition": "health.director_agent_enabled is true; otherwise rollback",
+    "no_paid_generation_button_click": true
+  },
+  "post_deploy_checks": [
+    "all seven runtime paths exactly match expected_postimage_sha256",
+    "huangque-content.service is active after one restart",
+    "health reports director_agent_enabled=true only after activation",
+    "the served script.html and script-agent.js bytes exactly match their locked source SHA-256 values",
+    "same Idempotency-Key replays the original zero-cost job_id",
+    "the original job reaches done with a valid Director Agent result"
+  ],
+  "premerge_evidence": [
+    "registry startup succeeds when the optional Agent file is absent",
+    "custom Base without dedicated Key reports director_agent unavailable",
+    "browser refresh continues the persisted job_id without a second POST",
+    "concurrent submissions cannot exceed the configured minute or active-job limit",
+    "every file, compile, restart, health, activation, static, acceptance and final-audit failure restores all seven files and the feature row"
+  ],
+  "rollback": {
+    "trigger": "any install, compile, restart, health, activation or acceptance failure",
+    "sequence": [
+      "disable director_agent before changing files",
+      "restore every prior file from the unified backup and remove only targets recorded absent",
+      "restore the exact prior director_agent feature_flags row or delete it if the row was previously absent",
+      "verify all seven preimage states and SHA-256 values",
+      "restart huangque-content.service exactly once",
+      "retry within the bounded rollback policy until service active and GET /api/gen/health HTTP 200, otherwise fail closed",
+      "append rollback result and final hashes to audit.json"
+    ],
+    "production_untouched": true
+  }
+}
