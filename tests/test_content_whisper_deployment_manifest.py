@@ -300,6 +300,72 @@ class ContentWhisperDeploymentManifestTests(unittest.TestCase):
                 len(self.verify.verify_targets(synthetic, runtime_root, "postimage")), TARGET_COUNT
             )
 
+    def test_start_state_classifier_accepts_only_exact_declared_images(self):
+        synthetic = copy.deepcopy(self.manifest)
+        synthetic.setdefault("deployment_policy", {})[
+            "allow_exact_postimage_as_existing"
+        ] = True
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_root = pathlib.Path(directory)
+            for index, entry in enumerate(synthetic["files"]):
+                target = self.verify._safe_runtime_path(
+                    runtime_root, entry["runtime_path"]
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                preimage = ("preimage:" + entry["repository_path"]).encode("utf-8")
+                target.write_bytes(preimage)
+                entry["target_preimage_state"] = "file"
+                entry["target_preimage_sha256"] = hashlib.sha256(
+                    preimage
+                ).hexdigest()
+                entry["target_preimage_blob"] = self.verify._blob_id(preimage)
+                postimage = ("postimage:" + entry["repository_path"]).encode("utf-8")
+                entry["expected_postimage_sha256"] = hashlib.sha256(
+                    postimage
+                ).hexdigest()
+                entry["expected_postimage_blob"] = self.verify._blob_id(postimage)
+                if index == 0:
+                    target.write_bytes(postimage)
+                elif index == 1:
+                    entry["expected_postimage_sha256"] = entry[
+                        "target_preimage_sha256"
+                    ]
+                    entry["expected_postimage_blob"] = entry[
+                        "target_preimage_blob"
+                    ]
+
+            classified = self.verify.classify_start_states(
+                synthetic, runtime_root
+            )
+            self.assertEqual("already_installed", classified[0]["disposition"])
+            self.assertEqual("unchanged", classified[1]["disposition"])
+            self.assertTrue(all(
+                item["disposition"] == "needs_install"
+                for item in classified[2:]
+            ))
+
+            synthetic["deployment_policy"][
+                "allow_exact_postimage_as_existing"
+            ] = False
+            with self.assertRaisesRegex(RuntimeError, "not an allowed"):
+                self.verify.classify_start_states(synthetic, runtime_root)
+
+            synthetic["deployment_policy"][
+                "allow_exact_postimage_as_existing"
+            ] = True
+            first_target = self.verify._safe_runtime_path(
+                runtime_root, synthetic["files"][0]["runtime_path"]
+            )
+            first_target.write_bytes(b"unknown-third-state")
+            with self.assertRaisesRegex(RuntimeError, "not an allowed"):
+                self.verify.classify_start_states(synthetic, runtime_root)
+
+            synthetic["deployment_policy"][
+                "allow_exact_postimage_as_existing"
+            ] = "true"
+            with self.assertRaisesRegex(ValueError, "must be a boolean"):
+                self.verify.classify_start_states(synthetic, runtime_root)
+
     def test_verifier_rejects_unexpected_file_for_absent_preimage(self):
         synthetic = copy.deepcopy(self.manifest)
         absent_entry = synthetic["files"][-1]

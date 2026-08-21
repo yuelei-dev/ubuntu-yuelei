@@ -124,6 +124,13 @@ def load_manifest(path):
         raise ValueError("duplicate repository_path in deployment manifest")
     if len(runtime_paths) != len(set(runtime_paths)):
         raise ValueError("duplicate runtime_path in deployment manifest")
+    allow_existing_postimage = manifest.get("deployment_policy", {}).get(
+        "allow_exact_postimage_as_existing", False,
+    )
+    if not isinstance(allow_existing_postimage, bool):
+        raise ValueError(
+            "allow_exact_postimage_as_existing must be a boolean"
+        )
     return manifest
 
 
@@ -153,6 +160,63 @@ def _actual_target_digest(runtime_root, target):
     return "file", _sha256(data), _blob_id(data)
 
 
+def _target_matches(entry, state, digest, blob, phase):
+    if phase == "preimage":
+        expected_state = entry["target_preimage_state"]
+        expected_digest = entry["target_preimage_sha256"]
+        expected_blob = entry.get("target_preimage_blob")
+    elif phase == "postimage":
+        expected_state = "file"
+        expected_digest = entry["expected_postimage_sha256"]
+        expected_blob = entry["expected_postimage_blob"]
+    else:
+        raise ValueError("phase must be preimage or postimage")
+    if state != expected_state or digest != expected_digest:
+        return False
+    return state != "file" or blob == expected_blob
+
+
+def classify_start_states(manifest, runtime_root):
+    """Classify exact deployment start states without allowing unknown bytes."""
+    allow_existing_postimage = manifest.get("deployment_policy", {}).get(
+        "allow_exact_postimage_as_existing", False,
+    )
+    if not isinstance(allow_existing_postimage, bool):
+        raise ValueError(
+            "allow_exact_postimage_as_existing must be a boolean"
+        )
+    classified = []
+    for entry in manifest["files"]:
+        target = _safe_runtime_path(runtime_root, entry["runtime_path"])
+        state, digest, blob = _actual_target_digest(runtime_root, target)
+        preimage = _target_matches(
+            entry, state, digest, blob, "preimage",
+        )
+        postimage = _target_matches(
+            entry, state, digest, blob, "postimage",
+        )
+        if preimage and postimage:
+            disposition = "unchanged"
+        elif preimage:
+            disposition = "needs_install"
+        elif allow_existing_postimage and postimage:
+            disposition = "already_installed"
+        else:
+            raise RuntimeError(
+                "target is not an allowed preimage or postimage: %s" %
+                entry["runtime_path"]
+            )
+        classified.append({
+            "repository_path": entry["repository_path"],
+            "runtime_path": entry["runtime_path"],
+            "state": state,
+            "sha256": digest,
+            "blob": blob,
+            "disposition": disposition,
+        })
+    return classified
+
+
 def verify_targets(manifest, runtime_root, phase):
     if phase not in {"preimage", "postimage"}:
         raise ValueError("phase must be preimage or postimage")
@@ -160,18 +224,8 @@ def verify_targets(manifest, runtime_root, phase):
     for entry in manifest["files"]:
         target = _safe_runtime_path(runtime_root, entry["runtime_path"])
         state, digest, blob = _actual_target_digest(runtime_root, target)
-        if phase == "preimage":
-            expected_state = entry["target_preimage_state"]
-            expected_digest = entry["target_preimage_sha256"]
-            expected_blob = entry.get("target_preimage_blob")
-        else:
-            expected_state = "file"
-            expected_digest = entry["expected_postimage_sha256"]
-            expected_blob = entry["expected_postimage_blob"]
-        if state != expected_state or digest != expected_digest:
+        if not _target_matches(entry, state, digest, blob, phase):
             raise RuntimeError("%s mismatch: %s" % (phase, entry["runtime_path"]))
-        if state == "file" and blob != expected_blob:
-            raise RuntimeError("%s Git blob mismatch: %s" % (phase, entry["runtime_path"]))
         verified.append(str(target))
     return verified
 
