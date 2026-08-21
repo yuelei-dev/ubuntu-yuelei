@@ -152,7 +152,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(observation["repository_git_metadata"], "absent")
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "f6009eba98f8e199cbca0710c16157c1952a6982",
+            "bec6f49c05107b46df358d99207e5f89bea1804d",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
@@ -222,6 +222,10 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
 
     def test_release_tools_and_contracts_have_historical_content_locks(self):
         executor = self.manifest["executor"]
+        self.assertEqual(
+            executor["repository_path"],
+            "scripts/deploy_seedream_v3_locked_manifest.py",
+        )
         self.assertEqual(executor["confirm_target"], "test@8.148.158.106")
         self.assertFalse(executor["remote_connection_capability"])
         for tool in (executor, executor["verifier"], executor["requirements_verifier"]):
@@ -249,6 +253,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_oneclick", rendered)
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
+        self.assertIn("tests.test_seedream_v3_release_executor", rendered)
         self.assertNotIn("/usr/bin/node", rendered)
         self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertIn("tests.test_cosyvoice", rendered)

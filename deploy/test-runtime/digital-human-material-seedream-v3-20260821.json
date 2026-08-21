@@ -17,7 +17,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "f6009eba98f8e199cbca0710c16157c1952a6982",
+    "base_main_commit": "bec6f49c05107b46df358d99207e5f89bea1804d",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -45,9 +45,9 @@
     "production_server_write_allowed": false
   },
   "executor": {
-    "repository_path": "scripts/deploy_content_whisper_runtime.py",
-    "source_blob": "c9dd02ba92e03a476751ae15e03f4e1c5f68886a",
-    "source_sha256": "fbc4a9200d4b769aee37cb8de18ea614521e92baa19744d5e2a954021085c36f",
+    "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
+    "source_blob": "06edfec0550c7ff54faac590fbe40e37a76426ac",
+    "source_sha256": "17f4324a5f54217456a807ad667199f67610ca01dff29ce98c2ed41a08a5ac84",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
@@ -225,13 +225,18 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "662da9e97cb97dc653297adebfea3cd115a7cf60",
-      "source_sha256": "2e349fd1805692e1843386d3481dc9933aa402c1d56ea2f09bcb86e2409b8bb3"
+      "source_blob": "bf00ba2040bafc8e0119854dfaf5ff26010ab876",
+      "source_sha256": "e897c81b6c95713dcd2804a005e625cd44286bbd5ad49f48cb8485c7b6e2306c"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
       "source_blob": "66385a804210c3c7df42ffcfe76594c7c94cb536",
       "source_sha256": "93de1c0feb21e4d934dd244897f1b91aec9a0f414d5b3dd5c7de62f098561cc5"
+    },
+    {
+      "repository_path": "tests/test_seedream_v3_release_executor.py",
+      "source_blob": "4e26d720fbed605261c83e33fffbe4160f23ca85",
+      "source_sha256": "92a5fbff7604f6d2ea70e76568080619a42931acc9d6439d273d7f9435fd3fa4"
     }
   ],
   "release_commands": {
@@ -248,7 +253,8 @@
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_cosyvoice", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_heygen_mcp_oauth", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
       {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
-      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900}
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_seedream_v3_release_executor", "-v"], "cwd": "{source:.}", "timeout_seconds": 300}
     ],
     "daemon_reload": [{"argv": ["/usr/bin/systemctl", "daemon-reload"], "timeout_seconds": 30}],
     "restart": [{"argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"], "timeout_seconds": 180}],
