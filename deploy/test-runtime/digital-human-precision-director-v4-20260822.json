@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "0000000000000000000000000000000000000000",
+    "code_source_commit": "1be77ff7ce6927c78aafa6791cd382ef9f10ba6b",
     "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head"
   },
   "expected_preimage": {
