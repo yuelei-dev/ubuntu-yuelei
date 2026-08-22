@@ -2082,6 +2082,129 @@ def update_video_asset_phase(job_id, phase, strict=False, **fields):
     return asset_updated
 
 
+PRECISION_RECOVERY_KEY = "_precision_lipsync_state"
+
+
+def get_precision_lipsync_recovery_state(job_id):
+    """Load the durable Precision paid-submission anchor from the job row."""
+    if not job_id:
+        return {}
+    with closing(jdb()) as connection:
+        row = connection.execute(
+            "SELECT payload FROM jobs WHERE id=?", (int(job_id),),
+        ).fetchone()
+    if not row:
+        raise RuntimeError("Precision 恢复任务不存在")
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except Exception as exc:
+        raise RuntimeError("Precision 恢复状态无法读取") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("Precision 恢复状态不是对象")
+    state = payload.get(PRECISION_RECOVERY_KEY)
+    if state is None:
+        return {}
+    if not isinstance(state, dict):
+        raise RuntimeError("Precision 恢复锚点损坏")
+    return dict(state)
+
+
+def _persist_precision_lipsync_state(job_id, phase, **fields):
+    """Atomically persist one Precision recovery transition in jobs.payload."""
+    if not job_id:
+        raise ValueError("Precision 恢复状态缺少 job_id")
+    now = int(time.time())
+    with closing(jdb()) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT payload,status FROM jobs WHERE id=?", (int(job_id),),
+        ).fetchone()
+        if not row or row["status"] != "running":
+            raise RuntimeError("Precision 任务已不在运行状态")
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception as exc:
+            raise RuntimeError("Precision 任务 payload 无法读取") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Precision 任务 payload 不是对象")
+        existing = payload.get(PRECISION_RECOVERY_KEY) or {}
+        if not isinstance(existing, dict):
+            raise RuntimeError("Precision 恢复锚点损坏")
+        state = dict(existing)
+        provider_id = str(fields.get("provider_video_id") or "").strip()
+        locked_id = str(state.get("provider_video_id") or "").strip()
+        if provider_id and locked_id and provider_id != locked_id:
+            raise RuntimeError("Precision 上游任务编号冲突，已停止自动恢复")
+        state["phase"] = str(phase)
+        for key, value in fields.items():
+            if value is None:
+                state.pop(key, None)
+            else:
+                state[key] = value
+        payload[PRECISION_RECOVERY_KEY] = state
+        changed = connection.execute(
+            "UPDATE jobs SET payload=?,updated_at=? WHERE id=? AND status='running'",
+            (json.dumps(payload, ensure_ascii=False), now, int(job_id)),
+        ).rowcount
+        if changed != 1:
+            raise RuntimeError("Precision 恢复状态未能持久化")
+        connection.commit()
+    return state
+
+
+def get_resumable_precision_lipsync(job_id):
+    state = get_precision_lipsync_recovery_state(job_id)
+    if not state:
+        return None
+    phase = str(state.get("phase") or "")
+    provider_id = str(state.get("provider_video_id") or "").strip()
+    if not provider_id and phase in {
+            "precision_submitting", "precision_recovery_required"}:
+        return {
+            "request_id": None,
+            "submission_unknown": True,
+            "phase": phase,
+            "provider": "HeyGen Precision",
+        }
+    if provider_id and phase.startswith("precision_"):
+        return dict(state, request_id=provider_id,
+                    provider="HeyGen Precision")
+    return None
+
+
+def recover_precision_lipsync_paid_job(job_id, error, requeue=None):
+    """Hold unknown POST outcomes and resume known IDs without another create."""
+    recovery = get_resumable_precision_lipsync(job_id)
+    if not recovery:
+        return False
+    if recovery.get("submission_unknown"):
+        _persist_precision_lipsync_state(
+            job_id, "precision_recovery_required", error=str(error)[:300],
+        )
+        update_video_asset_phase(
+            job_id, "precision_recovery_required", error=str(error)[:300],
+        )
+        return True
+    if recovery.get("request_id"):
+        if requeue:
+            _persist_precision_lipsync_state(
+                job_id, "precision_retrying", error=str(error)[:300],
+            )
+            update_video_asset_phase(
+                job_id, "precision_retrying", error=str(error)[:300],
+            )
+            requeue(job_id)
+            return True
+        _persist_precision_lipsync_state(
+            job_id, "precision_recovery_required", error=str(error)[:300],
+        )
+        update_video_asset_phase(
+            job_id, "precision_recovery_required", error=str(error)[:300],
+        )
+        return True
+    return False
+
+
 def _persist_seedance_upscale_prediction(job_id, prediction_id):
     """把第二次付费提交的 ID 写回原 job payload；不改公共数据库结构。"""
     prediction_id = str(prediction_id or "").strip()
@@ -5068,47 +5191,90 @@ def generate_heygen_video_recoverable(
 
 
 def generate_heygen_precision_lipsync(source_video_file, audio_file,
-                                       dynamic_duration=True):
-    """Replace the source speech through HeyGen v3 Precision lipsync."""
-    source_fp = _resolve_out_file(source_video_file)
-    audio_fp = _resolve_out_file(audio_file)
-    if not source_fp or not audio_fp:
-        raise ValueError("Precision 口型素材文件不存在")
-    if source_fp.suffix.lower() != ".mp4":
-        raise ValueError("Precision 真人源视频仅支持 MP4")
-    audio_fp = _ensure_heygen_audio_mp3(audio_fp)
-    route = _heygen_require_paid_route()
-    if route == "mcp_oauth":
-        direct = True
-        transport = "mcp"
-        contract = _heygen_mcp_asset_upload_contract()
-        video_asset_id = _heygen_mcp_begin_asset(
-            source_fp, "video/mp4", contract,
-        )
-        audio_asset_id = _heygen_mcp_begin_asset(
-            audio_fp, "audio/mpeg", contract,
-        )
-        _heygen_mcp_wait_assets([video_asset_id, audio_asset_id])
+                                       dynamic_duration=True, lifecycle=None):
+    """Replace speech with a single-create, durably resumable Precision job."""
+    state = dict((lifecycle or {}).get("state") or {})
+    lipsync_id = str(state.get("provider_video_id") or "").strip()
+    route = str(state.get("provider") or "").strip()
+    transport = str(state.get("provider_transport") or "").strip()
+    video_asset_id = str(state.get("reference_asset_id") or "").strip()
+    audio_asset_id = str(state.get("audio_asset_id") or "").strip()
+    creating = not lipsync_id
+    if creating:
+        source_fp = _resolve_out_file(source_video_file)
+        audio_fp = _resolve_out_file(audio_file)
+        if not source_fp or not audio_fp:
+            raise ValueError("Precision 口型素材文件不存在")
+        if source_fp.suffix.lower() != ".mp4":
+            raise ValueError("Precision 真人源视频仅支持 MP4")
+        audio_fp = _ensure_heygen_audio_mp3(audio_fp)
+        route = _heygen_require_paid_route()
+        if route == "mcp_oauth":
+            direct = True
+            transport = "mcp"
+            contract = _heygen_mcp_asset_upload_contract()
+            video_asset_id = _heygen_mcp_begin_asset(
+                source_fp, "video/mp4", contract,
+            )
+            audio_asset_id = _heygen_mcp_begin_asset(
+                audio_fp, "audio/mpeg", contract,
+            )
+            _heygen_mcp_wait_assets([video_asset_id, audio_asset_id])
+        else:
+            direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
+            transport = "direct" if direct else "relay"
+            video_asset_id = _heygen_retry_net(
+                lambda: _heygen_upload_asset(source_fp, direct=direct),
+                "Precision 传真人视频",
+            )
+            audio_asset_id = _heygen_retry_net(
+                lambda: _heygen_upload_asset(audio_fp, direct=direct),
+                "Precision 传配音",
+            )
     else:
-        direct = bool(_HEYGEN_DIRECT and HEYGEN_API_KEY)
-        transport = "direct" if direct else "relay"
-        video_asset_id = _heygen_retry_net(
-            lambda: _heygen_upload_asset(source_fp, direct=direct),
-            "Precision 传真人视频",
-        )
-        audio_asset_id = _heygen_retry_net(
-            lambda: _heygen_upload_asset(audio_fp, direct=direct),
-            "Precision 传配音",
-        )
+        if route not in {"mcp_oauth", "api_wallet"}:
+            raise RuntimeError("Precision 恢复任务缺少供应商通道")
+        if route == "mcp_oauth":
+            transport = "mcp"
+        elif transport not in {"direct", "relay"}:
+            raise RuntimeError("Precision 恢复任务缺少供应商传输通道")
+        direct = transport in {"direct", "mcp"}
 
-    with heygen_slot("Precision 口型"):
-        lipsync_id = _heygen_retry_429(
-            lambda: _heygen_create_lipsync(
-                video_asset_id, audio_asset_id, direct=direct, route=route,
-                dynamic_duration=dynamic_duration,
-            ),
-            "Precision 口型提交",
-        )
+    with heygen_slot("Precision 口型恢复" if not creating else "Precision 口型"):
+        if creating:
+            _lifecycle_notify(lifecycle, "on_submitting", {
+                "provider": route,
+                "provider_transport": transport,
+                "reference_asset_id": video_asset_id,
+                "audio_asset_id": audio_asset_id,
+            })
+            try:
+                lipsync_id = _heygen_retry_429(
+                    lambda: _heygen_create_lipsync(
+                        video_asset_id, audio_asset_id, direct=direct, route=route,
+                        dynamic_duration=dynamic_duration,
+                    ),
+                    "Precision 口型提交",
+                )
+            except Exception as exc:
+                if _definitive_heygen_create_rejection(exc):
+                    _lifecycle_notify(lifecycle, "on_rejected", {
+                        "provider": route,
+                    })
+                raise
+            try:
+                _lifecycle_notify(lifecycle, "on_submitted", {
+                    "provider": route,
+                    "provider_transport": transport,
+                    "provider_video_id": lipsync_id,
+                    "reference_asset_id": video_asset_id,
+                    "audio_asset_id": audio_asset_id,
+                })
+            except BaseException as exc:
+                raise HeyGenBilledError(
+                    "Precision 已受理但恢复编号落盘失败(lipsync_id=%s): %s"
+                    % (lipsync_id, str(exc)[:160])
+                ) from exc
         try:
             info = _heygen_poll_lipsync(
                 lipsync_id, direct=direct, deadline_s=VIDEO_GEN_DEADLINE,
@@ -5142,6 +5308,7 @@ def generate_heygen_precision_lipsync(source_video_file, audio_file,
     if cover:
         result["image_file"] = cover
         result["image_url"] = public_url(cover, "image/jpeg")
+    _lifecycle_notify(lifecycle, "on_completed", result)
     return result
 
 # ============ F4 · 口播视频自动字幕（whisper 时间轴 + libass 烧录） ============
@@ -5560,13 +5727,31 @@ def burn_subtitle(video_file, known_text=None, style_key="white", job_id=None, p
 def _gen_precision_lipsync(payload):
     if not HEYGEN_API_KEY and not _heygen_mcp_enabled():
         raise ValueError("视频生成服务未配置")
-    source_video_file = str(payload.get("source_video_file") or "").strip()
+    job_id = payload.get("_job_id")
+    username = str(payload.get("_username") or "").strip()
+    recovery_state = (
+        get_precision_lipsync_recovery_state(job_id) if job_id else {}
+    )
+    if (recovery_state
+            and str(recovery_state.get("phase") or "") in {
+                "precision_submitting", "precision_recovery_required"
+            }
+            and not recovery_state.get("provider_video_id")):
+        raise HeyGenBilledError(
+            "Precision 提交结果待人工核对，禁止自动重发"
+        )
+    source_video_file = str(
+        recovery_state.get("source_video_file")
+        or payload.get("source_video_file") or ""
+    ).strip()
     if not source_video_file:
         raise ValueError("请先上传或选择真人口播视频")
-    if payload.get("audio_file"):
+    if recovery_state.get("audio_file"):
+        audio_file = str(recovery_state["audio_file"])
+    elif payload.get("audio_file"):
         audio_file = _normalize_audio_file_ref(
             payload.get("audio_file"),
-            username=(payload.get("_username") or "").strip() or None,
+            username=username or None,
         )
     else:
         audio_file = _save_data_file(
@@ -5574,9 +5759,96 @@ def _gen_precision_lipsync(payload):
         )
     if not audio_file:
         raise ValueError("请先生成或选择完整配音")
-    preflight_heygen_audio_file(audio_file)
+    if not recovery_state.get("provider_video_id"):
+        preflight_heygen_audio_file(audio_file)
+    lifecycle = None
+    if job_id:
+        initial_phase = str(
+            recovery_state.get("phase") or "precision_preparing"
+        )
+        record_video_asset(job_id, username, {
+            "mode": "lipsync", "status": "running", "phase": initial_phase,
+            "reference_video_file": source_video_file,
+            "audio_file": audio_file,
+            "provider_video_id": recovery_state.get("provider_video_id"),
+            "reference_asset_id": recovery_state.get("reference_asset_id"),
+            "audio_asset_id": recovery_state.get("audio_asset_id"),
+            "model": "HeyGen Lipsync Precision",
+            "resolution": payload.get("resolution") or "1080p",
+            "ratio": payload.get("ratio") or "9:16",
+        })
+
+        def on_submitting(data):
+            state = _persist_precision_lipsync_state(
+                job_id, "precision_submitting",
+                source_video_file=source_video_file,
+                audio_file=audio_file,
+                provider=data.get("provider"),
+                provider_transport=data.get("provider_transport"),
+                reference_asset_id=data.get("reference_asset_id"),
+                audio_asset_id=data.get("audio_asset_id"),
+            )
+            update_video_asset_phase(
+                job_id, "precision_submitting", strict=True,
+                reference_video_file=source_video_file,
+                audio_file=audio_file,
+                reference_asset_id=state.get("reference_asset_id"),
+                audio_asset_id=state.get("audio_asset_id"),
+            )
+
+        def on_submitted(data):
+            state = _persist_precision_lipsync_state(
+                job_id, "precision_submitted",
+                provider=data.get("provider"),
+                provider_transport=data.get("provider_transport"),
+                provider_video_id=data.get("provider_video_id"),
+                reference_asset_id=data.get("reference_asset_id"),
+                audio_asset_id=data.get("audio_asset_id"),
+                error=None,
+            )
+            update_video_asset_phase(
+                job_id, "precision_submitted", strict=True,
+                provider_video_id=state.get("provider_video_id"),
+                reference_asset_id=state.get("reference_asset_id"),
+                audio_asset_id=state.get("audio_asset_id"), error=None,
+            )
+
+        def on_rejected(_data):
+            _persist_precision_lipsync_state(
+                job_id, "precision_prepared",
+                provider=None, provider_transport=None,
+                provider_video_id=None, reference_asset_id=None,
+                audio_asset_id=None, error=None,
+            )
+            update_video_asset_phase(
+                job_id, "precision_prepared", strict=True, error=None,
+            )
+
+        def on_completed(data):
+            state = _persist_precision_lipsync_state(
+                job_id, "precision_completed",
+                provider_video_id=data.get("video_id"),
+                video_file=data.get("video_file"),
+                source_video_url=data.get("source_video_url"),
+                error=None,
+            )
+            update_video_asset_phase(
+                job_id, "precision_completed", strict=True,
+                provider_video_id=state.get("provider_video_id"),
+                video_file=state.get("video_file"),
+                source_video_url=state.get("source_video_url"), error=None,
+            )
+
+        lifecycle = {
+            "state": recovery_state,
+            "on_submitting": on_submitting,
+            "on_submitted": on_submitted,
+            "on_rejected": on_rejected,
+            "on_completed": on_completed,
+        }
     result = generate_heygen_precision_lipsync(
         source_video_file, audio_file, dynamic_duration=True,
+        lifecycle=lifecycle,
     )
     return {
         "type": "video", "status": "done", "mode": "lipsync",

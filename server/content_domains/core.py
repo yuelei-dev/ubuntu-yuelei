@@ -1581,6 +1581,19 @@ def run_job(job_id):
                     % (job_id, str(recovery_error)[:160]), flush=True,
                 )
                 return
+        if kind == "video" and mode == "lipsync":
+            try:
+                video_domain = _domains()[2]
+                if (not isinstance(e, video_domain.HeyGenProviderFailed)
+                        and video_domain.recover_precision_lipsync_paid_job(
+                            job_id, e, _requeue_running_job)):
+                    return
+            except Exception as recovery_error:
+                print(
+                    "[precision-recovery] 恢复信息暂不可读，保留 job#%s: %s"
+                    % (job_id, str(recovery_error)[:160]), flush=True,
+                )
+                return
         if kind in {"sora_video", "xiaole_video"}:
             try:
                 if _domains()[2].recover_paid_video_error(
@@ -1724,6 +1737,17 @@ def reaper():
                     stuck_payload = json.loads(r["payload"] or "{}")
                 except Exception:
                     stuck_payload = {}
+                if (r["kind"] == "video"
+                        and str(stuck_payload.get("mode") or "").lower()
+                        == "lipsync"):
+                    try:
+                        video_domain = _domains()[2]
+                        if video_domain.recover_precision_lipsync_paid_job(
+                                r["id"], "本地 worker 中断，正在恢复查询",
+                                _requeue_running_job):
+                            continue
+                    except Exception:
+                        continue
                 if r["kind"] in {"sora_video", "xiaole_video"}:
                     try:
                         video_domain = _domains()[2]
