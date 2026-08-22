@@ -103,7 +103,7 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             if item["target_preimage_state"] == "file":
                 data = subprocess.run(
-                    ["git", "show", "origin/main:" + item["repository_path"]],
+                    ["git", "show", self.manifest["expected_preimage"]["development_base_commit"] + ":" + item["repository_path"]],
                     cwd=ROOT, check=True, stdout=subprocess.PIPE,
                 ).stdout
                 self.assertEqual(item["preimage_blob"], git_blob(data))
@@ -115,7 +115,7 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
         )
         nginx_target.parent.mkdir(parents=True, exist_ok=True)
         base_source = subprocess.run(
-            ["git", "show", "origin/main:" + nginx["source_repository_path"]],
+            ["git", "show", self.manifest["expected_preimage"]["development_base_commit"] + ":" + nginx["source_repository_path"]],
             cwd=ROOT, check=True, stdout=subprocess.PIPE,
         ).stdout.decode("utf-8")
         nginx_preimage = self.renderer.render_config(base_source).encode("utf-8")
