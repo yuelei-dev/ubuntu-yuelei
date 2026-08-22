@@ -55,7 +55,7 @@
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
         "expected_status": 200,
-        "expected_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152"
+        "expected_sha256": "22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e"
       },
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
@@ -102,13 +102,13 @@
       "repository_path": "server/content_domains/core.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/core.py",
       "classification": "backend_runtime",
-      "source_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
-      "source_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
+      "source_blob": "9d7f7a853b33cfda2038b64155ce13c83eac51b7",
+      "source_sha256": "2676f87b8fbbeea9750a1c35fe0cbc68fdc72db511b2cd98278da42e5f8ad3d1",
       "target_preimage_state": "file",
       "target_preimage_blob": "f09d95766e278c59e47c4b9fa8b4eebad0aadb4f",
       "target_preimage_sha256": "eb0a3467ee4c4c4a91325399a7d7b4619f7a5c111f5e2e971268eac6914a2fe5",
-      "expected_postimage_blob": "db05b6d0c122186798d8ef80bff77648eeb12711",
-      "expected_postimage_sha256": "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425"
+      "expected_postimage_blob": "9d7f7a853b33cfda2038b64155ce13c83eac51b7",
+      "expected_postimage_sha256": "2676f87b8fbbeea9750a1c35fe0cbc68fdc72db511b2cd98278da42e5f8ad3d1"
     },
     {
       "repository_path": "server/content_domains/director_agent.py",
@@ -174,13 +174,13 @@
       "repository_path": "site/workbench/script.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/script.html",
       "classification": "static_runtime",
-      "source_blob": "cc01341d5832d44ac58a3fca7be727eec5cbeeff",
-      "source_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152",
+      "source_blob": "ea4bad20da05b624f2c77b7f6283734997b19553",
+      "source_sha256": "22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e",
       "target_preimage_state": "file",
       "target_preimage_blob": "49631f3e7e1058d0153981e8c12dde917b0b9b2b",
       "target_preimage_sha256": "1da2e4670557f18e3b2698c98a08b9d73b1578918b99852f1f2692cd1f2e66fb",
-      "expected_postimage_blob": "cc01341d5832d44ac58a3fca7be727eec5cbeeff",
-      "expected_postimage_sha256": "cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152"
+      "expected_postimage_blob": "ea4bad20da05b624f2c77b7f6283734997b19553",
+      "expected_postimage_sha256": "22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e"
     }
   ],
   "unified_backup": {
