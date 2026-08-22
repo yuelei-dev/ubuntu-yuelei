@@ -33,8 +33,16 @@ def git_blob(data):
 
 
 class FilesystemHooks:
-    def __init__(self, executor, fail_probe=False):
+    def __init__(
+        self, executor, fail_probe=False, forward_health_failures=0,
+        fail_static=False, inactive_forward=False,
+    ):
         self.fail_probe = fail_probe
+        self.forward_health_failures = forward_health_failures
+        self.fail_static = fail_static
+        self.inactive_forward = inactive_forward
+        self.forward_health_attempts = 0
+        self.restart_count = 0
         self.calls = []
         self.links = {}
 
@@ -61,19 +69,39 @@ class FilesystemHooks:
 
     def service_active(self, service):
         self.calls.append(("active", service))
+        if self.inactive_forward and self.restart_count == 1:
+            return False
         return True
 
     def restart(self, service):
+        self.restart_count += 1
         self.calls.append(("restart", service))
 
     def probe(self, url, method, expected_status):
         self.calls.append(("probe", url, method, expected_status))
-        if self.fail_probe:
-            self.fail_probe = False
-            raise RuntimeError("injected forward health failure")
+        if expected_status == 200 and self.restart_count == 1:
+            self.forward_health_attempts += 1
+            if (self.fail_probe or self.forward_health_attempts
+                    <= self.forward_health_failures):
+                raise RuntimeError("HTTP 502")
 
     def probe_static(self, url, expected_status, expected_sha256):
         self.calls.append(("static", url, expected_status, expected_sha256))
+        if self.fail_static:
+            raise RuntimeError("static resource hash mismatch")
+
+
+class SimulatedClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
@@ -160,6 +188,41 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
             reviewed_head="r" * 40, merged_main="m" * 40,
         )
 
+    def _assert_all_22_preimages(self, target, hooks):
+        checked = 0
+        for item in self.manifest["files"]:
+            runtime = self._runtime(target, item["runtime_path"])
+            if item["target_preimage_state"] == "file":
+                self.assertTrue(runtime.is_file(), item["runtime_path"])
+                self.assertFalse(runtime.is_symlink(), item["runtime_path"])
+                self.assertEqual(
+                    item["preimage_sha256"], sha256(runtime.read_bytes()),
+                    item["runtime_path"],
+                )
+            else:
+                self.assertFalse(runtime.exists(), item["runtime_path"])
+                self.assertFalse(runtime.is_symlink(), item["runtime_path"])
+            checked += 1
+        directory = self.manifest["directories"][0]
+        runtime_directory = self._runtime(target, directory["runtime_path"])
+        self.assertFalse(runtime_directory.exists())
+        self.assertFalse(runtime_directory.is_symlink())
+        checked += 1
+        nginx = self.manifest["nginx_contract"]
+        nginx_runtime = self._runtime(target, nginx["runtime_path"])
+        self.assertEqual(nginx["preimage_sha256"], sha256(nginx_runtime.read_bytes()))
+        checked += 1
+        enabled = self._runtime(target, nginx["enabled_runtime_path"])
+        self.assertEqual(
+            {
+                "state": nginx["enabled_preimage_state"],
+                "target": nginx["enabled_preimage_target"],
+            },
+            hooks.link_state(enabled),
+        )
+        checked += 1
+        self.assertEqual(22, checked)
+
     def test_historical_v4_manifest_and_executor_are_exact_locked_blobs(self):
         for relative, (blob_id, digest) in HISTORICAL_V4.items():
             data = (ROOT / relative).read_bytes()
@@ -174,6 +237,10 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
         self.assertEqual("digital_human_precision_director_v5", release["contract"])
         self.assertEqual(release["git_blob"], git_blob(data))
         self.assertEqual(release["sha256"], sha256(data))
+        self.assertEqual(
+            {"timeout_seconds": 30, "interval_seconds": 1},
+            release["forward_health_policy"],
+        )
         directory = loaded["directories"][0]
         self.assertEqual("absent", directory["preimage_state"])
         self.assertEqual("directory", directory["postimage_state"])
@@ -183,6 +250,39 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
             self.executor._load_manifest(
                 ROOT / "deploy/test-runtime/digital-human-precision-director-v4-20260822.json"
             )
+
+    def test_forward_health_policy_is_rejected_before_runtime_work(self):
+        cases = [
+            ("missing", None, "policy is missing"),
+            (
+                "zero interval",
+                {"timeout_seconds": 30, "interval_seconds": 0},
+                "interval is invalid",
+            ),
+            (
+                "interval exceeds timeout",
+                {"timeout_seconds": 30, "interval_seconds": 31},
+                "interval is invalid",
+            ),
+            (
+                "timeout exceeds cap",
+                {"timeout_seconds": 121, "interval_seconds": 1},
+                "timeout is invalid",
+            ),
+        ]
+        for label, policy, message in cases:
+            with self.subTest(label=label):
+                manifest = json.loads(json.dumps(self.manifest))
+                if policy is None:
+                    manifest["release_executor"].pop("forward_health_policy", None)
+                else:
+                    manifest["release_executor"]["forward_health_policy"] = policy
+                with mock.patch.object(
+                    pathlib.Path, "read_text", return_value=json.dumps(manifest),
+                ):
+                    with self.assertRaisesRegex(
+                            self.executor.ReleaseError, message):
+                        self.executor._load_manifest(MANIFEST)
 
     def test_v5_source_binding_requires_exact_reviewed_parent(self):
         manifest = json.loads(json.dumps(self.manifest))
@@ -247,6 +347,101 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
             )
             self.assertEqual("deployed", audit["status"])
             self.assertEqual("directory", audit["directory_postimages"][0]["state"])
+
+    def test_forward_health_retries_502_502_200_before_existing_gates(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir:
+            target, _ = self._target_tree(target_dir)
+            hooks = FilesystemHooks(self.executor, forward_health_failures=2)
+            clock = SimulatedClock()
+            with mock.patch.object(
+                    self.executor.time, "monotonic", clock.monotonic), \
+                 mock.patch.object(self.executor.time, "sleep", clock.sleep):
+                result = self._execute(target, backup_dir, hooks=hooks)
+            self.assertEqual("deployed", result["status"])
+            self.assertEqual(3, hooks.forward_health_attempts)
+            self.assertEqual([1.0, 1.0], clock.sleeps)
+            health_call = (
+                "probe", self.manifest["release_executor"]["health_url"],
+                "GET", 200,
+            )
+            health_indices = [
+                index for index, call in enumerate(hooks.calls)
+                if call == health_call
+            ]
+            static_indices = [
+                index for index, call in enumerate(hooks.calls)
+                if call[0] == "static"
+            ]
+            unauthenticated = self.manifest["release_executor"][
+                "unauthenticated_probes"
+            ][0]
+            unauthenticated_call = (
+                "probe", unauthenticated["url"], unauthenticated["method"],
+                unauthenticated["expected_status"],
+            )
+            self.assertEqual(3, len(static_indices))
+            self.assertIn(("nginx-test",), hooks.calls)
+            self.assertIn(("nginx-reload",), hooks.calls)
+            self.assertIn(unauthenticated_call, hooks.calls)
+            self.assertLess(health_indices[-1], static_indices[0])
+            self.assertLess(static_indices[-1], hooks.calls.index(unauthenticated_call))
+
+    def test_forward_health_timeout_rolls_back_all_22_targets(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir:
+            target, _ = self._target_tree(target_dir)
+            hooks = FilesystemHooks(self.executor, fail_probe=True)
+            clock = SimulatedClock()
+            with mock.patch.object(
+                    self.executor.time, "monotonic", clock.monotonic), \
+                 mock.patch.object(self.executor.time, "sleep", clock.sleep):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError,
+                        "forward health did not become ready"):
+                    self._execute(target, backup_dir, hooks=hooks)
+            self.assertGreaterEqual(hooks.forward_health_attempts, 30)
+            self.assertEqual(30.0, sum(clock.sleeps))
+            self._assert_all_22_preimages(target, hooks)
+            audit = json.loads(next(
+                pathlib.Path(backup_dir).glob("*/audit.json")
+            ).read_text(encoding="utf-8"))
+            self.assertEqual("rolled_back", audit["status"])
+            self.assertEqual([], audit["rollback_errors"])
+
+    def test_forward_service_becoming_inactive_times_out_and_rolls_back(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir:
+            target, _ = self._target_tree(target_dir)
+            hooks = FilesystemHooks(self.executor, inactive_forward=True)
+            clock = SimulatedClock()
+            with mock.patch.object(
+                    self.executor.time, "monotonic", clock.monotonic), \
+                 mock.patch.object(self.executor.time, "sleep", clock.sleep):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError,
+                        "forward health did not become ready") as caught:
+                    self._execute(target, backup_dir, hooks=hooks)
+            self.assertIsInstance(caught.exception.__cause__, self.executor.ReleaseError)
+            self.assertIn("forward service is not active", str(caught.exception.__cause__))
+            self.assertEqual(0, hooks.forward_health_attempts)
+            self._assert_all_22_preimages(target, hooks)
+
+    def test_static_hash_failure_after_health_rolls_back_all_22_targets(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir:
+            target, _ = self._target_tree(target_dir)
+            hooks = FilesystemHooks(self.executor, fail_static=True)
+            with self.assertRaisesRegex(RuntimeError, "static resource hash mismatch"):
+                self._execute(target, backup_dir, hooks=hooks)
+            self.assertEqual(1, hooks.forward_health_attempts)
+            self._assert_all_22_preimages(target, hooks)
+            audit = json.loads(next(
+                pathlib.Path(backup_dir).glob("*/audit.json")
+            ).read_text(encoding="utf-8"))
+            self.assertEqual("rolled_back", audit["status"])
+            self.assertEqual("RuntimeError", audit["forward_error"])
+            self.assertEqual([], audit["rollback_errors"])
 
     def test_preexisting_directory_fails_before_backup(self):
         with tempfile.TemporaryDirectory() as target_dir, \
@@ -354,11 +549,15 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as target_dir, \
                 tempfile.TemporaryDirectory() as backup_dir:
             target, preview = self._target_tree(target_dir)
-            with self.assertRaisesRegex(RuntimeError, "forward health"):
-                self._execute(
-                    target, backup_dir,
-                    hooks=FilesystemHooks(self.executor, fail_probe=True),
-                )
+            hooks = FilesystemHooks(self.executor, fail_probe=True)
+            clock = SimulatedClock()
+            with mock.patch.object(
+                    self.executor.time, "monotonic", clock.monotonic), \
+                 mock.patch.object(self.executor.time, "sleep", clock.sleep):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError,
+                        "forward health did not become ready"):
+                    self._execute(target, backup_dir, hooks=hooks)
             self.assertFalse(preview.exists())
             self.assertFalse(preview.is_symlink())
             for runtime_path in self.manifest["directories"][0]["child_runtime_paths"]:
