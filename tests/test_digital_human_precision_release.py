@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from precision_release_fixture import materialize_locked_source
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy/test-runtime/digital-human-precision-director-v3-20260822.json"
@@ -91,6 +93,7 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
         cls.executor = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.executor)
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        cls.source_root = materialize_locked_source(cls, ROOT, cls.manifest)
         renderer_spec = importlib.util.spec_from_file_location(
             "precision_test_renderer", ROOT / "deploy/render_yuelei_test_nginx.py",
         )
@@ -179,7 +182,10 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
         self.assertEqual(release["git_blob"], git_blob(executor_data))
         self.assertEqual(release["sha256"], sha256(executor_data))
         for item in loaded["files"]:
-            data = (ROOT / item["repository_path"]).read_bytes()
+            data = subprocess.run(
+                ["git", "cat-file", "blob", item["postimage_blob"]],
+                cwd=ROOT, check=True, stdout=subprocess.PIPE,
+            ).stdout
             self.assertEqual(item["postimage_blob"], git_blob(data), item["repository_path"])
             self.assertEqual(item["postimage_sha256"], sha256(data), item["repository_path"])
 
@@ -259,7 +265,7 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             hooks = Hooks()
             self._lock_enabled_link(hooks, target)
             result = self.executor.execute_locked_release(
-                MANIFEST, ROOT, target, pathlib.Path(backup_dir), hooks=hooks,
+                MANIFEST, self.source_root, target, pathlib.Path(backup_dir), hooks=hooks,
                 verify_repository=False,
                 reviewed_head="r" * 40, merged_main="m" * 40,
             )
@@ -297,7 +303,7 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             self._lock_enabled_link(hooks, target)
             with self.assertRaisesRegex(RuntimeError, "forward health"):
                 self.executor.execute_locked_release(
-                    MANIFEST, ROOT, target, pathlib.Path(backup_dir), hooks=hooks,
+                    MANIFEST, self.source_root, target, pathlib.Path(backup_dir), hooks=hooks,
                     verify_repository=False,
                     reviewed_head="r" * 40, merged_main="m" * 40,
                 )
