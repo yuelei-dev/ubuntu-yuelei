@@ -4097,10 +4097,20 @@
     },
     "/api/gen/video": {
       "post": {
-        "tags": ["视频"], "summary": "HeyGen 数字人视频(图+音→视频)",
-        "description": "异步。mode=text:文案+音色生配音;mode=audio:直接导入音频。image_data 与本人 avatar_id 二选一。",
-        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "anyOf": [{ "required": ["image_data"] }, { "required": ["avatar_id"] }], "properties": { "mode": { "type": "string", "enum": ["text", "audio"], "default": "text" }, "image_data": { "type": "string", "description": "data:image/png;base64,... 人物形象图" }, "avatar_id": { "type": "integer", "description": "本人已保存的形象 ID" }, "text": { "type": "string", "description": "mode=text 必填" }, "voice": { "type": "string", "description": "mode=text 必填" }, "audio_data": { "type": "string", "description": "mode=audio 必填,data:audio/mp3;base64,..." }, "speed": { "type": "number", "default": 1.0 }, "pitch": { "type": "number", "default": 0 }, "volume": { "type": "number", "default": 0 }, "resolution": { "type": "string", "enum": ["720p", "1080p"], "default": "1080p" }, "ratio": { "type": "string", "enum": ["9:16", "16:9", "1:1", "4:5", "5:4"], "default": "9:16" }, "motion": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" } } } } } },
+        "tags": ["视频"], "summary": "HeyGen 数字人视频或 Precision 完整口型",
+        "description": "异步。mode=text:文案+音色生配音；mode=audio:直接导入音频；mode=lipsync:本人已导入的真人视频+本人音频资产生成 HeyGen Precision 完整口型。text/audio 模式下 image_data 与本人 avatar_id 二选一。",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "mode": { "type": "string", "enum": ["text", "audio", "lipsync"], "default": "text" }, "image_data": { "type": "string", "description": "data:image/png;base64,... 人物形象图（text/audio 模式）" }, "avatar_id": { "type": "integer", "description": "本人已保存的形象 ID（text/audio 模式）" }, "text": { "type": "string", "description": "mode=text 必填；lipsync 模式可用于资产说明" }, "voice": { "type": "string", "description": "mode=text 必填" }, "audio_data": { "type": "string", "description": "mode=audio 必填,data:audio/mp3;base64,..." }, "video_asset_id": { "type": "integer", "description": "mode=lipsync 必填，本人的真人源视频资产 ID" }, "audio_asset_id": { "type": "integer", "description": "mode=lipsync 必填，本人的配音资产 ID" }, "lipsync_mode": { "type": "string", "enum": ["precision"], "default": "precision" }, "dynamic_duration": { "type": "boolean", "enum": [true], "default": true }, "speed": { "type": "number", "default": 1.0 }, "pitch": { "type": "number", "default": 0 }, "volume": { "type": "number", "default": 0 }, "resolution": { "type": "string", "enum": ["720p", "1080p"], "default": "1080p" }, "ratio": { "type": "string", "enum": ["9:16", "16:9", "1:1", "4:5", "5:4"], "default": "9:16" }, "motion": { "type": "string", "enum": ["low", "medium", "high"], "default": "medium" } } } } } },
         "responses": { "200": { "description": "受理", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobAccepted" } } } } }
+      }
+    },
+    "/api/gen/video/lipsync-import": {
+      "post": {
+        "tags": ["视频"],
+        "summary": "导入本人真人视频供 Precision 完整口型使用",
+        "description": "上传 1-300 秒、最大 100 MB 的 MP4。服务端校验视频并保存为当前用户的私有视频资产。",
+        "parameters": [{ "name": "X-Video-Title", "in": "header", "schema": { "type": "string" }, "description": "URL 编码的原文件名" }],
+        "requestBody": { "required": true, "content": { "video/mp4": { "schema": { "type": "string", "format": "binary" } } } },
+        "responses": { "200": { "description": "导入成功，返回 asset" }, "400": { "description": "格式、大小或时长不合法" }, "401": { "description": "未登录" }, "503": { "description": "视频功能未启用" } }
       }
     },
     "/api/gen/video/batch": {

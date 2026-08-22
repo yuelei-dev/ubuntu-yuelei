@@ -1492,10 +1492,10 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("原图将直接用于全部真人出镜片段", page)
         self.assertNotIn('name="segmentCount"', page)
 
-    def test_video_flush_workspace_remains_vertically_scrollable(self):
+    def test_director_flush_workspace_remains_vertically_scrollable(self):
         page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
         self.assertIn('body .hq-main-scroll-flush{overflow-x:hidden;overflow-y:auto}', page)
-        self.assertIn('.hq-content[data-active="video"]{min-height:max-content}', page)
+        self.assertIn('.hq-content[data-active="script"]{min-height:max-content}', page)
 
     def test_consent_enforcement_runs_before_security_validation_and_charge(self):
         root = Path(__file__).resolve().parents[1]
@@ -1722,11 +1722,14 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("cleaned.update(legacy.natural_mouth_talking_profile())", source)
         self.assertNotIn('"motion": "high" if segment["role"]', source)
 
-    def test_video_page_replaces_the_old_talking_tab_instead_of_adding_a_header_link(self):
-        page = (Path(__file__).resolve().parents[1] / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
-        self.assertIn('<a class="function-tab on" href="digital-human-oneclick.html"', page)
-        self.assertEqual(page.count('href="digital-human-oneclick.html"'), 1)
-        self.assertNotIn('data-function="talking">数字人口播', page)
+    def test_photo_mode_moves_under_the_director_without_replacing_video_tabs(self):
+        root = Path(__file__).resolve().parents[1]
+        video_page = (root / "site" / "workbench" / "video.html").read_text(encoding="utf-8")
+        photo_page = (root / "site" / "workbench" / "digital-human-oneclick.html").read_text(encoding="utf-8")
+        self.assertNotIn('href="digital-human-oneclick.html"', video_page)
+        self.assertIn('data-function="talking">数字化 IP', video_page)
+        self.assertIn('data-active="script"', photo_page)
+        self.assertIn('href="digital-human-one-click.html">真人视频 Precision</a>', photo_page)
 
 
 if __name__ == "__main__":
