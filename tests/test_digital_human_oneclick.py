@@ -1729,7 +1729,9 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertNotIn('href="digital-human-oneclick.html"', video_page)
         self.assertIn('data-function="talking">数字化 IP', video_page)
         self.assertIn('data-active="script"', photo_page)
-        self.assertIn('href="digital-human-one-click.html">真人视频 Precision</a>', photo_page)
+        self.assertIn('data-dh-mode="photo">数字人一键生成</button>', photo_page)
+        self.assertIn('data-dh-mode="video">真人视频 Precision</button>', photo_page)
+        self.assertNotIn("照片数字人", photo_page)
 
 
 if __name__ == "__main__":

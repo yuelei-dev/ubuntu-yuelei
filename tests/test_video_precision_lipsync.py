@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import closing, nullcontext
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -31,6 +32,106 @@ class VideoPrecisionLipsyncTests(unittest.TestCase):
             self.assertIn("client_max_body_size 100m;", location)
             self.assertIn("limit_conn hq_cli_upload_conn 2;", location)
             self.assertIn("proxy_set_header X-HQ-Internal-Token \"\";", location)
+
+    def test_voice_sample_extracts_bounded_audio_and_removes_temporary_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "owned.mp4"
+            source.write_bytes(b"video")
+
+            def run(command, **_kwargs):
+                if command[0] == "ffmpeg":
+                    pathlib.Path(command[-1]).write_bytes(b"ID3" + b"v" * 600)
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout="12.345\n", stderr="")
+
+            with mock.patch.object(video, "AUDIO_OUT_DIR", root), \
+                 mock.patch.object(video, "_owned_video_asset", return_value={
+                     "id": 17, "mode": "lipsync_source",
+                     "video_file": "video/owned.mp4",
+                 }), \
+                 mock.patch.object(video, "_resolve_out_file", return_value=source), \
+                 mock.patch.object(video, "_user_owns_output_file", return_value=True), \
+                 mock.patch.object(video.subprocess, "run", side_effect=run):
+                sample = video.extract_lipsync_voice_sample("yuelei", 17)
+
+            self.assertEqual(17, sample["video_asset_id"])
+            self.assertEqual("mp3", sample["audio_format"])
+            self.assertEqual(12.345, sample["duration"])
+            self.assertGreater(len(video.base64.b64decode(sample["audio"])), 256)
+            self.assertEqual([], list(root.glob(".lipsync-voice-sample-*.mp3")))
+
+    def test_voice_sample_rejects_non_lipsync_or_silent_source(self):
+        with mock.patch.object(
+                video, "_owned_video_asset",
+                side_effect=ValueError("真人源视频不存在、未完成或不属于当前账号"),
+        ) as owned:
+            with self.assertRaisesRegex(ValueError, "不属于当前账号"):
+                video.extract_lipsync_voice_sample("other-user", 17)
+            owned.assert_called_once_with("other-user", 17)
+        with mock.patch.object(video, "_owned_video_asset", return_value={
+                "id": 18, "mode": "text", "video_file": "video/other.mp4"}):
+            with self.assertRaisesRegex(ValueError, "真人口播源视频"):
+                video.extract_lipsync_voice_sample("yuelei", 18)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "silent.mp4"
+            source.write_bytes(b"video")
+            with mock.patch.object(video, "AUDIO_OUT_DIR", root), \
+                 mock.patch.object(video, "_owned_video_asset", return_value={
+                     "id": 19, "mode": "lipsync_source",
+                     "video_file": "video/silent.mp4",
+                 }), \
+                 mock.patch.object(video, "_resolve_out_file", return_value=source), \
+                 mock.patch.object(video, "_user_owns_output_file", return_value=True), \
+                 mock.patch.object(video.subprocess, "run", return_value=SimpleNamespace(
+                     returncode=1, stdout="", stderr="no audio")):
+                with self.assertRaisesRegex(ValueError, "没有可用人声"):
+                    video.extract_lipsync_voice_sample("yuelei", 19)
+            self.assertEqual([], list(root.glob(".lipsync-voice-sample-*.mp3")))
+
+    def test_voice_sample_api_requires_auth_and_explicit_consent(self):
+        domain = SimpleNamespace(
+            extract_lipsync_voice_sample=mock.Mock(return_value={"audio": "dm9pY2U="})
+        )
+
+        class Handler:
+            path = "/api/gen/video/lipsync-voice-sample"
+            headers = {}
+            def __init__(self, body):
+                self.body = body
+                self.sent = None
+            def _token(self): return "token"
+            def _json_body_strict(self): return dict(self.body)
+            def _send(self, status, payload):
+                self.sent = (status, payload)
+                return self.sent
+
+        common = (
+            mock.patch.object(core, "_domains", return_value=(mock.Mock(), mock.Mock(), domain)),
+            mock.patch.object(core.cli_gateway, "handle_image_upload", return_value=False),
+            mock.patch.object(core.cli_gateway, "handle_quote", return_value=False),
+            mock.patch.object(core, "_dispatch_short_drama", return_value=False),
+            mock.patch.object(core, "_must_change_password", return_value=False),
+            mock.patch.object(core.feature_flags, "require_enabled"),
+        )
+        for patcher in common: patcher.start()
+        try:
+            with mock.patch.object(core, "verify", return_value=None):
+                unauthenticated = Handler({"video_asset_id": 17, "consent_confirmed": True})
+                core.H.do_POST(unauthenticated)
+            with mock.patch.object(core, "verify", return_value={"username": "yuelei"}):
+                unconfirmed = Handler({"video_asset_id": 17, "consent_confirmed": False})
+                core.H.do_POST(unconfirmed)
+                confirmed = Handler({"video_asset_id": 17, "consent_confirmed": True})
+                core.H.do_POST(confirmed)
+        finally:
+            for patcher in reversed(common): patcher.stop()
+
+        self.assertEqual(401, unauthenticated.sent[0])
+        self.assertEqual(403, unconfirmed.sent[0])
+        self.assertEqual(200, confirmed.sent[0])
+        domain.extract_lipsync_voice_sample.assert_called_once_with("yuelei", 17)
 
     def test_validation_resolves_owned_assets_and_forces_precision(self):
         payload = {

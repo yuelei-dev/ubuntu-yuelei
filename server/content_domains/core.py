@@ -2958,6 +2958,27 @@ class H(BaseHTTPRequestHandler):
                 return self._send(400, {"detail": str(e)[:220]})
             except Exception as e:
                 return self._send(500, {"detail": "真人源视频导入失败：%s" % str(e)[:160]})
+        if p == "/api/gen/video/lipsync-voice-sample":
+            user = verify(self._token())
+            if not user: return self._send(401, {"detail": "未登录或登录已过期"})
+            if _must_change_password(user): return self._send(403, {"detail": "请先修改初始密码"})
+            try:
+                feature_flags.require_enabled("video")
+                feature_flags.require_enabled("audio")
+                body = self._json_body_strict()
+                if not isinstance(body, dict):
+                    raise ValueError("请求体必须是 JSON 对象")
+                if body.get("consent_confirmed") is not True:
+                    return self._send(403, {"detail": "请先确认真人视频与声音使用授权"})
+                sample = video_domain.extract_lipsync_voice_sample(
+                    user["username"], body.get("video_asset_id"))
+                return self._send(200, {"ok": True, "sample": sample})
+            except feature_flags.FeatureDisabled as e:
+                return self._send(503, {"detail": str(e)})
+            except ValueError as e:
+                return self._send(400, {"detail": str(e)[:220]})
+            except Exception as e:
+                return self._send(500, {"detail": "真人视频原声提取失败：%s" % str(e)[:160]})
         if p == "/api/gen/leads/crm":
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "未登录"})

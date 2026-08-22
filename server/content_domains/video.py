@@ -2810,6 +2810,59 @@ def import_lipsync_source_video(username, raw, content_type="video/mp4", title="
             except OSError: pass
 
 
+def extract_lipsync_voice_sample(username, video_asset_id):
+    """Extract a private, bounded clone sample from an owned lipsync source."""
+    asset = _owned_video_asset(username, video_asset_id)
+    if str(asset.get("mode") or "").strip().lower() != "lipsync_source":
+        raise ValueError("只能从本人上传的真人口播源视频提取音色")
+    source = _resolve_out_file(asset.get("video_file"))
+    if not source or not source.is_file() or not _user_owns_output_file(
+            username, asset.get("video_file")):
+        raise ValueError("真人源视频不存在或不属于当前账号")
+
+    AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
+    sample_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                prefix=".lipsync-voice-sample-", suffix=".mp3",
+                dir=AUDIO_OUT_DIR, delete=False) as handle:
+            sample_path = pathlib.Path(handle.name)
+        converted = subprocess.run([
+            "ffmpeg", "-y", "-v", "error", "-i", str(source),
+            "-map", "0:a:0", "-vn", "-ac", "1", "-ar", "16000",
+            "-b:a", "48k", "-t", "60", str(sample_path),
+        ], capture_output=True, text=True, timeout=90)
+        if converted.returncode != 0 or not sample_path.is_file() \
+                or sample_path.stat().st_size < 256:
+            raise ValueError("视频中没有可用人声，请上传一条正在清晰说话的真人视频")
+        raw = sample_path.read_bytes()
+        duration = 0.0
+        probed = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(sample_path),
+        ], capture_output=True, text=True, timeout=20)
+        if probed.returncode == 0:
+            try:
+                duration = round(float((probed.stdout or "0").strip()), 3)
+            except (TypeError, ValueError):
+                duration = 0.0
+        return {
+            "video_asset_id": int(asset["id"]),
+            "audio": base64.b64encode(raw).decode("ascii"),
+            "audio_format": "mp3",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "duration": duration,
+        }
+    except ValueError:
+        raise
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("真人视频原声提取失败：%s" % str(exc)[:120]) from None
+    finally:
+        if sample_path:
+            try: sample_path.unlink()
+            except OSError: pass
+
+
 def get_video_job_phase(job_id):
     try:
         with closing(adb()) as c:
