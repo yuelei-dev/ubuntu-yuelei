@@ -121,6 +121,21 @@ def _assert_managed_directory_identity(path, identity):
         raise ReleaseError("managed directory identity drifted")
 
 
+def _validate_health_policy(executor, key, phase):
+    policy = executor.get(key)
+    if not isinstance(policy, dict):
+        raise ReleaseError("Precision v5 %s health policy is missing" % phase)
+    timeout = policy.get("timeout_seconds")
+    interval = policy.get("interval_seconds")
+    if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or timeout <= 0 or timeout > 120):
+        raise ReleaseError("Precision v5 %s health timeout is invalid" % phase)
+    if (not isinstance(interval, (int, float)) or isinstance(interval, bool)
+            or interval <= 0 or interval > timeout):
+        raise ReleaseError("Precision v5 %s health interval is invalid" % phase)
+    return policy
+
+
 def _load_manifest(path):
     manifest_path = pathlib.Path(path)
     manifest = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
@@ -198,16 +213,8 @@ def _validate_precision_contract(manifest):
     if ("https://yuelei.huangquechuanmei.com/api/gen/video/lipsync-import"
             not in probe_paths):
         raise ReleaseError("Precision v5 lipsync-import 401 probe is missing")
-    policy = executor.get("rollback_health_policy")
-    if not isinstance(policy, dict):
-        raise ReleaseError("Precision v5 rollback health policy is missing")
-    timeout, interval = policy.get("timeout_seconds"), policy.get("interval_seconds")
-    if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
-            or timeout <= 0 or timeout > 120):
-        raise ReleaseError("Precision v5 rollback health timeout is invalid")
-    if (not isinstance(interval, (int, float)) or isinstance(interval, bool)
-            or interval <= 0 or interval > timeout):
-        raise ReleaseError("Precision v5 rollback health interval is invalid")
+    _validate_health_policy(executor, "forward_health_policy", "forward")
+    _validate_health_policy(executor, "rollback_health_policy", "rollback")
 
 
 def _validate_director_contract(manifest):
@@ -604,7 +611,7 @@ def _validate_director_sources(source_root, manifest, hooks):
                     raise ReleaseError("candidate HTML marker is missing")
 
 
-def _wait_for_rollback_health(hooks, service, url, policy):
+def _wait_for_health(hooks, service, url, policy, phase):
     timeout = float(policy["timeout_seconds"])
     interval = float(policy["interval_seconds"])
     deadline = time.monotonic() + timeout
@@ -612,7 +619,7 @@ def _wait_for_rollback_health(hooks, service, url, policy):
     while True:
         try:
             if not hooks.service_active(service):
-                raise ReleaseError("restored service is not active")
+                raise ReleaseError("%s service is not active" % phase)
             hooks.probe(url, "GET", 200)
             return
         except Exception as error:
@@ -620,9 +627,9 @@ def _wait_for_rollback_health(hooks, service, url, policy):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ReleaseError(
-                "rollback service health readiness timed out after %ss; "
+                "%s health did not become ready after %ss; "
                 "last error: %s: %s"
-                % (timeout, type(last_error).__name__, last_error)
+                % (phase, timeout, type(last_error).__name__, last_error)
             ) from last_error
         time.sleep(min(interval, remaining))
 
@@ -852,8 +859,8 @@ def _execute_director_release(
             policy = executor.get("rollback_health_policy", {
                 "timeout_seconds": 15, "interval_seconds": 1,
             })
-            _wait_for_rollback_health(
-                hooks, service, executor["health_url"], policy,
+            _wait_for_health(
+                hooks, service, executor["health_url"], policy, "rollback",
             )
         except BaseException as error:
             rollback_errors.append("service:" + type(error).__name__)
@@ -1215,9 +1222,10 @@ def _execute_precision_release(
         hooks.restart(service)
         hooks.reload_nginx()
         checkpoint("after_restart")
-        if not hooks.service_active(service):
-            raise ReleaseError("target service is not active after restart")
-        hooks.probe(executor["health_url"], "GET", 200)
+        _wait_for_health(
+            hooks, service, executor["health_url"],
+            executor["forward_health_policy"], "forward",
+        )
         for probe in executor.get("static_probes", []):
             hooks.probe_static(
                 probe["url"], probe.get("expected_status", 200),
@@ -1300,9 +1308,9 @@ def _execute_precision_release(
             hooks.validate_nginx()
             hooks.restart(service)
             hooks.reload_nginx()
-            _wait_for_rollback_health(
+            _wait_for_health(
                 hooks, service, executor["health_url"],
-                executor["rollback_health_policy"],
+                executor["rollback_health_policy"], "rollback",
             )
         except BaseException as error:
             rollback_errors.append("service:" + type(error).__name__)

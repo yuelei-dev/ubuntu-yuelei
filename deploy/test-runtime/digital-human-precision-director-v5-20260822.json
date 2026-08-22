@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "f8f8b7d5bf558369811b89b92d240a3ceeae05a0",
+    "code_source_commit": "e69ebc8509b3eb8e9811a33fde6a343424378448",
     "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head"
   },
   "expected_preimage": {
@@ -36,8 +36,8 @@
   "release_executor": {
     "contract": "digital_human_precision_director_v5",
     "repository_path": "scripts/deploy_precision_director_v5_locked_manifest.py",
-    "git_blob": "d16bca3fe6b8ea9279b6261ff22011dcfcf489a1",
-    "sha256": "61181fb4e3266efbf623af3c083c2fbcc83598fee1713435e179129e24ef04aa",
+    "git_blob": "af6c4e6295ddff641091a4a2223abc8118b0857e",
+    "sha256": "aa98b9b6288cf93b1b452ecf62b9ba51cac5eac4fe7c7c059c4313bc736035c1",
     "runtime_python_root": "/home/ubuntu/content-api",
     "import_modules": [
       "content_domains.core",
@@ -47,6 +47,7 @@
       "content_domains.video_compose_render"
     ],
     "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "forward_health_policy": {"timeout_seconds": 30, "interval_seconds": 1},
     "rollback_health_policy": {"timeout_seconds": 30, "interval_seconds": 1},
     "required_repository_paths": [
       "server/content_domains/core.py",
