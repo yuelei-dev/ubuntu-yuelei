@@ -66,6 +66,7 @@ ASSETS = (
     Asset("digital-human-one-click.css", required=False),
     Asset("digital-human-one-click.js", required=False),
     Asset("digital-human-unified.js", required=False),
+    Asset("digital-human-unified-state.js", required=False),
     Asset("theme.css", required=False),
     Asset("theme-init.js", required=False),
     Asset("short-drama-center.css", required=False),

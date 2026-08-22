@@ -2819,6 +2819,10 @@ def extract_lipsync_voice_sample(username, video_asset_id):
     if not source or not source.is_file() or not _user_owns_output_file(
             username, asset.get("video_file")):
         raise ValueError("真人源视频不存在或不属于当前账号")
+    video_digest = hashlib.sha256()
+    with source.open("rb") as source_handle:
+        for chunk in iter(lambda: source_handle.read(1024 * 1024), b""):
+            video_digest.update(chunk)
 
     AUDIO_OUT_DIR.mkdir(parents=True, exist_ok=True)
     sample_path = None
@@ -2848,6 +2852,7 @@ def extract_lipsync_voice_sample(username, video_asset_id):
                 duration = 0.0
         return {
             "video_asset_id": int(asset["id"]),
+            "video_sha256": video_digest.hexdigest(),
             "audio": base64.b64encode(raw).decode("ascii"),
             "audio_format": "mp3",
             "sha256": hashlib.sha256(raw).hexdigest(),

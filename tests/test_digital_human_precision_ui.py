@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PAGE = (ROOT / "site/workbench/digital-human-oneclick.html").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "site/workbench/digital-human-unified.js").read_text(encoding="utf-8")
+STATE_SCRIPT = ROOT / "site/workbench/digital-human-unified-state.js"
 LEGACY = (ROOT / "site/workbench/digital-human-one-click.html").read_text(encoding="utf-8")
 DIRECTOR = (ROOT / "site/workbench/script.html").read_text(encoding="utf-8")
 
@@ -23,6 +24,9 @@ class DigitalHumanPrecisionUiTests(unittest.TestCase):
         self.assertNotIn('data-mode="script_to_video"', DIRECTOR)
 
     def test_video_mode_clones_the_uploaded_videos_voice_before_paid_generation(self):
+        state_tag = 'src="digital-human-unified-state.js?'
+        app_tag = 'src="digital-human-unified.js?'
+        self.assertLess(PAGE.index(state_tag), PAGE.index(app_tag))
         for marker in (
             "/api/gen/video/lipsync-import",
             "/api/gen/video/lipsync-voice-sample",
@@ -64,11 +68,20 @@ class DigitalHumanPrecisionUiTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("node"), "Node.js required")
     def test_javascript_parses(self):
+        for script in (STATE_SCRIPT, ROOT / "site/workbench/digital-human-unified.js"):
+            completed = subprocess.run(
+                ["node", "--check", str(script)], capture_output=True, text=True,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required")
+    def test_slot_selection_and_clone_version_idempotency_behaviors(self):
         completed = subprocess.run(
-            ["node", "--check", str(ROOT / "site/workbench/digital-human-unified.js")],
+            ["node", str(ROOT / "tests/test_digital_human_unified_state.js")],
             capture_output=True, text=True,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("unified state tests passed", completed.stdout)
 
 
 if __name__ == "__main__":
