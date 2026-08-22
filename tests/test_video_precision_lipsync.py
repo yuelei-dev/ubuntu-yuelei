@@ -16,6 +16,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 video = importlib.import_module("content_domains.video")
 core = importlib.import_module("content_domains.core")
+digital_human_oneclick = importlib.import_module("content_domains.digital_human_oneclick")
 startup_recovery = importlib.import_module("content_domains.startup_recovery")
 
 
@@ -91,9 +92,20 @@ class VideoPrecisionLipsyncTests(unittest.TestCase):
             self.assertEqual([], list(root.glob(".lipsync-voice-sample-*.mp3")))
 
     def test_voice_sample_api_requires_auth_and_explicit_consent(self):
-        domain = SimpleNamespace(
-            extract_lipsync_voice_sample=mock.Mock(return_value={"audio": "dm9pY2U="})
+        slot = {"slot_id": "slot-1", "status": "active", "voice_name": None}
+        audio_domain = SimpleNamespace(
+            list_user_audio_voice_slots=mock.Mock(return_value=[slot]),
         )
+        domain = SimpleNamespace(
+            extract_lipsync_voice_sample=mock.Mock(return_value={
+                "video_asset_id": 17, "video_sha256": "a" * 64,
+                "audio": "dm9pY2U=", "audio_format": "mp3",
+                "sha256": "b" * 64, "duration": 1.0,
+            })
+        )
+        consent_create = mock.Mock(return_value={
+            "consent_token": "dhvc_signed", "clone_attempt_id": "attempt-1",
+        })
 
         class Handler:
             path = "/api/gen/video/lipsync-voice-sample"
@@ -108,12 +120,16 @@ class VideoPrecisionLipsyncTests(unittest.TestCase):
                 return self.sent
 
         common = (
-            mock.patch.object(core, "_domains", return_value=(mock.Mock(), mock.Mock(), domain)),
+            mock.patch.object(core, "_domains", return_value=(audio_domain, mock.Mock(), domain)),
             mock.patch.object(core.cli_gateway, "handle_image_upload", return_value=False),
             mock.patch.object(core.cli_gateway, "handle_quote", return_value=False),
             mock.patch.object(core, "_dispatch_short_drama", return_value=False),
             mock.patch.object(core, "_must_change_password", return_value=False),
             mock.patch.object(core.feature_flags, "require_enabled"),
+            mock.patch.object(
+                digital_human_oneclick, "create_unified_video_consent",
+                consent_create,
+            ),
         )
         for patcher in common: patcher.start()
         try:
@@ -123,15 +139,27 @@ class VideoPrecisionLipsyncTests(unittest.TestCase):
             with mock.patch.object(core, "verify", return_value={"username": "yuelei"}):
                 unconfirmed = Handler({"video_asset_id": 17, "consent_confirmed": False})
                 core.H.do_POST(unconfirmed)
-                confirmed = Handler({"video_asset_id": 17, "consent_confirmed": True})
+                incomplete = Handler({"video_asset_id": 17, "consent_confirmed": True})
+                core.H.do_POST(incomplete)
+                confirmed = Handler({
+                    "video_asset_id": 17, "slot_id": "slot-1",
+                    "script": "本次真人视频完整口播文案",
+                    "run_id": "dhv-precision-test-001",
+                    "consent_confirmed": True,
+                    "consent_version": digital_human_oneclick.UNIFIED_VIDEO_CONSENT_VERSION,
+                    "purpose": digital_human_oneclick.UNIFIED_VIDEO_CONSENT_PURPOSE,
+                    "overwrite_confirmed": False, "overwrite_voice_name": "",
+                })
                 core.H.do_POST(confirmed)
         finally:
             for patcher in reversed(common): patcher.stop()
 
         self.assertEqual(401, unauthenticated.sent[0])
         self.assertEqual(403, unconfirmed.sent[0])
+        self.assertEqual(403, incomplete.sent[0])
         self.assertEqual(200, confirmed.sent[0])
         domain.extract_lipsync_voice_sample.assert_called_once_with("yuelei", 17)
+        consent_create.assert_called_once()
 
     def test_validation_resolves_owned_assets_and_forces_precision(self):
         payload = {
