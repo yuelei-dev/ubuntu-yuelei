@@ -36,8 +36,8 @@
   "release_executor": {
     "contract": "digital_human_precision_director_v5",
     "repository_path": "scripts/deploy_precision_director_v5_locked_manifest.py",
-    "git_blob": "abde597b12bc2a222e232b3c4563424661ce71ae",
-    "sha256": "f472fd7b9778a448915b89bbd714ea2a8d71fda21021f20644024bac48e8df88",
+    "git_blob": "d16bca3fe6b8ea9279b6261ff22011dcfcf489a1",
+    "sha256": "61181fb4e3266efbf623af3c083c2fbcc83598fee1713435e179129e24ef04aa",
     "runtime_python_root": "/home/ubuntu/content-api",
     "import_modules": [
       "content_domains.core",

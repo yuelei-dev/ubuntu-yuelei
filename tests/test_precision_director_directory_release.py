@@ -258,6 +258,38 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
                 self._execute(target, backup_dir)
             self.assertEqual([], list(pathlib.Path(backup_dir).iterdir()))
 
+    def test_directory_appearing_after_backup_is_retained_as_conflict(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir:
+            target, preview = self._target_tree(target_dir)
+
+            def create_concurrent_directory(name):
+                if name == "after_backup":
+                    preview.mkdir()
+                    (preview / "external.txt").write_text(
+                        "concurrent content", encoding="utf-8",
+                    )
+
+            with self.assertRaisesRegex(
+                    self.executor.ReleaseError, "directory:conflict") as caught:
+                self._execute(
+                    target, backup_dir,
+                    checkpoint=create_concurrent_directory,
+                )
+            forward_error = caught.exception.__cause__
+            self.assertIsInstance(forward_error, self.executor.ReleaseError)
+            self.assertIn("appeared after backup", str(forward_error))
+            self.assertIsInstance(forward_error.__cause__, FileExistsError)
+            self.assertTrue((preview / "external.txt").is_file())
+            audit_path = next(pathlib.Path(backup_dir).glob("*/audit.json"))
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual("rollback_failed", audit["status"])
+            self.assertEqual("ReleaseError", audit["forward_error"])
+            self.assertEqual(["directory:conflict"], audit["rollback_errors"])
+            self.assertEqual([], audit["created_directory_runtime_paths"])
+            self.assertEqual([], audit["installed_runtime_paths"])
+            self.assertEqual("directory", audit["directory_final"][0]["state"])
+
     def test_symlinked_parent_is_rejected_before_backup(self):
         with tempfile.TemporaryDirectory() as target_dir, \
                 tempfile.TemporaryDirectory() as backup_dir, \
@@ -272,6 +304,51 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
                     self.executor.ReleaseError, "parent is missing or unsafe"):
                 self._execute(target, backup_dir)
             self.assertEqual([], list(pathlib.Path(backup_dir).iterdir()))
+
+    def test_replaced_managed_parent_never_unlinks_external_child(self):
+        with tempfile.TemporaryDirectory() as target_dir, \
+                tempfile.TemporaryDirectory() as backup_dir, \
+                tempfile.TemporaryDirectory() as outside_dir:
+            target, preview = self._target_tree(target_dir)
+            first_child_runtime = self.manifest["directories"][0][
+                "child_runtime_paths"
+            ][0]
+            first_child_index = next(
+                index for index, item in enumerate(self.manifest["files"])
+                if item["runtime_path"] == first_child_runtime
+            )
+            outside = pathlib.Path(outside_dir)
+            external_child = outside / pathlib.PurePosixPath(
+                first_child_runtime
+            ).name
+            external_child.write_bytes(b"external file must survive")
+            stashed = preview.with_name(preview.name + ".created-by-release")
+
+            def replace_parent_after_first_child(name):
+                if name == "after_replace_%d" % first_child_index:
+                    preview.rename(stashed)
+                    os.symlink(outside, preview, target_is_directory=True)
+
+            with self.assertRaisesRegex(
+                    self.executor.ReleaseError, "file:ReleaseError"):
+                self._execute(
+                    target, backup_dir,
+                    checkpoint=replace_parent_after_first_child,
+                )
+            self.assertEqual(b"external file must survive", external_child.read_bytes())
+            self.assertTrue(preview.is_symlink())
+            self.assertTrue((stashed / external_child.name).is_file())
+            audit_path = next(pathlib.Path(backup_dir).glob("*/audit.json"))
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual("rollback_failed", audit["status"])
+            self.assertIn("file:ReleaseError", audit["rollback_errors"])
+            self.assertIn("directory:ReleaseError", audit["rollback_errors"])
+            self.assertEqual(
+                [self.manifest["directories"][0]["runtime_path"]],
+                audit["created_directory_runtime_paths"],
+            )
+            self.assertIn(first_child_runtime, audit["installed_runtime_paths"])
+            self.assertEqual("symlink", audit["directory_final"][0]["state"])
 
     def test_forward_failure_restores_files_and_removes_created_directory(self):
         with tempfile.TemporaryDirectory() as target_dir, \

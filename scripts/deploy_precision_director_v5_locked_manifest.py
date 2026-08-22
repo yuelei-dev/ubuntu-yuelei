@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -91,6 +92,33 @@ def _mapped_managed_directory_node(root, absolute_path):
         if parent.is_symlink() or not parent.is_dir():
             raise ReleaseError("managed directory parent is missing or unsafe")
     return parent / value.name
+
+
+def _managed_directory_state(path):
+    try:
+        node_stat = os.lstat(path)
+    except FileNotFoundError:
+        return "absent"
+    if stat.S_ISLNK(node_stat.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(node_stat.st_mode):
+        return "directory"
+    return "other"
+
+
+def _assert_managed_directory_identity(path, identity):
+    try:
+        node_stat = os.lstat(path)
+    except FileNotFoundError as error:
+        raise ReleaseError("managed directory identity disappeared") from error
+    mode, uid, gid, device, inode = identity
+    if (not stat.S_ISDIR(node_stat.st_mode)
+            or node_stat.st_dev != device or node_stat.st_ino != inode
+            or (os.name != "nt" and (
+                node_stat.st_mode & 0o777 != mode
+                or node_stat.st_uid != uid or node_stat.st_gid != gid
+            ))):
+        raise ReleaseError("managed directory identity drifted")
 
 
 def _load_manifest(path):
@@ -1080,6 +1108,8 @@ def _execute_precision_release(
         "executor_sha256": _sha256(executor_data),
         "executor_git_blob": _git_blob(executor_data), "files": [],
         "directories": [],
+        "created_directory_runtime_paths": [],
+        "installed_runtime_paths": [],
         "nginx_enabled_preimage": hooks.link_state(
             nginx_release["enabled_path"]
         ),
@@ -1126,24 +1156,39 @@ def _execute_precision_release(
     checkpoint("after_backup")
 
     created_directories = []
+    created_directory_identities = {}
+    installed_entries = []
     try:
         for index, (item, target, mode, uid, gid) in enumerate(directories):
-            os.mkdir(target, mode)
-            created_directories.append((item, target, mode, uid, gid))
+            try:
+                os.mkdir(target, mode)
+            except FileExistsError as error:
+                raise ReleaseError(
+                    "managed directory appeared after backup"
+                ) from error
+            created_stat = os.lstat(target)
+            identity = (
+                mode, uid, gid, created_stat.st_dev, created_stat.st_ino,
+            )
+            created_directories.append((item, target, identity))
+            created_directory_identities[target] = identity
+            audit["created_directory_runtime_paths"].append(item["runtime_path"])
             os.chmod(target, mode)
             if os.name != "nt":
                 os.chown(target, uid, gid)
-            target_stat = target.stat()
-            if (not target.is_dir() or target.is_symlink()
-                    or (os.name != "nt" and (
-                        target_stat.st_mode & 0o777 != mode
-                        or target_stat.st_uid != uid
-                        or target_stat.st_gid != gid
-                    ))):
-                raise ReleaseError("managed directory postimage mismatch")
+            _assert_managed_directory_identity(target, identity)
             checkpoint("after_directory_%d" % index)
         for index, (item, source, target, mode, uid, gid) in enumerate(entries):
+            if target.parent in managed_parents:
+                identity = created_directory_identities.get(target.parent)
+                if identity is None:
+                    raise ReleaseError("managed directory was not created")
+                _assert_managed_directory_identity(target.parent, identity)
             _atomic_install(source, target, mode, replace, uid, gid)
+            installed_entries.append((
+                (item, source, target, mode, uid, gid), backups[index],
+            ))
+            audit["installed_runtime_paths"].append(item["runtime_path"])
             checkpoint("after_replace_%d" % index)
         for item, _, target, _, _, _ in entries:
             if _sha256(target.read_bytes()) != _locked_value(item, "postimage", "sha256"):
@@ -1208,8 +1253,13 @@ def _execute_precision_release(
                 enabled_target.unlink()
         except BaseException as error:
             rollback_errors.append("nginx-link:" + type(error).__name__)
-        for (item, _, target, mode, uid, gid), saved in zip(entries, backups):
+        for (item, _, target, mode, uid, gid), saved in reversed(installed_entries):
             try:
+                if target.parent in managed_parents:
+                    identity = created_directory_identities.get(target.parent)
+                    if identity is None:
+                        raise ReleaseError("managed directory was not created")
+                    _assert_managed_directory_identity(target.parent, identity)
                 if saved is None:
                     if target.is_symlink() or (target.exists() and not target.is_file()):
                         raise ReleaseError("created target became unsafe")
@@ -1223,17 +1273,22 @@ def _execute_precision_release(
                     raise ReleaseError("absent preimage was not restored")
             except BaseException as error:
                 rollback_errors.append("file:" + type(error).__name__)
-        for item, target, mode, uid, gid in reversed(created_directories):
+        created_targets = {target for _, target, _ in created_directories}
+        for item, target, _, _, _ in reversed(directories):
+            if target not in created_targets:
+                try:
+                    _mapped_managed_directory_node(
+                        target_root, item["runtime_path"],
+                    )
+                except ReleaseError:
+                    rollback_errors.append("directory:unsafe-parent")
+                    continue
+                if _managed_directory_state(target) != "absent":
+                    rollback_errors.append("directory:conflict")
+                continue
             try:
-                if target.is_symlink() or not target.is_dir():
-                    raise ReleaseError("managed directory rollback target is unsafe")
-                target_stat = target.stat()
-                if (os.name != "nt" and (
-                        target_stat.st_mode & 0o777 != mode
-                        or target_stat.st_uid != uid
-                        or target_stat.st_gid != gid
-                )):
-                    raise ReleaseError("managed directory rollback state drifted")
+                identity = created_directory_identities[target]
+                _assert_managed_directory_identity(target, identity)
                 if any(target.iterdir()):
                     raise ReleaseError("managed directory is not empty after file rollback")
                 target.rmdir()
@@ -1257,8 +1312,7 @@ def _execute_precision_release(
         audit["directory_final"] = [
             {
                 "runtime_path": item["runtime_path"],
-                "state": "absent" if not target.exists() and not target.is_symlink()
-                else "present",
+                "state": _managed_directory_state(target),
             }
             for item, target, _, _, _ in directories
         ]
