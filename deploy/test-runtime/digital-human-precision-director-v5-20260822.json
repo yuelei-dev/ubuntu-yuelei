@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "purpose": "Versioned fail-closed Precision Director contract with transactional preview-directory creation and symlink-node-safe Nginx activation.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service",
+    "backend_root": "/home/ubuntu/content-api",
+    "static_root": "/var/www/huangquechuanmei"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "0000000000000000000000000000000000000000",
+    "review_lock": "deploy only the merge commit on main that contains the unchanged independently reviewed PR Head"
+  },
+  "expected_preimage": {
+    "development_base_commit": "bce8c6c57ac1f213b661d4e030a583e41a4ccf43",
+    "remote_capture_required_before_first_write": true,
+    "note": "Every target must match this Base-derived locked state; any live drift aborts before backup or write."
+  },
+  "deployment_policy": {
+    "production_server_write_allowed": false,
+    "require_merged_main": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "fail_closed_on_missing_source": true,
+    "backup_all_targets_before_first_write": true,
+    "create_locked_directories_after_backup": true,
+    "atomic_replace_each_file": true,
+    "install_all_files_before_restart": true,
+    "restart_backend_once": true,
+    "validate_and_reload_nginx": true,
+    "rollback_all_files_as_one_unit": true,
+    "copy_environment_or_database": false
+  },
+  "release_executor": {
+    "contract": "digital_human_precision_director_v5",
+    "repository_path": "scripts/deploy_precision_director_v5_locked_manifest.py",
+    "git_blob": "abde597b12bc2a222e232b3c4563424661ce71ae",
+    "sha256": "f472fd7b9778a448915b89bbd714ea2a8d71fda21021f20644024bac48e8df88",
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": [
+      "content_domains.core",
+      "content_domains.pricing",
+      "content_domains.video",
+      "content_domains.video_compose",
+      "content_domains.video_compose_render"
+    ],
+    "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "rollback_health_policy": {"timeout_seconds": 30, "interval_seconds": 1},
+    "required_repository_paths": [
+      "server/content_domains/core.py",
+      "server/content_domains/pricing.py",
+      "server/content_domains/startup_recovery.py",
+      "server/content_domains/video.py",
+      "server/content_domains/video_compose.py",
+      "server/content_domains/video_compose_render.py",
+      "site/api-docs/openapi.json",
+      "site/index.html",
+      "site/assets/one-click/previews/clean-talking-10s.mp4",
+      "site/assets/one-click/previews/high-frequency-10s.mp4",
+      "site/assets/one-click/previews/professional-explainer-10s.mp4",
+      "site/workbench/assets.html",
+      "site/workbench/digital-human-one-click.css",
+      "site/workbench/digital-human-one-click.html",
+      "site/workbench/digital-human-one-click.js",
+      "site/workbench/digital-human-oneclick.html",
+      "site/workbench/script.html",
+      "site/workbench/text-video.html",
+      "site/workbench/video.html"
+    ],
+    "static_probes": [
+      {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.html", "expected_status": 200, "expected_sha256": "2d3c9a6c57fcfc5be637d68dcb6c72a984829fcd3468c5b361f09fab3776e204"},
+      {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.js", "expected_status": 200, "expected_sha256": "12d43bfedae6fd2d4464bff0e5f4855f67203287852c7f53f251cb37cdda01dc"},
+      {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.css", "expected_status": 200, "expected_sha256": "d3b4879550b86641c46cd8b198c7eb084f6975ea31272f36eb3c3fe25a0f10da"}
+    ],
+    "unauthenticated_probes": [
+      {"url": "https://yuelei.huangquechuanmei.com/api/gen/video/lipsync-import", "method": "POST", "expected_status": 401}
+    ]
+  },
+  "nginx_contract": {
+    "source_repository_path": "deploy/nginx-huangquechuanmei.conf",
+    "source_blob": "785cd77b878b95c7410fce6de639082297ba7a1c",
+    "source_sha256": "08f78fef1097e1f45042356a7477addad2dcb0d2738cc451079853ae40a581f1",
+    "renderer_repository_path": "deploy/render_yuelei_test_nginx.py",
+    "renderer_blob": "43ce35b226a70150a433e9789bfb5e7bb3c3451c",
+    "renderer_sha256": "8e4c3b6145010de01a154ed4cfa30a4ddc677ab257544b41bd8ccac4ab163c1a",
+    "runtime_path": "/etc/nginx/sites-available/yuelei-test.conf",
+    "preimage_blob": "5133965e33968dd77a73ef1aef9c06ad8d5e1bbf",
+    "preimage_sha256": "e024e9ee105e5d5925d2f682e06851e426ec6678bb704260d4301ef4481584b0",
+    "postimage_blob": "3480e27277676082fa52164683ca22cd477a4069",
+    "postimage_sha256": "2017141cd9bb391872ed175c38cada39801e54dd2c58844992cba1cecbbe5edc",
+    "enabled_runtime_path": "/etc/nginx/sites-enabled/yuelei-test.conf",
+    "enabled_preimage_state": "symlink",
+    "enabled_preimage_target": "/etc/nginx/sites-available/yuelei-test.conf",
+    "enabled_postimage_state": "symlink",
+    "enabled_postimage_target": "/etc/nginx/sites-available/yuelei-test.conf",
+    "protected_runtime_paths": ["/etc/nginx/sites-available/huangquechuanmei"]
+  },
+  "directories": [
+    {
+      "runtime_path": "/var/www/huangquechuanmei/assets/one-click/previews",
+      "preimage_state": "absent",
+      "postimage_state": "directory",
+      "install_mode": "0755",
+      "ownership_source_runtime_path": "/var/www/huangquechuanmei/assets/one-click",
+      "child_runtime_paths": [
+        "/var/www/huangquechuanmei/assets/one-click/previews/clean-talking-10s.mp4",
+        "/var/www/huangquechuanmei/assets/one-click/previews/high-frequency-10s.mp4",
+        "/var/www/huangquechuanmei/assets/one-click/previews/professional-explainer-10s.mp4"
+      ]
+    }
+  ],
+  "files": [
+    {"repository_path":"server/content_domains/core.py","runtime_path":"/home/ubuntu/content-api/content_domains/core.py","target_preimage_state":"file","preimage_blob":"db05b6d0c122186798d8ef80bff77648eeb12711","preimage_sha256":"f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425","postimage_blob":"332d5fab975ee3e070b27aa27a58bd8135435af5","postimage_sha256":"ce2977e30a02d5dec1a38e2e39d98e75731c6fd8f5744854e2f5933c4e2e0398"},
+    {"repository_path":"server/content_domains/pricing.py","runtime_path":"/home/ubuntu/content-api/content_domains/pricing.py","target_preimage_state":"file","preimage_blob":"1bf25c32f8c34d02e785607b8f2a70edfb69eafe","preimage_sha256":"18187403df376e33381de09d4e533e843a9212f27c64f3358e794bd68f59c4ff","postimage_blob":"4f82fd578f9ee90ae1b99309f4071cd6b136c6fd","postimage_sha256":"597e4d9cf39f1f3953b87e18a0264d0f858ac61f9dfe84bab6ac72ce92df5b9a"},
+    {"repository_path":"server/content_domains/startup_recovery.py","runtime_path":"/home/ubuntu/content-api/content_domains/startup_recovery.py","target_preimage_state":"file","preimage_blob":"9620bf2943a9104a7ee56a5ed4fb84e93b6fceec","preimage_sha256":"19a42bce8311a26568b3efd511f338e2adea6494c05f2e6f022dfb56da2ac03f","postimage_blob":"6021abfb3c8e1529506c078dfe8f3f08617dd54a","postimage_sha256":"3b6f45456e9351c61110db10df760bb2adbbfcc4b81e7fc158702a0419eaaff3"},
+    {"repository_path":"server/content_domains/video.py","runtime_path":"/home/ubuntu/content-api/content_domains/video.py","target_preimage_state":"file","preimage_blob":"ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf","preimage_sha256":"ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb","postimage_blob":"14eb06a8a39b31809e63386aefb767da884a2fd3","postimage_sha256":"d7416e7e9471793fda0452c405631010cdb13505eae632c80e92de1ffaafaf4a"},
+    {"repository_path":"server/content_domains/video_compose.py","runtime_path":"/home/ubuntu/content-api/content_domains/video_compose.py","target_preimage_state":"file","preimage_blob":"1620bbeff76dc0fdc6fd4a4a110c181ac14f7681","preimage_sha256":"a0782b72cfcc5c878af7cc4f9bb93426e651b42b442d822398d3f5033f9b03df","postimage_blob":"87922f387372297dc23281f9970436a1c7cd64a2","postimage_sha256":"b8585b0b5897fad7a63d96d7b6e1e2d08f5e0f7bfec5226fc497af4d6cc77fa6"},
+    {"repository_path":"server/content_domains/video_compose_render.py","runtime_path":"/home/ubuntu/content-api/content_domains/video_compose_render.py","target_preimage_state":"file","preimage_blob":"58654737f16e809065a0b0112d5ae623a8377019","preimage_sha256":"98f51fff558c5ece218fb8e3ed5df90327da506eeb3779323e570dfeefb9cbda","postimage_blob":"ab3b28583b643a3b4887922d741038167205cb59","postimage_sha256":"a780f61de1cb324a9b0a3c704d3fe2cfb5fb56e0a4c4247d123ee1f7e95aa08e"},
+    {"repository_path":"site/api-docs/openapi.json","runtime_path":"/var/www/huangquechuanmei/api-docs/openapi.json","target_preimage_state":"file","preimage_blob":"0eab94ed7f6f264356361dfac5dac2c16a713f66","preimage_sha256":"a6c60cf5d5500a49fa44accbf624eed002c2bc2e407630b35b279c4c48d283d5","postimage_blob":"cbbc94ceb1022841ff3415a4b14b8158ca36b98a","postimage_sha256":"4ef6e6f82bce5f96404f13ac747c52f569f218757f40003483c735e67d5fa324"},
+    {"repository_path":"site/index.html","runtime_path":"/var/www/huangquechuanmei/index.html","target_preimage_state":"file","preimage_blob":"db8c21e99973e22989c7636d0243ecba848b34d2","preimage_sha256":"c69a99e33031256baba56a7287e3ab598383420fcddd0da5d9a7a26cc46de98f","postimage_blob":"30ffb012757ab5b315e7cb420ff2286cc4e24a64","postimage_sha256":"630a3988a80ed74b7c2eb346f788749bfa1387a20f945f21a4fe393a424c8401"},
+    {"repository_path":"site/assets/one-click/previews/clean-talking-10s.mp4","runtime_path":"/var/www/huangquechuanmei/assets/one-click/previews/clean-talking-10s.mp4","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"26b3949398d997cc1be8a60564d6409917a584ca","postimage_sha256":"daf34fef8d87561222e26b09cb127d519d3a9bd249012f9bf839f74aeca7f42f"},
+    {"repository_path":"site/assets/one-click/previews/high-frequency-10s.mp4","runtime_path":"/var/www/huangquechuanmei/assets/one-click/previews/high-frequency-10s.mp4","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"829b7a7df88603d51f1de093a18e06bb357022eb","postimage_sha256":"84255219ee5a0cedc08d0867355ce52c52343d03c2ef6837065d7db7f05f27c8"},
+    {"repository_path":"site/assets/one-click/previews/professional-explainer-10s.mp4","runtime_path":"/var/www/huangquechuanmei/assets/one-click/previews/professional-explainer-10s.mp4","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"fb4ce71d23adca9be602fb56dab46632f1fd0707","postimage_sha256":"e342f9e997216721965f7c0d2dfc1189f573ffd97b460cee35098f3002624cca"},
+    {"repository_path":"site/workbench/assets.html","runtime_path":"/var/www/huangquechuanmei/workbench/assets.html","target_preimage_state":"file","preimage_blob":"6e7d3b017959157c0249b53f18e8dee4eba4b67d","preimage_sha256":"c84d4439e7c87e109405de780fb9f63a0e3722dc70189afe380fc82b933abdd9","postimage_blob":"fdaefc9550949c435a60a729c840275226f54603","postimage_sha256":"6dfa13cdf50c222c549ed8caa1d9e5ff1e1416eba673fd6e98d2a25fc96605fa"},
+    {"repository_path":"site/workbench/digital-human-one-click.css","runtime_path":"/var/www/huangquechuanmei/workbench/digital-human-one-click.css","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"57e4a28410137972f2f368033fbf6b75e91f2dd3","postimage_sha256":"d3b4879550b86641c46cd8b198c7eb084f6975ea31272f36eb3c3fe25a0f10da"},
+    {"repository_path":"site/workbench/digital-human-one-click.html","runtime_path":"/var/www/huangquechuanmei/workbench/digital-human-one-click.html","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"e16c6bfd7fe9beed35880174b99a2840de3b6a15","postimage_sha256":"2d3c9a6c57fcfc5be637d68dcb6c72a984829fcd3468c5b361f09fab3776e204"},
+    {"repository_path":"site/workbench/digital-human-one-click.js","runtime_path":"/var/www/huangquechuanmei/workbench/digital-human-one-click.js","target_preimage_state":"absent","preimage_blob":null,"preimage_sha256":null,"postimage_blob":"d6814d34d6f6fdb6fddb38680d895cf68019625c","postimage_sha256":"12d43bfedae6fd2d4464bff0e5f4855f67203287852c7f53f251cb37cdda01dc"},
+    {"repository_path":"site/workbench/digital-human-oneclick.html","runtime_path":"/var/www/huangquechuanmei/workbench/digital-human-oneclick.html","target_preimage_state":"file","preimage_blob":"bb8fc593d957e2f6a728c39ff31321f293a5ca21","preimage_sha256":"2c20b69b86d78a6d186c01987f97856b0b228f50551297029a0bbb9aa3d311c4","postimage_blob":"34fb66a8f03c137149371cecead51e66b5caee66","postimage_sha256":"d26e956ff3168acc9bfcdde357366212c54033e8433ab4dbc80063fb69736784"},
+    {"repository_path":"site/workbench/script.html","runtime_path":"/var/www/huangquechuanmei/workbench/script.html","target_preimage_state":"file","preimage_blob":"cc01341d5832d44ac58a3fca7be727eec5cbeeff","preimage_sha256":"cba9e1571197e1bfd436b2800eac40677baa6639e46d432482ef79adffd8f152","postimage_blob":"ea4bad20da05b624f2c77b7f6283734997b19553","postimage_sha256":"22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e"},
+    {"repository_path":"site/workbench/text-video.html","runtime_path":"/var/www/huangquechuanmei/workbench/text-video.html","target_preimage_state":"file","preimage_blob":"46156af57263462ec6a5048fd8a5ae490d157630","preimage_sha256":"4b409f2b424b15c2a2c77d0ea6cd4a28ec6443802fc8a56339501885a03d0684","postimage_blob":"69de0bb5f5104a881fc0cb536bb9dc29c8b70c7e","postimage_sha256":"80ba3fd068bad7070fa9c1dbc041e91c52d637b941e6a252809e803f95530dca"},
+    {"repository_path":"site/workbench/video.html","runtime_path":"/var/www/huangquechuanmei/workbench/video.html","target_preimage_state":"file","preimage_blob":"a077dd9c3e00ac710ca45d4a5edc8187a51897c5","preimage_sha256":"a2fa12bf7a4085c2bc8adb97d12e462887f71d74aab73772c45751a4f08af9c1","postimage_blob":"122693504aa4df12fe224120bf85be1f0549e27c","postimage_sha256":"e25aee6de095378dd5ccaf304763fb2e20107d710dbd39dfe240cb96e95f4e6d"}
+  ]
+}
