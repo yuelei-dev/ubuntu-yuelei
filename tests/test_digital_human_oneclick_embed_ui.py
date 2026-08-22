@@ -18,9 +18,9 @@ class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
 
     def test_director_workspace_owns_the_precision_entry(self):
         page = SCRIPT_PAGE.read_text(encoding="utf-8")
-        self.assertIn('href="digital-human-one-click.html">🎬 数字人一键生成</a>', page)
+        self.assertIn('href="digital-human-oneclick.html">🎬 数字人一键生成</a>', page)
         self.assertNotIn('data-mode="script_to_video"', page)
-        self.assertIn("location.replace('digital-human-one-click.html')", page)
+        self.assertIn("location.replace('digital-human-oneclick.html')", page)
 
     def test_oneclick_page_supports_embedded_workspace_mode(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")
@@ -29,7 +29,9 @@ class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
         self.assertIn("if(!window.HQ_DIGITAL_HUMAN_EMBEDDED)", page)
         self.assertIn("hq:digital-human-oneclick:resize", page)
         self.assertIn("/workbench/digital-human-oneclick.html", page)
-        self.assertIn('href="digital-human-one-click.html">真人视频 Precision</a>', page)
+        self.assertIn('data-dh-mode="photo">数字人一键生成</button>', page)
+        self.assertIn('data-dh-mode="video">真人视频 Precision</button>', page)
+        self.assertNotIn("照片数字人", page)
 
     def test_embedded_401_redirects_the_top_level_workspace(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")

@@ -5,33 +5,53 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-PAGE = (ROOT / "site/workbench/digital-human-one-click.html").read_text(encoding="utf-8")
-SCRIPT = (ROOT / "site/workbench/digital-human-one-click.js").read_text(encoding="utf-8")
+PAGE = (ROOT / "site/workbench/digital-human-oneclick.html").read_text(encoding="utf-8")
+SCRIPT = (ROOT / "site/workbench/digital-human-unified.js").read_text(encoding="utf-8")
+STATE_SCRIPT = ROOT / "site/workbench/digital-human-unified-state.js"
+LEGACY = (ROOT / "site/workbench/digital-human-one-click.html").read_text(encoding="utf-8")
 DIRECTOR = (ROOT / "site/workbench/script.html").read_text(encoding="utf-8")
-VIDEO = (ROOT / "site/workbench/video.html").read_text(encoding="utf-8")
 
 
 class DigitalHumanPrecisionUiTests(unittest.TestCase):
-    def test_module_lives_under_director_and_replaces_copy_to_video(self):
+    def test_director_entry_opens_photo_mode_without_a_second_photo_tab(self):
         self.assertIn('data-active="script"', PAGE)
-        self.assertIn('href="script.html"', PAGE)
-        self.assertIn('aria-current="page"', PAGE)
-        self.assertIn('href="digital-human-one-click.html">🎬 数字人一键生成</a>', DIRECTOR)
+        self.assertIn('href="digital-human-oneclick.html">🎬 数字人一键生成</a>', DIRECTOR)
+        self.assertIn('data-dh-mode="photo">数字人一键生成</button>', PAGE)
+        self.assertIn('data-dh-mode="video">真人视频 Precision</button>', PAGE)
+        self.assertNotIn("照片数字人", PAGE)
+        self.assertIn("params.get('mode')==='video'?'video':'photo'", SCRIPT)
+        self.assertIn("location.replace('digital-human-oneclick.html?'", LEGACY)
         self.assertNotIn('data-mode="script_to_video"', DIRECTOR)
-        self.assertNotIn("oneclickPanel", VIDEO)
 
-    def test_real_precision_pipeline_is_wired_end_to_end(self):
+    def test_video_mode_clones_the_uploaded_videos_voice_before_paid_generation(self):
+        state_tag = 'src="digital-human-unified-state.js?'
+        app_tag = 'src="digital-human-unified.js?'
+        self.assertLess(PAGE.index(state_tag), PAGE.index(app_tag))
         for marker in (
-            "/api/gen/video/lipsync-import", "/api/gen/audio", "/api/gen/video",
-            "/api/gen/video-compose/projects", "/analyze-source",
-            "/edit-decisions", "/render",
+            "/api/gen/video/lipsync-import",
+            "/api/gen/video/lipsync-voice-sample",
+            "/api/gen/audio/slots",
+            "/api/gen/audio/clone-vip",
+            "/api/gen/audio/clone-status",
+            "/api/gen/audio",
+            "/api/gen/video",
+            "/api/gen/video-compose/projects",
+            "/analyze-source",
+            "/edit-decisions",
+            "/render",
         ):
             self.assertIn(marker, SCRIPT)
+        self.assertNotIn("/api/gen/audio/voices", SCRIPT)
+        self.assertNotIn('id="dhVoice"', PAGE)
         self.assertIn("lipsync_mode:'precision'", SCRIPT)
         self.assertIn("dynamic_duration:true", SCRIPT)
+        self.assertIn("consent_confirmed:true", SCRIPT)
         self.assertIn("'Idempotency-Key'", SCRIPT)
-        self.assertIn("data.output_url||waitRender()", SCRIPT)
-        self.assertIn("state.project.id+'/output'", SCRIPT)
+        analyze = SCRIPT[SCRIPT.index("function analyzeVoice("):SCRIPT.index("function previewVoice(")]
+        self.assertNotIn("generateAudio(", analyze)
+        self.assertNotIn("generateLipsync(", analyze)
+        confirm = SCRIPT[SCRIPT.index("function confirmAndGenerate("):]
+        self.assertIn("generateAudio(text).then(generateLipsync)", confirm)
 
     def test_three_templates_have_visible_ten_second_examples(self):
         expected = {
@@ -44,15 +64,24 @@ class DigitalHumanPrecisionUiTests(unittest.TestCase):
             self.assertIn(filename, PAGE)
             preview = ROOT / "site/assets/one-click/previews" / filename
             self.assertGreater(preview.stat().st_size, 100000)
-        self.assertEqual(3, PAGE.count("<video muted loop playsinline"))
+        self.assertEqual(3, PAGE.count('<video muted loop playsinline preload="metadata"'))
 
     @unittest.skipUnless(shutil.which("node"), "Node.js required")
     def test_javascript_parses(self):
+        for script in (STATE_SCRIPT, ROOT / "site/workbench/digital-human-unified.js"):
+            completed = subprocess.run(
+                ["node", "--check", str(script)], capture_output=True, text=True,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js required")
+    def test_slot_selection_and_clone_version_idempotency_behaviors(self):
         completed = subprocess.run(
-            ["node", "--check", str(ROOT / "site/workbench/digital-human-one-click.js")],
+            ["node", str(ROOT / "tests/test_digital_human_unified_state.js")],
             capture_output=True, text=True,
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIn("unified state tests passed", completed.stdout)
 
 
 if __name__ == "__main__":

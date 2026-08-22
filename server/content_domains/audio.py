@@ -1100,7 +1100,7 @@ def get_audio_asset(username, asset_id):
         conn.row_factory = sqlite3.Row
         _ensure_column(conn, "audio_assets", "deleted", "INTEGER DEFAULT 0")
         row = conn.execute(
-            "SELECT id,username,file,url,created_at FROM audio_assets "
+            "SELECT id,job_id,username,file,url,created_at FROM audio_assets "
             "WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
             (asset_id, username),
         ).fetchone()
