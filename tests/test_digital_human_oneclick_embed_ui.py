@@ -5,19 +5,22 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 VIDEO_PAGE = ROOT / "site" / "workbench" / "video.html"
 ONECLICK_PAGE = ROOT / "site" / "workbench" / "digital-human-oneclick.html"
+SCRIPT_PAGE = ROOT / "site" / "workbench" / "script.html"
 
 
 class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
-    def test_oneclick_tab_opens_inside_the_video_workspace(self):
+    def test_video_workspace_no_longer_owns_the_oneclick_module(self):
         page = VIDEO_PAGE.read_text(encoding="utf-8")
-        self.assertIn('class="function-tab on" href="digital-human-oneclick.html" id="oneclickTab"', page)
-        self.assertIn('data-oneclick-tab="true"', page)
-        self.assertIn('id="oneclickPanel" class="function-panel oneclick-panel"', page)
-        self.assertIn('id="oneclickFrame"', page)
-        self.assertIn('src="digital-human-oneclick.html?embed=1"', page)
-        self.assertIn("var videoFunction='oneclick'", page)
-        self.assertIn("event.preventDefault();updateFunction('oneclick')", page)
-        self.assertIn("updateFunction('oneclick')", page)
+        for marker in ("oneclickTab", "oneclickPanel", "oneclickFrame", "oneclick-active"):
+            self.assertNotIn(marker, page)
+        self.assertIn("var videoFunction='talking'", page)
+        self.assertIn("updateFunction('talking')", page)
+
+    def test_director_workspace_owns_the_precision_entry(self):
+        page = SCRIPT_PAGE.read_text(encoding="utf-8")
+        self.assertIn('href="digital-human-one-click.html">🎬 数字人一键生成</a>', page)
+        self.assertNotIn('data-mode="script_to_video"', page)
+        self.assertIn("location.replace('digital-human-one-click.html')", page)
 
     def test_oneclick_page_supports_embedded_workspace_mode(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")
@@ -25,7 +28,8 @@ class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
         self.assertIn("document.documentElement.classList.add('dh-embedded')", page)
         self.assertIn("if(!window.HQ_DIGITAL_HUMAN_EMBEDDED)", page)
         self.assertIn("hq:digital-human-oneclick:resize", page)
-        self.assertIn("/workbench/video.html?function=oneclick", page)
+        self.assertIn("/workbench/digital-human-oneclick.html", page)
+        self.assertIn('href="digital-human-one-click.html">真人视频 Precision</a>', page)
 
     def test_embedded_401_redirects_the_top_level_workspace(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")
@@ -37,7 +41,7 @@ class DigitalHumanOneClickEmbedUiTests(unittest.TestCase):
     def test_standalone_401_redirects_the_current_page(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")
         self.assertIn("window.location.href=target;", page)
-        self.assertIn("var target='/login.html?next='+encodeURIComponent('/workbench/video.html?function=oneclick')", page)
+        self.assertIn("var target='/login.html?next='+encodeURIComponent('/workbench/digital-human-oneclick.html')", page)
 
     def test_only_401_responses_invoke_the_login_redirect(self):
         page = ONECLICK_PAGE.read_text(encoding="utf-8")

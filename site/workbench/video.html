@@ -33,14 +33,6 @@
   .function-tab{height:36px;padding:0 18px;border:1px solid transparent;border-radius:10px;background:transparent;color:#94a4bb;font:800 13px inherit;cursor:pointer}
   .function-tab.on{color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);box-shadow:0 10px 24px rgba(231,178,76,.14)}
   .video-header-row{align-items:flex-start}
-  .video-quick-actions{display:flex;align-items:center;gap:8px;flex:none}
-  .video-quick-action,.video-quick-actions .function-tab{height:36px;padding:0 13px;display:inline-flex;align-items:center;justify-content:center;border:1px solid rgba(231,178,76,.34);border-radius:9px;background:rgba(231,178,76,.08);color:#e7b24c;text-decoration:none;font-size:12px;font-weight:900;white-space:nowrap;transition:.16s}
-  .video-quick-action:hover,.video-quick-actions .function-tab:hover{border-color:rgba(244,205,114,.62);background:rgba(231,178,76,.14);transform:translateY(-1px)}
-  .video-quick-action.on,.video-quick-actions .function-tab.on{color:#1a1206;background:linear-gradient(135deg,#f4cd72,#e7b24c);box-shadow:0 10px 24px rgba(231,178,76,.14)}
-  .gVid.oneclick-active{grid-template-columns:minmax(0,1fr)}
-  .gVid.oneclick-active .vid-side{display:none}
-  .oneclick-panel{margin-top:14px;min-height:920px;border:1px solid rgba(148,164,187,.12);border-radius:15px;background:rgba(7,11,19,.2);overflow:hidden}
-  .oneclick-frame{display:block;width:100%;height:1100px;min-height:920px;border:0;background:transparent}
   .direct-create-focus{outline:2px solid #e7b24c;box-shadow:0 0 0 5px rgba(231,178,76,.15)}
   .function-panel{min-height:0}
   .motion-panel{margin-top:22px;border:1px solid rgba(148,164,187,.12);border-radius:15px;background:rgba(7,11,19,.28);padding:18px}
@@ -228,7 +220,7 @@
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(12px);opacity:0;pointer-events:none;transition:.2s;background:#111827;border:1px solid rgba(148,164,187,.2);border-radius:12px;padding:11px 16px;color:#eaf1fa;font-size:13px;z-index:80}
   .toast.show{opacity:1;transform:translateX(-50%)}
   @media (max-width:1100px){.gVid{height:auto;min-height:0;overflow:visible}.gVid,.form-grid,.motion-grid,.video-parameter-grid{grid-template-columns:1fr}.vid-main,.vid-side{height:auto;overflow:visible}.history-list{max-height:420px}.voice-grid,.audio-source,.avatar-grid{grid-template-columns:1fr}.batch-avatar-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-  @media (max-width:640px){.video-header-row{align-items:stretch;flex-direction:column}.video-quick-actions{width:100%}.video-quick-action,.video-quick-actions .function-tab{flex:1;padding-inline:10px}}
+  @media (max-width:640px){.video-header-row{align-items:stretch;flex-direction:column}}
   @media (prefers-reduced-motion:reduce){.history-focus{animation:none}}
   .line-switch{margin:12px 0;padding:12px;background:rgba(255,255,255,.03);border:1px solid rgba(148,164,187,.14);border-radius:12px}
   .line-switch>.label{margin-bottom:8px}
@@ -252,14 +244,10 @@
           <h1 style="margin:0;font-size:21px;font-weight:800; display:flex; align-items:center; gap:10px;"><img src="../assets/icons/ic_video.png" alt="" style="width:30px;height:30px;object-fit:contain;flex:none;">视频模块</h1>
           <p id="modeSummary" class="muted" style="margin:7px 0 0;font-size:13px;">选择视频生成功能，创建对应的视频内容</p>
         </div>
-        <nav class="video-quick-actions" aria-label="快捷成片功能">
-          <a class="video-quick-action" href="one-click-video.html">一键成片</a>
-          <a class="function-tab on" href="digital-human-oneclick.html" id="oneclickTab" data-oneclick-tab="true" aria-current="page">数字人一键生成</a>
-        </nav>
       </div>
 
       <div class="function-tabs" aria-label="视频功能分页">
-        <button class="function-tab" type="button" data-function="talking">数字化 IP</button>
+        <button class="function-tab on" type="button" data-function="talking">数字化 IP</button>
         <button class="function-tab" type="button" data-function="cinematic">电影化身</button>
         <button class="function-tab" type="button" data-function="tryon">换装换背景</button>
         <button class="function-tab" type="button" data-function="grok">果肉视频生成</button>
@@ -267,10 +255,6 @@
         <button class="function-tab hidden" type="button" data-function="minimax" aria-hidden="true">麦克视频</button>
         <button class="function-tab hidden" type="button" data-function="omni" aria-hidden="true">Omni 视频</button>
         <button class="function-tab hidden" type="button" data-function="micro" aria-hidden="true">Seedance 视频</button>
-      </div>
-
-      <div id="oneclickPanel" class="function-panel oneclick-panel">
-        <iframe id="oneclickFrame" class="oneclick-frame" src="digital-human-oneclick.html?embed=1" title="数字人一键生成完整工作流" loading="eager"></iframe>
       </div>
 
       <div id="bgmPanel" class="panel" style="margin-top:14px;">
@@ -855,7 +839,7 @@
 <script>
 (function(){
   var token='__cookie__';
-  var videoFunction='oneclick', mode='text', voiceTab='public', selectedVoice='S_d21F8OR62', activePreview=null, activePreviewBtn=null;
+  var videoFunction='talking', mode='text', voiceTab='public', selectedVoice='S_d21F8OR62', activePreview=null, activePreviewBtn=null;
   var imageData='', imagePreview='', audioData='', selectedAssetAudio=null, assetAudiosLoaded=false, selectedResolution='1080p', selectedRatio='9:16', selectedMotion='medium';
   var talkingBatch=false, talkingBatchItems=[], videoCost=20, videoBatchMax=5, talkingBatchSeq=0;
   var TALKING_BLOCK_SECONDS=30, TALKING_BLOCK_POINTS=30;
@@ -2337,18 +2321,9 @@
     updateChecklist();
   }
   function updateFunction(next){
-    videoFunction=next||'oneclick';
-    var workspace=document.querySelector('.gVid');
-    if(workspace) workspace.classList.toggle('oneclick-active',videoFunction==='oneclick');
+    videoFunction=next||'talking';
     if($('bgmPanel')) $('bgmPanel').classList.toggle('hidden',videoFunction!=='talking');
     document.querySelectorAll('[data-function]').forEach(function(b){b.classList.toggle('on',b.dataset.function===videoFunction);});
-    var oneclickTab=$('oneclickTab');
-    if(oneclickTab){
-      oneclickTab.classList.toggle('on',videoFunction==='oneclick');
-      if(videoFunction==='oneclick') oneclickTab.setAttribute('aria-current','page');
-      else oneclickTab.removeAttribute('aria-current');
-    }
-    $('oneclickPanel').classList.toggle('hidden',videoFunction!=='oneclick');
     $('talkingPanel').classList.toggle('hidden',videoFunction!=='talking');
     if($('cinematicPanel')) $('cinematicPanel').classList.toggle('hidden',videoFunction!=='cinematic');
     if($('tryonPanel')) $('tryonPanel').classList.toggle('hidden',videoFunction!=='tryon');
@@ -2360,10 +2335,7 @@
     // 面板 hidden 的时候量不到卡片高度（getBoundingClientRect 全是 0），刚显示出来要重量一次，
     // 否则那个面板里的形象网格是不受限的 —— 形象一多就又拉长了
     limitAllAvatarGrids();
-    if(videoFunction==='oneclick'){
-      $('modeSummary').textContent='一张人物照片 + 声音 + 完整文案，自动完成三段口播、主画面、字幕与成片';
-      if($('modeName')) $('modeName').textContent='数字人一键生成';
-    }else if(videoFunction==='cinematic'){
+    if(videoFunction==='cinematic'){
       $('modeSummary').textContent='选自己的数字人形象，写一句画面描述，直接出片（最多 3 个形象同框）';
       if($('modeName')) $('modeName').textContent='电影化身';
       loadMotionAvatars();
@@ -2510,12 +2482,6 @@
       });
   }
   document.querySelectorAll('[data-function]').forEach(function(b){b.onclick=function(){updateFunction(b.dataset.function);};});
-  if($('oneclickTab')) $('oneclickTab').onclick=function(event){event.preventDefault();updateFunction('oneclick');};
-  window.addEventListener('message',function(event){
-    var frame=$('oneclickFrame'),data=event.data||{},height=Number(data.height);
-    if(!frame||event.source!==frame.contentWindow||event.origin!==location.origin||data.type!=='hq:digital-human-oneclick:resize'||!isFinite(height)) return;
-    frame.style.height=Math.max(920,Math.min(4800,Math.ceil(height)))+'px';
-  });
   function applyTryonDurationOptions(){
     var allowed=tryonIsLine2()?[5,6,10,15]:[3,5,6];
     if(allowed.indexOf(selectedTryonSeconds)<0) selectedTryonSeconds=6;
@@ -3379,7 +3345,7 @@
   bindVideoTaskSync();
   $('scriptText').dispatchEvent(new Event('input'));
   var videoHealthReady=loadTalkingLimits();
-  updateFunction('oneclick');
+  updateFunction('talking');
   syncVideoGenerateButtons();
   // F7 联动：资产页视频「重生成」跳转过来时，读 localStorage 预填(一次性)
   var _prefillVoice='';

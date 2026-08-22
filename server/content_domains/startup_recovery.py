@@ -1,5 +1,6 @@
 """Recover content jobs left running when the service restarts."""
 
+import json
 import time
 from contextlib import closing
 
@@ -121,6 +122,41 @@ def reclaim_orphaned_running(
                 logger("[startup] 查询Sora恢复信息失败，保留 running job=%s: %s" %
                        (row["id"], str(exc)[:200]), flush=True)
                 continue
+        elif row["kind"] == "video":
+            try:
+                with closing(jdb()) as connection:
+                    payload_row = connection.execute(
+                        "SELECT payload FROM jobs WHERE id=?", (row["id"],),
+                    ).fetchone()
+                payload = json.loads((payload_row or {})["payload"] or "{}")
+                if not isinstance(payload, dict):
+                    raise ValueError("video payload is not an object")
+            except Exception as exc:
+                logger(
+                    "[startup] 查询视频恢复 payload 失败，保留 running job=%s: %s"
+                    % (row["id"], str(exc)[:200]), flush=True,
+                )
+                continue
+            if (isinstance(payload, dict)
+                    and str(payload.get("mode") or "").lower() == "lipsync"):
+                provider = "HeyGen Precision"
+                try:
+                    resumable = domains()[2].get_resumable_precision_lipsync(
+                        row["id"]
+                    )
+                    if resumable and resumable.get("submission_unknown"):
+                        logger(
+                            "[startup] Precision 提交结果未知，保留 running 待核对 job=%s"
+                            % row["id"], flush=True,
+                        )
+                        continue
+                    request_id = _valid_request_id(resumable)
+                except Exception as exc:
+                    logger(
+                        "[startup] 查询 Precision 恢复信息失败，保留 running job=%s: %s"
+                        % (row["id"], str(exc)[:200]), flush=True,
+                    )
+                    continue
 
         if request_id:
             try:

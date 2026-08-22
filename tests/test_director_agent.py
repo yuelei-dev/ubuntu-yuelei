@@ -512,7 +512,7 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertIn('import_module("." + name, __package__)', registry_source)
         self.assertIn("node tests/test_director_agent.js", workflow)
 
-    def test_release_manifest_binds_all_seven_runtime_files(self):
+    def test_historical_release_manifest_binds_all_seven_locked_blobs(self):
         manifest_path = (
             ROOT / "deploy" / "test-runtime" /
             "director-agent-v1-20260820.json"
@@ -531,22 +531,13 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertEqual({item["repository_path"] for item in files}, expected_paths)
         self.assertEqual(len({item["runtime_path"] for item in files}), 7)
 
-        safe_directory = ROOT.as_posix()
         for item in files:
-            source = item["repository_path"]
-            blob = subprocess.check_output(
-                ["git", "-c", f"safe.directory={safe_directory}",
-                 "rev-parse", f"HEAD:{source}"],
-                cwd=ROOT,
-                text=True,
-            ).strip()
+            blob = item["source_blob"]
             contents = subprocess.check_output(
-                ["git", "-c", f"safe.directory={safe_directory}",
-                 "cat-file", "blob", f"HEAD:{source}"],
+                ["git", "cat-file", "blob", blob],
                 cwd=ROOT,
             )
             digest = hashlib.sha256(contents).hexdigest()
-            self.assertEqual(item["source_blob"], blob)
             self.assertEqual(item["source_sha256"], digest)
             self.assertEqual(item["expected_postimage_blob"], blob)
             self.assertEqual(item["expected_postimage_sha256"], digest)

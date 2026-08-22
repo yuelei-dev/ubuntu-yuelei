@@ -10,36 +10,21 @@ HOME = (ROOT / "site/index.html").read_text(encoding="utf-8")
 
 
 class TextVideoEntryTests(unittest.TestCase):
-    def test_entry_helper_behavior_in_node(self):
-        result = subprocess.run(
-            ["node", "tests/test_text_video_entry.js"],
-            cwd=ROOT,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        self.assertIn("10 assertions passed", result.stdout)
-
-    def test_old_url_is_a_compatibility_entry_without_duplicate_business_logic(self):
-        self.assertIn("HQTextVideoEntry.canonicalTarget(location.search,location.hash)", LEGACY)
-        self.assertIn("location.replace(target)", LEGACY)
-        self.assertIn("/workbench/script?mode=script_to_video", LEGACY)
+    def test_old_url_is_a_compatibility_entry_for_digital_human(self):
+        self.assertIn("location.replace('/workbench/digital-human-one-click'", LEGACY)
+        self.assertNotIn("HQTextVideoEntry", LEGACY)
+        self.assertNotIn("script_to_video", LEGACY)
         self.assertNotIn("/api/gen/", LEGACY)
 
-    def test_home_navigation_targets_the_canonical_mode(self):
-        href = 'href="/workbench/script?mode=script_to_video"'
+    def test_home_navigation_targets_digital_human(self):
+        href = 'href="/workbench/digital-human-one-click"'
         self.assertEqual(HOME.count(href), 2)
-        self.assertNotIn(
-            '<a href="/workbench/one-click-video"><b>文案成片</b>',
-            HOME,
-        )
+        self.assertNotIn('href="/workbench/script?mode=script_to_video"', HOME)
 
-    def test_script_page_opens_and_keeps_script_to_video_mode(self):
-        self.assertIn('data-mode="script_to_video"', SCRIPT)
-        self.assertIn("HQTextVideoEntry.modeFromSearch(location.search)", SCRIPT)
-        self.assertIn("currentMode=entryMode", SCRIPT)
-        self.assertIn("switchMode(currentMode)", SCRIPT)
-        self.assertIn("HQTextVideoEntry.keepModeAfterWrite(currentMode)", SCRIPT)
+    def test_script_page_replaces_copy_to_video_with_digital_human(self):
+        self.assertNotIn('data-mode="script_to_video"', SCRIPT)
+        self.assertIn('href="digital-human-one-click.html">🎬 数字人一键生成</a>', SCRIPT)
+        self.assertIn("location.replace('digital-human-one-click.html')", SCRIPT)
         self.assertIn('data-active="script"', SCRIPT)
 
     def test_refresh_recovery_and_material_handoff_remain_on_the_shared_page(self):
