@@ -99,8 +99,25 @@ def _validate_precision_contract(manifest):
     actual = {item.get("repository_path") for item in manifest["files"]}
     if not expected or actual != expected:
         raise ReleaseError("Precision v3 runtime inventory is incomplete")
-    if executor.get("nginx_repository_path") not in actual:
-        raise ReleaseError("Precision v3 Nginx runtime is not locked")
+    nginx = manifest.get("nginx_contract")
+    if not isinstance(nginx, dict):
+        raise ReleaseError("Precision v3 Yuelei Nginx contract is missing")
+    if nginx.get("runtime_path") != "/etc/nginx/sites-available/yuelei-test.conf":
+        raise ReleaseError("Precision v3 may only update the Yuelei test vhost")
+    if nginx.get("enabled_runtime_path") != "/etc/nginx/sites-enabled/yuelei-test.conf":
+        raise ReleaseError("Precision v3 Yuelei enabled-vhost path is invalid")
+    if "huangquechuanmei" in str(nginx.get("runtime_path") or ""):
+        raise ReleaseError("Precision v3 must not update the main-site vhost")
+    if nginx.get("source_repository_path") != "deploy/nginx-huangquechuanmei.conf":
+        raise ReleaseError("Precision v3 Nginx source path is invalid")
+    if nginx.get("renderer_repository_path") != "deploy/render_yuelei_test_nginx.py":
+        raise ReleaseError("Precision v3 Nginx renderer path is invalid")
+    probe_paths = {
+        probe.get("url") for probe in executor.get("unauthenticated_probes", [])
+    }
+    if ("https://yuelei.huangquechuanmei.com/api/gen/video/lipsync-import"
+            not in probe_paths):
+        raise ReleaseError("Precision v3 lipsync-import 401 probe is missing")
     policy = executor.get("rollback_health_policy")
     if not isinstance(policy, dict):
         raise ReleaseError("Precision v3 rollback health policy is missing")
@@ -227,8 +244,40 @@ class SystemHooks:
     def validate_nginx(self):
         _run(["nginx", "-t"])
 
+    def validate_nginx_candidate(self, candidate, reviewed_source):
+        source = pathlib.Path(reviewed_source).read_text(encoding="utf-8")
+        preamble = source.split("server {", 1)[0]
+        candidate = pathlib.Path(candidate).resolve()
+        with tempfile.TemporaryDirectory(prefix="hq-nginx-candidate-") as directory:
+            directory = pathlib.Path(directory)
+            wrapper = directory / "nginx.conf"
+            wrapper.write_text(
+                "pid %s;\nerror_log %s;\nevents {}\nhttp {\n%s\ninclude %s;\n}\n"
+                % (directory / "nginx.pid", directory / "error.log",
+                   preamble, candidate),
+                encoding="utf-8",
+            )
+            _run(["nginx", "-t", "-c", str(wrapper)])
+
     def reload_nginx(self):
         _run(["systemctl", "reload", "nginx"])
+
+    def link_state(self, path):
+        path = pathlib.Path(path)
+        if path.is_symlink():
+            return {"state": "symlink", "target": os.readlink(path)}
+        if path.exists():
+            return {"state": "other", "target": None}
+        return {"state": "absent", "target": None}
+
+    def replace_symlink(self, path, target):
+        path = pathlib.Path(path)
+        state = self.link_state(path)
+        if state["state"] == "other":
+            raise ReleaseError("enabled-vhost path is not a symlink")
+        if state["state"] == "symlink":
+            path.unlink()
+        os.symlink(target, path)
 
     def probe(self, url, method, expected_status):
         request = urllib.request.Request(
@@ -509,6 +558,30 @@ def _verify_director_checkout(source_root, manifest, reviewed_head, merged_main)
     return head
 
 
+def _verify_precision_checkout(source_root, manifest, reviewed_head, merged_main):
+    head = _verify_director_checkout(
+        source_root, manifest, reviewed_head, merged_main,
+    )
+    code_source = str(manifest.get("source", {}).get("code_source_commit") or "")
+    try:
+        reviewed_parent = _run(["git", "rev-parse", reviewed_head + "^"], cwd=source_root)
+    except subprocess.CalledProcessError as error:
+        raise ReleaseError("reviewed Precision Head has no source parent") from error
+    if code_source != reviewed_parent:
+        raise ReleaseError(
+            "Precision code source must be the exact parent of the reviewed Head"
+        )
+    metadata_paths = set(_run(
+        ["git", "diff", "--name-only", code_source, reviewed_head], cwd=source_root,
+    ).splitlines())
+    allowed = {"deploy/test-runtime/digital-human-precision-director-v3-20260822.json"}
+    if not metadata_paths or not metadata_paths.issubset(allowed):
+        raise ReleaseError(
+            "reviewed Precision Head may only finalize the locked manifest metadata"
+        )
+    return head
+
+
 def _execute_director_release(
     manifest, source_root, target_root, backup_root, *, hooks, replace,
     verify_repository, checkpoint, reviewed_head, merged_main,
@@ -775,6 +848,77 @@ def _validate_candidates(target_root, source_root, manifest, hooks, workspace):
     )
 
 
+def _prepare_precision_nginx(
+    manifest, source_root, target_root, backup_root, hooks,
+):
+    nginx = manifest["nginx_contract"]
+    nginx_source = (source_root / nginx["source_repository_path"]).resolve()
+    renderer_source = (source_root / nginx["renderer_repository_path"]).resolve()
+    for path in (nginx_source, renderer_source):
+        if source_root not in path.parents:
+            raise ReleaseError("Nginx release source escapes source root")
+    nginx_source_data = nginx_source.read_bytes()
+    renderer_data = renderer_source.read_bytes()
+    if (_sha256(nginx_source_data) != nginx["source_sha256"]
+            or _git_blob(nginx_source_data) != nginx["source_blob"]):
+        raise ReleaseError("reviewed main-site Nginx source lock mismatch")
+    if (_sha256(renderer_data) != nginx["renderer_sha256"]
+            or _git_blob(renderer_data) != nginx["renderer_blob"]):
+        raise ReleaseError("Yuelei Nginx renderer lock mismatch")
+    backup_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+            prefix="precision-nginx-candidate-", dir=backup_root) as candidate_dir:
+        candidate = pathlib.Path(candidate_dir) / "yuelei-test.conf"
+        _run([
+            sys.executable, str(renderer_source),
+            "--source", str(nginx_source), "--output", str(candidate),
+        ], cwd=source_root)
+        candidate_data = candidate.read_bytes()
+        if (_sha256(candidate_data) != nginx["postimage_sha256"]
+                or _git_blob(candidate_data) != nginx["postimage_blob"]):
+            raise ReleaseError("rendered Yuelei Nginx candidate lock mismatch")
+        text = candidate_data.decode("utf-8")
+        required = (
+            "server_name yuelei.huangquechuanmei.com;",
+            "location = /api/gen/video/lipsync-import",
+            "client_max_body_size 100m;",
+        )
+        if any(marker not in text for marker in required):
+            raise ReleaseError("rendered Yuelei Nginx candidate is incomplete")
+        if "server_name huangquechuanmei.com" in text:
+            raise ReleaseError("rendered Yuelei Nginx candidate retained main-site names")
+        hooks.validate_nginx_candidate(candidate, nginx_source)
+
+    target = _mapped_path(target_root, nginx["runtime_path"])
+    if not target.is_file() or target.is_symlink():
+        raise ReleaseError("expected regular Yuelei Nginx preimage")
+    preimage = target.read_bytes()
+    if (_sha256(preimage) != nginx["preimage_sha256"]
+            or _git_blob(preimage) != nginx["preimage_blob"]):
+        raise ReleaseError("Yuelei Nginx preimage lock mismatch")
+    target_stat = target.stat()
+    item = {
+        "repository_path": nginx["source_repository_path"],
+        "runtime_path": nginx["runtime_path"],
+        "target_preimage_state": "file",
+        "preimage_sha256": nginx["preimage_sha256"],
+        "preimage_blob": nginx["preimage_blob"],
+        "postimage_sha256": nginx["postimage_sha256"],
+        "postimage_blob": nginx["postimage_blob"],
+    }
+    enabled = _mapped_path(target_root, nginx["enabled_runtime_path"])
+    enabled_actual = hooks.link_state(enabled)
+    if (enabled_actual.get("state") != nginx["enabled_preimage_state"]
+            or enabled_actual.get("target") != nginx.get("enabled_preimage_target")):
+        raise ReleaseError("Yuelei enabled-vhost symlink preimage mismatch")
+    return {
+        "contract": nginx, "candidate_data": candidate_data,
+        "entry": (item, None, target, target_stat.st_mode & 0o777,
+                  target_stat.st_uid, target_stat.st_gid),
+        "enabled_path": enabled,
+    }
+
+
 def _execute_precision_release(
     manifest, source_root, target_root, backup_root, *, hooks, replace,
     verify_repository, checkpoint, reviewed_head, merged_main,
@@ -782,7 +926,7 @@ def _execute_precision_release(
     """Install the complete Precision Director overlay as one rollback unit."""
     executor = manifest["release_executor"]
     if verify_repository:
-        release_head = _verify_director_checkout(
+        release_head = _verify_precision_checkout(
             source_root, manifest, reviewed_head, merged_main,
         )
     else:
@@ -797,6 +941,9 @@ def _execute_precision_release(
             or _git_blob(executor_data) != executor.get("git_blob")):
         raise ReleaseError("release executor lock does not match source")
 
+    nginx_release = _prepare_precision_nginx(
+        manifest, source_root, target_root, backup_root, hooks,
+    )
     _validate_director_sources(source_root, manifest, hooks)
     entries = []
     for item in manifest["files"]:
@@ -831,6 +978,7 @@ def _execute_precision_release(
             raise ReleaseError("unsupported runtime preimage state")
         entries.append((item, source, target, mode, uid, gid))
 
+    entries.append(nginx_release["entry"])
     service = manifest["target"]["service"]
     if not hooks.service_active(service):
         raise ReleaseError("target service is not active before release")
@@ -846,6 +994,9 @@ def _execute_precision_release(
         "reviewed_head": reviewed_head, "merged_main": release_head,
         "executor_sha256": _sha256(executor_data),
         "executor_git_blob": _git_blob(executor_data), "files": [],
+        "nginx_enabled_preimage": hooks.link_state(
+            nginx_release["enabled_path"]
+        ),
     }
     for index, (item, _, target, mode, uid, gid) in enumerate(entries):
         saved = None
@@ -865,6 +1016,18 @@ def _execute_precision_release(
             "postimage_sha256": _locked_value(item, "postimage", "sha256"),
         })
     _write_audit(backup / "audit.json", audit)
+    candidate_source = backup / "yuelei-test.conf.candidate"
+    candidate_source.write_bytes(nginx_release["candidate_data"])
+    os.chmod(candidate_source, 0o600)
+    entries = [
+        (item, candidate_source if source is None else source,
+         target, mode, uid, gid)
+        for item, source, target, mode, uid, gid in entries
+    ]
+    nginx = nginx_release["contract"]
+    enabled_target = nginx_release["enabled_path"]
+    enabled_preimage_state = nginx["enabled_preimage_state"]
+    enabled_preimage_target = nginx.get("enabled_preimage_target")
     checkpoint("after_backup")
 
     try:
@@ -881,6 +1044,18 @@ def _execute_precision_release(
         )
         hooks.validate_nginx()
         checkpoint("after_compile")
+        if nginx["enabled_postimage_state"] == "symlink":
+            post_target = nginx["enabled_postimage_target"]
+            current_link = hooks.link_state(enabled_target)
+            if current_link.get("state") == "symlink":
+                if current_link.get("target") != post_target:
+                    raise ReleaseError("Yuelei enabled-vhost symlink postimage mismatch")
+            elif current_link.get("state") != "absent":
+                raise ReleaseError("Yuelei enabled-vhost postimage became unsafe")
+            else:
+                hooks.replace_symlink(enabled_target, post_target)
+        else:
+            raise ReleaseError("unsupported Yuelei enabled-vhost postimage state")
         hooks.restart(service)
         hooks.reload_nginx()
         checkpoint("after_restart")
@@ -892,8 +1067,14 @@ def _execute_precision_release(
                 probe["url"], probe.get("expected_status", 200),
                 probe["expected_sha256"],
             )
+        for probe in executor.get("unauthenticated_probes", []):
+            hooks.probe(
+                probe["url"], probe.get("method", "GET"),
+                probe["expected_status"],
+            )
         checkpoint("after_health")
         audit["status"] = "deployed"
+        audit["nginx_enabled_postimage"] = hooks.link_state(enabled_target)
         audit["final_files"] = [
             {"runtime_path": item["runtime_path"], "state": "file",
              "sha256": _sha256(target.read_bytes())}
@@ -902,6 +1083,16 @@ def _execute_precision_release(
         _write_audit(backup / "audit.json", audit)
     except BaseException as forward_error:
         rollback_errors = []
+        try:
+            current_link = hooks.link_state(enabled_target)
+            if current_link.get("state") == "other":
+                raise ReleaseError("Yuelei enabled-vhost rollback target is unsafe")
+            if enabled_preimage_state == "symlink":
+                hooks.replace_symlink(enabled_target, enabled_preimage_target)
+            elif current_link.get("state") == "symlink":
+                enabled_target.unlink()
+        except BaseException as error:
+            rollback_errors.append("nginx-link:" + type(error).__name__)
         for (item, _, target, mode, uid, gid), saved in zip(entries, backups):
             try:
                 if saved is None:
@@ -930,6 +1121,7 @@ def _execute_precision_release(
         audit["status"] = "rollback_failed" if rollback_errors else "rolled_back"
         audit["forward_error"] = type(forward_error).__name__
         audit["rollback_errors"] = rollback_errors
+        audit["nginx_enabled_final"] = hooks.link_state(enabled_target)
         try:
             _write_audit(backup / "audit.json", audit)
         except BaseException as error:

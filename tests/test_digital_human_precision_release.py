@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -41,6 +42,7 @@ class Hooks:
     def __init__(self, fail_probe=False):
         self.calls = []
         self.fail_probe = fail_probe
+        self.links = {}
 
     def validate_import(self, python_root, modules):
         self.calls.append(("imports", tuple(modules)))
@@ -51,8 +53,19 @@ class Hooks:
     def validate_nginx(self):
         self.calls.append(("nginx-test",))
 
+    def validate_nginx_candidate(self, candidate, reviewed_source):
+        content = pathlib.Path(candidate).read_text(encoding="utf-8")
+        self.calls.append(("nginx-candidate", content, str(reviewed_source)))
+
     def reload_nginx(self):
         self.calls.append(("nginx-reload",))
+
+    def link_state(self, path):
+        return dict(self.links.get(str(path), {"state": "absent", "target": None}))
+
+    def replace_symlink(self, path, target):
+        self.links[str(path)] = {"state": "symlink", "target": target}
+        self.calls.append(("symlink", str(path), target))
 
     def service_active(self, service):
         self.calls.append(("active", service))
@@ -78,6 +91,11 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
         cls.executor = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.executor)
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        renderer_spec = importlib.util.spec_from_file_location(
+            "precision_test_renderer", ROOT / "deploy/render_yuelei_test_nginx.py",
+        )
+        cls.renderer = importlib.util.module_from_spec(renderer_spec)
+        renderer_spec.loader.exec_module(cls.renderer)
 
     def _target_tree(self, root):
         for item in self.manifest["files"]:
@@ -91,7 +109,33 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
                 self.assertEqual(item["preimage_blob"], git_blob(data))
                 self.assertEqual(item["preimage_sha256"], sha256(data))
                 target.write_bytes(data)
+        nginx = self.manifest["nginx_contract"]
+        nginx_target = pathlib.Path(root).joinpath(
+            *pathlib.PurePosixPath(nginx["runtime_path"]).parts[1:]
+        )
+        nginx_target.parent.mkdir(parents=True, exist_ok=True)
+        base_source = subprocess.run(
+            ["git", "show", "origin/main:" + nginx["source_repository_path"]],
+            cwd=ROOT, check=True, stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        nginx_preimage = self.renderer.render_config(base_source).encode("utf-8")
+        self.assertEqual(nginx["preimage_blob"], git_blob(nginx_preimage))
+        self.assertEqual(nginx["preimage_sha256"], sha256(nginx_preimage))
+        nginx_target.write_bytes(nginx_preimage)
+        main_vhost = pathlib.Path(root) / "etc/nginx/sites-available/huangquechuanmei"
+        main_vhost.write_bytes(b"protected-main-site-vhost\n")
         return pathlib.Path(root)
+
+    def _lock_enabled_link(self, hooks, target):
+        nginx = self.manifest["nginx_contract"]
+        path = target.joinpath(
+            *pathlib.PurePosixPath(nginx["enabled_runtime_path"]).parts[1:]
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        hooks.links[str(path)] = {
+            "state": nginx["enabled_preimage_state"],
+            "target": nginx["enabled_preimage_target"],
+        }
 
     def test_historical_director_manifests_remain_exact_locked_blobs(self):
         for path, (blob_id, digest) in HISTORICAL_LOCKS.items():
@@ -123,6 +167,14 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             set(release["required_repository_paths"]),
             {item["repository_path"] for item in loaded["files"]},
         )
+        nginx = loaded["nginx_contract"]
+        self.assertEqual(
+            "/etc/nginx/sites-available/yuelei-test.conf", nginx["runtime_path"],
+        )
+        self.assertNotIn(
+            "/etc/nginx/sites-available/huangquechuanmei",
+            [item["runtime_path"] for item in loaded["files"]] + [nginx["runtime_path"]],
+        )
         executor_data = EXECUTOR.read_bytes()
         self.assertEqual(release["git_blob"], git_blob(executor_data))
         self.assertEqual(release["sha256"], sha256(executor_data))
@@ -146,10 +198,66 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             ):
                 self.executor._load_manifest(wrong)
 
+    def test_source_binding_requires_exact_reviewed_head_parent(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        parent = "a" * 40
+        reviewed = "b" * 40
+        merged = "c" * 40
+        manifest["source"]["code_source_commit"] = parent
+
+        def git_result(command, cwd=None, env=None):
+            if command[:2] == ["git", "rev-parse"]:
+                self.assertEqual(reviewed + "^", command[2])
+                return parent
+            if command[:3] == ["git", "diff", "--name-only"]:
+                return "deploy/test-runtime/digital-human-precision-director-v3-20260822.json"
+            raise AssertionError(command)
+
+        with mock.patch.object(
+                self.executor, "_verify_director_checkout", return_value=merged), \
+             mock.patch.object(self.executor, "_run", side_effect=git_result):
+            self.assertEqual(
+                merged,
+                self.executor._verify_precision_checkout(
+                    ROOT, manifest, reviewed, merged,
+                ),
+            )
+            manifest["source"]["code_source_commit"] = "d" * 40
+            with self.assertRaisesRegex(
+                    self.executor.ReleaseError, "exact parent"):
+                self.executor._verify_precision_checkout(
+                    ROOT, manifest, reviewed, merged,
+                )
+
+    def test_system_candidate_gate_runs_nginx_t_against_rendered_include(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = pathlib.Path(directory)
+            source = directory / "source.conf"
+            candidate = directory / "yuelei-test.conf"
+            source.write_text(
+                "log_format huangque_observed 'x';\nserver { return 200; }\n",
+                encoding="utf-8",
+            )
+            candidate.write_text(
+                "server { server_name yuelei.huangquechuanmei.com; }\n",
+                encoding="utf-8",
+            )
+
+            def inspect(command, cwd=None, env=None):
+                self.assertEqual(["nginx", "-t", "-c"], command[:3])
+                wrapper = pathlib.Path(command[3]).read_text(encoding="utf-8")
+                self.assertIn("log_format huangque_observed", wrapper)
+                self.assertIn(str(candidate.resolve()), wrapper)
+                return ""
+
+            with mock.patch.object(self.executor, "_run", side_effect=inspect):
+                self.executor.SystemHooks().validate_nginx_candidate(candidate, source)
+
     def test_successor_executes_full_overlay_with_nginx_gate(self):
         with tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as backup_dir:
             target = self._target_tree(target_dir)
             hooks = Hooks()
+            self._lock_enabled_link(hooks, target)
             result = self.executor.execute_locked_release(
                 MANIFEST, ROOT, target, pathlib.Path(backup_dir), hooks=hooks,
                 verify_repository=False,
@@ -158,15 +266,35 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
             self.assertEqual("deployed", result["status"])
             self.assertIn(("nginx-test",), hooks.calls)
             self.assertIn(("nginx-reload",), hooks.calls)
+            candidates = [call for call in hooks.calls if call[0] == "nginx-candidate"]
+            self.assertEqual(1, len(candidates))
+            self.assertIn("server_name yuelei.huangquechuanmei.com;", candidates[0][1])
+            self.assertIn("location = /api/gen/video/lipsync-import", candidates[0][1])
+            self.assertIn("client_max_body_size 100m;", candidates[0][1])
+            self.assertNotIn("server_name huangquechuanmei.com", candidates[0][1])
+            self.assertIn(
+                ("probe", "https://yuelei.huangquechuanmei.com/api/gen/video/lipsync-import", "POST", 401),
+                hooks.calls,
+            )
             self.assertEqual(1, sum(call[0] == "restart" for call in hooks.calls))
             for item in self.manifest["files"]:
                 deployed = target.joinpath(*pathlib.PurePosixPath(item["runtime_path"]).parts[1:])
                 self.assertEqual(item["postimage_sha256"], sha256(deployed.read_bytes()))
+            nginx = self.manifest["nginx_contract"]
+            deployed_nginx = target.joinpath(
+                *pathlib.PurePosixPath(nginx["runtime_path"]).parts[1:]
+            )
+            self.assertEqual(nginx["postimage_sha256"], sha256(deployed_nginx.read_bytes()))
+            self.assertEqual(
+                b"protected-main-site-vhost\n",
+                (target / "etc/nginx/sites-available/huangquechuanmei").read_bytes(),
+            )
 
     def test_forward_failure_restores_every_preimage_and_reloads_nginx(self):
         with tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as backup_dir:
             target = self._target_tree(target_dir)
             hooks = Hooks(fail_probe=True)
+            self._lock_enabled_link(hooks, target)
             with self.assertRaisesRegex(RuntimeError, "forward health"):
                 self.executor.execute_locked_release(
                     MANIFEST, ROOT, target, pathlib.Path(backup_dir), hooks=hooks,
@@ -181,6 +309,18 @@ class PrecisionDirectorReleaseTests(unittest.TestCase):
                     self.assertFalse(restored.exists(), item["runtime_path"])
                 else:
                     self.assertEqual(item["preimage_sha256"], sha256(restored.read_bytes()))
+            nginx = self.manifest["nginx_contract"]
+            restored_nginx = target.joinpath(
+                *pathlib.PurePosixPath(nginx["runtime_path"]).parts[1:]
+            )
+            self.assertEqual(nginx["preimage_sha256"], sha256(restored_nginx.read_bytes()))
+            enabled = target.joinpath(
+                *pathlib.PurePosixPath(nginx["enabled_runtime_path"]).parts[1:]
+            )
+            self.assertEqual(
+                {"state": "symlink", "target": nginx["enabled_preimage_target"]},
+                hooks.link_state(enabled),
+            )
 
 
 if __name__ == "__main__":

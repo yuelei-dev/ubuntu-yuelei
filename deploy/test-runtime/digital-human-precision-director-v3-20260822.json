@@ -35,8 +35,8 @@
   "release_executor": {
     "contract": "digital_human_precision_director_v3",
     "repository_path": "scripts/deploy_precision_director_locked_manifest.py",
-    "git_blob": "e19c84ce83b5b5d5195dd896b4f196ced06f9432",
-    "sha256": "00a4e637a2e6ce614599ed6a8f0725b9f36f22e1be5efd596813a5f85b8ddc6e",
+    "git_blob": "fcbd6526ae11806ecea19b02c6507fa6345b6c27",
+    "sha256": "da46b99894cde08dbdebe221632d5447d4259e9298678ef71f00411c5d38fbfc",
     "runtime_python_root": "/home/ubuntu/content-api",
     "import_modules": [
       "content_domains.core",
@@ -45,11 +45,9 @@
       "content_domains.video_compose",
       "content_domains.video_compose_render"
     ],
-    "nginx_repository_path": "deploy/nginx-huangquechuanmei.conf",
     "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
     "rollback_health_policy": {"timeout_seconds": 30, "interval_seconds": 1},
     "required_repository_paths": [
-      "deploy/nginx-huangquechuanmei.conf",
       "server/content_domains/core.py",
       "server/content_domains/pricing.py",
       "server/content_domains/startup_recovery.py",
@@ -74,10 +72,31 @@
       {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.html", "expected_status": 200, "expected_sha256": "2d3c9a6c57fcfc5be637d68dcb6c72a984829fcd3468c5b361f09fab3776e204"},
       {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.js", "expected_status": 200, "expected_sha256": "12d43bfedae6fd2d4464bff0e5f4855f67203287852c7f53f251cb37cdda01dc"},
       {"url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-one-click.css", "expected_status": 200, "expected_sha256": "d3b4879550b86641c46cd8b198c7eb084f6975ea31272f36eb3c3fe25a0f10da"}
+    ],
+    "unauthenticated_probes": [
+      {"url": "https://yuelei.huangquechuanmei.com/api/gen/video/lipsync-import", "method": "POST", "expected_status": 401}
     ]
   },
+  "nginx_contract": {
+    "source_repository_path": "deploy/nginx-huangquechuanmei.conf",
+    "source_blob": "785cd77b878b95c7410fce6de639082297ba7a1c",
+    "source_sha256": "08f78fef1097e1f45042356a7477addad2dcb0d2738cc451079853ae40a581f1",
+    "renderer_repository_path": "deploy/render_yuelei_test_nginx.py",
+    "renderer_blob": "43ce35b226a70150a433e9789bfb5e7bb3c3451c",
+    "renderer_sha256": "8e4c3b6145010de01a154ed4cfa30a4ddc677ab257544b41bd8ccac4ab163c1a",
+    "runtime_path": "/etc/nginx/sites-available/yuelei-test.conf",
+    "preimage_blob": "5133965e33968dd77a73ef1aef9c06ad8d5e1bbf",
+    "preimage_sha256": "e024e9ee105e5d5925d2f682e06851e426ec6678bb704260d4301ef4481584b0",
+    "postimage_blob": "3480e27277676082fa52164683ca22cd477a4069",
+    "postimage_sha256": "2017141cd9bb391872ed175c38cada39801e54dd2c58844992cba1cecbbe5edc",
+    "enabled_runtime_path": "/etc/nginx/sites-enabled/yuelei-test.conf",
+    "enabled_preimage_state": "symlink",
+    "enabled_preimage_target": "/etc/nginx/sites-available/yuelei-test.conf",
+    "enabled_postimage_state": "symlink",
+    "enabled_postimage_target": "/etc/nginx/sites-available/yuelei-test.conf",
+    "protected_runtime_paths": ["/etc/nginx/sites-available/huangquechuanmei"]
+  },
   "files": [
-    {"repository_path":"deploy/nginx-huangquechuanmei.conf","runtime_path":"/etc/nginx/sites-available/huangquechuanmei","target_preimage_state":"file","preimage_blob":"8a75cf0e9cae8d105f18c9727b2ac27554146d05","preimage_sha256":"89270618ff08171f6ea06426436a6781381541d585d356f40868d2a611e56d57","postimage_blob":"785cd77b878b95c7410fce6de639082297ba7a1c","postimage_sha256":"08f78fef1097e1f45042356a7477addad2dcb0d2738cc451079853ae40a581f1"},
     {"repository_path":"server/content_domains/core.py","runtime_path":"/home/ubuntu/content-api/content_domains/core.py","target_preimage_state":"file","preimage_blob":"db05b6d0c122186798d8ef80bff77648eeb12711","preimage_sha256":"f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425","postimage_blob":"332d5fab975ee3e070b27aa27a58bd8135435af5","postimage_sha256":"ce2977e30a02d5dec1a38e2e39d98e75731c6fd8f5744854e2f5933c4e2e0398"},
     {"repository_path":"server/content_domains/pricing.py","runtime_path":"/home/ubuntu/content-api/content_domains/pricing.py","target_preimage_state":"file","preimage_blob":"1bf25c32f8c34d02e785607b8f2a70edfb69eafe","preimage_sha256":"18187403df376e33381de09d4e533e843a9212f27c64f3358e794bd68f59c4ff","postimage_blob":"4f82fd578f9ee90ae1b99309f4071cd6b136c6fd","postimage_sha256":"597e4d9cf39f1f3953b87e18a0264d0f858ac61f9dfe84bab6ac72ce92df5b9a"},
     {"repository_path":"server/content_domains/startup_recovery.py","runtime_path":"/home/ubuntu/content-api/content_domains/startup_recovery.py","target_preimage_state":"file","preimage_blob":"9620bf2943a9104a7ee56a5ed4fb84e93b6fceec","preimage_sha256":"19a42bce8311a26568b3efd511f338e2adea6494c05f2e6f022dfb56da2ac03f","postimage_blob":"6021abfb3c8e1529506c078dfe8f3f08617dd54a","postimage_sha256":"3b6f45456e9351c61110db10df760bb2adbbfcc4b81e7fc158702a0419eaaff3"},
