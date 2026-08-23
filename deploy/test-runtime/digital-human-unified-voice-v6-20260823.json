@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "27b86092b1d497fae1b966ce524bffb45d82ad81",
+    "code_source_commit": "3d6976c71a90f8b71739ead0a85edf037ee12292",
     "review_lock": "deploy only the merge commit on main that contains this exact independently reviewed manifest-only Head"
   },
   "expected_preimage": {
@@ -26,7 +26,8 @@
     "fail_closed_on_preimage_mismatch": true,
     "backup_all_targets_before_first_write": true,
     "backup_live_database_before_first_write": true,
-    "restore_database_on_failure": true,
+    "restore_database_on_failure": false,
+    "preserve_database_on_code_rollback": true,
     "install_all_files_before_restart": true,
     "restart_backend_once": true,
     "rollback_all_files_as_one_unit": true,
@@ -35,8 +36,8 @@
   "release_executor": {
     "contract": "digital_human_unified_voice_v6",
     "repository_path": "scripts/deploy_unified_voice_v6_locked_manifest.py",
-    "git_blob": "4dcd0b1446173321b674623f7c5a6530634c9829",
-    "sha256": "02d6b580b4c4e5b719f885d8a59fe9d4a781f2f7e82172d6433f44d6a7c9e177",
+    "git_blob": "cfcae73ce86d0460b68575c1348203aeccd5ce68",
+    "sha256": "5ee5a5a23639d8d997446d6dfb288fff359b36a6dd6786716bc2a0fefd2b206d",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_precision_director_v5_locked_manifest.py",
       "git_blob": "af6c4e6295ddff641091a4a2223abc8118b0857e",
