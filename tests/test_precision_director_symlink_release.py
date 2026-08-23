@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from precision_release_fixture import materialize_locked_source
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy/test-runtime/digital-human-precision-director-v4-20260822.json"
@@ -82,6 +84,7 @@ class PrecisionDirectorSymlinkReleaseTests(unittest.TestCase):
         cls.executor = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.executor)
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        cls.source_root = materialize_locked_source(cls, ROOT, cls.manifest)
         renderer_spec = importlib.util.spec_from_file_location(
             "precision_symlink_renderer",
             ROOT / "deploy/render_yuelei_test_nginx.py",
@@ -226,7 +229,7 @@ class PrecisionDirectorSymlinkReleaseTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as backup_dir:
             target, enabled = self._target_tree(target_dir)
             result = self.executor.execute_locked_release(
-                MANIFEST, ROOT, target, pathlib.Path(backup_dir),
+                MANIFEST, self.source_root, target, pathlib.Path(backup_dir),
                 hooks=FilesystemHooks(self.executor), verify_repository=False,
                 reviewed_head="r" * 40, merged_main="m" * 40,
             )
@@ -242,7 +245,7 @@ class PrecisionDirectorSymlinkReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(
                     self.executor.ReleaseError, "symlink preimage mismatch"):
                 self.executor.execute_locked_release(
-                    MANIFEST, ROOT, target, pathlib.Path(backup_dir),
+                    MANIFEST, self.source_root, target, pathlib.Path(backup_dir),
                     hooks=FilesystemHooks(self.executor), verify_repository=False,
                     reviewed_head="r" * 40, merged_main="m" * 40,
                 )
@@ -254,7 +257,7 @@ class PrecisionDirectorSymlinkReleaseTests(unittest.TestCase):
             target, enabled = self._target_tree(target_dir)
             with self.assertRaisesRegex(RuntimeError, "forward health"):
                 self.executor.execute_locked_release(
-                    MANIFEST, ROOT, target, pathlib.Path(backup_dir),
+                    MANIFEST, self.source_root, target, pathlib.Path(backup_dir),
                     hooks=FilesystemHooks(self.executor, fail_probe=True),
                     verify_repository=False, reviewed_head="r" * 40,
                     merged_main="m" * 40,

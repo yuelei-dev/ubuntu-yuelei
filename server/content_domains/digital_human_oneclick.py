@@ -32,6 +32,9 @@ MAX_TTS_SEGMENT_CHARS = 1000
 CONSENT_VERSION = "digital-human-oneclick-v1"
 CONSENT_PURPOSE = "digital_human_oneclick"
 CONSENT_TTL_SECONDS = 30 * 24 * 60 * 60
+UNIFIED_VIDEO_CONSENT_VERSION = "digital-human-video-voice-v1"
+UNIFIED_VIDEO_CONSENT_PURPOSE = "digital_human_video_voice"
+UNIFIED_VIDEO_CONSENT_TTL_SECONDS = 2 * 60 * 60
 CONSENT_DB = pathlib.Path(os.environ.get(
     "DIGITAL_HUMAN_ONECLICK_DB",
     str(pathlib.Path(__file__).resolve().parents[1] / "digital_human_oneclick.db"),
@@ -39,6 +42,7 @@ CONSENT_DB = pathlib.Path(os.environ.get(
 _HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 _CONSENT_TOKEN_RE = re.compile(r"^dhc_[0-9a-f]{32}\.[0-9a-f]{64}$")
+_UNIFIED_VIDEO_TOKEN_RE = re.compile(r"^dhvc_[0-9a-f]{32}\.[0-9a-f]{64}$")
 _CONSENT_METADATA_FIELDS = {
     "digital_human_pipeline", "digital_human_stage", "digital_human_run_id",
     "digital_human_plan_digest", "digital_human_consent_token",
@@ -303,6 +307,448 @@ def consent_response(payload, username, signing_secret, db_factory=None):
     )}
 
 
+def _ensure_unified_video_consent_table(connection):
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS digital_human_video_consents(
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            consent_version TEXT NOT NULL,
+            purpose TEXT NOT NULL,
+            video_asset_id INTEGER NOT NULL,
+            video_sha256 TEXT NOT NULL,
+            sample_sha256 TEXT NOT NULL,
+            slot_id TEXT NOT NULL,
+            slot_preimage_status TEXT NOT NULL,
+            slot_preimage_voice_name TEXT NOT NULL,
+            slot_preimage_voice_id INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_provider_voice TEXT NOT NULL DEFAULT '',
+            slot_preimage_reclone_count INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_updated_at INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_voice_updated_at INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_version TEXT NOT NULL DEFAULT '',
+            script_sha256 TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            last_used_at INTEGER NOT NULL,
+            UNIQUE(username, run_id)
+        )"""
+    )
+    existing = {
+        str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(digital_human_video_consents)"
+        ).fetchall()
+    }
+    additions = {
+        "slot_preimage_voice_id": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_provider_voice": "TEXT NOT NULL DEFAULT ''",
+        "slot_preimage_reclone_count": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_updated_at": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_voice_updated_at": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_version": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, definition in additions.items():
+        if name not in existing:
+            connection.execute(
+                "ALTER TABLE digital_human_video_consents ADD COLUMN %s %s"
+                % (name, definition)
+            )
+
+
+def _unified_slot_preimage(slot_preimage):
+    slot = dict(slot_preimage or {})
+    slot_id = str(slot.get("slot_id") or "").strip()
+    status = str(slot.get("status") or "").strip().lower()
+    voice_name = str(slot.get("voice_name") or "未命名音色").strip()[:80]
+    try:
+        voice_id = int(slot.get("voice_id") or 0)
+        reclone_count = int(slot.get("reclone_count") or 0)
+        updated_at = int(slot.get("updated_at") or 0)
+        voice_updated_at = int(slot.get("voice_updated_at") or 0)
+    except (TypeError, ValueError) as exc:
+        raise DigitalHumanRequestError(
+            "音色槽位版本无效，请刷新后重试", "consent_slot_version_invalid", 409,
+        ) from exc
+    provider_voice = str(slot.get("provider_voice") or "").strip()
+    if (not slot_id or status not in {"active", "failed", "ready"}
+            or voice_id < 0 or reclone_count < 0 or updated_at <= 0
+            or voice_updated_at < 0):
+        raise DigitalHumanRequestError(
+            "音色槽位版本无效，请刷新后重试", "consent_slot_version_invalid", 409,
+        )
+    if status == "ready" and (
+            voice_id <= 0 or not provider_voice or voice_updated_at <= 0):
+        raise DigitalHumanRequestError(
+            "已有音色版本信息不完整，请刷新后重试",
+            "consent_slot_version_invalid", 409,
+        )
+    canonical = "|".join((
+        slot_id, status, voice_name, str(voice_id), provider_voice,
+        str(reclone_count), str(updated_at), str(voice_updated_at),
+    ))
+    return {
+        "slot_id": slot_id,
+        "slot_preimage_status": status,
+        "slot_preimage_voice_name": voice_name,
+        "slot_preimage_voice_id": voice_id,
+        "slot_preimage_provider_voice": provider_voice,
+        "slot_preimage_reclone_count": reclone_count,
+        "slot_preimage_updated_at": updated_at,
+        "slot_preimage_voice_updated_at": voice_updated_at,
+        "slot_preimage_version": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _unified_slot_preimage_from_record(record):
+    return {
+        "status": str(record["slot_preimage_status"]),
+        "voice_name": str(record["slot_preimage_voice_name"]),
+        "voice_id": int(record["slot_preimage_voice_id"]),
+        "provider_voice": str(record["slot_preimage_provider_voice"]),
+        "reclone_count": int(record["slot_preimage_reclone_count"]),
+        "updated_at": int(record["slot_preimage_updated_at"]),
+        "voice_updated_at": int(record["slot_preimage_voice_updated_at"]),
+        "version": str(record["slot_preimage_version"]),
+    }
+
+
+def _unified_video_signature(record, signing_secret):
+    secret = str(signing_secret or "").strip()
+    if not secret:
+        raise DigitalHumanRequestError(
+            "授权存证服务尚未配置，请联系管理员",
+            "consent_service_unavailable", 503,
+        )
+    canonical = "|".join(str(record[key]) for key in (
+        "id", "username", "run_id", "consent_version", "purpose",
+        "video_asset_id", "video_sha256", "sample_sha256", "slot_id",
+        "slot_preimage_status", "slot_preimage_voice_name",
+        "slot_preimage_voice_id", "slot_preimage_provider_voice",
+        "slot_preimage_reclone_count", "slot_preimage_updated_at",
+        "slot_preimage_voice_updated_at", "slot_preimage_version",
+        "script_sha256",
+        "created_at", "expires_at",
+    ))
+    return hmac.new(
+        secret.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256,
+    ).hexdigest()
+
+
+def _unified_clone_attempt_id(record):
+    canonical = "|".join(str(record[key]) for key in (
+        "username", "run_id", "video_asset_id", "video_sha256",
+        "sample_sha256", "slot_id", "script_sha256",
+    ))
+    return "dh-video-clone-" + hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()[:40]
+
+
+def create_unified_video_consent(
+        payload, username, signing_secret, *, video_asset_id, video_sha256,
+        sample_sha256, slot_preimage, now=None, db_factory=None):
+    """Persist server-derived consent before any clone or paid child task."""
+    if not isinstance(payload, dict):
+        raise DigitalHumanRequestError("请求体必须是 JSON 对象")
+    allowed = {
+        "confirmed", "consent_version", "purpose", "run_id", "script",
+        "slot_id", "overwrite_confirmed", "overwrite_voice_name",
+        "video_asset_id",
+    }
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise DigitalHumanRequestError("真人视频授权包含不支持字段：" + ", ".join(unknown))
+    if payload.get("confirmed") is not True:
+        raise DigitalHumanRequestError(
+            "请先确认真人视频与声音使用授权", "consent_required", 403,
+        )
+    if str(payload.get("consent_version") or "") != UNIFIED_VIDEO_CONSENT_VERSION:
+        raise DigitalHumanRequestError(
+            "授权条款版本已更新，请重新确认", "consent_version_mismatch", 409,
+        )
+    if str(payload.get("purpose") or "") != UNIFIED_VIDEO_CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("授权用途无效", "consent_purpose_invalid")
+    run_id = str(payload.get("run_id") or "").strip()
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise DigitalHumanRequestError("本次真人视频流程编号无效，请重新开始")
+    username = str(username or "").strip()
+    if not username:
+        raise DigitalHumanRequestError("未登录或登录已过期", "unauthorized", 401)
+    try:
+        video_asset_id = int(video_asset_id)
+    except (TypeError, ValueError) as exc:
+        raise DigitalHumanRequestError("真人源视频标识无效") from exc
+    if video_asset_id <= 0 or int(payload.get("video_asset_id") or 0) != video_asset_id:
+        raise DigitalHumanRequestError(
+            "真人源视频与授权记录不一致", "consent_video_mismatch", 403,
+        )
+    video_sha256 = _required_sha256(video_sha256, "真人源视频")
+    sample_sha256 = _required_sha256(sample_sha256, "声音样本")
+    script = _clean_script(payload.get("script"))
+    script_sha256 = hashlib.sha256(script.encode("utf-8")).hexdigest()
+    slot_id = str(payload.get("slot_id") or "").strip()
+    if not slot_id or len(slot_id) > 128:
+        raise DigitalHumanRequestError("音色槽位无效")
+    slot_version = _unified_slot_preimage(slot_preimage)
+    if slot_version["slot_id"] != slot_id:
+        raise DigitalHumanRequestError(
+            "音色槽位不存在或不属于当前账号", "consent_slot_mismatch", 403,
+        )
+    slot_status = slot_version["slot_preimage_status"]
+    voice_name = slot_version["slot_preimage_voice_name"]
+    if slot_status == "ready":
+        if payload.get("overwrite_confirmed") is not True:
+            raise DigitalHumanRequestError(
+                "覆盖已有音色前必须单独确认", "voice_overwrite_confirmation_required", 409,
+            )
+        if str(payload.get("overwrite_voice_name") or "").strip() != voice_name:
+            raise DigitalHumanRequestError(
+                "待覆盖音色已变化，请重新选择并确认", "voice_overwrite_binding_mismatch", 409,
+            )
+    now = int(time.time() if now is None else now)
+    consent_id = "dhvc_" + hmac.new(
+        str(signing_secret or "").encode("utf-8"),
+        (username + "|" + run_id).encode("utf-8"), hashlib.sha256,
+    ).hexdigest()[:32]
+    candidate = {
+        "id": consent_id, "username": username, "run_id": run_id,
+        "consent_version": UNIFIED_VIDEO_CONSENT_VERSION,
+        "purpose": UNIFIED_VIDEO_CONSENT_PURPOSE,
+        "video_asset_id": video_asset_id, "video_sha256": video_sha256,
+        "sample_sha256": sample_sha256, "slot_id": slot_id,
+        "slot_preimage_status": slot_status,
+        "slot_preimage_voice_name": voice_name,
+        **{
+            key: slot_version[key] for key in (
+                "slot_preimage_voice_id", "slot_preimage_provider_voice",
+                "slot_preimage_reclone_count", "slot_preimage_updated_at",
+                "slot_preimage_voice_updated_at", "slot_preimage_version",
+            )
+        },
+        "script_sha256": script_sha256, "created_at": now,
+        "expires_at": now + UNIFIED_VIDEO_CONSENT_TTL_SECONDS,
+    }
+    _unified_video_signature(candidate, signing_secret)
+    db_factory = db_factory or cdb
+    with closing(db_factory()) as connection:
+        _ensure_unified_video_consent_table(connection)
+        row = connection.execute(
+            "SELECT * FROM digital_human_video_consents WHERE username=? AND run_id=?",
+            (username, run_id),
+        ).fetchone()
+        if row:
+            existing = dict(row)
+            comparable = tuple(candidate.keys() - {"id", "username", "created_at", "expires_at"})
+            if any(str(existing[key]) != str(candidate[key]) for key in comparable):
+                raise DigitalHumanRequestError(
+                    "本次流程的源视频、样音、槽位或文案已经变化，请重新授权",
+                    "consent_binding_conflict", 409,
+                )
+            if int(existing["expires_at"]) <= now:
+                raise DigitalHumanRequestError(
+                    "本次授权已过期，请重新授权", "consent_expired", 409,
+                )
+            candidate = existing
+        token = candidate["id"] + "." + _unified_video_signature(candidate, signing_secret)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        if row:
+            if not hmac.compare_digest(str(candidate["token_hash"]), token_hash):
+                raise DigitalHumanRequestError(
+                    "授权签名已变化，请重新授权", "consent_signature_changed", 409,
+                )
+        else:
+            connection.execute(
+                """INSERT INTO digital_human_video_consents(
+                    id,username,run_id,consent_version,purpose,video_asset_id,
+                    video_sha256,sample_sha256,slot_id,slot_preimage_status,
+                    slot_preimage_voice_name,slot_preimage_voice_id,
+                    slot_preimage_provider_voice,slot_preimage_reclone_count,
+                    slot_preimage_updated_at,slot_preimage_voice_updated_at,
+                    slot_preimage_version,script_sha256,token_hash,created_at,
+                    expires_at,last_used_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                tuple(candidate[key] for key in (
+                    "id", "username", "run_id", "consent_version", "purpose",
+                    "video_asset_id", "video_sha256", "sample_sha256", "slot_id",
+                    "slot_preimage_status", "slot_preimage_voice_name",
+                    "slot_preimage_voice_id", "slot_preimage_provider_voice",
+                    "slot_preimage_reclone_count", "slot_preimage_updated_at",
+                    "slot_preimage_voice_updated_at", "slot_preimage_version",
+                    "script_sha256",
+                )) + (token_hash, candidate["created_at"], candidate["expires_at"], now),
+            )
+            connection.commit()
+    return {
+        "consent_id": candidate["id"], "consent_token": token,
+        "run_id": candidate["run_id"], "purpose": candidate["purpose"],
+        "consent_version": candidate["consent_version"],
+        "expires_at": int(candidate["expires_at"]),
+        "clone_attempt_id": _unified_clone_attempt_id(candidate),
+    }
+
+
+def _load_unified_video_consent(username, token, now=None, db_factory=None):
+    token = str(token or "").strip()
+    if not _UNIFIED_VIDEO_TOKEN_RE.fullmatch(token):
+        raise DigitalHumanRequestError(
+            "缺少有效的真人视频授权", "consent_required", 403,
+        )
+    now = int(time.time() if now is None else now)
+    db_factory = db_factory or cdb
+    with closing(db_factory()) as connection:
+        _ensure_unified_video_consent_table(connection)
+        row = connection.execute(
+            "SELECT * FROM digital_human_video_consents WHERE token_hash=? AND username=?",
+            (hashlib.sha256(token.encode("utf-8")).hexdigest(), str(username or "").strip()),
+        ).fetchone()
+        if not row:
+            raise DigitalHumanRequestError(
+                "真人视频授权不存在或不属于当前账号", "consent_invalid", 403,
+            )
+        record = dict(row)
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(
+                record.get("slot_preimage_version") or ""))
+                or int(record.get("slot_preimage_updated_at") or 0) <= 0):
+            raise DigitalHumanRequestError(
+                "本次授权缺少音色版本信息，请重新授权",
+                "consent_slot_version_invalid", 409,
+            )
+        if int(record["expires_at"]) <= now:
+            raise DigitalHumanRequestError(
+                "本次真人视频授权已过期", "consent_expired", 409,
+            )
+        connection.execute(
+            "UPDATE digital_human_video_consents SET last_used_at=? WHERE id=?",
+            (now, record["id"]),
+        )
+        connection.commit()
+    return record
+
+
+def _verify_unified_video_common(payload, username, stage):
+    if str(payload.get("digital_human_pipeline") or "").strip().lower() != UNIFIED_VIDEO_CONSENT_PURPOSE:
+        raise DigitalHumanRequestError("真人视频授权流程标识无效")
+    if str(payload.get("digital_human_stage") or "").strip().lower() != stage:
+        raise DigitalHumanRequestError("真人视频授权步骤不匹配")
+    record = _load_unified_video_consent(
+        username, payload.get("digital_human_consent_token"),
+    )
+    expected = {
+        "digital_human_run_id": record["run_id"],
+        "digital_human_video_asset_id": str(record["video_asset_id"]),
+        "digital_human_video_sha256": record["video_sha256"],
+        "digital_human_sample_sha256": record["sample_sha256"],
+        "digital_human_slot_id": record["slot_id"],
+        "clone_attempt_id": _unified_clone_attempt_id(record),
+    }
+    for key, value in expected.items():
+        if str(payload.get(key) or "") != str(value):
+            raise DigitalHumanRequestError(
+                "真人视频授权绑定已变化", "consent_binding_mismatch", 403,
+            )
+    script = _clean_script(payload.get("digital_human_script"))
+    if not hmac.compare_digest(
+            hashlib.sha256(script.encode("utf-8")).hexdigest(),
+            record["script_sha256"]):
+        raise DigitalHumanRequestError(
+            "口播文案与授权记录不一致", "consent_plan_mismatch", 409,
+        )
+    cleaned = dict(payload)
+    cleaned.pop("digital_human_consent_token", None)
+    cleaned["digital_human_consent_id"] = record["id"]
+    return cleaned, record
+
+
+def verify_unified_video_clone_submission(payload, username):
+    cleaned, record = _verify_unified_video_common(payload, username, "voice_clone")
+    if str(payload.get("slot_id") or "") != record["slot_id"]:
+        raise DigitalHumanRequestError("音色槽位与授权记录不一致", "consent_slot_mismatch", 403)
+    actual = hashlib.sha256(_decode_b64_bytes(payload.get("audio"), "声音样本")).hexdigest()
+    if not hmac.compare_digest(actual, record["sample_sha256"]):
+        raise DigitalHumanRequestError("声音样本与授权记录不一致", "consent_voice_mismatch", 403)
+    from . import audio as audio_domain
+    snapshot = audio_domain.clone_attempt_snapshot(
+        username, record["slot_id"], _unified_clone_attempt_id(record),
+    )
+    if snapshot.get("action") == "mismatch":
+        slot = next((item for item in audio_domain.list_user_audio_voice_slots(username)
+                     if str(item.get("slot_id") or "") == record["slot_id"]), None)
+        try:
+            current = _unified_slot_preimage(slot)
+        except DigitalHumanRequestError:
+            current = {}
+        if (not current or not hmac.compare_digest(
+                str(current.get("slot_preimage_version") or ""),
+                str(record["slot_preimage_version"] or ""))):
+            raise DigitalHumanRequestError(
+                "音色槽位在授权后发生变化，请重新选择并确认",
+                "consent_slot_changed", 409,
+            )
+    cleaned["_unified_video_slot_preimage"] = (
+        _unified_slot_preimage_from_record(record)
+    )
+    return cleaned
+
+
+def verify_unified_video_child_submission(payload, username, kind):
+    stage = "full_audio" if kind == "audio" else "precision" if kind == "video" else ""
+    if not stage:
+        raise DigitalHumanRequestError("真人视频授权不允许该任务类型")
+    cleaned, record = _verify_unified_video_common(payload, username, stage)
+    if stage == "full_audio":
+        expected_voice = _expected_cloned_voice(record["slot_id"])
+        if str(payload.get("voice") or "") != expected_voice:
+            raise DigitalHumanRequestError("完整配音音色与授权记录不一致", "consent_voice_mismatch", 403)
+        from . import audio as audio_domain
+        snapshot = audio_domain.clone_attempt_snapshot(
+            username, record["slot_id"], _unified_clone_attempt_id(record),
+        )
+        try:
+            ready_voice_id = int(snapshot.get("voice_id") or 0)
+            ready_voice_updated_at = int(snapshot.get("voice_updated_at") or 0)
+        except (TypeError, ValueError):
+            ready_voice_id = 0
+            ready_voice_updated_at = 0
+        ready_provider_voice = str(snapshot.get("provider_voice") or "").strip()
+        if (snapshot.get("action") != "ready" or ready_voice_id <= 0
+                or not ready_provider_voice or ready_voice_updated_at <= 0):
+            raise DigitalHumanRequestError(
+                "本次复刻音色尚未就绪或已被其他复刻替换，请重新试听确认",
+                "consent_clone_not_ready", 409,
+            )
+        # Freeze the exact provider version into the paid job.  The worker must
+        # not resolve the mutable slot alias again after another clone replaces
+        # it while this job is queued.
+        cleaned["digital_human_provider_voice"] = ready_provider_voice
+        cleaned["digital_human_voice_id"] = ready_voice_id
+        cleaned["digital_human_voice_updated_at"] = ready_voice_updated_at
+    else:
+        if (str(payload.get("mode") or "").lower() != "lipsync"
+                or int(payload.get("video_asset_id") or 0) != int(record["video_asset_id"])):
+            raise DigitalHumanRequestError("Precision 源视频与授权记录不一致", "consent_video_mismatch", 403)
+        from . import audio as audio_domain
+        asset = audio_domain.get_audio_asset(username, payload.get("audio_asset_id"))
+        if not asset or not asset.get("job_id"):
+            raise DigitalHumanRequestError("Precision 配音资产不属于本次授权", "consent_audio_mismatch", 403)
+        with closing(jdb()) as connection:
+            job = connection.execute(
+                "SELECT kind,status,payload FROM jobs WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
+                (int(asset["job_id"]), str(username or "").strip()),
+            ).fetchone()
+        try:
+            audio_payload = json.loads(job["payload"] or "{}") if job else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            audio_payload = {}
+        if (not job or job["kind"] != "audio" or job["status"] != "done"
+                or str(audio_payload.get("digital_human_consent_id") or "") != record["id"]
+                or str(audio_payload.get("clone_attempt_id") or "") != _unified_clone_attempt_id(record)):
+            raise DigitalHumanRequestError("Precision 配音资产不属于本次授权", "consent_audio_mismatch", 403)
+    return cleaned, record
+
+
 def _decode_b64_bytes(value, label):
     import base64
     text = str(value or "").strip()
@@ -372,6 +818,8 @@ def verify_child_submission_with_record(payload, username, kind):
     if not isinstance(payload, dict):
         return payload, None
     pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    if pipeline == UNIFIED_VIDEO_CONSENT_PURPOSE:
+        return verify_unified_video_child_submission(payload, username, kind)
     # v2 keeps the established points/refund/idempotency boundary in core but
     # owns a separate consent and duration-driven child-job contract.
     from . import digital_human_v2
@@ -572,6 +1020,8 @@ def verify_clone_submission(payload, username):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     pipeline = str(payload.get("digital_human_pipeline") or "").strip().lower()
+    if pipeline == UNIFIED_VIDEO_CONSENT_PURPOSE:
+        return verify_unified_video_clone_submission(payload, username)
     from . import digital_human_v2
     if pipeline == digital_human_v2.CONSENT_PURPOSE:
         return digital_human_v2.verify_clone_submission(payload, username)

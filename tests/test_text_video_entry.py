@@ -23,8 +23,8 @@ class TextVideoEntryTests(unittest.TestCase):
 
     def test_script_page_replaces_copy_to_video_with_digital_human(self):
         self.assertNotIn('data-mode="script_to_video"', SCRIPT)
-        self.assertIn('href="digital-human-one-click.html">🎬 数字人一键生成</a>', SCRIPT)
-        self.assertIn("location.replace('digital-human-one-click.html')", SCRIPT)
+        self.assertIn('href="digital-human-oneclick.html">🎬 数字人一键生成</a>', SCRIPT)
+        self.assertIn("location.replace('digital-human-oneclick.html')", SCRIPT)
         self.assertIn('data-active="script"', SCRIPT)
 
     def test_refresh_recovery_and_material_handoff_remain_on_the_shared_page(self):

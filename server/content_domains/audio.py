@@ -286,7 +286,8 @@ def list_user_audio_voice_slots(username):
         rows = c.execute("""SELECT s.id, s.username, s.user_id, s.slot_id, s.status, s.voice_id, COALESCE(s.reclone_count, 0) AS reclone_count,
                    s.created_at, s.updated_at, s.clone_started_at, s.clone_upload_at, s.clone_error,
                    s.clone_upload_speaker_id, s.clone_upload_response,
-                   v.display_name AS voice_name, v.preview_file, v.preview_url, v.updated_at AS voice_updated_at
+                   v.display_name AS voice_name, v.provider_voice, v.voice_key,
+                   v.preview_file, v.preview_url, v.updated_at AS voice_updated_at
             FROM audio_voice_slots s
             LEFT JOIN audio_voices v ON v.id = s.voice_id
             WHERE s.username=?
@@ -480,15 +481,41 @@ def clone_attempt_snapshot(username, slot_id, attempt_id, now=None):
     with closing(adb()) as c:
         _ensure_clone_attempt_columns(c)
         c.commit()
-        row = c.execute("""SELECT status, voice_id, clone_error, clone_attempt_id,
-                    clone_attempt_phase, clone_attempt_updated_at
-                FROM audio_voice_slots WHERE username=? AND slot_id=?""",
+        row = c.execute("""SELECT s.status, s.voice_id, s.clone_error,
+                    s.clone_attempt_id, s.clone_attempt_phase,
+                    s.clone_attempt_updated_at, s.clone_upload_speaker_id,
+                    COALESCE(s.reclone_count, 0) AS reclone_count,
+                    s.updated_at, v.username AS voice_username,
+                    v.scope AS voice_scope, v.voice_key, v.provider_voice,
+                    v.slot_id AS voice_slot_id, v.updated_at AS voice_updated_at
+                FROM audio_voice_slots s
+                LEFT JOIN audio_voices v ON v.id=s.voice_id
+                WHERE s.username=? AND s.slot_id=?""",
                 ((username or "").strip(), (slot_id or "").strip())).fetchone()
     if not row or str(row["clone_attempt_id"] or "") != attempt_id:
         return {"action": "mismatch"}
     phase = str(row["clone_attempt_phase"] or "")
-    if phase == "ready" or row["status"] == "ready":
-        return {"action": "ready", "attempt_id": attempt_id}
+    expected_voice_key = "vip_" + re.sub(
+        r"[^a-zA-Z0-9_\-]", "_", (slot_id or "").strip()
+    )
+    provider_voice = str(row["provider_voice"] or "")
+    ready_version = (
+        row["status"] == "ready" and phase == "ready"
+        and bool(row["voice_id"]) and bool(provider_voice)
+        and str(row["clone_upload_speaker_id"] or "") == provider_voice
+        and str(row["voice_username"] or "") == (username or "").strip()
+        and str(row["voice_scope"] or "") == "personal"
+        and str(row["voice_key"] or "") == expected_voice_key
+        and str(row["voice_slot_id"] or "") == (slot_id or "").strip()
+    )
+    if ready_version:
+        return {
+            "action": "ready", "attempt_id": attempt_id,
+            "voice_id": row["voice_id"], "provider_voice": provider_voice,
+            "reclone_count": int(row["reclone_count"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+            "voice_updated_at": int(row["voice_updated_at"] or 0),
+        }
     if phase == "failed" or row["status"] == "failed":
         return {"action": "failed", "attempt_id": attempt_id,
                 "clone_error": str(row["clone_error"] or "声音复刻失败")}
@@ -532,7 +559,8 @@ def fail_clone_attempt(username, slot_id, attempt_id, error):
     return _update_clone_attempt(username, slot_id, attempt_id, "failed", status="failed", error=str(error or "声音复刻失败")[:220])
 
 
-def mark_clone_training(username, slot_id, name, attempt_id=None):
+def mark_clone_training(
+        username, slot_id, name, attempt_id=None, expected_preimage=None):
     username = (username or "").strip()
     slot_id = (slot_id or "").strip()
     name = (name or "\u6211\u7684VIP\u590d\u523b\u97f3\u8272").strip()[:40]
@@ -542,6 +570,7 @@ def mark_clone_training(username, slot_id, name, attempt_id=None):
     with closing(adb()) as c:
         _ensure_clone_attempt_columns(c)
         c.commit()
+        c.execute("BEGIN IMMEDIATE")
         slot = c.execute("""SELECT id, status, voice_id, COALESCE(reclone_count, 0) AS reclone_count,
                     updated_at, clone_upload_at, clone_attempt_id FROM audio_voice_slots
             WHERE username=? AND slot_id=?""",
@@ -550,6 +579,7 @@ def mark_clone_training(username, slot_id, name, attempt_id=None):
             raise ValueError("\u97f3\u8272\u69fd\u4f4d\u4e0d\u5b58\u5728\u6216\u4e0d\u5c5e\u4e8e\u5f53\u524d\u8d26\u53f7")
         if slot["status"] == "training":
             if str(slot["clone_attempt_id"] or "") == attempt_id:
+                c.commit()
                 return {"voice_id": slot["voice_id"], "voice_key": voice_key,
                         "display_name": name, "status": "training",
                         "reclone_count": int(slot["reclone_count"] or 0),
@@ -564,17 +594,59 @@ def mark_clone_training(username, slot_id, name, attempt_id=None):
             (username, scope, voice_key, display_name, provider_voice, slot_id, created_at, updated_at)
             VALUES(?,?,?,?,?,?,?,?)""",
             (username, "personal", voice_key, name, slot_id, slot_id, now, now))
+        r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
+                      (username, voice_key)).fetchone()
+        voice_id = r["id"] if r else None
+        where = "username=? AND slot_id=?"
+        where_values = [username, slot_id]
+        if expected_preimage is not None:
+            expected = dict(expected_preimage or {})
+            required = {
+                "status", "voice_name", "voice_id", "provider_voice", "reclone_count",
+                "updated_at", "voice_updated_at", "version",
+            }
+            if not required.issubset(expected):
+                c.rollback()
+                raise CloneAttemptError(
+                    "音色槽位授权版本不完整，请重新授权",
+                    "clone_slot_preimage_invalid",
+                )
+            where += """ AND status=? AND COALESCE(voice_id,0)=?
+                AND COALESCE(reclone_count,0)=? AND COALESCE(updated_at,0)=?
+                AND ((?=0 AND voice_id IS NULL AND ?='' AND ?=0)
+                  OR (?<>0 AND EXISTS(
+                    SELECT 1 FROM audio_voices original
+                    WHERE original.id=audio_voice_slots.voice_id
+                      AND original.username=? AND original.scope='personal'
+                      AND COALESCE(original.display_name,'')=?
+                      AND COALESCE(original.provider_voice,'')=?
+                      AND COALESCE(original.updated_at,0)=?
+                  )))"""
+            expected_voice_id = int(expected.get("voice_id") or 0)
+            expected_provider = str(expected.get("provider_voice") or "")
+            expected_voice_updated = int(expected.get("voice_updated_at") or 0)
+            where_values.extend([
+                str(expected.get("status") or ""), expected_voice_id,
+                int(expected.get("reclone_count") or 0),
+                int(expected.get("updated_at") or 0), expected_voice_id,
+                expected_provider, expected_voice_updated, expected_voice_id,
+                username, str(expected.get("voice_name") or ""),
+                expected_provider, expected_voice_updated,
+            ])
+        cur = c.execute("""UPDATE audio_voice_slots SET voice_id=?, status='training', reclone_count=?, clone_started_at=?,
+                clone_upload_at=NULL, clone_error=NULL, clone_attempt_id=?, clone_attempt_phase='accepted',
+                clone_attempt_updated_at=?, updated_at=? WHERE """ + where,
+                tuple([voice_id, next_reclone_count, now, attempt_id, now, now] + where_values))
+        if cur.rowcount != 1:
+            c.rollback()
+            raise CloneAttemptError(
+                "音色槽位在授权后发生变化，请重新选择并确认",
+                "clone_slot_preimage_mismatch",
+            )
         c.execute("""UPDATE audio_voices
             SET display_name=?, provider_voice=?, slot_id=?, updated_at=?
             WHERE username=? AND scope='personal' AND voice_key=?""",
             (name, slot_id, slot_id, now, username, voice_key))
-        r = c.execute("SELECT id FROM audio_voices WHERE username=? AND scope='personal' AND voice_key=?",
-                      (username, voice_key)).fetchone()
-        voice_id = r["id"] if r else None
-        c.execute("""UPDATE audio_voice_slots SET voice_id=?, status='training', reclone_count=?, clone_started_at=?,
-                clone_upload_at=NULL, clone_error=NULL, clone_attempt_id=?, clone_attempt_phase='accepted',
-                clone_attempt_updated_at=?, updated_at=? WHERE username=? AND slot_id=?""",
-                (voice_id, next_reclone_count, now, attempt_id, now, now, username, slot_id))
         c.commit()
     clear_voice_preview(username, slot_id)
     return {"voice_id": voice_id, "voice_key": voice_key, "display_name": name,
@@ -1100,7 +1172,7 @@ def get_audio_asset(username, asset_id):
         conn.row_factory = sqlite3.Row
         _ensure_column(conn, "audio_assets", "deleted", "INTEGER DEFAULT 0")
         row = conn.execute(
-            "SELECT id,username,file,url,created_at FROM audio_assets "
+            "SELECT id,job_id,username,file,url,created_at FROM audio_assets "
             "WHERE id=? AND username=? AND COALESCE(deleted,0)=0",
             (asset_id, username),
         ).fetchone()
@@ -1173,7 +1245,24 @@ def validate_audio_payload(payload, username=""):
     if not isinstance(raw_voice_key, str) or not raw_voice_key.strip() or len(raw_voice_key.strip()) > 128:
         raise ValueError("音色参数无效")
     voice_key = raw_voice_key.strip()
-    if username:
+    bound_provider_voice = str(
+        body.get("digital_human_provider_voice") or ""
+    ).strip()
+    if bound_provider_voice:
+        try:
+            bound_voice_id = int(body.get("digital_human_voice_id") or 0)
+            bound_voice_updated_at = int(
+                body.get("digital_human_voice_updated_at") or 0
+            )
+        except (TypeError, ValueError):
+            bound_voice_id = 0
+            bound_voice_updated_at = 0
+        if (body.get("digital_human_pipeline") != "digital_human_video_voice"
+                or not str(body.get("digital_human_consent_id") or "").startswith("dhvc_")
+                or bound_voice_id <= 0 or bound_voice_updated_at <= 0
+                or len(bound_provider_voice) > 256):
+            raise ValueError("完整配音的音色版本绑定无效，请重新授权")
+    elif username:
         resolve_audio_provider_voice(username, voice_key)
     raw_speed = body.get("speed")
     if isinstance(raw_speed, (int, float)):
@@ -1249,7 +1338,8 @@ def gen_audio(payload, publish=True):
     payload = validate_audio_payload(payload, username)
     text = payload["text"]
     voice_key = payload["voice"]
-    voice = resolve_audio_provider_voice(username, voice_key)
+    voice = (str(payload.get("digital_human_provider_voice") or "").strip()
+             or resolve_audio_provider_voice(username, voice_key))
     speed, pitch, volume = payload["speed"], payload["pitch"], payload["volume"]
     delivery = payload["delivery"]
 

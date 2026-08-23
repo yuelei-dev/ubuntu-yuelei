@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from unittest import mock
 
+from precision_release_fixture import materialize_locked_source
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy/test-runtime/digital-human-precision-director-v5-20260822.json"
@@ -113,6 +115,7 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
         cls.executor = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(cls.executor)
         cls.manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        cls.source_root = materialize_locked_source(cls, ROOT, cls.manifest)
         renderer_spec = importlib.util.spec_from_file_location(
             "precision_directory_renderer",
             ROOT / "deploy/render_yuelei_test_nginx.py",
@@ -182,7 +185,7 @@ class PrecisionDirectorDirectoryReleaseTests(unittest.TestCase):
             "target": nginx["enabled_preimage_target"],
         }
         return self.executor.execute_locked_release(
-            MANIFEST, ROOT, target, pathlib.Path(backup),
+            MANIFEST, self.source_root, target, pathlib.Path(backup),
             hooks=hooks,
             verify_repository=False, checkpoint=checkpoint,
             reviewed_head="r" * 40, merged_main="m" * 40,

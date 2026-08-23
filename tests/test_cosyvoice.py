@@ -414,6 +414,34 @@ class AudioVoiceMappingTests(unittest.TestCase):
             })
         self.assertIn("自然清晰的讲解语气", captured["instruction"])
 
+    def test_unified_audio_job_uses_the_frozen_provider_voice(self):
+        captured = {}
+
+        def fake_synth(voice, _text, **_kwargs):
+            captured["voice"] = voice
+            return b"mp3"
+
+        with unittest.mock.patch.object(self.audio.cosyvoice, "enabled", return_value=True), \
+                unittest.mock.patch.object(
+                    self.audio, "resolve_audio_provider_voice",
+                    side_effect=AssertionError("must not resolve the replaced slot alias"),
+                ), unittest.mock.patch.object(
+                    self.audio.cosyvoice, "synth", side_effect=fake_synth,
+                ), unittest.mock.patch.object(self.audio, "_out_path") as out_path, \
+                unittest.mock.patch.object(
+                    self.audio, "_audio_result", return_value={"file": "audio/test.mp3"},
+                ):
+            out_path.return_value.write_bytes.return_value = None
+            self.audio.gen_audio({
+                "_username": "fang", "text": "完整配音", "voice": "vip_slot-1",
+                "digital_human_pipeline": "digital_human_video_voice",
+                "digital_human_consent_id": "dhvc_" + "1" * 32,
+                "digital_human_provider_voice": "cosyvoice-confirmed-version",
+                "digital_human_voice_id": 21,
+                "digital_human_voice_updated_at": 201,
+            })
+        self.assertEqual("cosyvoice-confirmed-version", captured["voice"])
+
     def test_public_legacy_voice_does_not_receive_unsupported_instruction(self):
         captured = {}
 
