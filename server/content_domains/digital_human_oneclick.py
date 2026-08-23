@@ -321,6 +321,12 @@ def _ensure_unified_video_consent_table(connection):
             slot_id TEXT NOT NULL,
             slot_preimage_status TEXT NOT NULL,
             slot_preimage_voice_name TEXT NOT NULL,
+            slot_preimage_voice_id INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_provider_voice TEXT NOT NULL DEFAULT '',
+            slot_preimage_reclone_count INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_updated_at INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_voice_updated_at INTEGER NOT NULL DEFAULT 0,
+            slot_preimage_version TEXT NOT NULL DEFAULT '',
             script_sha256 TEXT NOT NULL,
             token_hash TEXT NOT NULL UNIQUE,
             created_at INTEGER NOT NULL,
@@ -329,6 +335,84 @@ def _ensure_unified_video_consent_table(connection):
             UNIQUE(username, run_id)
         )"""
     )
+    existing = {
+        str(row[1]) for row in connection.execute(
+            "PRAGMA table_info(digital_human_video_consents)"
+        ).fetchall()
+    }
+    additions = {
+        "slot_preimage_voice_id": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_provider_voice": "TEXT NOT NULL DEFAULT ''",
+        "slot_preimage_reclone_count": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_updated_at": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_voice_updated_at": "INTEGER NOT NULL DEFAULT 0",
+        "slot_preimage_version": "TEXT NOT NULL DEFAULT ''",
+    }
+    for name, definition in additions.items():
+        if name not in existing:
+            connection.execute(
+                "ALTER TABLE digital_human_video_consents ADD COLUMN %s %s"
+                % (name, definition)
+            )
+
+
+def _unified_slot_preimage(slot_preimage):
+    slot = dict(slot_preimage or {})
+    slot_id = str(slot.get("slot_id") or "").strip()
+    status = str(slot.get("status") or "").strip().lower()
+    voice_name = str(slot.get("voice_name") or "未命名音色").strip()[:80]
+    try:
+        voice_id = int(slot.get("voice_id") or 0)
+        reclone_count = int(slot.get("reclone_count") or 0)
+        updated_at = int(slot.get("updated_at") or 0)
+        voice_updated_at = int(slot.get("voice_updated_at") or 0)
+    except (TypeError, ValueError) as exc:
+        raise DigitalHumanRequestError(
+            "音色槽位版本无效，请刷新后重试", "consent_slot_version_invalid", 409,
+        ) from exc
+    provider_voice = str(slot.get("provider_voice") or "").strip()
+    if (not slot_id or status not in {"active", "failed", "ready"}
+            or voice_id < 0 or reclone_count < 0 or updated_at <= 0
+            or voice_updated_at < 0):
+        raise DigitalHumanRequestError(
+            "音色槽位版本无效，请刷新后重试", "consent_slot_version_invalid", 409,
+        )
+    if status == "ready" and (
+            voice_id <= 0 or not provider_voice or voice_updated_at <= 0):
+        raise DigitalHumanRequestError(
+            "已有音色版本信息不完整，请刷新后重试",
+            "consent_slot_version_invalid", 409,
+        )
+    canonical = "|".join((
+        slot_id, status, voice_name, str(voice_id), provider_voice,
+        str(reclone_count), str(updated_at), str(voice_updated_at),
+    ))
+    return {
+        "slot_id": slot_id,
+        "slot_preimage_status": status,
+        "slot_preimage_voice_name": voice_name,
+        "slot_preimage_voice_id": voice_id,
+        "slot_preimage_provider_voice": provider_voice,
+        "slot_preimage_reclone_count": reclone_count,
+        "slot_preimage_updated_at": updated_at,
+        "slot_preimage_voice_updated_at": voice_updated_at,
+        "slot_preimage_version": hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _unified_slot_preimage_from_record(record):
+    return {
+        "status": str(record["slot_preimage_status"]),
+        "voice_name": str(record["slot_preimage_voice_name"]),
+        "voice_id": int(record["slot_preimage_voice_id"]),
+        "provider_voice": str(record["slot_preimage_provider_voice"]),
+        "reclone_count": int(record["slot_preimage_reclone_count"]),
+        "updated_at": int(record["slot_preimage_updated_at"]),
+        "voice_updated_at": int(record["slot_preimage_voice_updated_at"]),
+        "version": str(record["slot_preimage_version"]),
+    }
 
 
 def _unified_video_signature(record, signing_secret):
@@ -341,7 +425,11 @@ def _unified_video_signature(record, signing_secret):
     canonical = "|".join(str(record[key]) for key in (
         "id", "username", "run_id", "consent_version", "purpose",
         "video_asset_id", "video_sha256", "sample_sha256", "slot_id",
-        "slot_preimage_status", "slot_preimage_voice_name", "script_sha256",
+        "slot_preimage_status", "slot_preimage_voice_name",
+        "slot_preimage_voice_id", "slot_preimage_provider_voice",
+        "slot_preimage_reclone_count", "slot_preimage_updated_at",
+        "slot_preimage_voice_updated_at", "slot_preimage_version",
+        "script_sha256",
         "created_at", "expires_at",
     ))
     return hmac.new(
@@ -404,17 +492,13 @@ def create_unified_video_consent(
     slot_id = str(payload.get("slot_id") or "").strip()
     if not slot_id or len(slot_id) > 128:
         raise DigitalHumanRequestError("音色槽位无效")
-    slot_preimage = dict(slot_preimage or {})
-    if str(slot_preimage.get("slot_id") or "") != slot_id:
+    slot_version = _unified_slot_preimage(slot_preimage)
+    if slot_version["slot_id"] != slot_id:
         raise DigitalHumanRequestError(
             "音色槽位不存在或不属于当前账号", "consent_slot_mismatch", 403,
         )
-    slot_status = str(slot_preimage.get("status") or "").strip().lower()
-    if slot_status not in {"active", "failed", "ready"}:
-        raise DigitalHumanRequestError(
-            "当前音色槽位不可用于复刻", "consent_slot_unavailable", 409,
-        )
-    voice_name = str(slot_preimage.get("voice_name") or "未命名音色").strip()[:80]
+    slot_status = slot_version["slot_preimage_status"]
+    voice_name = slot_version["slot_preimage_voice_name"]
     if slot_status == "ready":
         if payload.get("overwrite_confirmed") is not True:
             raise DigitalHumanRequestError(
@@ -437,6 +521,13 @@ def create_unified_video_consent(
         "sample_sha256": sample_sha256, "slot_id": slot_id,
         "slot_preimage_status": slot_status,
         "slot_preimage_voice_name": voice_name,
+        **{
+            key: slot_version[key] for key in (
+                "slot_preimage_voice_id", "slot_preimage_provider_voice",
+                "slot_preimage_reclone_count", "slot_preimage_updated_at",
+                "slot_preimage_voice_updated_at", "slot_preimage_version",
+            )
+        },
         "script_sha256": script_sha256, "created_at": now,
         "expires_at": now + UNIFIED_VIDEO_CONSENT_TTL_SECONDS,
     }
@@ -473,13 +564,19 @@ def create_unified_video_consent(
                 """INSERT INTO digital_human_video_consents(
                     id,username,run_id,consent_version,purpose,video_asset_id,
                     video_sha256,sample_sha256,slot_id,slot_preimage_status,
-                    slot_preimage_voice_name,script_sha256,token_hash,created_at,
+                    slot_preimage_voice_name,slot_preimage_voice_id,
+                    slot_preimage_provider_voice,slot_preimage_reclone_count,
+                    slot_preimage_updated_at,slot_preimage_voice_updated_at,
+                    slot_preimage_version,script_sha256,token_hash,created_at,
                     expires_at,last_used_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 tuple(candidate[key] for key in (
                     "id", "username", "run_id", "consent_version", "purpose",
                     "video_asset_id", "video_sha256", "sample_sha256", "slot_id",
                     "slot_preimage_status", "slot_preimage_voice_name",
+                    "slot_preimage_voice_id", "slot_preimage_provider_voice",
+                    "slot_preimage_reclone_count", "slot_preimage_updated_at",
+                    "slot_preimage_voice_updated_at", "slot_preimage_version",
                     "script_sha256",
                 )) + (token_hash, candidate["created_at"], candidate["expires_at"], now),
             )
@@ -512,6 +609,13 @@ def _load_unified_video_consent(username, token, now=None, db_factory=None):
                 "真人视频授权不存在或不属于当前账号", "consent_invalid", 403,
             )
         record = dict(row)
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(
+                record.get("slot_preimage_version") or ""))
+                or int(record.get("slot_preimage_updated_at") or 0) <= 0):
+            raise DigitalHumanRequestError(
+                "本次授权缺少音色版本信息，请重新授权",
+                "consent_slot_version_invalid", 409,
+            )
         if int(record["expires_at"]) <= now:
             raise DigitalHumanRequestError(
                 "本次真人视频授权已过期", "consent_expired", 409,
@@ -572,14 +676,20 @@ def verify_unified_video_clone_submission(payload, username):
     if snapshot.get("action") == "mismatch":
         slot = next((item for item in audio_domain.list_user_audio_voice_slots(username)
                      if str(item.get("slot_id") or "") == record["slot_id"]), None)
-        if (not slot or str(slot.get("status") or "") != record["slot_preimage_status"]
-                or (record["slot_preimage_status"] == "ready" and
-                    str(slot.get("voice_name") or "未命名音色").strip()[:80]
-                    != record["slot_preimage_voice_name"])):
+        try:
+            current = _unified_slot_preimage(slot)
+        except DigitalHumanRequestError:
+            current = {}
+        if (not current or not hmac.compare_digest(
+                str(current.get("slot_preimage_version") or ""),
+                str(record["slot_preimage_version"] or ""))):
             raise DigitalHumanRequestError(
                 "音色槽位在授权后发生变化，请重新选择并确认",
                 "consent_slot_changed", 409,
             )
+    cleaned["_unified_video_slot_preimage"] = (
+        _unified_slot_preimage_from_record(record)
+    )
     return cleaned
 
 
@@ -592,6 +702,29 @@ def verify_unified_video_child_submission(payload, username, kind):
         expected_voice = _expected_cloned_voice(record["slot_id"])
         if str(payload.get("voice") or "") != expected_voice:
             raise DigitalHumanRequestError("完整配音音色与授权记录不一致", "consent_voice_mismatch", 403)
+        from . import audio as audio_domain
+        snapshot = audio_domain.clone_attempt_snapshot(
+            username, record["slot_id"], _unified_clone_attempt_id(record),
+        )
+        try:
+            ready_voice_id = int(snapshot.get("voice_id") or 0)
+            ready_voice_updated_at = int(snapshot.get("voice_updated_at") or 0)
+        except (TypeError, ValueError):
+            ready_voice_id = 0
+            ready_voice_updated_at = 0
+        ready_provider_voice = str(snapshot.get("provider_voice") or "").strip()
+        if (snapshot.get("action") != "ready" or ready_voice_id <= 0
+                or not ready_provider_voice or ready_voice_updated_at <= 0):
+            raise DigitalHumanRequestError(
+                "本次复刻音色尚未就绪或已被其他复刻替换，请重新试听确认",
+                "consent_clone_not_ready", 409,
+            )
+        # Freeze the exact provider version into the paid job.  The worker must
+        # not resolve the mutable slot alias again after another clone replaces
+        # it while this job is queued.
+        cleaned["digital_human_provider_voice"] = ready_provider_voice
+        cleaned["digital_human_voice_id"] = ready_voice_id
+        cleaned["digital_human_voice_updated_at"] = ready_voice_updated_at
     else:
         if (str(payload.get("mode") or "").lower() != "lipsync"
                 or int(payload.get("video_asset_id") or 0) != int(record["video_asset_id"])):

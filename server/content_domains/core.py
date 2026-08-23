@@ -2856,6 +2856,11 @@ class H(BaseHTTPRequestHandler):
                             voice = audio_domain.mark_clone_training(
                                 user["username"], body.get("slot_id"), body.get("name"),
                                 attempt_id,
+                                expected_preimage=(
+                                    body.get("_unified_video_slot_preimage")
+                                    if pipeline == digital_human_oneclick.UNIFIED_VIDEO_CONSENT_PURPOSE
+                                    else None
+                                ),
                             )
                             worker = threading.Thread(
                                 target=audio_domain.clone_vip_voice_background,

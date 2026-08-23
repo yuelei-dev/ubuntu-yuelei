@@ -609,14 +609,15 @@ class ContentDomainTests(unittest.TestCase):
                         voice_id INTEGER, reclone_count INTEGER, clone_started_at INTEGER,
                         updated_at INTEGER, clone_upload_at INTEGER, clone_error TEXT,
                         clone_attempt_id TEXT, clone_attempt_phase TEXT,
-                        clone_attempt_updated_at INTEGER)""")
+                        clone_attempt_updated_at INTEGER,
+                        clone_upload_speaker_id TEXT)""")
                     c.execute("""CREATE TABLE audio_voices(id INTEGER PRIMARY KEY,
                         username TEXT, scope TEXT, voice_key TEXT, display_name TEXT,
                         provider_voice TEXT, slot_id TEXT, created_at INTEGER, updated_at INTEGER,
                         UNIQUE(username,scope,voice_key))""")
                     c.execute("""INSERT INTO audio_voice_slots VALUES(
                         1,'fang','S_demo','training',NULL,0,1,1,NULL,NULL,
-                        'attempt-new-001','running',100)""")
+                        'attempt-new-001','running',100,NULL)""")
                     c.commit()
                 self.assertEqual("mismatch", audio.clone_attempt_snapshot(
                     "fang", "S_demo", "attempt-old-001", now=500)["action"])
@@ -631,11 +632,31 @@ class ContentDomainTests(unittest.TestCase):
                 )
                 self.assertEqual("provider_training", provider["action"])
                 self.assertEqual(9, provider["voice_id"])
+                with closing(attempt_db()) as c:
+                    c.execute("""INSERT INTO audio_voices VALUES(
+                        9,'fang','personal','vip_S_demo','本次复刻音色',
+                        'cosyvoice-attempt-new','S_demo',1,500)""")
+                    c.execute("""UPDATE audio_voice_slots SET status='ready',
+                        clone_attempt_phase='ready',clone_upload_speaker_id='cosyvoice-attempt-new',
+                        clone_attempt_updated_at=500,updated_at=500 WHERE id=1""")
+                    c.commit()
+                ready = audio.clone_attempt_snapshot(
+                    "fang", "S_demo", "attempt-new-001", now=500,
+                )
+                self.assertEqual("ready", ready["action"])
+                self.assertEqual("cosyvoice-attempt-new", ready["provider_voice"])
+                with closing(attempt_db()) as c:
+                    c.execute("""UPDATE audio_voices SET
+                        provider_voice='cosyvoice-replaced' WHERE id=9""")
+                    c.commit()
+                self.assertNotEqual("ready", audio.clone_attempt_snapshot(
+                    "fang", "S_demo", "attempt-new-001", now=500,
+                )["action"])
                 self.assertFalse(audio.fail_clone_attempt(
                     "fang", "S_demo", "attempt-old-001", "old failed"))
                 with closing(attempt_db()) as c:
                     row = c.execute("SELECT status,clone_attempt_id FROM audio_voice_slots").fetchone()
-                self.assertEqual(("training", "attempt-new-001"), tuple(row))
+                self.assertEqual(("ready", "attempt-new-001"), tuple(row))
             finally:
                 audio.adb = original_adb
 

@@ -92,7 +92,11 @@ class VideoPrecisionLipsyncTests(unittest.TestCase):
             self.assertEqual([], list(root.glob(".lipsync-voice-sample-*.mp3")))
 
     def test_voice_sample_api_requires_auth_and_explicit_consent(self):
-        slot = {"slot_id": "slot-1", "status": "active", "voice_name": None}
+        slot = {
+            "slot_id": "slot-1", "status": "active", "voice_name": None,
+            "voice_id": None, "provider_voice": None, "reclone_count": 0,
+            "updated_at": 100, "voice_updated_at": None,
+        }
         audio_domain = SimpleNamespace(
             list_user_audio_voice_slots=mock.Mock(return_value=[slot]),
         )
