@@ -5,10 +5,11 @@ import json
 import os
 import pathlib
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, nullcontext
 from unittest import mock
 
 
@@ -161,7 +162,8 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
                 "fail_closed_on_preimage_mismatch": True,
                 "backup_all_targets_before_first_write": True,
                 "backup_live_database_before_first_write": True,
-                "restore_database_on_failure": True,
+                "restore_database_on_failure": False,
+                "preserve_database_on_code_rollback": True,
                 "install_all_files_before_restart": True,
                 "restart_backend_once": True,
                 "rollback_all_files_as_one_unit": True,
@@ -228,11 +230,11 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
             connection.commit()
         return root, database
 
-    def _execute(self, manifest_path, target, backup, hooks):
+    def _execute(self, manifest_path, target, backup, hooks, checkpoint=None):
         return self.executor.execute_locked_release(
             manifest_path, ROOT, target, backup, hooks=hooks,
             verify_repository=False, reviewed_head="r" * 40,
-            merged_main="m" * 40,
+            merged_main="m" * 40, checkpoint=checkpoint,
         )
 
     def _assert_preimages(self, target, manifest):
@@ -242,6 +244,27 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
                 self.assertEqual(item["preimage_sha256"], sha256(path.read_bytes()))
             else:
                 self.assertFalse(path.exists())
+
+    def _replace_with_symlink_or_mock_lstat(self, node):
+        node = pathlib.Path(node)
+        if os.name != "nt":
+            real = node.with_name(node.name + ".real-preimage")
+            node.rename(real)
+            os.symlink(real, node)
+            return nullcontext()
+        original_lstat = os.lstat
+
+        def symlink_lstat(candidate, *args, **kwargs):
+            if pathlib.Path(candidate) == node:
+                current = original_lstat(node)
+                return os.stat_result(
+                    (stat.S_IFLNK | 0o777,) + tuple(current)[1:]
+                )
+            return original_lstat(candidate, *args, **kwargs)
+
+        return mock.patch.object(
+            self.executor.os, "lstat", side_effect=symlink_lstat,
+        )
 
     def test_historical_v5_executor_and_manifest_are_exact_git_blobs(self):
         for relative, (blob_id, digest) in HISTORICAL_LOCKS.items():
@@ -292,24 +315,37 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
             self.assertEqual("deployed", audit["status"])
             self.assertTrue((pathlib.Path(result["backup"]) / "digital_human_oneclick.db").is_file())
 
-    def test_static_failure_restores_every_file_and_database_preimage(self):
+    def test_static_failure_restores_files_but_preserves_concurrent_database_writes(self):
         manifest = self._manifest()
         with tempfile.TemporaryDirectory() as manifests, tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as backup_dir:
             path = self._write_manifest(manifests, manifest)
             target, database = self._target(target_dir, manifest)
-            before = database.read_bytes()
             hooks = Hooks(self.executor, fail_static=True)
+
+            def concurrent_authorization(name):
+                if name == "after_restart":
+                    with closing(sqlite3.connect(str(database))) as connection:
+                        connection.execute(
+                            "INSERT INTO existing_authorizations VALUES('concurrent','accepted')"
+                        )
+                        connection.commit()
+
             with self.assertRaisesRegex(RuntimeError, "static hash mismatch"):
-                self._execute(path, target, backup_dir, hooks)
+                self._execute(
+                    path, target, backup_dir, hooks,
+                    checkpoint=concurrent_authorization,
+                )
             self._assert_preimages(target, manifest)
             with closing(sqlite3.connect(str(database))) as connection:
-                self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name='digital_human_video_consents'").fetchone())
+                self.assertIsNotNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name='digital_human_video_consents'").fetchone())
                 self.assertEqual("original", connection.execute("SELECT value FROM existing_authorizations WHERE id='keep'").fetchone()[0])
+                self.assertEqual("accepted", connection.execute("SELECT value FROM existing_authorizations WHERE id='concurrent'").fetchone()[0])
             self.assertEqual(2, hooks.restarts)
             audit = json.loads(next(pathlib.Path(backup_dir).glob("*/audit.json")).read_text(encoding="utf-8"))
             self.assertEqual("rolled_back", audit["status"])
             self.assertEqual([], audit["rollback_errors"])
-            self.assertNotEqual(before, b"")
+            self.assertFalse(audit["database"]["automatic_restore"])
+            self.assertTrue((next(pathlib.Path(backup_dir).glob("*")) / "digital_human_oneclick.db").is_file())
 
     def test_migration_failure_restores_all_preimages(self):
         manifest = self._manifest()
@@ -326,6 +362,7 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         interval = self._manifest(); interval["release_executor"]["forward_health_policy"]["interval_seconds"] = 0; cases.append((interval, "interval is invalid"))
         timeout = self._manifest(); timeout["release_executor"]["forward_health_policy"]["timeout_seconds"] = 121; cases.append((timeout, "timeout is invalid"))
         database = self._manifest(); database["database_backup"]["backup_method"] = "copy"; cases.append((database, "database contract is incomplete"))
+        restore = self._manifest(); restore["deployment_policy"]["restore_database_on_failure"] = True; cases.append((restore, "deployment policy is incomplete"))
         probes = self._manifest(); probes["release_executor"]["unauthenticated_probes"] = []; cases.append((probes, "401 acceptance is missing"))
         for manifest, message in cases:
             with self.subTest(message=message), tempfile.TemporaryDirectory() as root:
@@ -358,10 +395,70 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         base.ReleaseError = RuntimeError
         base._verify_repository.return_value = merged
         base._run.side_effect = ["", "a" * 40, "deploy/test-runtime/" + MANIFEST_NAME]
-        self.assertEqual(merged, self.executor._verify_checkout(base, ROOT, manifest, reviewed, merged))
+        manifest_path = ROOT / "deploy/test-runtime" / MANIFEST_NAME
+        reviewed_blob = manifest_path.read_bytes()
+        completed = mock.Mock(stdout=reviewed_blob)
+        with mock.patch.object(self.executor.subprocess, "run", return_value=completed):
+            self.assertEqual(
+                merged,
+                self.executor._verify_checkout(
+                    base, ROOT, manifest, manifest_path,
+                    manifest_path.read_bytes(), reviewed, merged,
+                ),
+            )
         base._run.side_effect = ["", "a" * 40, "scripts/unexpected.py"]
         with self.assertRaisesRegex(self.executor.ReleaseError, "only finalize"):
-            self.executor._verify_checkout(base, ROOT, manifest, reviewed, merged)
+            self.executor._verify_checkout(
+                base, ROOT, manifest, manifest_path,
+                manifest_path.read_bytes(), reviewed, merged,
+            )
+
+    def test_old_reviewed_head_rejects_a_later_mutated_manifest(self):
+        manifest = self._manifest()
+        reviewed, merged = "b" * 40, "c" * 40
+        base = mock.Mock()
+        base.ReleaseError = RuntimeError
+        base._verify_repository.return_value = merged
+        base._run.side_effect = ["", "a" * 40, "deploy/test-runtime/" + MANIFEST_NAME]
+        with tempfile.TemporaryDirectory() as source:
+            source = pathlib.Path(source)
+            path = self._write_manifest(source, manifest)
+            reviewed_blob = path.read_bytes()
+            path.write_bytes(reviewed_blob + b"\n")
+            completed = mock.Mock(stdout=reviewed_blob)
+            with mock.patch.object(
+                    self.executor.subprocess, "run", return_value=completed):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError, "reviewed Head blob"):
+                    self.executor._verify_checkout(
+                        base, source, manifest, path, path.read_bytes(),
+                        reviewed, merged,
+                    )
+
+    def test_file_target_symlink_is_rejected_before_backup(self):
+        manifest = self._manifest()
+        with tempfile.TemporaryDirectory() as manifests, tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as backup_dir:
+            path = self._write_manifest(manifests, manifest)
+            target, _ = self._target(target_dir, manifest)
+            runtime = pathlib.Path(target).joinpath(
+                *pathlib.PurePosixPath(manifest["files"][0]["runtime_path"]).parts[1:]
+            )
+            with self._replace_with_symlink_or_mock_lstat(runtime):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError, "regular v6 runtime preimage"):
+                    self._execute(path, target, backup_dir, Hooks(self.executor))
+            self.assertEqual([], list(pathlib.Path(backup_dir).iterdir()))
+
+    def test_database_target_symlink_is_rejected_before_backup(self):
+        manifest = self._manifest()
+        with tempfile.TemporaryDirectory() as manifests, tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as backup_dir:
+            path = self._write_manifest(manifests, manifest)
+            target, database = self._target(target_dir, manifest)
+            with self._replace_with_symlink_or_mock_lstat(database):
+                with self.assertRaisesRegex(
+                        self.executor.ReleaseError, "database preimage is missing or unsafe"):
+                    self._execute(path, target, backup_dir, Hooks(self.executor))
+            self.assertEqual([], list(pathlib.Path(backup_dir).iterdir()))
 
     def test_system_hook_executes_the_declared_migration_callable(self):
         base = self.executor._load_base_executor(ROOT)

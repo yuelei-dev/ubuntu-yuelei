@@ -13,6 +13,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -97,9 +98,11 @@ def _validate_policy(executor, key, phase):
         raise ReleaseError("v6 %s health interval is invalid" % phase)
 
 
-def _load_manifest(path):
+def _load_manifest(path, manifest_bytes=None):
     manifest_path = pathlib.Path(path)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest_bytes is None:
+        manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
     if tuple(manifest_path.parts[-3:]) != MANIFEST_PARTS:
         raise ReleaseError("v6 manifest must come from its locked source path")
     if manifest.get("schema_version") != 1:
@@ -114,7 +117,8 @@ def _load_manifest(path):
         "fail_closed_on_preimage_mismatch": True,
         "backup_all_targets_before_first_write": True,
         "backup_live_database_before_first_write": True,
-        "restore_database_on_failure": True,
+        "restore_database_on_failure": False,
+        "preserve_database_on_code_rollback": True,
         "install_all_files_before_restart": True,
         "restart_backend_once": True,
         "rollback_all_files_as_one_unit": True,
@@ -181,12 +185,22 @@ def _load_manifest(path):
 
 def _mapped(base, root, absolute_path):
     try:
+        return base._mapped_symlink_node(root, absolute_path)
+    except base.ReleaseError as error:
+        raise ReleaseError(str(error)) from error
+
+
+def _mapped_directory(base, root, absolute_path):
+    try:
         return base._mapped_path(root, absolute_path)
     except base.ReleaseError as error:
         raise ReleaseError(str(error)) from error
 
 
-def _verify_checkout(base, source_root, manifest, reviewed_head, merged_main):
+def _verify_checkout(
+    base, source_root, manifest, manifest_path, manifest_bytes,
+    reviewed_head, merged_main,
+):
     if not reviewed_head or len(reviewed_head) != 40:
         raise ReleaseError("exact reviewed PR Head is required")
     if not merged_main or len(merged_main) != 40:
@@ -210,6 +224,19 @@ def _verify_checkout(base, source_root, manifest, reviewed_head, merged_main):
     expected = {"deploy/test-runtime/digital-human-unified-voice-v6-20260823.json"}
     if changed != expected:
         raise ReleaseError("reviewed v6 Head must only finalize the locked manifest")
+    manifest_path = pathlib.Path(manifest_path).resolve()
+    expected_path = (source_root / next(iter(expected))).resolve()
+    if manifest_path != expected_path:
+        raise ReleaseError("v6 manifest must be loaded from the locked source checkout")
+    reviewed = subprocess.run(
+        ["git", "cat-file", "blob", "%s:%s" % (
+            reviewed_head, next(iter(expected)),
+        )],
+        cwd=source_root, check=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    if manifest_bytes != reviewed:
+        raise ReleaseError("loaded v6 manifest does not match the reviewed Head blob")
     return head
 
 
@@ -222,15 +249,6 @@ def _database_backup(source, destination):
         saved.commit()
         if saved.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise ReleaseError("authorization database backup failed verification")
-
-
-def _database_restore(source, destination):
-    with closing(sqlite3.connect(str(source), timeout=10)) as saved, \
-            closing(sqlite3.connect(str(destination), timeout=10)) as live:
-        saved.backup(live)
-        live.commit()
-        if live.execute("PRAGMA quick_check").fetchone()[0] != "ok":
-            raise ReleaseError("authorization database restore failed verification")
 
 
 def _verify_consent_schema(database_path, specification):
@@ -275,11 +293,17 @@ def execute_locked_release(
     target_root = pathlib.Path(target_root).resolve()
     backup_root = pathlib.Path(backup_root).resolve()
     base = _load_base_executor(source_root)
-    manifest = _load_manifest(manifest_path)
+    manifest_path = pathlib.Path(manifest_path)
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = _load_manifest(manifest_path, manifest_bytes)
     hooks = hooks or SystemHooks(base)
     checkpoint = checkpoint or (lambda name: None)
     release_head = (
-        _verify_checkout(base, source_root, manifest, reviewed_head, merged_main)
+        _verify_checkout(
+            base, source_root, manifest, manifest_path,
+            manifest_bytes,
+            reviewed_head, merged_main,
+        )
         if verify_repository else (merged_main or "test-double")
     )
     executor = manifest["release_executor"]
@@ -303,16 +327,24 @@ def execute_locked_release(
         target = _mapped(base, target_root, item["runtime_path"])
         state = item["target_preimage_state"]
         if state == "file":
-            if not target.is_file() or target.is_symlink():
+            try:
+                target_stat = os.lstat(target)
+            except FileNotFoundError as error:
+                raise ReleaseError("expected regular v6 runtime preimage") from error
+            if not stat.S_ISREG(target_stat.st_mode):
                 raise ReleaseError("expected regular v6 runtime preimage")
             old = target.read_bytes()
             if (_sha256(old) != _locked(item, "preimage", "sha256")
                     or _git_blob(old) != _locked(item, "preimage", "blob")):
                 raise ReleaseError("v6 runtime preimage lock mismatch")
-            stat_result = target.stat()
-            mode, uid, gid = stat_result.st_mode & 0o777, stat_result.st_uid, stat_result.st_gid
+            mode = target_stat.st_mode & 0o777
+            uid, gid = target_stat.st_uid, target_stat.st_gid
         else:
-            if target.exists() or target.is_symlink():
+            try:
+                os.lstat(target)
+            except FileNotFoundError:
+                pass
+            else:
                 raise ReleaseError("expected absent v6 runtime preimage")
             if not target.parent.is_dir() or target.parent.is_symlink():
                 raise ReleaseError("v6 new target parent is missing or unsafe")
@@ -327,7 +359,11 @@ def execute_locked_release(
         raise ReleaseError(str(error)) from error
     database_spec = manifest["database_backup"]
     database = _mapped(base, target_root, database_spec["runtime_path"])
-    if not database.is_file() or database.is_symlink():
+    try:
+        database_stat = os.lstat(database)
+    except FileNotFoundError as error:
+        raise ReleaseError("authorization database preimage is missing or unsafe") from error
+    if not stat.S_ISREG(database_stat.st_mode):
         raise ReleaseError("authorization database preimage is missing or unsafe")
     if not hooks.service_active(manifest["target"]["service"]):
         raise ReleaseError("target service is not active before v6 release")
@@ -344,7 +380,10 @@ def execute_locked_release(
         "reviewed_head": reviewed_head, "merged_main": release_head,
         "executor_sha256": _sha256(executor_data),
         "executor_git_blob": _git_blob(executor_data), "files": [],
-        "database": {"runtime_path": database_spec["runtime_path"]},
+        "database": {
+            "runtime_path": database_spec["runtime_path"],
+            "automatic_restore": False,
+        },
     }
     for index, (item, _, target, mode, uid, gid) in enumerate(entries):
         saved = None
@@ -379,11 +418,11 @@ def execute_locked_release(
             if _sha256(target.read_bytes()) != _locked(item, "postimage", "sha256"):
                 raise ReleaseError("deployed v6 postimage hash mismatch")
         hooks.validate_import(
-            _mapped(base, target_root, executor["runtime_python_root"]),
+            _mapped_directory(base, target_root, executor["runtime_python_root"]),
             executor["import_modules"],
         )
         hooks.migrate_consent(
-            _mapped(base, target_root, executor["runtime_python_root"]),
+            _mapped_directory(base, target_root, executor["runtime_python_root"]),
             database, database_spec,
         )
         _verify_consent_schema(database, database_spec)
@@ -423,10 +462,6 @@ def execute_locked_release(
                     raise ReleaseError("absent v6 preimage was not restored")
             except BaseException as error:
                 rollback_errors.append("file:" + type(error).__name__)
-        try:
-            _database_restore(database_saved, database)
-        except BaseException as error:
-            rollback_errors.append("database:" + type(error).__name__)
         try:
             hooks.restart(service)
             base._wait_for_health(
