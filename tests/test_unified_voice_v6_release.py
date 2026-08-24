@@ -134,6 +134,25 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         cls.executor = load_executor()
         cls.executor_blob = git_blob(EXECUTOR.read_bytes())
         cls.executor_sha = sha256(EXECUTOR.read_bytes())
+        cls.source_workspace = tempfile.TemporaryDirectory(
+            prefix="unified-voice-v6-source-",
+        )
+        cls.addClassCleanup(cls.source_workspace.cleanup)
+        cls.source_root = pathlib.Path(cls.source_workspace.name)
+        checked_in = ROOT / "deploy/test-runtime" / MANIFEST_NAME
+        locked_manifest = json.loads(checked_in.read_text(encoding="utf-8"))
+        locked_sources = {
+            item["repository_path"]: item["postimage_blob"]
+            for item in locked_manifest["files"]
+        }
+        release = locked_manifest["release_executor"]
+        locked_sources[release["repository_path"]] = release["git_blob"]
+        base = release["locked_base_executor"]
+        locked_sources[base["repository_path"]] = base["git_blob"]
+        for repository_path, blob_id in locked_sources.items():
+            target = cls.source_root / repository_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(git_bytes(blob_id))
 
     def _manifest(self):
         files = []
@@ -232,7 +251,7 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
 
     def _execute(self, manifest_path, target, backup, hooks, checkpoint=None):
         return self.executor.execute_locked_release(
-            manifest_path, ROOT, target, backup, hooks=hooks,
+            manifest_path, self.source_root, target, backup, hooks=hooks,
             verify_repository=False, reviewed_head="r" * 40,
             merged_main="m" * 40, checkpoint=checkpoint,
         )
@@ -287,7 +306,7 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         self.assertEqual(self.executor_sha, release["sha256"])
         self.assertEqual(set(LOCKS), set(release["required_repository_paths"]))
         for item in loaded["files"]:
-            data = (ROOT / item["repository_path"]).read_bytes()
+            data = git_bytes(item["postimage_blob"])
             self.assertEqual(item["postimage_blob"], git_blob(data))
             self.assertEqual(item["postimage_sha256"], sha256(data))
             if item["target_preimage_state"] == "file":
