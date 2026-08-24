@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "b2524f687fc07de1e3ac94c44c476b40abb6c8ef"
+    "code_source_commit": "37cc5d164f59e7f72c51eb7a5bf693d658114e99"
   },
   "expected_preimage": {
     "development_base_commit": "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
@@ -27,8 +27,8 @@
   "release_executor": {
     "contract": "private_domain_video_six_file_v2",
     "repository_path": "scripts/deploy_private_domain_video_v1_locked_manifest.py",
-    "git_blob": "27c091772d826fd15840f31772eb0933bec120a9",
-    "sha256": "17286884fcffa927b356723e340411b0a6ab122f20e9819b26759fd6bddd2277",
+    "git_blob": "f19a21d4d5dbf3152edaf922bfd9f6f5458c4d2b",
+    "sha256": "f1f1308ebc5a84a662876d199b1cd7003764faad77e6acb22d98944e7e959544",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -69,9 +69,9 @@
       "job_timeout_seconds": 120,
       "submit_url": "http://127.0.0.1:8096/api/gen/director_agent",
       "job_url_template": "http://127.0.0.1:8096/api/gen/job/{job_id}",
-      "expected_action": {"type": "fill_field", "field": "private_domain_copy"},
+      "expected_action": {"type": "fill_field", "field": "private_domain_copy", "value": "验收哨兵一：仅验证从用户请求预填空白批量文案框。\n验收哨兵二：不生成、不上传、不删除、不发布。"},
       "request": {
-        "prompt": "把顾客给出的两条文案原样填入批量文案框，不要随机素材、不要生成、不要上传、不要删除或发布。",
+        "prompt": "请把下面两条固定验收哨兵文案原样填入空白批量文案框，保留中间换行。不要随机素材、不要生成、不要上传、不要删除或发布：\n验收哨兵一：仅验证从用户请求预填空白批量文案框。\n验收哨兵二：不生成、不上传、不删除、不发布。",
         "session_id": "release_private_domain_video_v1_acceptance",
         "page_revision": "b22c16f918572c03",
         "page_context": {

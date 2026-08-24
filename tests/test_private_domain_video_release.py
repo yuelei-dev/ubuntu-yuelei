@@ -80,8 +80,28 @@ class FakeHooks:
     def acceptance(self, specification):
         self._record("acceptance")
         if specification["expected_action"] != {
-                "type": "fill_field", "field": "private_domain_copy"}:
+                "type": "fill_field", "field": "private_domain_copy",
+                "value": self._sentinel_value(specification)}:
             raise AssertionError("acceptance does not prove private copy fill")
+
+    @staticmethod
+    def _sentinel_value(specification):
+        return specification["request"]["prompt"].split("：\n", 1)[1]
+
+
+class JsonResponse:
+    def __init__(self, payload):
+        self.status = 200
+        self.data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def read(self):
+        return self.data
 
 
 class PrivateDomainReleaseTests(unittest.TestCase):
@@ -185,6 +205,139 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         executor = EXECUTOR.read_bytes()
         self.assertEqual(self.manifest["release_executor"]["git_blob"], git_blob(executor))
         self.assertEqual(self.manifest["release_executor"]["sha256"], sha256(executor))
+
+    def test_manifest_provides_two_exact_side_effect_free_sentinel_copies(self):
+        acceptance = self.manifest["release_executor"]["authenticated_acceptance"]
+        request = acceptance["request"]
+        self.assertEqual("", request["page_context"]["copy_text"])
+        self.assertEqual(0, request["page_context"]["copy_count"])
+        self.assertEqual(self.module.ACCEPTANCE_PROMPT, request["prompt"])
+        self.assertEqual(
+            [
+                "验收哨兵一：仅验证从用户请求预填空白批量文案框。",
+                "验收哨兵二：不生成、不上传、不删除、不发布。",
+            ],
+            self.module.ACCEPTANCE_SENTINEL_VALUE.splitlines(),
+        )
+        self.assertEqual(
+            self.module.ACCEPTANCE_EXPECTED_ACTION,
+            acceptance["expected_action"],
+        )
+
+    def test_system_acceptance_replays_same_zero_cost_job_and_exact_value(self):
+        specification = copy.deepcopy(
+            self.manifest["release_executor"]["authenticated_acceptance"]
+        )
+        job_id = 3593
+        responses = [
+            JsonResponse({"job_id": job_id, "cost": 0}),
+            JsonResponse({"job_id": job_id, "cost": 0}),
+            JsonResponse({
+                "id": job_id,
+                "kind": "director_agent",
+                "cost": 0,
+                "status": "done",
+                "result": {
+                    "type": "director_agent",
+                    "plan": {
+                        "page_revision": specification["request"]["page_revision"],
+                        "actions": [{
+                            **specification["expected_action"],
+                            "label": "填入两条验收文案",
+                        }],
+                    },
+                },
+            }),
+        ]
+        opener = mock.Mock()
+        opener.open.side_effect = responses
+        with mock.patch.dict(
+                os.environ,
+                {specification["token_environment"]: "test-release-token"}), \
+                mock.patch.object(
+                    self.module.urllib.request, "build_opener",
+                    return_value=opener,
+                ):
+            self.module.SystemHooks().acceptance(specification)
+        self.assertEqual(3, opener.open.call_count)
+        first_request = opener.open.call_args_list[0].args[0]
+        replay_request = opener.open.call_args_list[1].args[0]
+        self.assertEqual(
+            first_request.get_header("Idempotency-key"),
+            replay_request.get_header("Idempotency-key"),
+        )
+        self.assertEqual(first_request.data, replay_request.data)
+
+    def test_system_acceptance_rejects_replay_or_zero_cost_drift(self):
+        specification = copy.deepcopy(
+            self.manifest["release_executor"]["authenticated_acceptance"]
+        )
+        failures = {
+            "different-job": (
+                [{"job_id": 3593, "cost": 0}, {"job_id": 3594, "cost": 0}],
+                "did not replay",
+            ),
+            "nonzero-cost": (
+                [{"job_id": 3593, "cost": 1}, {"job_id": 3593, "cost": 1}],
+                "zero-cost",
+            ),
+        }
+        for label, (payloads, error) in failures.items():
+            with self.subTest(label=label):
+                opener = mock.Mock()
+                opener.open.side_effect = [
+                    JsonResponse(payload) for payload in payloads
+                ]
+                with mock.patch.dict(
+                        os.environ,
+                        {specification["token_environment"]:
+                         "test-release-token"}), \
+                        mock.patch.object(
+                            self.module.urllib.request, "build_opener",
+                            return_value=opener,
+                        ):
+                    with self.assertRaisesRegex(self.module.ReleaseError, error):
+                        self.module.SystemHooks().acceptance(specification)
+
+    def test_acceptance_rejects_empty_wrong_field_and_wrong_or_missing_value(self):
+        specification = copy.deepcopy(
+            self.manifest["release_executor"]["authenticated_acceptance"]
+        )
+        expected = specification["expected_action"]
+
+        def job(actions):
+            return {
+                "result": {
+                    "type": "director_agent",
+                    "plan": {
+                        "page_revision": specification["request"]["page_revision"],
+                        "actions": actions,
+                    },
+                },
+            }
+
+        invalid_actions = {
+            "empty": [],
+            "wrong-field": [{**expected, "field": "topic"}],
+            "wrong-value": [{**expected, "value": "被篡改的验收值"}],
+            "missing-value": [{
+                "type": expected["type"], "field": expected["field"],
+            }],
+        }
+        for label, actions in invalid_actions.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                        self.module.ReleaseError, "acceptance result is invalid"):
+                    self.module._validate_private_domain_acceptance_result(
+                        specification, job(actions),
+                    )
+        wrong_revision = job([expected])
+        wrong_revision["result"]["plan"]["page_revision"] = "deadbeef"
+        with self.assertRaisesRegex(
+                self.module.ReleaseError, "acceptance result is invalid"):
+            self.module._validate_private_domain_acceptance_result(
+                specification, wrong_revision,
+            )
 
     def test_bgm_manifest_requires_stable_utf8_titles(self):
         catalog = json.loads(
