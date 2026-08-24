@@ -1,0 +1,7 @@
+{
+  "environment": "test",
+  "host_id": "yuelei-test-01",
+  "hostname": "REPLACE_WITH_EXACT_TEST_HOSTNAME",
+  "machine_id_sha256": "REPLACE_WITH_SHA256_OF_STRIPPED_ETC_MACHINE_ID",
+  "schema_version": 1
+}

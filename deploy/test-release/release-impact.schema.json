@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://huangque.example/schemas/test-release-impact-v1.json",
+  "additionalProperties": false,
+  "properties": {
+    "external_checks": {
+      "maxItems": 0,
+      "type": "array"
+    },
+    "health_checks": {
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "migrations": {
+      "maxItems": 0,
+      "type": "array"
+    },
+    "pre_health_checks": {
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "release_id": {
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
+      "type": "string"
+    },
+    "required_env": {
+      "additionalProperties": {
+        "items": { "pattern": "^[A-Z][A-Z0-9_]{0,79}$", "type": "string" },
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9@_.:-]+\\.(service|timer)$"
+      },
+      "type": "object"
+    },
+    "restart_services": {
+      "items": {
+        "pattern": "^[A-Za-z0-9@_.:-]+\\.(service|timer)$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "runtime_changes": {
+      "items": { "minLength": 1, "type": "string" },
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "schema_version": { "const": 1 }
+  },
+  "required": [
+    "schema_version",
+    "release_id",
+    "runtime_changes",
+    "restart_services",
+    "required_env",
+    "pre_health_checks",
+    "health_checks",
+    "external_checks",
+    "migrations"
+  ],
+  "title": "Huangque test release impact",
+  "type": "object"
+}

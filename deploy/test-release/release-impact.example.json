@@ -1,0 +1,13 @@
+{
+  "external_checks": [],
+  "health_checks": ["content-health"],
+  "migrations": [],
+  "pre_health_checks": ["content-health"],
+  "release_id": "pr-000-example",
+  "required_env": {
+    "huangque-content.service": ["EXAMPLE_API_KEY"]
+  },
+  "restart_services": ["huangque-content.service"],
+  "runtime_changes": ["server/content_domains/example.py"],
+  "schema_version": 1
+}

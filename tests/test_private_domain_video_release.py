@@ -34,6 +34,61 @@ def git_bytes(blob):
     ).stdout
 
 
+def verify_manifest_relock(repository, manifest_path, head="HEAD"):
+    repository = pathlib.Path(repository)
+    manifest_path = pathlib.Path(manifest_path)
+    relative_path = manifest_path.relative_to(repository).as_posix()
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+    expected_parent = manifest["source"]["code_source_commit"]
+    expected_blob = git_blob(manifest_bytes)
+
+    history = subprocess.run(
+        ["git", "rev-list", head, "--", relative_path], cwd=repository,
+        check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+    candidates = []
+    for commit in history:
+        blob = subprocess.run(
+            ["git", "rev-parse", "%s:%s" % (commit, relative_path)],
+            cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        if blob == expected_blob:
+            candidates.append(commit)
+    if not candidates:
+        raise AssertionError("current manifest bytes have no reachable locked commit")
+
+    locked_commit = candidates[0]
+    reachable = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", locked_commit, head],
+        cwd=repository,
+    )
+    if reachable.returncode != 0:
+        raise AssertionError("locked manifest commit is not reachable from current head")
+
+    parents = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.split()
+    if len(parents) != 2 or parents[1] != expected_parent:
+        raise AssertionError("locked manifest commit parent does not match code source")
+
+    changed = set(filter(None, subprocess.run(
+        ["git", "diff", "--name-only", parents[1], locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()))
+    if changed != {relative_path}:
+        raise AssertionError("locked manifest commit is not manifest-only")
+
+    locked_bytes = subprocess.run(
+        ["git", "cat-file", "blob", "%s:%s" % (locked_commit, relative_path)],
+        cwd=repository, check=True, stdout=subprocess.PIPE,
+    ).stdout
+    if locked_bytes != manifest_bytes or git_blob(locked_bytes) != expected_blob:
+        raise AssertionError("current manifest bytes do not match locked blob")
+    return locked_commit
+
+
 def load_executor():
     specification = importlib.util.spec_from_file_location(
         "private_domain_release", EXECUTOR,
@@ -484,24 +539,77 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.assertEqual(self.original, self._snapshot())
         self.assertEqual(self.original_feature, self._feature_row())
 
-    def test_current_head_is_manifest_only_child_of_locked_code_source(self):
-        parents = subprocess.run(
-            ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
-            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
-        ).stdout.split()
-        # pull_request CI checks out GitHub's synthetic merge commit. Its second
-        # parent is the exact PR Head; a normal branch checkout uses HEAD itself.
-        candidate = parents[2] if len(parents) == 3 else parents[0]
-        parent = subprocess.run(
-            ["git", "rev-parse", candidate + "^"], cwd=ROOT, check=True,
-            text=True, stdout=subprocess.PIPE,
-        ).stdout.strip()
-        changed = set(filter(None, subprocess.run(
-            ["git", "diff", "--name-only", parent, candidate], cwd=ROOT,
-            check=True, text=True, stdout=subprocess.PIPE,
-        ).stdout.splitlines()))
-        self.assertEqual(parent, self.manifest["source"]["code_source_commit"])
-        self.assertEqual({MANIFEST.relative_to(ROOT).as_posix()}, changed)
+    def _relock_repository(self, *, wrong_parent=False, extra_delta=False):
+        repository = self.root / ("relock-" + str(len(list(self.root.iterdir()))))
+        repository.mkdir()
+
+        def git(*arguments):
+            return subprocess.run(
+                ["git", *arguments], cwd=repository, check=True, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Release Test")
+        git("config", "user.email", "release-test@example.invalid")
+        git("config", "core.autocrlf", "false")
+        (repository / "source.txt").write_text("locked source\n", encoding="utf-8")
+        git("add", "source.txt")
+        git("commit", "-m", "code source")
+        code_source = git("rev-parse", "HEAD")
+        if wrong_parent:
+            (repository / "intervening.txt").write_text("drift\n", encoding="utf-8")
+            git("add", "intervening.txt")
+            git("commit", "-m", "unexpected parent")
+
+        manifest = repository / "deploy/locked.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({
+            "source": {"code_source_commit": code_source},
+            "payload": "locked",
+        }, indent=2) + "\n", encoding="utf-8")
+        git("add", manifest.relative_to(repository).as_posix())
+        if extra_delta:
+            (repository / "extra.txt").write_text("extra delta\n", encoding="utf-8")
+            git("add", "extra.txt")
+        git("commit", "-m", "lock manifest")
+        return repository, manifest, git
+
+    def test_manifest_relock_history_survives_later_commit_and_merge(self):
+        repository, manifest, git = self._relock_repository()
+        locked_commit = git("rev-parse", "HEAD")
+        (repository / "ordinary.txt").write_text("ordinary\n", encoding="utf-8")
+        git("add", "ordinary.txt")
+        git("commit", "-m", "ordinary later change")
+        git("checkout", "-b", "side", locked_commit)
+        (repository / "side.txt").write_text("side\n", encoding="utf-8")
+        git("add", "side.txt")
+        git("commit", "-m", "side change")
+        git("checkout", "main")
+        git("merge", "--no-ff", "side", "-m", "later merge")
+        self.assertEqual(locked_commit, verify_manifest_relock(repository, manifest))
+
+    def test_manifest_relock_history_rejects_tampered_current_bytes(self):
+        repository, manifest, _git = self._relock_repository()
+        manifest.write_text('{"source": {"code_source_commit": "tampered"}}\n', encoding="utf-8")
+        with self.assertRaisesRegex(AssertionError, "no reachable locked commit"):
+            verify_manifest_relock(repository, manifest)
+
+    def test_manifest_relock_history_rejects_wrong_parent(self):
+        repository, manifest, _git = self._relock_repository(wrong_parent=True)
+        with self.assertRaisesRegex(AssertionError, "parent does not match"):
+            verify_manifest_relock(repository, manifest)
+
+    def test_manifest_relock_history_rejects_extra_delta(self):
+        repository, manifest, _git = self._relock_repository(extra_delta=True)
+        with self.assertRaisesRegex(AssertionError, "not manifest-only"):
+            verify_manifest_relock(repository, manifest)
+
+    def test_private_domain_manifest_has_strict_reachable_relock(self):
+        locked_commit = verify_manifest_relock(ROOT, MANIFEST)
+        self.assertEqual(
+            "c9e203abd87d334e5842f5097ade4b23bf0cb13f", locked_commit,
+        )
 
     def test_old_reviewed_head_rejects_later_loaded_manifest_bytes(self):
         repository = self.root / "reviewed-source"
