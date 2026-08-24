@@ -53,7 +53,7 @@ LOCKS = {
     ),
     "site/workbench/script.html": (
         "ea4bad20da05b624f2c77b7f6283734997b19553", "22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e",
-        "26aaf0a4a8bc048534462cdc1cbe5af400c3fc23", "8ce245e020501e16bb2ec91e1ead6ec602c1a9792a7a84f5da662191f46fc2b3",
+        "1a80c4f9b6eb2b06e4d3c651eeb4ba9c4804f164", "3817f62ffc2ce26319fb783f3751762386621ee464971f033c0abc87a585b863",
     ),
     "site/workbench/digital-human-unified-state.js": (
         None, None, "1fe597e7c684759ba1fd88c37239d48c81e693fc", "6d1c7c65ca7635e9c3515b1e1a6d3d6d4f56d561d962de1684aefa498cd0916d",
