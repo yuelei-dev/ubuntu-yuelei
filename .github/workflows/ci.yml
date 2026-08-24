@@ -24,6 +24,18 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: 锁定 PR 精确 Head
+        if: github.event_name == 'pull_request'
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          ACTUAL_HEAD="$(git rev-parse HEAD)"
+          test "$ACTUAL_HEAD" = "$EXPECTED_HEAD" || {
+            echo "CI checkout mismatch: expected $EXPECTED_HEAD, got $ACTUAL_HEAD" >&2
+            exit 1
+          }
 
       - name: 配置 Python
         uses: actions/setup-python@v6

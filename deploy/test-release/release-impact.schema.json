@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "properties": {
     "external_checks": {
-      "items": { "$ref": "#/$defs/externalCheck" },
+      "maxItems": 0,
       "type": "array"
     },
     "health_checks": {
@@ -13,7 +13,7 @@
       "type": "array"
     },
     "migrations": {
-      "items": { "$ref": "#/$defs/migration" },
+      "maxItems": 0,
       "type": "array"
     },
     "pre_health_checks": {
@@ -59,32 +59,6 @@
   "title": "Huangque test release impact",
   "type": "object",
   "$defs": {
-    "command": {
-      "additionalProperties": false,
-      "properties": {
-        "argv": {
-          "items": { "minLength": 1, "type": "string" },
-          "minItems": 1,
-          "type": "array"
-        },
-        "cwd": { "enum": ["{source}", "{runtime}"] },
-        "timeout_seconds": { "maximum": 1800, "minimum": 1, "type": "integer" }
-      },
-      "required": ["argv"],
-      "type": "object"
-    },
-    "externalCheck": {
-      "additionalProperties": false,
-      "properties": {
-        "argv": { "$ref": "#/$defs/command/properties/argv" },
-        "cwd": { "$ref": "#/$defs/command/properties/cwd" },
-        "name": { "minLength": 1, "type": "string" },
-        "no_charge": { "const": true },
-        "timeout_seconds": { "$ref": "#/$defs/command/properties/timeout_seconds" }
-      },
-      "required": ["name", "no_charge", "argv"],
-      "type": "object"
-    },
     "healthCheck": {
       "additionalProperties": false,
       "properties": {
@@ -99,18 +73,6 @@
         "url": { "pattern": "^http://127\\.0\\.0\\.1:[0-9]+/", "type": "string" }
       },
       "required": ["url", "expected_statuses"],
-      "type": "object"
-    },
-    "migration": {
-      "additionalProperties": false,
-      "properties": {
-        "database_path": { "pattern": "^/", "type": "string" },
-        "id": { "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$", "type": "string" },
-        "rollback": { "const": "restore_sqlite_snapshot" },
-        "up": { "$ref": "#/$defs/command" },
-        "verify": { "$ref": "#/$defs/command" }
-      },
-      "required": ["id", "database_path", "up", "verify", "rollback"],
       "type": "object"
     }
   }

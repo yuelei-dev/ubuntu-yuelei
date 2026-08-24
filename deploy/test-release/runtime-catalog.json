@@ -1,10 +1,6 @@
 {
   "allowed_tools": [
-    "/usr/bin/curl",
-    "/usr/bin/env",
-    "/usr/bin/ffmpeg",
-    "/usr/bin/ffprobe",
-    "/usr/bin/python3",
+    "/usr/bin/git",
     "/usr/bin/systemctl"
   ],
   "allowed_units": [
@@ -28,11 +24,14 @@
     "server/test_wxpay.py"
   ],
   "ignored_repository_prefixes": [],
+  "unmanaged_runtime_paths": [],
+  "unmanaged_runtime_prefixes": [],
   "impact_prefix": "deploy/test-release/impacts/",
   "min_free_bytes": 16777216,
   "rules": [
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "prefix",
       "mode": "0644",
       "repository": "server/content_domains/",
@@ -41,6 +40,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "prefix",
       "mode": "0644",
       "repository": "server/providers/",
@@ -49,6 +49,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/content_api.py",
@@ -57,6 +58,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/func_names.py",
@@ -65,6 +67,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/tikhub.py",
@@ -73,6 +76,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/imggen_api.py",
@@ -81,6 +85,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/admin_api.py",
@@ -89,6 +94,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/leadgen_api.py",
@@ -97,6 +103,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/auth_server.py",
@@ -105,6 +112,7 @@
     },
     {
       "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
       "repository": "server/dl_service.py",
@@ -113,6 +121,7 @@
     },
     {
       "delete_allowed": true,
+      "allow_unmanaged_runtime": false,
       "kind": "prefix",
       "mode": "0644",
       "repository": "site/",
@@ -122,6 +131,7 @@
     {
       "daemon_reload": true,
       "delete_allowed": false,
+      "allow_unmanaged_runtime": true,
       "kind": "prefix",
       "mode": "0644",
       "repository": "deploy/systemd/",
@@ -139,6 +149,7 @@
   "schema_version": 1,
   "target": {
     "environment": "test",
-    "host_id": "yuelei-test-01"
+    "host_id": "yuelei-test-01",
+    "origin_url": "https://github.com/yuelei-dev/ubuntu-yuelei.git"
   }
 }
