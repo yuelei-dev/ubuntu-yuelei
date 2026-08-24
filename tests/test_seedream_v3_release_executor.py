@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -106,7 +107,7 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def _release(self, module, manifest=None):
+    def _release(self, module, manifest=None, **kwargs):
         return module.ContentWhisperRelease(
             manifest or self.manifest,
             self.source_root,
@@ -115,7 +116,15 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             git_runner=FakeGitRunner(),
             reviewed_source_commit=REVIEWED_SOURCE,
             reviewed_main_commit=REVIEWED_MAIN,
+            **kwargs,
         )
+
+    @staticmethod
+    def _service_environment():
+        return {
+            "FEISHU_APP_ID": "test-app-id",
+            "FEISHU_APP_SECRET": "test-app-secret",
+        }
 
     def test_versioned_executor_accepts_locked_successor(self):
         release = self._release(self.versioned)
@@ -171,6 +180,113 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             ).stdout
             self.assertEqual(locked, data)
+
+    def test_feishu_preflight_fails_closed_when_service_credentials_are_missing(self):
+        release = self._release(
+            self.versioned, service_environment_getter=lambda: {},
+            feishu_json_getter=lambda _request, _environment: self.fail(
+                "network must not run"
+            ),
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError, "credentials are missing"):
+            release._verify_feishu_operational("pre-deployment")
+
+    def test_feishu_preflight_rejects_table_or_view_permission_failure(self):
+        responses = iter([
+            {"code": 0, "tenant_access_token": "tenant-token"},
+            {"code": 1254302, "msg": "permission denied"},
+        ])
+        release = self._release(
+            self.versioned,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=lambda _request, _environment: next(responses),
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError, "permission verification failed"):
+            release._verify_feishu_operational("pre-deployment")
+
+    def test_feishu_preflight_rejects_invalid_pagination_before_attachment(self):
+        responses = iter([
+            {"code": 0, "tenant_access_token": "tenant-token"},
+            {"code": 0, "data": {
+                "items": [], "has_more": True, "page_token": "",
+            }},
+        ])
+        release = self._release(
+            self.versioned,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=lambda _request, _environment: next(responses),
+            feishu_media_getter=lambda _request, _environment: self.fail(
+                "media must not run"
+            ),
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError, "pagination cursor is invalid"):
+            release._verify_feishu_operational("pre-deployment")
+
+    def test_feishu_preflight_reads_all_pages_and_downloads_attachment(self):
+        calls = []
+
+        def json_getter(request, environment):
+            self.assertEqual(environment["FEISHU_APP_ID"], "test-app-id")
+            calls.append(request.full_url)
+            if "/auth/" in request.full_url:
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            if "page_token=next-page" in request.full_url:
+                return {"code": 0, "data": {
+                    "items": [{"fields": {"素材": [{
+                        "file_token": "locked-attachment", "name": "material.png",
+                    }]}}], "has_more": False,
+                }}
+            return {"code": 0, "data": {
+                "items": [], "has_more": True, "page_token": "next-page",
+            }}
+
+        media_calls = []
+        release = self._release(
+            self.versioned,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=json_getter,
+            feishu_media_getter=lambda request, _environment: media_calls.append(
+                request.full_url
+            ),
+        )
+        release._verify_feishu_operational("post-restart")
+        self.assertEqual(len(calls), 3)
+        self.assertIn("view_id=vewa9ZW0Og", calls[1])
+        self.assertIn("page_token=next-page", calls[2])
+        self.assertEqual(len(media_calls), 1)
+        self.assertTrue(media_calls[0].endswith("/locked-attachment/download"))
+
+    def test_post_restart_feishu_failure_triggers_full_restore(self):
+        release = self._release(self.versioned)
+        release._validate_target = mock.Mock()
+        release._verify_source_checkout = mock.Mock()
+        release._verify_release_tools = mock.Mock()
+        release._preflight_release_commands = mock.Mock()
+        release._source_payloads = mock.Mock(return_value={})
+        release._health_probe_policy = mock.Mock(return_value=(60, 1))
+        release._run_stage = mock.Mock()
+        release._verify_health = mock.Mock()
+        release._verify_feishu_operational = mock.Mock(side_effect=[
+            None, self.versioned.ReleaseError("post-restart Feishu failed"),
+        ])
+        release._backup_all = mock.Mock()
+        release._install_all = mock.Mock(return_value=1)
+        release._restore_all = mock.Mock()
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=[]):
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "all manifest targets were restored"):
+                release.execute("test@8.148.158.106")
+        release._restore_all.assert_called_once_with()
+        self.assertEqual(
+            release._verify_feishu_operational.call_args_list,
+            [mock.call("pre-deployment"), mock.call("post-restart")],
+        )
 
 
 if __name__ == "__main__":

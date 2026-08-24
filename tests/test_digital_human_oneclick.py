@@ -1411,7 +1411,8 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             page,
         )
         self.assertIn("上传的每一张图片都会按顺序直接进入成片", page)
-        self.assertIn('id="allowAiMaterials" type="checkbox" checked', page)
+        self.assertIn('id="allowAiMaterials" type="checkbox"', page)
+        self.assertNotIn('id="allowAiMaterials" type="checkbox" checked', page)
         self.assertNotIn("全网公开可用素材", page)
         self.assertIn('id="voiceSource"', page)
         self.assertIn("已有声音无需再次复刻", page)

@@ -22,6 +22,11 @@ import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - the real release runtime is Linux.
+    pwd = None
+
 import verify_content_whisper_deployment as manifest_verify
 
 
@@ -251,7 +256,8 @@ class ContentWhisperRelease:
             *, runner=None, health_getter=None, checkpoint=None,
             git_runner=None, reviewed_source_commit=None,
             reviewed_main_commit=None, monotonic=None, sleeper=None,
-            deployment_tool_root=None):
+            deployment_tool_root=None, service_environment_getter=None,
+            feishu_json_getter=None, feishu_media_getter=None):
         self.manifest = manifest
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime = RuntimeFiles(runtime_root)
@@ -263,6 +269,11 @@ class ContentWhisperRelease:
         self.health_getter = health_getter or self._http_status
         self.monotonic = monotonic or time.monotonic
         self.sleeper = sleeper or time.sleep
+        self.service_environment_getter = (
+            service_environment_getter or self._service_environment
+        )
+        self.feishu_json_getter = feishu_json_getter or self._read_feishu_json
+        self.feishu_media_getter = feishu_media_getter or self._read_feishu_media
         self.deployment_tool_root = Path(os.path.abspath(
             deployment_tool_root or os.sep
         ))
@@ -712,6 +723,243 @@ class ContentWhisperRelease:
         except urllib.error.HTTPError as exc:
             return int(exc.code)
 
+    def _service_environment(self):
+        contract = self.manifest.get("configuration_requirements", {}).get(
+            "service_runtime", {}
+        )
+        service = str(self.manifest.get("target", {}).get("service") or "")
+        expected_user = str(contract.get("user") or "")
+        environment_file = str(contract.get("environment_file") or "")
+        if (service != "huangque-content.service" or expected_user != "ubuntu"
+                or environment_file != "/home/ubuntu/content-api/content.env"):
+            raise ReleaseError("locked service runtime contract is missing or invalid")
+
+        def show(property_name):
+            try:
+                result = subprocess.run(
+                    ["/usr/bin/systemctl", "show", service,
+                     "--property=" + property_name, "--value"],
+                    check=False, capture_output=True, text=True, timeout=30,
+                )
+            except OSError as exc:
+                raise ReleaseError(
+                    "could not inspect the locked service runtime"
+                ) from exc
+            if result.returncode:
+                raise ReleaseError(
+                    "could not inspect the locked service runtime: %s" % property_name
+                )
+            return result.stdout.strip()
+
+        if show("User") != expected_user:
+            raise ReleaseError("service runtime user does not match the locked contract")
+        if environment_file not in show("EnvironmentFiles"):
+            raise ReleaseError(
+                "service EnvironmentFile does not match the locked contract"
+            )
+        try:
+            pid = int(show("MainPID"))
+            if pwd is None:
+                raise ReleaseError("service identity inspection requires Linux")
+            account = pwd.getpwnam(expected_user)
+            process = Path("/proc") / str(pid)
+            if pid <= 0 or os.stat(process).st_uid != account.pw_uid:
+                raise ReleaseError(
+                    "service process identity does not match the locked runtime user"
+                )
+            raw = (process / "environ").read_bytes()
+        except (KeyError, OSError, ValueError) as exc:
+            raise ReleaseError(
+                "could not read the active service environment fail-closed"
+            ) from exc
+        if len(raw) > 1024 * 1024:
+            raise ReleaseError("active service environment is unexpectedly large")
+        environment = {}
+        for item in raw.split(b"\0"):
+            if not item:
+                continue
+            key, separator, value = item.partition(b"=")
+            if not separator:
+                continue
+            try:
+                environment[key.decode("utf-8")] = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ReleaseError(
+                    "active service environment contains invalid text"
+                ) from exc
+        return environment
+
+    @staticmethod
+    def _feishu_proxy_handler(environment):
+        proxies = {}
+        for scheme in ("http", "https"):
+            value = str(
+                environment.get(scheme + "_proxy")
+                or environment.get(scheme.upper() + "_PROXY") or ""
+            ).strip()
+            if value:
+                proxies[scheme] = value
+        return urllib.request.ProxyHandler(proxies)
+
+    @staticmethod
+    def _read_feishu_json(request, environment):
+        opener = urllib.request.build_opener(
+            ContentWhisperRelease._feishu_proxy_handler(environment)
+        )
+        try:
+            with opener.open(request, timeout=15) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            raise ReleaseError(
+                "Feishu operational preflight HTTP status %s" % exc.code
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise ReleaseError(
+                "Feishu operational preflight connection failed: %s" %
+                type(exc).__name__
+            ) from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise ReleaseError("Feishu operational preflight response is too large")
+        try:
+            result = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReleaseError(
+                "Feishu operational preflight returned invalid JSON"
+            ) from exc
+        if not isinstance(result, dict):
+            raise ReleaseError("Feishu operational preflight returned invalid JSON")
+        return result
+
+    @staticmethod
+    def _read_feishu_media(request, environment):
+        allowed_mimes = {
+            "image/jpeg", "image/png", "image/webp", "video/mp4",
+            "video/webm", "video/quicktime",
+        }
+        opener = urllib.request.build_opener(
+            ContentWhisperRelease._feishu_proxy_handler(environment)
+        )
+        try:
+            with opener.open(request, timeout=30) as response:
+                mime = str(response.headers.get("Content-Type") or "").split(
+                    ";", 1
+                )[0].lower()
+                raw = response.read(20 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            raise ReleaseError(
+                "Feishu attachment preflight HTTP status %s" % exc.code
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise ReleaseError(
+                "Feishu attachment preflight connection failed: %s" %
+                type(exc).__name__
+            ) from exc
+        if not raw or len(raw) > 20 * 1024 * 1024:
+            raise ReleaseError("Feishu attachment is empty or exceeds 20MB")
+        if mime not in allowed_mimes:
+            raise ReleaseError("Feishu attachment MIME is not an approved material type")
+        return mime
+
+    @staticmethod
+    def _attachment_tokens(value, output):
+        if isinstance(value, dict):
+            token = str(value.get("file_token") or "").strip()
+            if token:
+                output.append(token)
+            for child in value.values():
+                ContentWhisperRelease._attachment_tokens(child, output)
+        elif isinstance(value, list):
+            for child in value:
+                ContentWhisperRelease._attachment_tokens(child, output)
+
+    def _verify_feishu_operational(self, phase):
+        requirements = self.manifest.get("configuration_requirements", {})
+        config = requirements.get("feishu", {})
+        if config.get("operational_probe_required") is not True:
+            raise ReleaseError("Feishu operational probe must be required")
+        environment = self.service_environment_getter()
+        credential_names = config.get("secret_environment_names")
+        if credential_names != ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]:
+            raise ReleaseError("Feishu credential contract is invalid")
+        credentials = {
+            name: str(environment.get(name) or "").strip()
+            for name in credential_names
+        }
+        if any(not value for value in credentials.values()):
+            raise ReleaseError(
+                "%s Feishu credentials are missing from the service environment" % phase
+            )
+        app_token = str(environment.get(
+            config.get("app_token_environment_name"),
+            config.get("app_token_default") or "",
+        ) or "").strip()
+        table_id = str(environment.get(
+            config.get("table_environment_name"),
+            config.get("table_default") or "",
+        ) or "").strip()
+        view_id = str(environment.get(
+            config.get("view_environment_name"),
+            config.get("view_default") or "",
+        ) or "").strip()
+        if not app_token or not table_id or not view_id:
+            raise ReleaseError("%s Feishu app, table or view is missing" % phase)
+        token_result = self.feishu_json_getter(urllib.request.Request(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            data=json.dumps({
+                "app_id": credentials["FEISHU_APP_ID"],
+                "app_secret": credentials["FEISHU_APP_SECRET"],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        ), environment)
+        if int(token_result.get("code") or 0) != 0:
+            raise ReleaseError("%s Feishu credential verification failed" % phase)
+        tenant_token = str(token_result.get("tenant_access_token") or "").strip()
+        if not tenant_token:
+            raise ReleaseError("%s Feishu credential verification returned no token" % phase)
+        attachment_tokens = []
+        page_token = ""
+        for page_index in range(20):
+            query = {"page_size": 100, "view_id": view_id}
+            if page_token:
+                query["page_token"] = page_token
+            url = (
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
+                (urllib.parse.quote(app_token, safe=""),
+                 urllib.parse.quote(table_id, safe=""),
+                 urllib.parse.urlencode(query))
+            )
+            result = self.feishu_json_getter(urllib.request.Request(
+                url, headers={"Authorization": "Bearer " + tenant_token},
+            ), environment)
+            if int(result.get("code") or 0) != 0:
+                raise ReleaseError(
+                    "%s Feishu table or view permission verification failed" % phase
+                )
+            data = result.get("data") or {}
+            if not isinstance(data, dict) or not isinstance(data.get("items", []), list):
+                raise ReleaseError("%s Feishu records response is invalid" % phase)
+            for record in data.get("items", []):
+                self._attachment_tokens(record, attachment_tokens)
+            if not data.get("has_more"):
+                break
+            next_page = str(data.get("page_token") or "").strip()
+            if not next_page or next_page == page_token:
+                raise ReleaseError("%s Feishu pagination cursor is invalid" % phase)
+            page_token = next_page
+            if page_index == 19:
+                raise ReleaseError("%s Feishu pagination exceeds the safety limit" % phase)
+        if not attachment_tokens:
+            raise ReleaseError("%s Feishu view contains no downloadable attachment" % phase)
+        media_url = (
+            "https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
+            urllib.parse.quote(attachment_tokens[0], safe="")
+        )
+        self.feishu_media_getter(urllib.request.Request(
+            media_url, headers={"Authorization": "Bearer " + tenant_token},
+        ), environment)
+        self.checkpoint("%s_feishu_operational" % phase)
+
     def _restore_all(self):
         failures = []
         for record in self.backup_entries:
@@ -790,6 +1038,7 @@ class ContentWhisperRelease:
         self.checkpoint("start_state_complete")
         self._run_stage("pre_service_active")
         self._verify_health("pre-deployment ")
+        self._verify_feishu_operational("pre-deployment")
         self.checkpoint("pre_health")
         self._backup_all(self.start_states)
         if manifest_verify.classify_start_states(
@@ -807,6 +1056,7 @@ class ContentWhisperRelease:
                 self._run_stage("restart")
                 self._run_stage("service_active")
             self._verify_health()
+            self._verify_feishu_operational("post-restart")
             self.checkpoint("health")
         except Exception as release_error:
             try:

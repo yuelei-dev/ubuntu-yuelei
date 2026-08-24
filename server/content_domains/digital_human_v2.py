@@ -689,7 +689,7 @@ def resolve_material_response(payload, username, db_factory=None):
             "feishu_material_unavailable", 503,
         ) from exc
     if not fetched:
-        if not frozen.get("allow_ai_materials", True):
+        if frozen.get("allow_ai_materials") is not True:
             raise DigitalHumanRequestError(
                 "顾客素材和飞书素材库均未找到匹配画面；当前方案未允许 AI 补图",
                 "material_unavailable_without_ai", 409,
@@ -703,7 +703,7 @@ def resolve_material_response(payload, username, db_factory=None):
             item_index, db_factory=db_factory,
         )
     except Exception:
-        if not frozen.get("allow_ai_materials", True):
+        if frozen.get("allow_ai_materials") is not True:
             raise DigitalHumanRequestError(
                 "飞书素材无法安全读取；当前方案未允许 AI 补图",
                 "material_unavailable_without_ai", 409,
@@ -780,8 +780,7 @@ def _material_policy_values(payload):
     ids_key = ("digital_human_customer_upload_ids"
                if "digital_human_customer_upload_ids" in payload else
                "customer_upload_ids")
-    explicit = allow_key in payload or ids_key in payload
-    allow_ai = payload.get(allow_key, True)
+    allow_ai = payload.get(allow_key, False)
     if not isinstance(allow_ai, bool):
         raise DigitalHumanRequestError(
             "AI 补图选项必须为布尔值", "invalid_material_policy",
@@ -803,12 +802,10 @@ def _material_policy_values(payload):
                 "同一张顾客素材不能重复用于多个镜头", "duplicate_customer_material",
             )
         upload_ids.append(upload_id)
-    return allow_ai, upload_ids, explicit
+    return allow_ai, upload_ids
 
 
-def _bind_material_policy(base_plan, allow_ai, upload_ids, explicit):
-    if not explicit:
-        return base_plan
+def _bind_material_policy(base_plan, allow_ai, upload_ids, explicit=True):
     if len(upload_ids) > int(base_plan.get("material_count") or 0):
         raise DigitalHumanRequestError(
             "顾客上传素材超过当前方案的内容镜头数量",
@@ -855,7 +852,7 @@ def plan_response(payload, username=None):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     mode = str(payload.get("narration_mode") or "text").strip().lower()
     try:
-        allow_ai, upload_ids, explicit = _material_policy_values(payload)
+        allow_ai, upload_ids = _material_policy_values(payload)
         request_payload = dict(payload)
         request_payload.pop("allow_ai_materials", None)
         request_payload.pop("customer_upload_ids", None)
@@ -868,7 +865,7 @@ def plan_response(payload, username=None):
             base_plan = _audio_plan(asset)
         else:
             base_plan = timeline.plan_response(request_payload)["plan"]
-        plan = _bind_material_policy(base_plan, allow_ai, upload_ids, explicit)
+        plan = _bind_material_policy(base_plan, allow_ai, upload_ids)
         _validate_customer_uploads(upload_ids, username)
         return {"ok": True, "plan": plan}
     except Exception as exc:
@@ -877,7 +874,7 @@ def plan_response(payload, username=None):
 
 def _authoritative_plan(payload, username=None):
     try:
-        allow_ai, upload_ids, explicit = _material_policy_values(payload)
+        allow_ai, upload_ids = _material_policy_values(payload)
         if str(payload.get("digital_human_narration_mode") or
                payload.get("narration_mode") or "text").strip().lower() == "audio":
             asset = _load_audio_asset(
@@ -889,7 +886,7 @@ def _authoritative_plan(payload, username=None):
             base_plan = timeline.plan_text(
                 payload.get("digital_human_script") or payload.get("script"),
             )
-        return _bind_material_policy(base_plan, allow_ai, upload_ids, explicit)
+        return _bind_material_policy(base_plan, allow_ai, upload_ids)
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
@@ -1192,7 +1189,7 @@ def verify_child_submission_with_record(payload, username, kind):
                 "这个镜头已绑定顾客上传素材，禁止改用 AI 重新生成",
                 "customer_material_required", 409,
             )
-        if not frozen.get("allow_ai_materials", True):
+        if frozen.get("allow_ai_materials") is not True:
             raise DigitalHumanRequestError(
                 "当前方案未允许 AI 补图，未创建付费生图任务",
                 "ai_material_not_allowed", 409,

@@ -55,12 +55,13 @@ class DigitalHumanV2UiTests(unittest.TestCase):
             self.page,
         )
         self.assertIn("上传的每一张图片都会按顺序直接进入成片", self.page)
-        self.assertIn('id="allowAiMaterials" type="checkbox" checked', self.page)
+        self.assertIn('id="allowAiMaterials" type="checkbox"', self.page)
+        self.assertNotIn('id="allowAiMaterials" type="checkbox" checked', self.page)
         self.assertIn("body.allow_ai_materials=allowAi", self.page)
         self.assertIn("body.customer_upload_ids=uploadIds", self.page)
-        self.assertIn("fields.digital_human_allow_ai_materials=plan.allow_ai_materials!==false", self.page)
+        self.assertIn("fields.digital_human_allow_ai_materials=plan.allow_ai_materials===true", self.page)
         self.assertIn("fields.digital_human_customer_upload_ids=plan.customer_upload_ids||[]", self.page)
-        self.assertIn("body.allow_ai_materials=plan.allow_ai_materials!==false", self.page)
+        self.assertIn("body.allow_ai_materials=plan.allow_ai_materials===true", self.page)
         self.assertNotIn("if(customerUploads[index])return aiFallback(item,index)", self.page)
         self.assertNotIn("body.reference_upload_ids=[customerUploads[index].upload_id]", self.page)
         self.assertNotIn("全网公开可用素材", self.page)
@@ -77,7 +78,7 @@ class DigitalHumanV2UiTests(unittest.TestCase):
             "count:1", "ratio:'9:16'",
         ):
             self.assertIn(marker, materials)
-        self.assertIn("if(plan.allow_ai_materials===false)throw new Error", materials)
+        self.assertIn("if(plan.allow_ai_materials!==true)throw new Error", materials)
         self.assertNotIn("provider:'banana'", materials)
         self.assertNotIn("model:'nb2'", materials)
 

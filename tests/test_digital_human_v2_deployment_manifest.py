@@ -189,6 +189,16 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(feishu["view_environment_name"],
                          "DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1")
         self.assertEqual(feishu["view_default"], "vewa9ZW0Og")
+        self.assertTrue(feishu["operational_probe_required"])
+        self.assertTrue(feishu["probe_all_pages"])
+        self.assertTrue(feishu["probe_attachment_download_and_mime"])
+        runtime = self.manifest["configuration_requirements"]["service_runtime"]
+        self.assertEqual(runtime["user"], "ubuntu")
+        self.assertEqual(
+            runtime["environment_file"],
+            "/home/ubuntu/content-api/content.env",
+        )
+        self.assertTrue(runtime["inspect_active_process_environment"])
         self.assertEqual(
             self.manifest["configuration_requirements"]["material_priority"],
             ["customer_upload_required", "feishu", "ai_optional"],

@@ -71,13 +71,12 @@ class DigitalHumanV2Tests(unittest.TestCase):
 
     def _consent(self, script, portrait=PNG_2X2, allow_ai=None, upload_ids=None,
                  run_id="dh-v2-run-test-001"):
-        plan = self.domain.timeline.plan_text(script)
-        explicit_policy = allow_ai is not None or upload_ids is not None
-        if explicit_policy:
-            plan = self.domain._bind_material_policy(
-                plan, True if allow_ai is None else allow_ai,
-                list(upload_ids or []), True,
-            )
+        plan = self.domain._bind_material_policy(
+            self.domain.timeline.plan_text(script), False, [], True,
+        )
+        plan = self.domain._bind_material_policy(
+            plan, allow_ai is True, list(upload_ids or []), True,
+        )
         payload = {
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
@@ -91,9 +90,8 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "voice_sha256": "",
             "narration_mode": "text",
         }
-        if explicit_policy:
-            payload["allow_ai_materials"] = plan["allow_ai_materials"]
-            payload["customer_upload_ids"] = plan["customer_upload_ids"]
+        payload["allow_ai_materials"] = plan["allow_ai_materials"]
+        payload["customer_upload_ids"] = plan["customer_upload_ids"]
         with mock.patch.object(self.domain, "_validate_customer_uploads"):
             consent = self.domain.create_consent(
                 payload, "yuelei", "test-signing-secret", db_factory=self._consent_connection,
@@ -136,7 +134,9 @@ class DigitalHumanV2Tests(unittest.TestCase):
     def test_v2_voice_clone_routes_through_legacy_entrypoint_and_keeps_bindings(self):
         sample = b"authorized-v2-voice-sample"
         script = "这是用于验证新版数字人声音复刻授权绑定的完整口播文案。"
-        plan = self.domain.timeline.plan_text(script)
+        plan = self.domain._bind_material_policy(
+            self.domain.timeline.plan_text(script), False, [], True,
+        )
         consent = self.domain.create_consent({
             "confirmed": True,
             "consent_version": self.domain.CONSENT_VERSION,
@@ -149,6 +149,8 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "voice_ref": "slot-v2-owned-1",
             "voice_sha256": hashlib.sha256(sample).hexdigest(),
             "narration_mode": "text",
+            "allow_ai_materials": False,
+            "customer_upload_ids": [],
         }, "yuelei", "test-signing-secret", db_factory=self._consent_connection)
         body = {
             "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
@@ -158,6 +160,8 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "digital_human_consent_token": consent["consent_token"],
             "digital_human_script": plan["copy"],
             "digital_human_narration_mode": "text",
+            "digital_human_allow_ai_materials": False,
+            "digital_human_customer_upload_ids": [],
             "slot_id": "slot-v2-owned-1",
             "audio": base64.b64encode(sample).decode("ascii"),
         }
@@ -335,7 +339,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
 
     def test_material_submission_forces_seedream_standard_route(self):
         script = "普通人学习人工智能时，应先明确问题，再选择与内容匹配的工具。" * 8
-        plan, consent = self._consent(script)
+        plan, consent = self._consent(script, allow_ai=True)
         self.assertGreater(plan["material_count"], 0)
         reference = base64.b64encode(PNG_2X2).decode("ascii")
         material = self._metadata(plan, consent, "material", 0)
@@ -501,6 +505,32 @@ class DigitalHumanV2Tests(unittest.TestCase):
             "customer_upload", "feishu", "ai_optional",
         ])
         self.assertNotEqual(plan["plan_digest"], self.domain.timeline.plan_text(script)["plan_digest"])
+
+    def test_missing_ai_policy_is_bound_as_denied_and_never_authorizes_paid_image(self):
+        script = "缺失付费补图选择时必须默认拒绝，并把拒绝值绑定到方案摘要和后续授权。" * 5
+        result = self.domain.plan_response({
+            "narration_mode": "text", "script": script,
+        }, "yuelei")
+        plan = result["plan"]
+        self.assertIs(plan["allow_ai_materials"], False)
+        self.assertEqual(plan["customer_upload_ids"], [])
+        self.assertNotEqual(
+            plan["plan_digest"], self.domain.timeline.plan_text(script)["plan_digest"],
+        )
+
+        plan, consent = self._consent(
+            script, run_id="dh-v2-run-missing-ai-policy-001",
+        )
+        resolver = self._metadata(plan, consent, "material_resolve", 0)
+        with mock.patch.object(self.domain, "_feishu_material", return_value=None):
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+                self.domain.resolve_material_response(resolver, "yuelei")
+        self.assertEqual(caught.exception.code, "material_unavailable_without_ai")
+
+        paid = self._metadata(plan, consent, "material", 0)
+        with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+            self.domain.verify_child_submission_with_record(paid, "yuelei", "image")
+        self.assertEqual(caught.exception.code, "ai_material_not_allowed")
 
     def test_feishu_defaults_use_only_the_selected_material_library(self):
         self.assertEqual(self.domain._FEISHU_APP_TOKEN, "TYqUb6KaQaLPQ2sLrLFcdsWanPZ")
