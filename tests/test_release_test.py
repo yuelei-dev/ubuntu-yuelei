@@ -1563,6 +1563,25 @@ class RepositoryContractTests(unittest.TestCase):
         ]
         self.assertEqual([], missing)
 
+    def test_completed_private_domain_release_artifacts_are_exactly_ignored(self):
+        catalog = release_test.RuntimeCatalog.load(
+            ROOT, "deploy/test-release/runtime-catalog.json",
+        )
+        completed_release_artifacts = {
+            "deploy/test-runtime/private-domain-video-v1-20260824.json",
+            "scripts/deploy_private_domain_video_v1_locked_manifest.py",
+        }
+        self.assertTrue(completed_release_artifacts.issubset(catalog.ignored_paths))
+        for path in completed_release_artifacts:
+            with self.subTest(path=path):
+                self.assertTrue(catalog.is_ignored(path))
+        self.assertFalse(catalog.is_ignored(
+            "deploy/test-runtime/private-domain-video-v2-future.json",
+        ))
+        self.assertFalse(catalog.is_ignored(
+            "scripts/deploy_private_domain_video_v2_future.py",
+        ))
+
     def test_checked_in_catalog_matches_ship_and_hermes_release_authorities(self):
         catalog = release_test.RuntimeCatalog.load(
             ROOT, "deploy/test-release/runtime-catalog.json",
