@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import closing
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -248,6 +249,65 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.assertEqual([], hooks.calls)
         self.assertFalse(self.backups.exists())
 
+    def test_identity_machine_id_and_hostname_final_symlinks_fail_before_backup(self):
+        for index, runtime_path in enumerate((
+                "/etc/huangque/release-identity.json",
+                "/etc/machine-id",
+                "/etc/hostname",
+        )):
+            with self.subTest(runtime_path=runtime_path):
+                target = self._target(runtime_path)
+                original = target.read_bytes()
+                outside = self.root / ("outside-identity-%d" % index)
+                outside.write_bytes(original)
+                target.unlink()
+                os.symlink(outside, target)
+                try:
+                    with self.assertRaisesRegex(
+                            self.module.ReleaseError,
+                            "identity file is unsafe|machine identity file is unsafe"):
+                        self._execute()
+                    self.assertFalse(self.backups.exists())
+                finally:
+                    target.unlink()
+                    target.write_bytes(original)
+                    if runtime_path.endswith("release-identity.json"):
+                        os.chmod(target, 0o600)
+
+    def test_all_runtime_final_symlinks_fail_before_backup(self):
+        for index, item in enumerate(self.manifest["files"]):
+            with self.subTest(runtime_path=item["runtime_path"]):
+                target = self._target(item["runtime_path"])
+                existed = target.exists()
+                original = target.read_bytes() if existed else b"unreviewed-target"
+                outside = self.root / ("outside-runtime-%d" % index)
+                outside.write_bytes(original)
+                if existed:
+                    target.unlink()
+                os.symlink(outside, target)
+                try:
+                    with self.assertRaisesRegex(
+                            self.module.ReleaseError,
+                            "expected regular runtime preimage|expected absent runtime preimage"):
+                        self._execute()
+                    self.assertFalse(self.backups.exists())
+                finally:
+                    target.unlink()
+                    if existed:
+                        target.write_bytes(original)
+
+    def test_feature_database_final_symlink_fails_before_backup(self):
+        database = self._target(
+            self.manifest["feature_activation"]["database_path"]
+        )
+        outside = self.root / "outside-feature-flags.db"
+        shutil.copy2(database, outside)
+        database.unlink()
+        os.symlink(outside, database)
+        with self.assertRaisesRegex(self.module.ReleaseError, "database is unsafe"):
+            self._execute()
+        self.assertFalse(self.backups.exists())
+
     def test_every_post_backup_stage_restores_files_absence_and_feature(self):
         stages = [
             "after_backup", "after_disable", "after_health_disabled_before_install",
@@ -289,6 +349,51 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         ).stdout.splitlines()))
         self.assertEqual(parent, self.manifest["source"]["code_source_commit"])
         self.assertEqual({MANIFEST.relative_to(ROOT).as_posix()}, changed)
+
+    def test_old_reviewed_head_rejects_later_loaded_manifest_bytes(self):
+        repository = self.root / "reviewed-source"
+        repository.mkdir()
+
+        def git(*arguments):
+            return subprocess.run(
+                ["git", *arguments], cwd=repository, check=True, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        git("init", "-b", "main")
+        git("config", "user.name", "Release Test")
+        git("config", "user.email", "release-test@example.invalid")
+        (repository / "code.txt").write_text("locked code\n", encoding="utf-8")
+        git("add", "code.txt")
+        git("commit", "-m", "code source")
+        code_source = git("rev-parse", "HEAD")
+
+        manifest_path = repository / MANIFEST.relative_to(ROOT)
+        manifest_path.parent.mkdir(parents=True)
+        reviewed_bytes = MANIFEST.read_bytes()
+        manifest_path.write_bytes(reviewed_bytes)
+        git("add", MANIFEST.relative_to(ROOT).as_posix())
+        git("commit", "-m", "reviewed manifest")
+        reviewed_head = git("rev-parse", "HEAD")
+
+        later_bytes = reviewed_bytes + b"\n"
+        manifest_path.write_bytes(later_bytes)
+        git("add", MANIFEST.relative_to(ROOT).as_posix())
+        git("commit", "-m", "later unreviewed manifest mutation")
+        merged_main = git("rev-parse", "HEAD")
+
+        loaded = copy.deepcopy(self.manifest)
+        loaded["source"]["code_source_commit"] = code_source
+        loaded["_loaded_manifest_path"] = str(manifest_path)
+        loaded["_loaded_manifest_bytes"] = later_bytes
+        with mock.patch.object(
+                self.module.BASE, "_verify_director_checkout",
+                return_value=merged_main):
+            with self.assertRaisesRegex(
+                    self.module.ReleaseError, "reviewed Head blob"):
+                self.module._verify_checkout(
+                    repository, loaded, reviewed_head, merged_main,
+                )
 
 
 if __name__ == "__main__":

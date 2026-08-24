@@ -17,6 +17,7 @@ import re
 import secrets
 import shutil
 import stat
+import subprocess
 import tempfile
 import time
 import urllib.error
@@ -77,6 +78,19 @@ def _sha256(data):
 
 def _git_blob(data):
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _mapped_symlink_node(root, absolute_path):
+    """Map a declared node without following its final path component."""
+    value = pathlib.PurePosixPath(str(absolute_path))
+    if (not value.is_absolute() or ".." in value.parts
+            or len(value.parts) < 2):
+        raise ReleaseError("manifest runtime path must be absolute and normalized")
+    root = pathlib.Path(root).resolve()
+    parent = root.joinpath(*value.parts[1:-1]).resolve()
+    if parent != root and root not in parent.parents:
+        raise ReleaseError("manifest runtime path escapes target root")
+    return parent / value.name
 
 
 def _require_lock(value, length, label):
@@ -250,14 +264,26 @@ def _validate_manifest(manifest):
 
 
 def _load_manifest(path):
-    path = pathlib.Path(path).resolve()
-    if path != MANIFEST.resolve():
+    path = pathlib.Path(os.path.abspath(path))
+    expected = pathlib.Path(os.path.abspath(MANIFEST))
+    if path != expected:
         raise ReleaseError("locked executor rejects every other manifest path")
-    return _validate_manifest(json.loads(path.read_text(encoding="utf-8")))
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ReleaseError("locked manifest path is unsafe")
+        raw = path.read_bytes()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("locked manifest must be valid UTF-8 JSON") from error
+    manifest = _validate_manifest(parsed)
+    manifest["_loaded_manifest_path"] = str(path)
+    manifest["_loaded_manifest_bytes"] = raw
+    return manifest
 
 
 def _read_identity_file(target_root, runtime_path):
-    path = BASE._mapped_path(target_root, runtime_path)
+    path = _mapped_symlink_node(target_root, runtime_path)
     try:
         info = os.lstat(path)
     except FileNotFoundError as error:
@@ -276,7 +302,7 @@ def _read_identity_file(target_root, runtime_path):
 
 
 def _read_machine_identity_value(target_root, runtime_path, encoding):
-    path = BASE._mapped_path(target_root, runtime_path)
+    path = _mapped_symlink_node(target_root, runtime_path)
     try:
         info = os.lstat(path)
         if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
@@ -333,6 +359,31 @@ def _verify_checkout(source_root, manifest, reviewed_head, merged_main):
     ).splitlines()))
     if changed != ALLOWED_REVIEW_DELTA:
         raise ReleaseError("reviewed Head is not the exact manifest-and-test lock commit")
+    repository_path = MANIFEST.relative_to(ROOT).as_posix()
+    expected_path = pathlib.Path(os.path.abspath(
+        pathlib.Path(source_root) / repository_path
+    ))
+    loaded_path = pathlib.Path(os.path.abspath(
+        manifest.get("_loaded_manifest_path", "")
+    ))
+    loaded_bytes = manifest.get("_loaded_manifest_bytes")
+    try:
+        loaded_stat = os.lstat(loaded_path)
+    except OSError as error:
+        raise ReleaseError("loaded manifest is unavailable") from error
+    if (loaded_path != expected_path or not isinstance(loaded_bytes, bytes)
+            or not stat.S_ISREG(loaded_stat.st_mode)
+            or stat.S_ISLNK(loaded_stat.st_mode)
+            or loaded_path.read_bytes() != loaded_bytes):
+        raise ReleaseError("loaded manifest is not the locked checkout bytes")
+    reviewed = subprocess.run(
+        ["git", "cat-file", "blob", reviewed_head + ":" + repository_path],
+        cwd=source_root, check=False, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if (reviewed.returncode != 0 or reviewed.stdout != loaded_bytes
+            or _git_blob(reviewed.stdout) != _git_blob(loaded_bytes)):
+        raise ReleaseError("loaded manifest does not match the reviewed Head blob")
     return head
 
 
@@ -524,7 +575,7 @@ def _execute_manifest(
     entries = []
     for item in manifest["files"]:
         source = source_root / item["repository_path"]
-        target = BASE._mapped_path(target_root, item["runtime_path"])
+        target = _mapped_symlink_node(target_root, item["runtime_path"])
         state = item["target_preimage_state"]
         if state == "file":
             try:
@@ -556,7 +607,13 @@ def _execute_manifest(
         ))
 
     feature = manifest["feature_activation"]
-    feature_db = BASE._mapped_path(target_root, feature["database_path"])
+    feature_db = _mapped_symlink_node(target_root, feature["database_path"])
+    try:
+        feature_stat = os.lstat(feature_db)
+    except FileNotFoundError as error:
+        raise ReleaseError("feature database is missing") from error
+    if not stat.S_ISREG(feature_stat.st_mode) or stat.S_ISLNK(feature_stat.st_mode):
+        raise ReleaseError("feature database is unsafe")
     feature_snapshot = BASE._capture_feature_row(feature_db, feature["feature"])
     expected_feature = manifest["expected_preimage"]["feature_flag"]
     if (feature_snapshot.get("state") != expected_feature["state"]
