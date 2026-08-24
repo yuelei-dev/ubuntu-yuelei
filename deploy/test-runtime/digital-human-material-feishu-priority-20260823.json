@@ -19,7 +19,15 @@
       "table_default": "tbl58c0UkQ5ZaR2z",
       "view_environment_name": "DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1",
       "view_default": "vewa9ZW0Og",
+      "operational_probe_required": true,
+      "probe_all_pages": true,
+      "probe_attachment_download_and_mime": true,
       "credentials_must_not_be_committed": true
+    },
+    "service_runtime": {
+      "user": "ubuntu",
+      "environment_file": "/home/ubuntu/content-api/content.env",
+      "inspect_active_process_environment": true
     }
   },
   "source": {
@@ -53,8 +61,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
-    "source_blob": "4aefc873c674b23f7cbe4a7b28058b6bf9b84554",
-    "source_sha256": "7a2371e62cc1ed8ba40f8884ac17257d39e885c5c1ab10db9600ad309d28d8db",
+    "source_blob": "1fd34909fb8d6331f5288121e52d7c49f5c5bb9b",
+    "source_sha256": "910747960cdbe168c3d99d73330db89049e522e3ce6464f45ac98fc8128cd9c8",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
@@ -89,25 +97,25 @@
       "repository_path": "server/content_domains/digital_human_v2.py",
       "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
       "classification": "runtime_code",
-      "source_blob": "054176c8274cc6eff3c2560d9c550ce6987b6175",
-      "source_sha256": "090376ebc415b2acfcb7c9c611cd1fe886f4ff10b6148b512bd0c1381919cd3b",
+      "source_blob": "5fb1f7bc45d3d5fc0df940084882782540f36960",
+      "source_sha256": "571603070ef9ccc8d8528489d77a1ca7b62182ba84fcc1b4e664bc10d571dd60",
       "target_preimage_state": "file",
       "target_preimage_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
       "target_preimage_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
-      "expected_postimage_blob": "054176c8274cc6eff3c2560d9c550ce6987b6175",
-      "expected_postimage_sha256": "090376ebc415b2acfcb7c9c611cd1fe886f4ff10b6148b512bd0c1381919cd3b"
+      "expected_postimage_blob": "5fb1f7bc45d3d5fc0df940084882782540f36960",
+      "expected_postimage_sha256": "571603070ef9ccc8d8528489d77a1ca7b62182ba84fcc1b4e664bc10d571dd60"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "7f0c23211392beb0dd88770d47107ccc00161912",
-      "source_sha256": "6d277c67f91a34d9b2a5cab17f8519e268b4f254872ecf39b8de2256b6206ebe",
+      "source_blob": "326cc548a7a8d5acfe57e0949ca8eff1883abd3d",
+      "source_sha256": "2148016c41955e41bf8f5478a30f696638c5ad77d20a3c191efbebaec6365740",
       "target_preimage_state": "file",
       "target_preimage_blob": "68d00a3abf51bcf00d477a30936e03f00bcd2ff3",
       "target_preimage_sha256": "8ff3497d40282b81a67cdb69e51ac53bd0761e90fa567a5c8df08a6f88223c1d",
-      "expected_postimage_blob": "7f0c23211392beb0dd88770d47107ccc00161912",
-      "expected_postimage_sha256": "6d277c67f91a34d9b2a5cab17f8519e268b4f254872ecf39b8de2256b6206ebe"
+      "expected_postimage_blob": "326cc548a7a8d5acfe57e0949ca8eff1883abd3d",
+      "expected_postimage_sha256": "2148016c41955e41bf8f5478a30f696638c5ad77d20a3c191efbebaec6365740"
     }
   ],
   "release_contract_sources": [
@@ -118,13 +126,13 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2.py",
-      "source_blob": "e6beccd94fb232fe4a721465bcf5139aa774e23c",
-      "source_sha256": "0fbadea8e661a38729ae4475654c7a35edc11c966b1d5bb26fd73af6dcaf41a4"
+      "source_blob": "3c45c006c5f0130c6263aba1d0b9a4182a916e8e",
+      "source_sha256": "1a46d51e220cfcec9c8329668ee9771e37de64b95d9a1154154a4bca14049e1d"
     },
     {
       "repository_path": "tests/test_digital_human_v2_ui.py",
-      "source_blob": "7296c7da538016227dc40d7fedb5825f336750d3",
-      "source_sha256": "7e77bbee6b6c9d6d9fcb567168c30d3ed1f225419857461923d43fecfe472ed2"
+      "source_blob": "41fed498ce5c75413cdfdb026d6376f64e3ffadd",
+      "source_sha256": "3ed5d3c1e1d8ae2d8f5edae4280f0006f6a3798f15ec268713c9bf96658ca60b"
     },
     {
       "repository_path": "tests/test_digital_human_voice_state.js",
@@ -133,13 +141,13 @@
     },
     {
       "repository_path": "tests/test_digital_human_oneclick.py",
-      "source_blob": "a9df8b541d15ba7bc946c720b8d9d032be31731c",
-      "source_sha256": "cc098b2f32a47e09b7ec229ea41edab8ce62986955c66579f7cb72caed825516"
+      "source_blob": "fe66fb9d1db3d0a657a36aa9fa1153cf9b8bc130",
+      "source_sha256": "29c5c7409c6717a9b4e968e18e34d497957ae5522b4025ef49c6e354150d473f"
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "f93c9fd8c0b08e36f8f4efd1f27732bd4d936ccf",
-      "source_sha256": "320ea3046c821e36fda4d35cde002d64dc45cc331f5436b538e240f6c21be206"
+      "source_blob": "a2baa426909bf54e15889b9a2444dca316cf726e",
+      "source_sha256": "74d79425aac989da53b0a7c027bf93cc12c3ff9662c193b49cef55cc52229c2b"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -148,8 +156,8 @@
     },
     {
       "repository_path": "tests/test_seedream_v3_release_executor.py",
-      "source_blob": "6c0d78ffef6e2836d5fcab45095c0604cee39128",
-      "source_sha256": "b1f2f841e91945ada8d8615e6fb6a1e4975a798cc70095fd1fc4585c13a81da6"
+      "source_blob": "78f0542780e232231c7ea7386c0371dc30f6b8cd",
+      "source_sha256": "a4e736b3da4fa518a0ff1ea6ca0668a289111e2b5803ad2a5670c24a2854ce1f"
     },
     {
       "repository_path": "tests/test_unified_voice_v6_release.py",
