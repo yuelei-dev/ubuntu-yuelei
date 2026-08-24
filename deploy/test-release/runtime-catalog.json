@@ -1,0 +1,144 @@
+{
+  "allowed_tools": [
+    "/usr/bin/curl",
+    "/usr/bin/env",
+    "/usr/bin/ffmpeg",
+    "/usr/bin/ffprobe",
+    "/usr/bin/python3",
+    "/usr/bin/systemctl"
+  ],
+  "allowed_units": [
+    "hermes-ip12-preview.service",
+    "huangque-admin.service",
+    "huangque-auth.service",
+    "huangque-content.service",
+    "huangque-dl.service",
+    "huangque-egress-tunnel.service",
+    "huangque-imggen-api.service",
+    "huangque-invite-reward-claims.service",
+    "huangque-invite-reward-claims.timer",
+    "huangque-leadgen-api.service",
+    "leadgen-A.service",
+    "leadgen-B.service",
+    "xiaotan.service"
+  ],
+  "ignored_repository_paths": [
+    "server/hermes_ip12/README.md",
+    "server/hermes_ip12/prompt.md",
+    "server/test_wxpay.py"
+  ],
+  "ignored_repository_prefixes": [],
+  "impact_prefix": "deploy/test-release/impacts/",
+  "min_free_bytes": 16777216,
+  "rules": [
+    {
+      "delete_allowed": false,
+      "kind": "prefix",
+      "mode": "0644",
+      "repository": "server/content_domains/",
+      "runtime": "/home/ubuntu/content-api/content_domains/",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "prefix",
+      "mode": "0644",
+      "repository": "server/providers/",
+      "runtime": "/home/ubuntu/content-api/providers/",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_api.py",
+      "runtime": "/home/ubuntu/content-api/content_api.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/func_names.py",
+      "runtime": "/home/ubuntu/content-api/func_names.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/tikhub.py",
+      "runtime": "/home/ubuntu/content-api/tikhub.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/imggen_api.py",
+      "runtime": "/home/ubuntu/content-api/imggen_api.py",
+      "service": "huangque-imggen-api.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/admin_api.py",
+      "runtime": "/home/ubuntu/content-api/admin_api.py",
+      "service": "huangque-admin.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/leadgen_api.py",
+      "runtime": "/home/ubuntu/content-api/leadgen_api.py",
+      "service": "huangque-leadgen-api.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/auth_server.py",
+      "runtime": "/home/ubuntu/auth-service/auth_server.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/dl_service.py",
+      "runtime": "/home/ubuntu/dl-service/dl_service.py",
+      "service": "huangque-dl.service"
+    },
+    {
+      "delete_allowed": true,
+      "kind": "prefix",
+      "mode": "0644",
+      "repository": "site/",
+      "runtime": "/var/www/huangquechuanmei/",
+      "service": null
+    },
+    {
+      "daemon_reload": true,
+      "delete_allowed": false,
+      "kind": "prefix",
+      "mode": "0644",
+      "repository": "deploy/systemd/",
+      "runtime": "/etc/systemd/system/",
+      "service": null,
+      "service_from_repository": true
+    }
+  ],
+  "runtime_candidate_prefixes": [
+    "deploy/systemd/",
+    "server/",
+    "site/",
+    "worker/"
+  ],
+  "schema_version": 1,
+  "target": {
+    "environment": "test",
+    "host_id": "yuelei-test-01"
+  }
+}

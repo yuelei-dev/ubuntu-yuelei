@@ -30,6 +30,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: 检查功能发布影响覆盖
+        if: github.event_name == 'pull_request'
+        run: |
+          python scripts/release_test.py check-impact \
+            --source-root . \
+            --catalog deploy/test-release/runtime-catalog.json \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --target "${{ github.event.pull_request.head.sha }}"
+
       - name: 配置 Node.js
         uses: actions/setup-node@v6
         with:

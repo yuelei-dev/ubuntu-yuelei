@@ -1,0 +1,38 @@
+{
+  "external_checks": [
+    {
+      "argv": [
+        "/usr/bin/python3",
+        "-m",
+        "py_compile",
+        "{source:server/content_domains/example.py}"
+      ],
+      "cwd": "{source}",
+      "name": "python-syntax",
+      "no_charge": true,
+      "timeout_seconds": 120
+    }
+  ],
+  "health_checks": [
+    {
+      "expected_statuses": [200, 401],
+      "interval_seconds": 1,
+      "timeout_seconds": 60,
+      "url": "http://127.0.0.1:8080/api/content/health"
+    }
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    {
+      "expected_statuses": [200, 401],
+      "interval_seconds": 1,
+      "timeout_seconds": 30,
+      "url": "http://127.0.0.1:8080/api/content/health"
+    }
+  ],
+  "release_id": "pr-000-example",
+  "required_env": ["EXAMPLE_API_KEY"],
+  "restart_services": ["huangque-content.service"],
+  "runtime_changes": ["server/content_domains/example.py"],
+  "schema_version": 1
+}
