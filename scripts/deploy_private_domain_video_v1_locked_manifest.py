@@ -264,8 +264,11 @@ def _read_identity_file(target_root, runtime_path):
         raise ReleaseError("trusted release identity file is missing") from error
     if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise ReleaseError("trusted release identity file is unsafe")
-    if os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600):
-        raise ReleaseError("trusted release identity file ownership or mode is invalid")
+    if os.name != "nt":
+        real_runtime = pathlib.Path(target_root).resolve() == pathlib.Path("/").resolve()
+        expected_uid = 0 if real_runtime else os.getuid()
+        if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ReleaseError("trusted release identity file ownership or mode is invalid")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (UnicodeError, json.JSONDecodeError) as error:
