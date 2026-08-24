@@ -28,7 +28,16 @@ class PrivateDomainVideoUiTests(unittest.TestCase):
         self.assertIn("function shuffle(items)", PAGE)
         self.assertIn("Math.floor(Math.random()*(i+1))", PAGE)
         self.assertNotIn("sort(function(){return Math.random()", PAGE)
-        self.assertIn("slice(0,Math.min(4,allAssets.length))", PAGE)
+        self.assertIn("var pool=visibleAssetPool()", PAGE)
+        self.assertIn("slice(0,Math.min(4,pool.length))", PAGE)
+        self.assertIn("return allAssets.slice(0,12)", PAGE)
+
+    def test_materials_use_same_origin_range_streaming_and_lazy_attachment(self):
+        self.assertIn("parsed.origin===location.origin||parsed.protocol==='https:'", PAGE)
+        self.assertIn("new IntersectionObserver", PAGE)
+        self.assertIn("video.setAttribute('data-src',url)", PAGE)
+        self.assertNotIn("response.blob()", PAGE)
+        self.assertNotIn("URL.createObjectURL", PAGE)
 
     def test_review_boundary_is_explicit_and_never_fakes_render_success(self):
         self.assertIn("付费渲染接口尚未接入", PAGE)

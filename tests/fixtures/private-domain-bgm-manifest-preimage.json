@@ -1,0 +1,15 @@
+{
+  "pack": "private-domain-v1",
+  "created": "2026-08-24",
+  "source": "audio extracted from six user-provided reference videos",
+  "rights_note": "Use is based on the user's supplied source files; confirm platform music licensing before commercial publication.",
+  "format": {"codec": "mp3", "sample_rate": 48000, "channels": 2, "bitrate_kbps": 192},
+  "tracks": [
+    {"file":"01_wuxi_persistence.mp3","source_video":"在江苏无锡_有一群不认输的60、70、80、90后_用热爱点.mp4","duration_seconds":10.945,"sha256":"ddbccb9b2385e74bb28ff66108c2e18f38372bdae15ea1820cfbdbf0da4ca321"},
+    {"file":"02_shenzhen_growth.mp3","source_video":"在深圳_专注成长 搞钱又懂得感恩 共享创业_坐标深.mp4","duration_seconds":7.827,"sha256":"fdcf6ff9e56ba34ccb09a0c4f490950d4f9dba61aa365045a058669a42c5ae9e"},
+    {"file":"03_female_social.mp3","source_video":"深圳富婆_女性成长_向上社交_女性智慧.mp4","duration_seconds":7.362,"sha256":"4fdf6690318531aeb97aa6fc192483b01ca6617dd65d050e231acbdd3c65ff02"},
+    {"file":"04_steady_progress.mp3","source_video":"不用追求惊艳逆袭，只愿稳步踏实变好.mp4","duration_seconds":7.177,"sha256":"192534992834941241c0940bbf38cb9d7fc72fedd91b4520151c17921b44b17c"},
+    {"file":"05_changsha_resilience.mp3","source_video":"坐标长沙！很多女生习惯默默承受所有压力.mp4","duration_seconds":7.177,"sha256":"907c1e64ec9bb86524fec0fca2bda00c87ffc926fa403f9eda3e94fda896a857"},
+    {"file":"06_lucky_future.mp3","source_video":"别刮走！大数据告诉我_今天点心的_2026卡里有九位数.mp4","duration_seconds":6.712,"sha256":"06069766bc2ddb6c5b7be1581d3a44d024702127180e2c0908d5c0df09ece44e"}
+  ]
+}

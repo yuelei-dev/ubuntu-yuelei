@@ -15,6 +15,7 @@ from contextlib import closing
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "scripts/deploy_private_domain_video_v1_locked_manifest.py"
 MANIFEST = ROOT / "deploy/test-runtime/private-domain-video-v1-20260824.json"
+BGM_PREIMAGE = ROOT / "tests/fixtures/private-domain-bgm-manifest-preimage.json"
 
 
 def sha256(data):
@@ -75,9 +76,6 @@ class FakeHooks:
     def probe(self, url, method, expected_status):
         self._record("probe:%s:%s" % (method, expected_status))
 
-    def probe_static(self, url, expected_status, expected_sha256):
-        self._record("static:" + url.rsplit("/", 1)[-1])
-
     def acceptance(self, specification):
         self._record("acceptance")
         if specification["expected_action"] != {
@@ -97,6 +95,24 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.runtime = self.root / "runtime"
         self.backups = self.root / "backups"
         self.manifest = copy.deepcopy(self.base_manifest)
+        machine_id = "0123456789abcdef0123456789abcdef"
+        hostname = "huangque-test-fixture"
+        etc = self.runtime / "etc"
+        etc.mkdir(parents=True, exist_ok=True)
+        (etc / "machine-id").write_text(machine_id + "\n", encoding="ascii")
+        (etc / "hostname").write_text(hostname + "\n", encoding="utf-8")
+        identity = {
+            "schema_version": 1,
+            "environment": "test",
+            "host_id": "yuelei-test-01",
+            "public_host": "8.148.158.106",
+            "hostname": hostname,
+            "machine_id_sha256": sha256(machine_id.encode("ascii")),
+        }
+        identity_path = etc / "huangque/release-identity.json"
+        identity_path.parent.mkdir(parents=True, exist_ok=True)
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        os.chmod(identity_path, 0o600)
         shutil.copytree(
             ROOT / "server/content_domains",
             self.runtime / "home/ubuntu/content-api/content_domains",
@@ -106,7 +122,10 @@ class PrivateDomainReleaseTests(unittest.TestCase):
             target = self._target(item["runtime_path"])
             target.parent.mkdir(parents=True, exist_ok=True)
             if item["target_preimage_state"] == "file":
-                data = git_bytes(item["preimage_blob"])
+                data = (BGM_PREIMAGE.read_bytes()
+                        if item["repository_path"] ==
+                        "site/assets/bgm/private-domain-v1/manifest.json"
+                        else git_bytes(item["preimage_blob"]))
                 target.write_bytes(data)
                 os.chmod(target, 0o640)
                 self.original[item["runtime_path"]] = data
@@ -150,13 +169,14 @@ class PrivateDomainReleaseTests(unittest.TestCase):
             hooks=hooks or FakeHooks(), verify_repository=False,
             checkpoint=checkpoint, reviewed_head="1" * 40,
             merged_main="2" * 40,
+            confirm_target="test@8.148.158.106",
         )
 
-    def test_manifest_locks_exact_sources_assets_and_five_file_scope(self):
+    def test_manifest_locks_exact_sources_assets_and_six_file_scope(self):
         self.assertEqual(self.module.REQUIRED_REPOSITORY_PATHS, {
             item["repository_path"] for item in self.manifest["files"]
         })
-        self.assertEqual(7, len(self.manifest["release_executor"]["external_assets"]))
+        self.assertEqual(6, len(self.manifest["release_executor"]["external_assets"]))
         for item in self.manifest["files"]:
             data = (ROOT / item["repository_path"]).read_bytes()
             self.assertEqual(item["postimage_blob"], git_blob(data))
@@ -165,12 +185,31 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.assertEqual(self.manifest["release_executor"]["git_blob"], git_blob(executor))
         self.assertEqual(self.manifest["release_executor"]["sha256"], sha256(executor))
 
+    def test_bgm_manifest_requires_stable_utf8_titles(self):
+        catalog = json.loads(
+            (ROOT / "site/assets/bgm/private-domain-v1/manifest.json").read_text(
+                encoding="utf-8",
+            )
+        )
+        self.assertEqual(6, len(self.module._validate_bgm_manifest(
+            json.dumps(catalog, ensure_ascii=False).encode("utf-8"),
+        )["tracks"]))
+        del catalog["tracks"][0]["title"]
+        with self.assertRaisesRegex(self.module.ReleaseError, "missing or corrupt"):
+            self.module._validate_bgm_manifest(
+                json.dumps(catalog, ensure_ascii=False).encode("utf-8"),
+            )
+        catalog["tracks"][0]["title"] = "坏\ufffd标题"
+        with self.assertRaisesRegex(self.module.ReleaseError, "missing or corrupt"):
+            self.module._validate_bgm_manifest(
+                json.dumps(catalog, ensure_ascii=False).encode("utf-8"),
+            )
+
     def test_success_installs_page_navigation_agent_and_runs_all_gates(self):
         hooks = FakeHooks()
         result = self._execute(hooks=hooks)
         self.assertEqual("deployed", result["status"])
-        self.assertEqual(7, sum(call.startswith("external:") for call in hooks.calls))
-        self.assertEqual(4, sum(call.startswith("static:") for call in hooks.calls))
+        self.assertEqual(6, sum(call.startswith("external:") for call in hooks.calls))
         self.assertEqual(1, hooks.calls.count("acceptance"))
         self.assertEqual(1, hooks.calls.count("restart"))
         for item in self.manifest["files"]:
@@ -186,12 +225,35 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.assertEqual(before, self._snapshot())
         self.assertFalse(self.backups.exists())
 
+    def test_target_host_confirmation_and_machine_identity_fail_before_preflight(self):
+        changed = copy.deepcopy(self.manifest)
+        changed["target"]["host"] = "129.204.166.13"
+        with self.assertRaisesRegex(self.module.ReleaseError, "test target"):
+            self.module._validate_manifest(changed)
+        hooks = FakeHooks()
+        with self.assertRaisesRegex(self.module.ReleaseError, "confirm-target"):
+            self.module._execute_manifest(
+                self.manifest, ROOT, self.runtime, self.backups,
+                hooks=hooks, verify_repository=False,
+                confirm_target="test@129.204.166.13",
+            )
+        self.assertEqual([], hooks.calls)
+        self.assertFalse(self.backups.exists())
+        identity_path = self._target("/etc/huangque/release-identity.json")
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+        identity["machine_id_sha256"] = "0" * 64
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        with self.assertRaisesRegex(self.module.ReleaseError, "does not match"):
+            self._execute(hooks=hooks)
+        self.assertEqual([], hooks.calls)
+        self.assertFalse(self.backups.exists())
+
     def test_every_post_backup_stage_restores_files_absence_and_feature(self):
         stages = [
             "after_backup", "after_disable", "after_health_disabled_before_install",
-            *("after_replace_%d" % index for index in range(5)),
+            *("after_replace_%d" % index for index in range(6)),
             "after_compile", "after_restart", "after_health_disabled",
-            "after_activate", "after_static", "after_acceptance", "after_final_audit",
+            "after_activate", "after_local_static", "after_acceptance", "after_final_audit",
         ]
         for stage in stages:
             with self.subTest(stage=stage):
@@ -203,12 +265,11 @@ class PrivateDomainReleaseTests(unittest.TestCase):
                 self.assertEqual(self.original, self._snapshot())
                 self.assertEqual(self.original_feature, self._feature_row())
 
-    def test_static_and_acceptance_failures_rollback_complete_unit(self):
-        for hook in ("static:", "acceptance"):
-            with self.subTest(hook=hook), self.assertRaisesRegex(RuntimeError, "injected"):
-                self._execute(hooks=FakeHooks(fail_on=hook))
-            self.assertEqual(self.original, self._snapshot())
-            self.assertEqual(self.original_feature, self._feature_row())
+    def test_authenticated_acceptance_failure_rolls_back_complete_unit(self):
+        with self.assertRaisesRegex(RuntimeError, "injected"):
+            self._execute(hooks=FakeHooks(fail_on="acceptance"))
+        self.assertEqual(self.original, self._snapshot())
+        self.assertEqual(self.original_feature, self._feature_row())
 
     def test_current_head_is_manifest_only_child_of_locked_code_source(self):
         parents = subprocess.run(

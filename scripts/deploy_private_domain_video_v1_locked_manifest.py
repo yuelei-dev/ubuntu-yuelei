@@ -13,12 +13,14 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import secrets
 import shutil
 import stat
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from contextlib import closing
 
@@ -26,13 +28,16 @@ from contextlib import closing
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "deploy/test-runtime/private-domain-video-v1-20260824.json"
 BASE_EXECUTOR = ROOT / "scripts/deploy_director_locked_manifest.py"
-CONTRACT = "private_domain_video_five_file_v1"
+CONTRACT = "private_domain_video_six_file_v2"
+AUTHORIZED_TARGET = "test@8.148.158.106"
+IDENTITY_FILE = "/etc/huangque/release-identity.json"
 REQUIRED_REPOSITORY_PATHS = {
     "server/content_domains/director_agent.py",
     "site/workbench/digital-human-oneclick.html",
     "site/workbench/private-domain-video.html",
     "site/workbench/script-agent.js",
     "site/workbench/script.html",
+    "site/assets/bgm/private-domain-v1/manifest.json",
 }
 REQUIRED_RUNTIME_PATHS = {
     "server/content_domains/director_agent.py":
@@ -45,6 +50,8 @@ REQUIRED_RUNTIME_PATHS = {
         "/var/www/huangquechuanmei/workbench/script-agent.js",
     "site/workbench/script.html":
         "/var/www/huangquechuanmei/workbench/script.html",
+    "site/assets/bgm/private-domain-v1/manifest.json":
+        "/var/www/huangquechuanmei/assets/bgm/private-domain-v1/manifest.json",
 }
 ALLOWED_REVIEW_DELTA = {
     MANIFEST.relative_to(ROOT).as_posix(),
@@ -81,6 +88,23 @@ def _require_lock(value, length, label):
         raise ReleaseError("%s lock is invalid" % label) from error
 
 
+def _validate_bgm_manifest(data):
+    try:
+        catalog = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("BGM manifest must be valid UTF-8 JSON") from error
+    tracks = catalog.get("tracks") if isinstance(catalog, dict) else None
+    if not isinstance(tracks, list) or len(tracks) != 6:
+        raise ReleaseError("BGM manifest must contain exactly six tracks")
+    for track in tracks:
+        fields = (track.get("title"), track.get("source_video")) \
+            if isinstance(track, dict) else (None, None)
+        if (not all(isinstance(value, str) and value.strip() for value in fields)
+                or any("\ufffd" in value for value in fields)):
+            raise ReleaseError("BGM manifest contains missing or corrupt text")
+    return catalog
+
+
 def _validate_policy(policy):
     required = {
         "production_server_write_allowed": False,
@@ -99,7 +123,11 @@ def _validate_policy(policy):
 def _validate_manifest(manifest):
     if manifest.get("schema_version") != 1:
         raise ReleaseError("unsupported manifest schema")
-    if manifest.get("target", {}).get("role") != "test":
+    target = manifest.get("target", {})
+    if (target.get("role") != "test"
+            or target.get("host") != "8.148.158.106"
+            or target.get("host_id") != "yuelei-test-01"
+            or target.get("identity_file") != IDENTITY_FILE):
         raise ReleaseError("locked release only permits the test target")
     _validate_policy(manifest.get("deployment_policy"))
     source_commit = manifest.get("source", {}).get("code_source_commit")
@@ -119,7 +147,7 @@ def _validate_manifest(manifest):
     _require_lock(executor.get("git_blob"), 40, "release executor blob")
     _require_lock(executor.get("sha256"), 64, "release executor SHA-256")
     if set(executor.get("required_repository_paths") or []) != REQUIRED_REPOSITORY_PATHS:
-        raise ReleaseError("release executor does not lock the five-file scope")
+        raise ReleaseError("release executor does not lock the six-file scope")
 
     base_lock = executor.get("locked_base_executor")
     if (not isinstance(base_lock, dict)
@@ -130,8 +158,8 @@ def _validate_manifest(manifest):
     _require_lock(base_lock.get("sha256"), 64, "base executor SHA-256")
 
     files = manifest.get("files")
-    if not isinstance(files, list) or len(files) != 5:
-        raise ReleaseError("release must contain exactly five runtime files")
+    if not isinstance(files, list) or len(files) != 6:
+        raise ReleaseError("release must contain exactly six runtime files")
     paths = {item.get("repository_path") for item in files}
     if paths != REQUIRED_REPOSITORY_PATHS:
         raise ReleaseError("release file scope is incomplete")
@@ -173,16 +201,37 @@ def _validate_manifest(manifest):
     if (not isinstance(revision, str)
             or BASE._DIRECTOR_REVISION_PATTERN.fullmatch(revision) is None):
         raise ReleaseError("acceptance page revision is invalid")
+    for key, path in (("submit_url", "/api/gen/director_agent"),
+                      ("job_url_template", "/api/gen/job/1")):
+        value = str(acceptance.get(key) or "").replace("{job_id}", "1")
+        parsed = urllib.parse.urlsplit(value)
+        if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                or parsed.port != 8096 or parsed.path != path
+                or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            raise ReleaseError("authenticated acceptance must use locked loopback URLs")
 
     markers = executor.get("html_required_markers")
     if not isinstance(markers, list) or len(markers) != 1:
         raise ReleaseError("locked HTML cache marker is missing")
-    probes = executor.get("static_probes")
-    if not isinstance(probes, list) or len(probes) != 4:
-        raise ReleaseError("release must probe the private page, navigation, Agent script, and adjacent page")
+    checks = executor.get("installed_file_checks")
+    if (not isinstance(checks, list)
+            or {item.get("repository_path") for item in checks}
+            != REQUIRED_REPOSITORY_PATHS):
+        raise ReleaseError("release must locally verify every installed file")
+    for check in checks:
+        _require_lock(check.get("expected_sha256"), 64, "installed file SHA-256")
+        item = next(entry for entry in files
+                    if entry["repository_path"] == check["repository_path"])
+        if check["expected_sha256"] != item["postimage_sha256"]:
+            raise ReleaseError("installed file acceptance hash does not match postimage")
+    health = urllib.parse.urlsplit(str(executor.get("health_url") or ""))
+    if (health.scheme != "http" or health.hostname != "127.0.0.1"
+            or health.port != 8096 or health.path != "/api/gen/health"
+            or health.query or health.fragment or health.username or health.password):
+        raise ReleaseError("health acceptance must use the locked loopback endpoint")
     assets = executor.get("external_assets")
-    if not isinstance(assets, list) or len(assets) != 7:
-        raise ReleaseError("release must lock the BGM manifest and six audio assets")
+    if not isinstance(assets, list) or len(assets) != 6:
+        raise ReleaseError("release must lock exactly six BGM audio assets")
     if len({asset.get("url") for asset in assets}) != len(assets):
         raise ReleaseError("external asset URLs must be unique")
     for asset in assets:
@@ -205,6 +254,61 @@ def _load_manifest(path):
     if path != MANIFEST.resolve():
         raise ReleaseError("locked executor rejects every other manifest path")
     return _validate_manifest(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _read_identity_file(target_root, runtime_path):
+    path = BASE._mapped_path(target_root, runtime_path)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise ReleaseError("trusted release identity file is missing") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ReleaseError("trusted release identity file is unsafe")
+    if os.name != "nt" and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600):
+        raise ReleaseError("trusted release identity file ownership or mode is invalid")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("trusted release identity file is invalid") from error
+
+
+def _read_machine_identity_value(target_root, runtime_path, encoding):
+    path = BASE._mapped_path(target_root, runtime_path)
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ReleaseError("local machine identity file is unsafe")
+        return path.read_text(encoding=encoding).strip()
+    except (OSError, UnicodeError) as error:
+        raise ReleaseError("local machine identity is unavailable") from error
+
+
+def _validate_target_identity(manifest, target_root, confirm_target):
+    if confirm_target != AUTHORIZED_TARGET:
+        raise ReleaseError("explicit --confirm-target does not match the test target")
+    target = manifest["target"]
+    identity = _read_identity_file(target_root, target["identity_file"])
+    machine_id = _read_machine_identity_value(
+        target_root, "/etc/machine-id", "ascii",
+    )
+    hostname = _read_machine_identity_value(
+        target_root, "/etc/hostname", "utf-8",
+    )
+    if re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ReleaseError("local machine-id format is invalid")
+    if not hostname or len(hostname) > 253:
+        raise ReleaseError("local hostname is invalid")
+    expected = {
+        "schema_version": 1,
+        "environment": "test",
+        "host_id": target["host_id"],
+        "public_host": target["host"],
+        "hostname": hostname,
+        "machine_id_sha256": _sha256(machine_id.encode("ascii")),
+    }
+    if identity != expected:
+        raise ReleaseError("trusted identity does not match this test machine")
+    return identity
 
 
 def _lock_matches(path, lock):
@@ -240,6 +344,7 @@ def _validate_sources(source_root, target_root, manifest, hooks):
         raise ReleaseError("historical base executor lock does not match source")
 
     for item in manifest["files"]:
+        path = item["repository_path"]
         source = (source_root / item["repository_path"]).resolve()
         if source_root not in source.parents:
             raise ReleaseError("repository path escapes source root")
@@ -247,6 +352,8 @@ def _validate_sources(source_root, target_root, manifest, hooks):
         if (_sha256(data) != item["postimage_sha256"]
                 or _git_blob(data) != item["postimage_blob"]):
             raise ReleaseError("candidate lock does not match source")
+        if path == "site/assets/bgm/private-domain-v1/manifest.json":
+            _validate_bgm_manifest(data)
         if source.suffix == ".py":
             try:
                 compile(data, str(source), "exec")
@@ -387,7 +494,7 @@ class SystemHooks(BASE.SystemHooks):
 def _execute_manifest(
     manifest, source_root, target_root, backup_root, *, hooks=None,
     replace=os.replace, verify_repository=True, checkpoint=None,
-    reviewed_head=None, merged_main=None,
+    reviewed_head=None, merged_main=None, confirm_target=None,
 ):
     manifest = _validate_manifest(manifest)
     hooks = hooks or SystemHooks()
@@ -395,6 +502,10 @@ def _execute_manifest(
     source_root = pathlib.Path(source_root).resolve()
     target_root = pathlib.Path(target_root).resolve()
     backup_root = pathlib.Path(backup_root).resolve()
+    target_identity = _validate_target_identity(
+        manifest, target_root, confirm_target,
+    )
+    checkpoint("after_target_identity")
     if verify_repository:
         release_head = _verify_checkout(
             source_root, manifest, reviewed_head, merged_main,
@@ -466,6 +577,7 @@ def _execute_manifest(
     base_data = (source_root / executor["locked_base_executor"]["repository_path"]).read_bytes()
     audit = {
         "reviewed_head": reviewed_head, "merged_main": release_head,
+        "target_identity": target_identity,
         "executor_sha256": _sha256(executor_data),
         "executor_git_blob": _git_blob(executor_data),
         "base_executor_sha256": _sha256(base_data),
@@ -538,12 +650,15 @@ def _execute_manifest(
         hooks.probe_feature(
             executor["health_url"], executor["health_feature_field"], True,
         )
-        for probe in executor["static_probes"]:
-            hooks.probe_static(
-                probe["url"], probe.get("expected_status", 200),
-                probe["expected_sha256"],
-            )
-        checkpoint("after_static")
+        files_by_path = {
+            item["repository_path"]: target
+            for item, _, target, _, _, _ in entries
+        }
+        for check in executor["installed_file_checks"]:
+            target = files_by_path[check["repository_path"]]
+            if _sha256(target.read_bytes()) != check["expected_sha256"]:
+                raise ReleaseError("local installed file acceptance failed")
+        checkpoint("after_local_static")
         hooks.acceptance(executor["authenticated_acceptance"])
         checkpoint("after_acceptance")
         audit["status"] = "deployed"
@@ -633,13 +748,13 @@ def _execute_manifest(
 def execute_locked_release(
     manifest_path, source_root, target_root, backup_root, *, hooks=None,
     replace=os.replace, verify_repository=True, checkpoint=None,
-    reviewed_head=None, merged_main=None,
+    reviewed_head=None, merged_main=None, confirm_target=None,
 ):
     return _execute_manifest(
         _load_manifest(manifest_path), source_root, target_root, backup_root,
         hooks=hooks, replace=replace, verify_repository=verify_repository,
         checkpoint=checkpoint, reviewed_head=reviewed_head,
-        merged_main=merged_main,
+        merged_main=merged_main, confirm_target=confirm_target,
     )
 
 
@@ -653,10 +768,12 @@ def main(argv=None):
     parser.add_argument("--backup-root", type=pathlib.Path, required=True)
     parser.add_argument("--reviewed-head", required=True)
     parser.add_argument("--merged-main", required=True)
+    parser.add_argument("--confirm-target", required=True)
     args = parser.parse_args(argv)
     result = execute_locked_release(
         args.manifest, args.source_root, args.target_root, args.backup_root,
         reviewed_head=args.reviewed_head, merged_main=args.merged_main,
+        confirm_target=args.confirm_target,
     )
     print(json.dumps(result, ensure_ascii=False))
     return 0
