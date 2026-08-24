@@ -44,8 +44,10 @@ DEFAULT_IMPACT_PREFIX = "deploy/test-release/impacts/"
 DEFAULT_IDENTITY_FILE = "/etc/huangque/release-identity.json"
 DEFAULT_STATE_ROOT = "/var/lib/huangque-release"
 DEFAULT_SOURCE_ROOT = "/opt/huangque-test-release"
+RUNTIME_LAUNCHER = "/usr/local/sbin/huangque-release-test"
 RUNTIME_ENTRYPOINT = "/usr/local/libexec/huangque-release/release_test.py"
 RUNTIME_BOOTSTRAP_MANIFEST = "/etc/huangque/release-bootstrap.json"
+SYSTEM_CA_BUNDLE = "/etc/ssl/certs/ca-certificates.crt"
 GIT_BINARY = "/usr/bin/git"
 TRUST_ROOT_PATHS = frozenset({
     ".github/workflows/ci.yml",
@@ -53,6 +55,9 @@ TRUST_ROOT_PATHS = frozenset({
     DEFAULT_CATALOG,
     "deploy/test-release/bootstrap.example.json",
     "scripts/release_test.py",
+    "scripts/release_test_launcher.sh",
+    "deploy/hermes-ip12-release.sh",
+    "ship",
 })
 
 
@@ -219,6 +224,39 @@ def _minimal_subprocess_environment():
     }
 
 
+def _verify_root_owned_path_chain(path, *, final_kind, final_mode=None):
+    target = Path(os.path.abspath(path))
+    if not target.is_absolute():  # pragma: no cover - abspath always produces absolute
+        raise ReleaseError("trusted runtime path must be absolute")
+    current = Path(target.anchor)
+    for index, part in enumerate(target.parts[1:], start=1):
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError as exc:
+            raise ReleaseError("trusted runtime path is unavailable: %s" % target) from exc
+        is_final = index == len(target.parts) - 1
+        expected_kind = final_kind if is_final else "directory"
+        if (stat.S_ISLNK(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o022
+                or expected_kind == "directory" and not stat.S_ISDIR(info.st_mode)
+                or expected_kind == "file" and not stat.S_ISREG(info.st_mode)):
+            raise ReleaseError("trusted runtime path ownership or mode is invalid: %s" % current)
+        if is_final and final_mode is not None \
+                and stat.S_IMODE(info.st_mode) != final_mode:
+            raise ReleaseError("trusted runtime path mode is invalid: %s" % current)
+
+
+def _system_tls_context():
+    _verify_root_owned_path_chain(SYSTEM_CA_BUNDLE, final_kind="file")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.load_verify_locations(cafile=SYSTEM_CA_BUNDLE)
+    context.keylog_filename = None
+    return context
+
+
 def _github_main_commit(origin_url, *, timeout=30):
     if origin_url != "https://github.com/yuelei-dev/ubuntu-yuelei.git":
         raise ReleaseError("live origin resolver only accepts the approved repository")
@@ -233,7 +271,7 @@ def _github_main_commit(origin_url, *, timeout=30):
     )
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
-        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        urllib.request.HTTPSHandler(context=_system_tls_context()),
     )
     try:
         with opener.open(request, timeout=timeout) as response:
@@ -257,6 +295,33 @@ def _github_main_commit(origin_url, *, timeout=30):
 def _verify_runtime_entrypoint(source_root):
     if os.name != "posix" or os.geteuid() != 0:
         raise ReleaseError("runtime release commands require the root-owned installed entrypoint")
+    if (not sys.flags.isolated or not sys.flags.ignore_environment
+            or not sys.flags.no_user_site or not sys.flags.dont_write_bytecode):
+        raise ReleaseError("runtime release Python must use isolated mode")
+    approved_python = os.path.realpath("/usr/bin/python3")
+    if os.path.realpath(sys.executable) != approved_python:
+        raise ReleaseError("runtime release Python executable is not approved")
+    _verify_root_owned_path_chain(approved_python, final_kind="file")
+    expected_environment = {
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": "/usr/bin:/bin",
+    }
+    if dict(os.environ) != expected_environment:
+        raise ReleaseError("runtime release process environment is not isolated")
+    _verify_root_owned_path_chain(
+        RUNTIME_LAUNCHER, final_kind="file", final_mode=0o755,
+    )
+    _verify_root_owned_path_chain(
+        RUNTIME_ENTRYPOINT, final_kind="file", final_mode=0o755,
+    )
+    _verify_root_owned_path_chain(
+        RUNTIME_BOOTSTRAP_MANIFEST, final_kind="file", final_mode=0o600,
+    )
+    _verify_root_owned_path_chain(
+        DEFAULT_SOURCE_ROOT, final_kind="directory",
+    )
     manifest_record = _read_regular_record(Path("/"), RUNTIME_BOOTSTRAP_MANIFEST)
     if (manifest_record is None or manifest_record[1].st_uid != 0
             or stat.S_IMODE(manifest_record[1].st_mode) != 0o600):
@@ -268,18 +333,24 @@ def _verify_runtime_entrypoint(source_root):
         raise ReleaseError("runtime release bootstrap manifest is unavailable") from exc
     if (not isinstance(manifest, dict)
             or set(manifest) != {
-                "schema_version", "entrypoint", "entrypoint_sha256", "source_root",
+                "schema_version", "launcher", "launcher_sha256",
+                "entrypoint", "entrypoint_sha256", "source_root",
             }
             or type(manifest.get("schema_version")) is not int
             or manifest["schema_version"] != SCHEMA_VERSION
+            or manifest.get("launcher") != RUNTIME_LAUNCHER
+            or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("launcher_sha256") or ""))
             or manifest.get("entrypoint") != RUNTIME_ENTRYPOINT
             or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("entrypoint_sha256") or ""))
             or manifest.get("source_root") != DEFAULT_SOURCE_ROOT):
         raise ReleaseError("runtime release bootstrap manifest is invalid")
     if os.path.abspath(__file__) != RUNTIME_ENTRYPOINT:
         raise ReleaseError("runtime release command was not launched from the installed entrypoint")
+    launcher_record = _read_regular_record(Path("/"), RUNTIME_LAUNCHER)
     record = _read_regular_record(Path("/"), RUNTIME_ENTRYPOINT)
-    if (record is None or record[1].st_uid != 0
+    if (launcher_record is None
+            or _sha256(launcher_record[0]) != manifest["launcher_sha256"]
+            or record is None or record[1].st_uid != 0
             or stat.S_IMODE(record[1].st_mode) != 0o755
             or _sha256(record[0]) != manifest["entrypoint_sha256"]):
         raise ReleaseError("installed runtime release entrypoint is not trusted")
@@ -612,18 +683,67 @@ class RuntimeCatalog:
         if type(raw_min_free_bytes) is not int or raw_min_free_bytes < 0:
             raise ReleaseError("runtime catalog minimum free bytes is invalid")
         self.min_free_bytes = raw_min_free_bytes
-        self.unmanaged_runtime_paths = frozenset(
-            _absolute_runtime_path(item)
-            for item in data.get("unmanaged_runtime_paths") or []
-        )
-        self.unmanaged_runtime_prefixes = tuple(
-            _absolute_runtime_path(item).rstrip("/") + "/"
-            for item in data.get("unmanaged_runtime_prefixes") or []
-        )
+        if data.get("unmanaged_runtime_paths") not in (None, []) \
+                or data.get("unmanaged_runtime_prefixes") not in (None, []):
+            raise ReleaseError("legacy unmanaged runtime exemptions are forbidden")
+        raw_runtime_data = data.get("runtime_data")
+        if not isinstance(raw_runtime_data, list) or not raw_runtime_data:
+            raise ReleaseError("runtime data contracts are incomplete")
+        self.runtime_data_contracts = []
+        self.runtime_data_exact = {}
+        self.runtime_data_directories = []
+        for raw in raw_runtime_data:
+            if (not isinstance(raw, dict)
+                    or set(raw) != {
+                        "path", "kind", "owner", "group", "allowed_modes", "required",
+                    }
+                    or raw.get("kind") not in {
+                        "secret_file", "sqlite_file", "mutable_file", "mutable_directory",
+                    }
+                    or type(raw.get("required")) is not bool
+                    or not isinstance(raw.get("allowed_modes"), list)
+                    or not raw["allowed_modes"]
+                    or len(set(raw["allowed_modes"])) != len(raw["allowed_modes"])
+                    or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", str(raw.get("owner")))
+                    or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", str(raw.get("group")))):
+                raise ReleaseError("runtime data contract is invalid")
+            modes = []
+            for mode_text in raw["allowed_modes"]:
+                if not isinstance(mode_text, str) or not re.fullmatch(r"0[0-7]{3}", mode_text):
+                    raise ReleaseError("runtime data mode is invalid")
+                mode = int(mode_text, 8)
+                if (raw["kind"] == "secret_file" and mode & 0o077
+                        or raw["kind"] != "secret_file" and mode & 0o007
+                        or raw["kind"] == "mutable_directory" and mode & 0o022):
+                    raise ReleaseError("runtime data mode is too permissive")
+                modes.append(mode)
+            path = _absolute_runtime_path(raw["path"])
+            contract = {
+                "path": path.rstrip("/") + "/"
+                if raw["kind"] == "mutable_directory" else path,
+                "kind": raw["kind"],
+                "owner": raw["owner"],
+                "group": raw["group"],
+                "allowed_modes": frozenset(modes),
+                "required": raw["required"],
+            }
+            key = contract["path"]
+            if (key in self.runtime_data_exact
+                    or any(item["path"] == key for item in self.runtime_data_directories)):
+                raise ReleaseError("runtime data paths are duplicated")
+            self.runtime_data_contracts.append(contract)
+            if contract["kind"] == "mutable_directory":
+                self.runtime_data_directories.append(contract)
+            else:
+                self.runtime_data_exact[key] = contract
+        directory_paths = [item["path"] for item in self.runtime_data_directories]
+        if (any(path.startswith(prefix) for path in self.runtime_data_exact
+                for prefix in directory_paths)
+                or any(left != right and left.startswith(right)
+                       for left in directory_paths for right in directory_paths)):
+            raise ReleaseError("runtime data contracts overlap")
         ignored_directory_names = data.get("ignored_runtime_directory_names") or []
-        if (not isinstance(ignored_directory_names, list)
-                or len(set(ignored_directory_names)) != len(ignored_directory_names)
-                or any(item != "__pycache__" for item in ignored_directory_names)):
+        if ignored_directory_names != []:
             raise ReleaseError("runtime catalog ignored directory names are invalid")
         self.ignored_runtime_directory_names = frozenset(ignored_directory_names)
         owner_rules = data.get("runtime_owner_rules")
@@ -650,6 +770,73 @@ class RuntimeCatalog:
         )
         if len(set(self.inventory_roots)) != len(self.inventory_roots):
             raise ReleaseError("runtime catalog inventory roots are duplicated")
+        raw_exact_paths = data.get("inventory_exact_paths")
+        if not isinstance(raw_exact_paths, list):
+            raise ReleaseError("runtime catalog exact inventory paths are invalid")
+        self.inventory_exact_paths = frozenset(
+            _absolute_runtime_path(item) for item in raw_exact_paths
+        )
+        if len(self.inventory_exact_paths) != len(raw_exact_paths):
+            raise ReleaseError("runtime catalog exact inventory paths are duplicated")
+        raw_symlinks = data.get("required_runtime_symlinks")
+        if not isinstance(raw_symlinks, dict):
+            raise ReleaseError("runtime catalog symlink contracts are invalid")
+        self.required_runtime_symlinks = {}
+        for path, target_path in raw_symlinks.items():
+            path = _absolute_runtime_path(path)
+            target_path = _absolute_runtime_path(target_path)
+            if path in self.required_runtime_symlinks:
+                raise ReleaseError("runtime catalog symlink paths are duplicated")
+            self.required_runtime_symlinks[path] = target_path
+        raw_name_guards = data.get("inventory_name_guards")
+        if not isinstance(raw_name_guards, list):
+            raise ReleaseError("runtime catalog name guards are invalid")
+        self.inventory_name_guards = []
+        for raw in raw_name_guards:
+            if (not isinstance(raw, dict)
+                    or set(raw) != {"directory", "prefix", "allowed_names"}
+                    or not isinstance(raw.get("prefix"), str)
+                    or not raw["prefix"] or "/" in raw["prefix"]
+                    or not isinstance(raw.get("allowed_names"), list)
+                    or len(set(raw["allowed_names"])) != len(raw["allowed_names"])
+                    or any(not isinstance(name, str) or "/" in name
+                           or not name.startswith(raw["prefix"])
+                           for name in raw["allowed_names"])):
+                raise ReleaseError("runtime catalog name guard is invalid")
+            self.inventory_name_guards.append({
+                "directory": _absolute_runtime_path(raw["directory"]),
+                "prefix": raw["prefix"],
+                "allowed_names": frozenset(raw["allowed_names"]),
+            })
+        raw_preconditions = data.get("service_preconditions")
+        if (not isinstance(raw_preconditions, dict)
+                or set(raw_preconditions) != set(self.allowed_units)
+                or any(value not in {"active", "loaded"}
+                       for value in raw_preconditions.values())):
+            raise ReleaseError("runtime catalog service preconditions are invalid")
+        self.service_preconditions = dict(raw_preconditions)
+        raw_service_environment = data.get("service_environment")
+        if (not isinstance(raw_service_environment, dict)
+                or set(raw_service_environment) != set(self.allowed_units)):
+            raise ReleaseError("runtime catalog service environment is incomplete")
+        self.service_environment = {}
+        for unit, raw in raw_service_environment.items():
+            if (not isinstance(raw, dict) or set(raw) != {"files", "inline"}
+                    or not isinstance(raw["files"], list)
+                    or not isinstance(raw["inline"], list)
+                    or len(set(raw["files"])) != len(raw["files"])
+                    or len(set(raw["inline"])) != len(raw["inline"])):
+                raise ReleaseError("runtime catalog service environment is invalid")
+            files = [_absolute_runtime_path(item) for item in raw["files"]]
+            if (any(path not in self.runtime_data_exact
+                    or self.runtime_data_exact[path]["kind"] != "secret_file"
+                    for path in files)
+                    or any(not ENV_NAME_RE.fullmatch(str(item)) for item in raw["inline"])):
+                raise ReleaseError("runtime catalog service environment source is invalid")
+            self.service_environment[unit] = {
+                "files": files,
+                "inline": frozenset(str(item) for item in raw["inline"]),
+            }
         raw_probes = data.get("health_probes")
         if not isinstance(raw_probes, dict) or not raw_probes:
             raise ReleaseError("runtime catalog health probes are incomplete")
@@ -680,6 +867,8 @@ class RuntimeCatalog:
                     "allow_unmanaged_runtime"):
                 if field in raw and type(raw[field]) is not bool:
                     raise ReleaseError("runtime catalog rule boolean is invalid")
+            if raw.get("allow_unmanaged_runtime") is True:
+                raise ReleaseError("runtime mappings cannot bypass complete inventory")
             kind = raw.get("kind")
             repository = _relative_repository_path(raw.get("repository") or "")
             runtime = _absolute_runtime_path(raw.get("runtime") or "")
@@ -728,7 +917,6 @@ class RuntimeCatalog:
                 "service_from_repository": service_from_repository,
                 "daemon_reload": raw.get("daemon_reload") is True,
                 "delete_allowed": raw.get("delete_allowed") is True,
-                "allow_unmanaged_runtime": raw.get("allow_unmanaged_runtime") is True,
                 "health_probe": None if health_probe is None else str(health_probe),
                 "planning_blocker": (
                     None if planning_blocker is None else planning_blocker.strip()
@@ -780,9 +968,35 @@ class RuntimeCatalog:
 
     def is_unmanaged_runtime(self, runtime_path):
         path = _absolute_runtime_path(runtime_path)
-        return path in self.unmanaged_runtime_paths or any(
-            path.startswith(prefix) for prefix in self.unmanaged_runtime_prefixes
+        return path in self.runtime_data_exact or any(
+            path.startswith(contract["path"])
+            for contract in self.runtime_data_directories
         )
+
+    def runtime_data_contract(self, runtime_path):
+        path = _absolute_runtime_path(runtime_path)
+        if path in self.runtime_data_exact:
+            return self.runtime_data_exact[path]
+        matches = [
+            item for item in self.runtime_data_directories
+            if path.startswith(item["path"])
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda item: len(item["path"]))
+
+    def is_inventory_scoped(self, runtime_path):
+        path = _absolute_runtime_path(runtime_path)
+        if path in self.inventory_exact_paths or any(
+                path.startswith(prefix) for prefix in self.inventory_roots):
+            return True
+        systemd_prefix = "/etc/systemd/system/"
+        if not path.startswith(systemd_prefix):
+            return False
+        relative = path[len(systemd_prefix):]
+        first = relative.split("/", 1)[0]
+        unit = first[:-2] if first.endswith((".service.d", ".timer.d")) else first
+        return unit in self.allowed_units
 
     def owner_for(self, runtime_path):
         path = _absolute_runtime_path(runtime_path)
@@ -884,11 +1098,15 @@ def validate_impact(data, catalog):
     required_services = {
         service for item in mappings for service in item.get("services", [])
     }
-    if not required_services.issubset(set(services)):
-        raise ReleaseError("release impact omits a required service restart")
+    if required_services != set(services):
+        raise ReleaseError("release impact service restarts are not exact")
     required_env = data.get("required_env")
-    if (not isinstance(required_env, list) or len(set(required_env)) != len(required_env)
-            or any(not ENV_NAME_RE.fullmatch(str(item)) for item in required_env)):
+    if (not isinstance(required_env, dict)
+            or not set(required_env).issubset(required_services)
+            or any(not isinstance(values, list) or not values
+                   or len(set(values)) != len(values)
+                   or any(not ENV_NAME_RE.fullmatch(str(item)) for item in values)
+                   for values in required_env.values())):
         raise ReleaseError("release impact environment declarations are invalid")
     pre_health_checks = data.get("pre_health_checks")
     health_checks = data.get("health_checks")
@@ -915,9 +1133,9 @@ def validate_impact(data, catalog):
             "runtime catalog lacks health probes for services: %s"
             % ", ".join(missing_service_probes)
         )
-    if (not required_probes.issubset(set(pre_health_checks))
-            or not required_probes.issubset(set(health_checks))):
-        raise ReleaseError("release impact omits required named health probes")
+    if (required_probes != set(pre_health_checks)
+            or required_probes != set(health_checks)):
+        raise ReleaseError("release impact named health probes are not exact")
     if not isinstance(data.get("external_checks"), list) or data["external_checks"]:
         raise ReleaseError(
             "phase-one release contracts forbid executable external checks"
@@ -931,7 +1149,10 @@ def validate_impact(data, catalog):
         "release_id": release_id,
         "runtime_changes": runtime_changes,
         "restart_services": sorted(services),
-        "required_env": sorted(required_env),
+        "required_env": {
+            service: sorted(str(item) for item in required_env[service])
+            for service in sorted(required_env)
+        },
         "pre_health_checks": pre_health_checks,
         "health_checks": health_checks,
         "external_checks": [],
@@ -994,6 +1215,10 @@ def collect_release_impact(
     candidate_changes = sorted({
         path for _status, path in changes
         if any(item.is_candidate(path) for item in catalogs)
+        and path not in TRUST_ROOT_PATHS
+        and not path.startswith(".github/workflows/")
+        and not any(path.startswith(prefix) for prefix in impact_prefixes)
+        and not all(item.is_ignored(path) for item in catalogs)
     })
     if (enforce_catalog_isolation and catalog_changed
             and (candidate_changes or impact_changes)):
@@ -1175,6 +1400,19 @@ class SystemInspector:
             check=False, timeout=timeout, env=_minimal_subprocess_environment(),
         )
         return result.returncode == 0
+
+    def is_loaded(self, service, *, timeout=30):
+        if not UNIT_RE.fullmatch(service):
+            raise ReleaseError("systemd unit name is invalid")
+        result = subprocess.run(
+            [
+                "/usr/bin/systemctl", "show", "--property=LoadState",
+                "--value", service,
+            ],
+            check=False, capture_output=True, text=True, timeout=timeout,
+            env=_minimal_subprocess_environment(),
+        )
+        return result.returncode == 0 and result.stdout.strip() == "loaded"
 
 
 class ReleaseEngine:
@@ -1440,6 +1678,11 @@ class ReleaseEngine:
                     raise ReleaseError("multiple repository files map to one runtime path")
                 runtime_hashes[runtime_path] = self._state_hash(content)
                 repository_paths[runtime_path] = repository_path
+                if not self.catalog.is_inventory_scoped(runtime_path):
+                    raise ReleaseError(
+                        "runtime mapping is outside complete inventory scope: %s"
+                        % runtime_path
+                    )
                 runtime_metadata[runtime_path] = {
                     "mode": mapping["mode"], "owner": mapping["owner"],
                     "group": mapping["group"],
@@ -1463,9 +1706,91 @@ class ReleaseEngine:
                 and info.st_uid == self.owner_resolver(expected_metadata["owner"])
                 and info.st_gid == self.group_resolver(expected_metadata["group"]))
 
+    def _runtime_data_drift(self):
+        drift = set()
+        for contract in self.catalog.runtime_data_contracts:
+            runtime_path = contract["path"].rstrip("/")
+            target = _mapped_path(self.runtime_root, runtime_path)
+            try:
+                info = os.lstat(target)
+            except FileNotFoundError:
+                if contract["required"]:
+                    drift.add(runtime_path)
+                continue
+            expected_directory = contract["kind"] == "mutable_directory"
+            if (stat.S_ISLNK(info.st_mode)
+                    or expected_directory and not stat.S_ISDIR(info.st_mode)
+                    or not expected_directory and not stat.S_ISREG(info.st_mode)):
+                drift.add(runtime_path)
+                continue
+            if not expected_directory:
+                record = _read_regular_record(self.runtime_root, runtime_path)
+                if record is None:
+                    drift.add(runtime_path)
+                    continue
+                info = record[1]
+            if os.name == "posix" and (
+                    stat.S_IMODE(info.st_mode) not in contract["allowed_modes"]
+                    or info.st_uid != self.owner_resolver(contract["owner"])
+                    or info.st_gid != self.group_resolver(contract["group"])):
+                drift.add(runtime_path)
+        return drift
+
+    def _runtime_symlink_drift(self):
+        drift = set()
+        for runtime_path, expected_target in self.catalog.required_runtime_symlinks.items():
+            target = _mapped_path(self.runtime_root, runtime_path)
+            _assert_real_parents(self.runtime_root, target)
+            try:
+                info = os.lstat(target)
+            except FileNotFoundError:
+                drift.add(runtime_path)
+                continue
+            if not stat.S_ISLNK(info.st_mode):
+                drift.add(runtime_path)
+                continue
+            raw_target = os.readlink(target)
+            resolved = os.path.abspath(os.path.join(os.path.dirname(runtime_path), raw_target))
+            if (resolved != expected_target or os.name == "posix" and info.st_uid != 0):
+                drift.add(runtime_path)
+        return drift
+
+    def _service_environment_names(self, service):
+        contract = self.catalog.service_environment[service]
+        names = set(contract["inline"])
+        for runtime_path in contract["files"]:
+            data_contract = self.catalog.runtime_data_exact[runtime_path]
+            record = _read_regular_record(self.runtime_root, runtime_path)
+            if record is None:
+                continue
+            info = record[1]
+            if os.name == "posix" and (
+                    stat.S_IMODE(info.st_mode) not in data_contract["allowed_modes"]
+                    or info.st_uid != self.owner_resolver(data_contract["owner"])
+                    or info.st_gid != self.group_resolver(data_contract["group"])):
+                raise ReleaseError("service environment file metadata is invalid")
+            try:
+                text = record[0].decode("utf-8")
+            except UnicodeError as exc:
+                raise ReleaseError("service environment file is not UTF-8") from exc
+            for raw_line in text.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[7:].lstrip()
+                if "=" not in line:
+                    continue
+                name, value = line.split("=", 1)
+                name = name.strip()
+                value = value.strip()
+                if ENV_NAME_RE.fullmatch(name) and value not in {"", "''", '\"\"'}:
+                    names.add(name)
+        return names
+
     def _runtime_inventory(self):
         inventory = set()
-        unsafe = set()
+        unsafe = set(self._runtime_data_drift()) | set(self._runtime_symlink_drift())
         for runtime_prefix in self.catalog.inventory_roots:
             root = _mapped_path(self.runtime_root, runtime_prefix)
             try:
@@ -1506,13 +1831,76 @@ class ReleaseEngine:
                         unsafe.add(runtime_path)
                     elif not self.catalog.is_unmanaged_runtime(runtime_path):
                         inventory.add(runtime_path)
+        for runtime_path in self.catalog.inventory_exact_paths:
+            target = _mapped_path(self.runtime_root, runtime_path)
+            try:
+                info = os.lstat(target)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                unsafe.add(runtime_path)
+            elif not self.catalog.is_unmanaged_runtime(runtime_path):
+                inventory.add(runtime_path)
+        for unit in self.catalog.allowed_units:
+            runtime_path = "/etc/systemd/system/" + unit
+            target = _mapped_path(self.runtime_root, runtime_path)
+            try:
+                info = os.lstat(target)
+            except FileNotFoundError:
+                info = None
+            if info is not None:
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                    unsafe.add(runtime_path)
+                else:
+                    inventory.add(runtime_path)
+            dropin_path = runtime_path + ".d"
+            dropin = _mapped_path(self.runtime_root, dropin_path)
+            try:
+                dropin_info = os.lstat(dropin)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(dropin_info.st_mode) or not stat.S_ISDIR(dropin_info.st_mode):
+                unsafe.add(dropin_path)
+                continue
+            for directory, names, filenames in os.walk(dropin, followlinks=False):
+                directory_path = Path(directory)
+                for name in list(names):
+                    candidate = directory_path / name
+                    child_path = "/" + candidate.relative_to(self.runtime_root).as_posix()
+                    child_info = os.lstat(candidate)
+                    if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISDIR(child_info.st_mode):
+                        unsafe.add(child_path)
+                        names.remove(name)
+                for name in filenames:
+                    candidate = directory_path / name
+                    child_path = "/" + candidate.relative_to(self.runtime_root).as_posix()
+                    child_info = os.lstat(candidate)
+                    if stat.S_ISLNK(child_info.st_mode) or not stat.S_ISREG(child_info.st_mode):
+                        unsafe.add(child_path)
+                    else:
+                        inventory.add(child_path)
+        for guard in self.catalog.inventory_name_guards:
+            directory = _mapped_path(self.runtime_root, guard["directory"])
+            try:
+                directory_info = os.lstat(directory)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(directory_info.st_mode):
+                unsafe.add(guard["directory"])
+                continue
+            for child in directory.iterdir():
+                if (child.name.startswith(guard["prefix"])
+                        and child.name not in guard["allowed_names"]):
+                    unsafe.add(
+                        guard["directory"].rstrip("/") + "/" + child.name
+                    )
         return inventory, unsafe
 
     def _inventory_drift(self, expected_paths):
         inventory, unsafe = self._runtime_inventory()
         expected_inventory = {
             path for path in expected_paths
-            if any(path.startswith(prefix) for prefix in self.catalog.inventory_roots)
+            if self.catalog.is_inventory_scoped(path)
             and not self.catalog.is_unmanaged_runtime(path)
         }
         return sorted((inventory - expected_inventory) | unsafe)
@@ -1543,6 +1931,46 @@ class ReleaseEngine:
             "drifted_paths": drift,
             "unexpected_runtime_paths": unexpected,
         }
+
+    def _verify_service_preconditions(self, services):
+        if not services:
+            return
+        self.inspector.validate_tool("/usr/bin/systemctl", self.catalog)
+        invalid = []
+        for service in services:
+            policy = self.catalog.service_preconditions[service]
+            if (policy == "active" and not self.inspector.is_active(service)
+                    or policy == "loaded" and not self.inspector.is_loaded(service)):
+                invalid.append(service)
+        if invalid:
+            raise ReleaseError(
+                "required systemd unit preconditions failed: %s"
+                % ", ".join(sorted(invalid))
+            )
+
+    def _verify_planning_snapshot(self, identity, state, target_commit, services):
+        if self.verify_identity() != identity:
+            raise ReleaseError("release identity changed during planning")
+        if self.load_state() != state:
+            raise ReleaseError("deployment ledger changed during planning")
+        self.repo.verify_checkout(
+            target_commit, self.catalog.target["origin_url"], verify_live_origin=True,
+        )
+        self._catalog_record(target_commit, expected=state["runtime_catalog"])
+        if collect_impact_index(
+                self.repo, self.catalog, state["deployed_main_commit"]
+        ) != state["accepted_impacts"]:
+            raise ReleaseError("release impacts changed during planning")
+        mismatches = [
+            path for path, expected in state["runtime_hashes"].items()
+            if not self._runtime_matches(
+                path, expected, state["runtime_metadata"][path],
+            )
+        ]
+        unexpected = self._inventory_drift(set(state["managed_runtime_paths"]))
+        if mismatches or unexpected:
+            raise ReleaseError("runtime changed during release planning")
+        self._verify_service_preconditions(services)
 
     def initialize(self, deployed_commit, confirmation, *, verify_live_origin=True):
         if confirmation != "test":
@@ -1628,6 +2056,8 @@ class ReleaseEngine:
         current = self.status()
         if not current["ok"]:
             raise ReleaseError("deployment ledger runtime has drifted")
+        if self.verify_identity() != identity or self.load_state() != state:
+            raise ReleaseError("release trust state changed before planning")
         target_commit = str(target_commit or "")
         self.repo.require_commit(target_commit)
         older = state["deployed_main_commit"]
@@ -1636,6 +2066,7 @@ class ReleaseEngine:
         )
         self._catalog_record(target_commit, expected=state["runtime_catalog"])
         if older == target_commit:
+            self._verify_planning_snapshot(identity, state, target_commit, [])
             return {
                 "ok": True,
                 "status": "already_deployed",
@@ -1655,20 +2086,22 @@ class ReleaseEngine:
             self.repo, self.catalog, older, target_commit, impacts,
             reviewed_evidence or {},
         )
-        required_env = sorted({
-            name for impact in impacts for name in impact["required_env"]
-        })
-        missing = [name for name in required_env if not self.environment.get(name)]
+        required_env = {}
+        for impact in impacts:
+            for service, names in impact["required_env"].items():
+                required_env.setdefault(service, set()).update(names)
+        missing = [
+            "%s:%s" % (service, name)
+            for service, names in sorted(required_env.items())
+            for name in sorted(names)
+            if name not in self._service_environment_names(service)
+        ]
         if missing:
             raise ReleaseError("required environment variables are missing: %s" % ", ".join(missing))
         services = sorted({
             service for impact in impacts for service in impact["restart_services"]
         })
-        if services:
-            self.inspector.validate_tool("/usr/bin/systemctl", self.catalog)
-            inactive = [service for service in services if not self.inspector.is_active(service)]
-            if inactive:
-                raise ReleaseError("required systemd units are not active: %s" % ", ".join(inactive))
+        self._verify_service_preconditions(services)
         pre_checks = sorted({
             check for impact in impacts for check in impact["pre_health_checks"]
         })
@@ -1729,6 +2162,7 @@ class ReleaseEngine:
         required_free = max(self.catalog.min_free_bytes, total_bytes * 2)
         if free < required_free:
             raise ReleaseError("insufficient disk space for a future transactional release")
+        self._verify_planning_snapshot(identity, state, target_commit, services)
         return {
             "ok": True,
             "status": "planned_read_only",
@@ -1744,7 +2178,9 @@ class ReleaseEngine:
             "daemon_reload_required": daemon_reload_required,
             "pre_health_probes": pre_checks,
             "post_health_probes": post_checks,
-            "required_env": required_env,
+            "required_env": {
+                service: sorted(names) for service, names in sorted(required_env.items())
+            },
             "required_free_bytes": required_free,
         }
 

@@ -46,7 +46,7 @@ jobs:
       - name: 检查功能发布影响覆盖
         if: github.event_name == 'pull_request'
         run: |
-          python scripts/release_test.py check-impact \
+          python -I -E -s -B scripts/release_test.py check-impact \
             --source-root . \
             --base "${{ github.event.pull_request.base.sha }}" \
             --target "${{ github.event.pull_request.head.sha }}"

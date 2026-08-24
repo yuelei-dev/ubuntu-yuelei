@@ -33,9 +33,16 @@
       "type": "string"
     },
     "required_env": {
-      "items": { "pattern": "^[A-Z][A-Z0-9_]{0,79}$", "type": "string" },
-      "type": "array",
-      "uniqueItems": true
+      "additionalProperties": {
+        "items": { "pattern": "^[A-Z][A-Z0-9_]{0,79}$", "type": "string" },
+        "minItems": 1,
+        "type": "array",
+        "uniqueItems": true
+      },
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9@_.:-]+\\.(service|timer)$"
+      },
+      "type": "object"
     },
     "restart_services": {
       "items": {

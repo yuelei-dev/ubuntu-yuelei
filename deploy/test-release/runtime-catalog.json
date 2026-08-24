@@ -18,14 +18,176 @@
     "leadgen-B.service",
     "xiaotan.service"
   ],
+  "service_preconditions": {
+    "hermes-ip12-preview.service": "active",
+    "huangque-admin.service": "active",
+    "huangque-auth.service": "active",
+    "huangque-content.service": "active",
+    "huangque-dl.service": "active",
+    "huangque-egress-tunnel.service": "active",
+    "huangque-imggen-api.service": "active",
+    "huangque-invite-reward-claims.service": "loaded",
+    "huangque-invite-reward-claims.timer": "active",
+    "huangque-leadgen-api.service": "active",
+    "leadgen-A.service": "active",
+    "leadgen-B.service": "active",
+    "xiaotan.service": "active"
+  },
+  "service_environment": {
+    "hermes-ip12-preview.service": {
+      "files": ["/home/ubuntu/.secrets/hermes-openai.env"],
+      "inline": ["HERMES_ENABLE_INTERNAL_TOOLS", "PATH"]
+    },
+    "huangque-admin.service": {
+      "files": [
+        "/home/ubuntu/content-api/content.env",
+        "/etc/huangque/runninghub.env",
+        "/home/ubuntu/auth-service/auth.env",
+        "/etc/leadgen-secrets.env"
+      ],
+      "inline": ["ADMIN_API_PORT", "CONTENT_JOB_DB", "ADMIN_DB"]
+    },
+    "huangque-auth.service": {
+      "files": ["/home/ubuntu/auth-service/auth.env"],
+      "inline": ["FEATURE_FLAGS_DB"]
+    },
+    "huangque-content.service": {
+      "files": [
+        "/home/ubuntu/content-api/content.env",
+        "/home/ubuntu/auth-service/auth.env",
+        "/etc/huangque/runninghub.env"
+      ],
+      "inline": [
+        "SORA_VIDEO_ENABLED",
+        "WHISPER_MODEL",
+        "WHISPER_DEVICE",
+        "WHISPER_COMPUTE_TYPE",
+        "WHISPER_CACHE_DIR",
+        "SUBTITLE_FONT",
+        "HF_HUB_OFFLINE"
+      ]
+    },
+    "huangque-dl.service": { "files": [], "inline": [] },
+    "huangque-egress-tunnel.service": { "files": [], "inline": [] },
+    "huangque-imggen-api.service": {
+      "files": [
+        "/home/ubuntu/content-api/content.env",
+        "/home/ubuntu/auth-service/auth.env"
+      ],
+      "inline": []
+    },
+    "huangque-invite-reward-claims.service": { "files": [], "inline": [] },
+    "huangque-invite-reward-claims.timer": { "files": [], "inline": [] },
+    "huangque-leadgen-api.service": {
+      "files": [
+        "/home/ubuntu/content-api/content.env",
+        "/home/ubuntu/auth-service/auth.env"
+      ],
+      "inline": []
+    },
+    "leadgen-A.service": {
+      "files": ["/etc/leadgen-secrets.env"],
+      "inline": []
+    },
+    "leadgen-B.service": {
+      "files": ["/etc/leadgen-secrets.env"],
+      "inline": []
+    },
+    "xiaotan.service": {
+      "files": [],
+      "inline": ["TZ", "PYTHONUNBUFFERED"]
+    }
+  },
   "ignored_repository_paths": [
+    "deploy/hermes-ip12-release.sh",
+    "deploy/hermes-ip12.env.example",
+    "deploy/huangque-secrets.env.example",
+    "deploy/leadgen.env.example",
+    "deploy/egress/README.md",
+    "deploy/egress/xray-client.example.json",
+    "deploy/render_yuelei_test_nginx.py",
+    "deploy/requirements-content.txt",
+    "deploy/setup-dev-server.sh",
+    "deploy/test-release/README.md",
+    "deploy/test-release/bootstrap.example.json",
+    "deploy/test-release/identity.example.json",
+    "deploy/test-release/release-impact.example.json",
+    "deploy/test-release/release-impact.schema.json",
+    "deploy/test-release/runtime-catalog.json",
+    "deploy/test-release/state.example.json",
+    "deploy/test-runtime/digital-human-material-seedream-v3-20260821.json",
+    "deploy/test-runtime/digital-human-material-v2-20260818.json",
+    "deploy/test-runtime/digital-human-precision-director-v3-20260822.json",
+    "deploy/test-runtime/digital-human-precision-director-v4-20260822.json",
+    "deploy/test-runtime/digital-human-precision-director-v5-20260822.json",
+    "deploy/test-runtime/digital-human-unified-voice-v6-20260823.json",
+    "deploy/test-runtime/digital-human-whisper-runtime-20260815.json",
+    "deploy/test-runtime/director-agent-v1-20260820.json",
+    "deploy/test-runtime/director-agent-v2-20260821.json",
+    "deploy/test-runtime/director-production-parity-20260810.json",
+    "deploy/test-runtime/ip12-openai-egress-20260815.json",
+    "deploy/会员系统上线与回滚.md",
+    "deploy/生产环境清单与还原手册.md",
+    "deploy/yuelei-test-domain-runbook.md",
+    "deploy/zelong/bootstrap-video-compose-runtime.sh",
+    "scripts/backfill_assets.py",
+    "scripts/backfill_launch_experience_members.py",
+    "scripts/balance_sentinel.py",
+    "scripts/check_membership_launch_readiness.py",
+    "scripts/check_short_drama_completion_integrity.py",
+    "scripts/ci_validate.py",
+    "scripts/cleanup_legacy_voice_slot_data.py",
+    "scripts/crawl_cli.py",
+    "scripts/db_backup.py",
+    "scripts/deploy_content_whisper_runtime.py",
+    "scripts/deploy_director_locked_manifest.py",
+    "scripts/deploy_locked_manifest.py",
+    "scripts/deploy_precision_director_locked_manifest.py",
+    "scripts/deploy_precision_director_v4_locked_manifest.py",
+    "scripts/deploy_precision_director_v5_locked_manifest.py",
+    "scripts/deploy_seedream_v3_locked_manifest.py",
+    "scripts/deploy_site.sh",
+    "scripts/deploy_unified_voice_v6_locked_manifest.py",
+    "scripts/dev_local.sh",
+    "scripts/domain_access_check.py",
+    "scripts/export_account_xlsx.py",
+    "scripts/export_videos_xlsx.py",
+    "scripts/export_xhs_xlsx.py",
+    "scripts/fix_video_first_frame_covers.py",
+    "scripts/gen_mockup.py",
+    "scripts/health_check.py",
+    "scripts/heygen_video_smoke.py",
+    "scripts/jobs_gc.py",
+    "scripts/leadgen.py",
+    "scripts/leads_filter.py",
+    "scripts/login_health_check.py",
+    "scripts/mcp_douyin_crawl.py",
+    "scripts/migrate_short_drama_legacy_completions.py",
+    "scripts/port_exposure_audit.py",
+    "scripts/prepare_content_whisper.py",
+    "scripts/prepare_content_whisper_runtime.sh",
+    "scripts/recover_xai_video_job.py",
+    "scripts/release_test.py",
+    "scripts/release_test_launcher.sh",
+    "scripts/resolve_douyin_id.py",
+    "scripts/server_douyin_login.py",
+    "scripts/server_proxy_login_check.py",
+    "scripts/stamp_assets.py",
+    "scripts/transcribe_video.py",
+    "scripts/validate_keywords.py",
+    "scripts/verify_content_python_requirements.py",
+    "scripts/verify_content_whisper_deployment.py",
+    "scripts/viral_hunter.py",
+    "scripts/xiaodong_SOUL.md",
+    "scripts/xiaodong_TOOLS.md",
+    "scripts/xiaodong_USER.md",
     "server/nginx-huangquechuanmei.conf",
     "worker/server_worker.py",
     "worker/worker.py",
     "server/test_wxpay.py"
   ],
-  "ignored_repository_prefixes": [],
-  "ignored_runtime_directory_names": ["__pycache__"],
+  "ignored_repository_prefixes": ["deploy/test-release/impacts/"],
+  "ignored_runtime_directory_names": [],
   "inventory_roots": [
     "/home/ubuntu/auth-service/",
     "/home/ubuntu/content-api/",
@@ -36,61 +198,136 @@
     "/home/ubuntu/leadgen-B/",
     "/var/www/huangquechuanmei/"
   ],
-  "unmanaged_runtime_paths": [
-    "/home/ubuntu/auth-service/auth.env",
-    "/home/ubuntu/auth-service/users.db",
-    "/home/ubuntu/auth-service/users.db-shm",
-    "/home/ubuntu/auth-service/users.db-wal",
-    "/home/ubuntu/content-api/admin_config.db",
-    "/home/ubuntu/content-api/admin_config.db-shm",
-    "/home/ubuntu/content-api/admin_config.db-wal",
-    "/home/ubuntu/content-api/audio_assets.db",
-    "/home/ubuntu/content-api/audio_assets.db-shm",
-    "/home/ubuntu/content-api/audio_assets.db-wal",
-    "/home/ubuntu/content-api/content.env",
-    "/home/ubuntu/content-api/content_jobs.db",
-    "/home/ubuntu/content-api/content_jobs.db-shm",
-    "/home/ubuntu/content-api/content_jobs.db-wal",
-    "/home/ubuntu/content-api/digital_human_oneclick.db",
-    "/home/ubuntu/content-api/digital_human_oneclick.db-shm",
-    "/home/ubuntu/content-api/digital_human_oneclick.db-wal",
-    "/home/ubuntu/content-api/feature_flags.db",
-    "/home/ubuntu/content-api/feature_flags.db-shm",
-    "/home/ubuntu/content-api/feature_flags.db-wal",
-    "/home/ubuntu/content-api/leads_crm.db",
-    "/home/ubuntu/content-api/leads_crm.db-shm",
-    "/home/ubuntu/content-api/leads_crm.db-wal",
-    "/home/ubuntu/content-api/runninghub.env",
-    "/home/ubuntu/content-api/tikhub_cache.db",
-    "/home/ubuntu/content-api/tikhub_cache.db-shm",
-    "/home/ubuntu/content-api/tikhub_cache.db-wal",
-    "/home/ubuntu/content-api/video_compose.db",
-    "/home/ubuntu/content-api/video_compose.db-shm",
-    "/home/ubuntu/content-api/video_compose.db-wal",
-    "/home/ubuntu/content-api/whisper.env",
-    "/home/ubuntu/hermes-web/.agnes_key",
-    "/home/ubuntu/hermes-web/agnes_key.txt",
-    "/home/ubuntu/hermes-web/nohup.out",
-    "/home/ubuntu/hq-drift/.state.json",
-    "/home/ubuntu/hq-drift/baseline.json",
-    "/home/ubuntu/hq-drift/deploy_bless.jsonl",
-    "/home/ubuntu/hq-drift/sentinel.log",
-    "/home/ubuntu/leadgen-A/discovered.json",
-    "/home/ubuntu/leadgen-A/jobs.db",
-    "/home/ubuntu/leadgen-A/jobs.db-shm",
-    "/home/ubuntu/leadgen-A/jobs.db-wal",
-    "/home/ubuntu/leadgen-B/discovered.json",
-    "/home/ubuntu/leadgen-B/jobs.db",
-    "/home/ubuntu/leadgen-B/jobs.db-shm",
-    "/home/ubuntu/leadgen-B/jobs.db-wal"
+  "inventory_exact_paths": [
+    "/home/ubuntu/hq_bitable_sync_server.py",
+    "/etc/nginx/sites-available/hermes-ip12-direct",
+    "/etc/nginx/sites-available/huangquechuanmei",
+    "/etc/nginx/sites-enabled/huangquechuanmei"
   ],
-  "unmanaged_runtime_prefixes": [
-    "/home/ubuntu/content-api/content_out/",
-    "/home/ubuntu/hermes-web/data/",
-    "/home/ubuntu/hermes-web/knowledge/",
-    "/home/ubuntu/hermes-web/media_library/",
-    "/home/ubuntu/leadgen-A/files/",
-    "/home/ubuntu/leadgen-B/files/"
+  "required_runtime_symlinks": {
+    "/etc/nginx/sites-enabled/hermes-ip12-direct": "/etc/nginx/sites-available/hermes-ip12-direct"
+  },
+  "inventory_name_guards": [
+    {
+      "directory": "/home/ubuntu",
+      "prefix": "hq_bitable_sync_server",
+      "allowed_names": ["hq_bitable_sync_server.py"]
+    },
+    {
+      "directory": "/etc/nginx/sites-available",
+      "prefix": "hermes-ip12-direct",
+      "allowed_names": ["hermes-ip12-direct"]
+    },
+    {
+      "directory": "/etc/nginx/sites-available",
+      "prefix": "huangquechuanmei",
+      "allowed_names": ["huangquechuanmei"]
+    },
+    {
+      "directory": "/etc/nginx/sites-enabled",
+      "prefix": "hermes-ip12-direct",
+      "allowed_names": ["hermes-ip12-direct"]
+    },
+    {
+      "directory": "/etc/nginx/sites-enabled",
+      "prefix": "huangquechuanmei",
+      "allowed_names": ["huangquechuanmei"]
+    },
+    {
+      "directory": "/etc/systemd/system",
+      "prefix": "huangque-",
+      "allowed_names": [
+        "huangque-admin.service",
+        "huangque-admin.service.d",
+        "huangque-auth.service",
+        "huangque-auth.service.d",
+        "huangque-content.service",
+        "huangque-content.service.d",
+        "huangque-dl.service",
+        "huangque-dl.service.d",
+        "huangque-egress-tunnel.service",
+        "huangque-imggen-api.service",
+        "huangque-imggen-api.service.d",
+        "huangque-invite-reward-claims.service",
+        "huangque-invite-reward-claims.timer",
+        "huangque-leadgen-api.service",
+        "huangque-leadgen-api.service.d"
+      ]
+    },
+    {
+      "directory": "/etc/systemd/system",
+      "prefix": "hermes-",
+      "allowed_names": ["hermes-ip12-preview.service"]
+    },
+    {
+      "directory": "/etc/systemd/system",
+      "prefix": "leadgen-",
+      "allowed_names": ["leadgen-A.service", "leadgen-B.service"]
+    },
+    {
+      "directory": "/etc/systemd/system",
+      "prefix": "xiaotan",
+      "allowed_names": ["xiaotan.service"]
+    }
+  ],
+  "runtime_data": [
+    { "path": "/home/ubuntu/auth-service/auth.env", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": false },
+    { "path": "/home/ubuntu/content-api/content.env", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": true },
+    { "path": "/home/ubuntu/content-api/whisper.env", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": false },
+    { "path": "/etc/huangque/runninghub.env", "kind": "secret_file", "owner": "root", "group": "root", "allowed_modes": ["0600"], "required": true },
+    { "path": "/etc/leadgen-secrets.env", "kind": "secret_file", "owner": "root", "group": "root", "allowed_modes": ["0600"], "required": true },
+    { "path": "/home/ubuntu/.secrets/hermes-openai.env", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": true },
+    { "path": "/home/ubuntu/hermes-web/.agnes_key", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": false },
+    { "path": "/home/ubuntu/hermes-web/agnes_key.txt", "kind": "secret_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600"], "required": false },
+
+    { "path": "/home/ubuntu/auth-service/users.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/auth-service/users.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/auth-service/users.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/admin_config.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/admin_config.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/admin_config.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/audio_assets.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/audio_assets.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/audio_assets.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/content_jobs.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/content_jobs.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/content_jobs.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/digital_human_oneclick.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/digital_human_oneclick.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/digital_human_oneclick.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/feature_flags.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/feature_flags.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/feature_flags.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/leads_crm.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": true },
+    { "path": "/home/ubuntu/content-api/leads_crm.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/leads_crm.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/tikhub_cache.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/tikhub_cache.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/tikhub_cache.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/video_compose.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/video_compose.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/content-api/video_compose.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-A/jobs.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-A/jobs.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-A/jobs.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-B/jobs.db", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-B/jobs.db-shm", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-B/jobs.db-wal", "kind": "sqlite_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+
+    { "path": "/home/ubuntu/hermes-web/nohup.out", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/hq-drift/.state.json", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/hq-drift/baseline.json", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/hq-drift/deploy_bless.jsonl", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/hq-drift/sentinel.log", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-A/discovered.json", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+    { "path": "/home/ubuntu/leadgen-B/discovered.json", "kind": "mutable_file", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0600", "0640"], "required": false },
+
+    { "path": "/home/ubuntu/content-api/content_out", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false },
+    { "path": "/home/ubuntu/hermes-web/data", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false },
+    { "path": "/home/ubuntu/hermes-web/knowledge", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false },
+    { "path": "/home/ubuntu/hermes-web/media_library", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false },
+    { "path": "/home/ubuntu/leadgen-A/files", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false },
+    { "path": "/home/ubuntu/leadgen-B/files", "kind": "mutable_directory", "owner": "ubuntu", "group": "ubuntu", "allowed_modes": ["0700", "0750"], "required": false }
   ],
   "impact_prefix": "deploy/test-release/impacts/",
   "health_probes": {
@@ -188,6 +425,28 @@
       "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
+      "repository": "deploy/nginx-huangquechuanmei.conf",
+      "runtime": "/etc/nginx/sites-enabled/huangquechuanmei",
+      "health_probe": "site-loopback",
+      "planning_blocker": "nginx syntax validation and transactional reload are not supported in phase one",
+      "service": null
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "deploy/nginx-hermes-ip12-direct.conf",
+      "runtime": "/etc/nginx/sites-available/hermes-ip12-direct",
+      "health_probe": "hermes-health",
+      "planning_blocker": "nginx syntax validation and transactional reload are not supported in phase one",
+      "service": null
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
       "repository": "scripts/pool_health.py",
       "runtime": "/home/ubuntu/leadgen-A/pool_health.py",
       "service": "leadgen-A.service"
@@ -244,7 +503,11 @@
       "mode": "0644",
       "repository": "server/tikhub.py",
       "runtime": "/home/ubuntu/content-api/tikhub.py",
-      "service": "huangque-content.service"
+      "services": [
+        "huangque-content.service",
+        "huangque-imggen-api.service",
+        "huangque-leadgen-api.service"
+      ]
     },
     {
       "delete_allowed": false,
@@ -556,7 +819,7 @@
     {
       "daemon_reload": true,
       "delete_allowed": false,
-      "allow_unmanaged_runtime": true,
+      "allow_unmanaged_runtime": false,
       "kind": "prefix",
       "mode": "0644",
       "repository": "deploy/systemd/",
@@ -566,12 +829,15 @@
     }
   ],
   "runtime_candidate_prefixes": [
+    "deploy/",
     "deploy/systemd/",
+    "scripts/",
     "server/",
     "site/",
     "worker/"
   ],
   "runtime_candidate_paths": [
+    "deploy/nginx-hermes-ip12-direct.conf",
     "deploy/nginx-huangquechuanmei.conf",
     "scripts/drift_sentinel.py",
     "scripts/hq_bitable_sync_server.py",

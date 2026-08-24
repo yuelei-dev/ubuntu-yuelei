@@ -25,6 +25,16 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.base.sha }}
 
+      - name: Mint the dedicated gate App token
+        id: gate-app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.TEST_RELEASE_GATE_APP_ID }}
+          private-key: ${{ secrets.TEST_RELEASE_GATE_APP_PRIVATE_KEY }}
+          owner: yuelei-dev
+          repositories: ubuntu-yuelei
+          permission-checks: write
+
       - name: Fetch Head as inert Git objects
         shell: bash
         env:
@@ -44,6 +54,8 @@ jobs:
           test "$(git status --porcelain --untracked-files=normal)" = ""
 
       - name: Execute only the trusted base verifier
+        id: verifier
+        continue-on-error: true
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -52,7 +64,46 @@ jobs:
           set -Eeuo pipefail
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(git status --porcelain --untracked-files=normal)" = ""
-          /usr/bin/python3 scripts/release_test.py check-impact \
+          /usr/bin/python3 -I -E -s -B scripts/release_test.py check-impact \
             --source-root . \
             --base "$BASE_SHA" \
             --target "$EXPECTED_HEAD"
+
+      - name: Publish the trusted Head check from the dedicated App
+        id: publish-head-check
+        if: always() && steps.gate-app-token.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.gate-app-token.outputs.token }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          VERIFIER_OUTCOME: ${{ steps.verifier.outcome }}
+        run: |
+          set -Eeuo pipefail
+          [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          conclusion=failure
+          summary="The Base-owned release verifier did not pass."
+          if [ "$VERIFIER_OUTCOME" = success ]; then
+            conclusion=success
+            summary="The Base-owned release verifier passed for the exact PR Head."
+          fi
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "/repos/yuelei-dev/ubuntu-yuelei/check-runs" \
+            -f name='Trusted test release impact gate' \
+            -f head_sha="$EXPECTED_HEAD" \
+            -f status=completed \
+            -f conclusion="$conclusion" \
+            -f 'output[title]=Trusted test release impact gate' \
+            -f "output[summary]=$summary" >/dev/null
+
+      - name: Keep the workflow red unless verification and publication passed
+        if: always()
+        shell: bash
+        env:
+          VERIFIER_OUTCOME: ${{ steps.verifier.outcome }}
+          PUBLISH_OUTCOME: ${{ steps.publish-head-check.outcome }}
+        run: |
+          set -Eeuo pipefail
+          test "$VERIFIER_OUTCOME" = success
+          test "$PUBLISH_OUTCOME" = success
