@@ -33,7 +33,7 @@
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
     "base_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
-    "code_source_commit": "857b5bc2185a7947f387e914eed6d202bda10a3d",
+    "code_source_commit": "dd95b86464ca86e54902dd94bb40fd567a298428",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -62,8 +62,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
-    "source_blob": "1fd34909fb8d6331f5288121e52d7c49f5c5bb9b",
-    "source_sha256": "910747960cdbe168c3d99d73330db89049e522e3ce6464f45ac98fc8128cd9c8",
+    "source_blob": "62989766785396aed5e7f6e13b2eb45b6791344d",
+    "source_sha256": "23b4ad940d40f4c3136ef21f8342e8ba85fed9321736619f9a955831c1ebf7c6",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
@@ -157,8 +157,8 @@
     },
     {
       "repository_path": "tests/test_seedream_v3_release_executor.py",
-      "source_blob": "78f0542780e232231c7ea7386c0371dc30f6b8cd",
-      "source_sha256": "a4e736b3da4fa518a0ff1ea6ca0668a289111e2b5803ad2a5670c24a2854ce1f"
+      "source_blob": "468a40f6582feb98b469c33654fdd91ec7979d4d",
+      "source_sha256": "0063c549bcab6d19eecabfeea751d93fd8fb61d84544ed66315faddc5ad89e73"
     },
     {
       "repository_path": "tests/test_unified_voice_v6_release.py",
