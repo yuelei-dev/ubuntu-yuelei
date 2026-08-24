@@ -260,7 +260,10 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
 
     def test_voice_state_node_test_is_ci_only_and_content_locked(self):
         ci = CI_PATH.read_text(encoding="utf-8")
-        self.assertIn("uses: actions/setup-node@v6", ci)
+        self.assertIn(
+            "uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6",
+            ci,
+        )
         self.assertIn('node-version: "22"', ci)
         self.assertIn("node tests/test_digital_human_voice_state.js", ci)
 
