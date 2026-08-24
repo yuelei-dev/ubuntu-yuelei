@@ -8,9 +8,10 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = (
-    ROOT / "deploy" / "test-runtime" /
+    ROOT / "docs" / "release-manifests" /
     "digital-human-material-feishu-priority-20260823.json"
 )
+CATALOG_PATH = ROOT / "deploy" / "test-release" / "runtime-catalog.json"
 HISTORICAL_MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" /
     "digital-human-material-seedream-v3-20260821.json"
@@ -129,6 +130,40 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         ).hexdigest()
         self.assertEqual(HISTORICAL_MANIFEST_BLOB, actual_blob)
         self.assertEqual(HISTORICAL_MANIFEST_SHA256, hashlib.sha256(data).hexdigest())
+
+    def test_successor_docs_manifest_is_not_runtime_candidate(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+
+        def is_candidate(path):
+            return (
+                path in catalog["runtime_candidate_paths"]
+                or any(
+                    path.startswith(prefix.rstrip("/") + "/")
+                    for prefix in catalog["runtime_candidate_prefixes"]
+                )
+            )
+
+        def is_ignored(path):
+            return (
+                path in catalog["ignored_repository_paths"]
+                or any(
+                    path.startswith(prefix.rstrip("/") + "/")
+                    for prefix in catalog["ignored_repository_prefixes"]
+                )
+            )
+
+        successor = MANIFEST_PATH.relative_to(ROOT).as_posix()
+        future_runtime_manifest = (
+            "deploy/test-runtime/"
+            "digital-human-material-feishu-priority-v2-future.json"
+        )
+        self.assertFalse(is_candidate(successor))
+        self.assertTrue(is_candidate(future_runtime_manifest))
+        self.assertFalse(is_ignored(future_runtime_manifest))
+        self.assertEqual(".json", MANIFEST_PATH.suffix)
+        self.assertTrue(
+            self.manifest["executor"]["repository_path"].startswith("scripts/")
+        )
 
     def test_scope_and_historical_source_locks_are_exact(self):
         files = self.manifest["files"]

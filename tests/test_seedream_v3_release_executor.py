@@ -14,7 +14,7 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUCCESSOR_PATH = (
-    ROOT / "deploy" / "test-runtime" /
+    ROOT / "docs" / "release-manifests" /
     "digital-human-material-feishu-priority-20260823.json"
 )
 HISTORICAL_MANIFEST_PATH = (
@@ -23,6 +23,9 @@ HISTORICAL_MANIFEST_PATH = (
 )
 REJECTED_HISTORICAL_MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
+)
+REJECTED_DOCS_MANIFEST_PATH = (
+    ROOT / "docs" / "release-manifests" / "unapproved-successor.json"
 )
 HISTORICAL_EXECUTOR_PATH = ROOT / "scripts" / "deploy_content_whisper_runtime.py"
 VERSIONED_EXECUTOR_PATH = ROOT / "scripts" / "deploy_seedream_v3_locked_manifest.py"
@@ -136,6 +139,18 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         manifest = dict(self.manifest)
         manifest["_manifest_path"] = str(
             self.source_root / REJECTED_HISTORICAL_MANIFEST_PATH.relative_to(ROOT)
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError,
+                "manifest must come from the locked source checkout"):
+            self._release(self.versioned, manifest)._verify_source_checkout(
+                REVIEWED_SOURCE, REVIEWED_MAIN,
+            )
+
+    def test_versioned_executor_rejects_arbitrary_docs_manifest(self):
+        manifest = dict(self.manifest)
+        manifest["_manifest_path"] = str(
+            self.source_root / REJECTED_DOCS_MANIFEST_PATH.relative_to(ROOT)
         )
         with self.assertRaisesRegex(
                 self.versioned.ReleaseError,
