@@ -57,6 +57,20 @@ REQUIRED_RUNTIME_PATHS = {
 ALLOWED_REVIEW_DELTA = {
     MANIFEST.relative_to(ROOT).as_posix(),
 }
+ACCEPTANCE_SENTINEL_VALUE = (
+    "验收哨兵一：仅验证从用户请求预填空白批量文案框。\n"
+    "验收哨兵二：不生成、不上传、不删除、不发布。"
+)
+ACCEPTANCE_PROMPT = (
+    "请把下面两条固定验收哨兵文案原样填入空白批量文案框，保留中间换行。"
+    "不要随机素材、不要生成、不要上传、不要删除或发布：\n"
+    + ACCEPTANCE_SENTINEL_VALUE
+)
+ACCEPTANCE_EXPECTED_ACTION = {
+    "type": "fill_field",
+    "field": "private_domain_copy",
+    "value": ACCEPTANCE_SENTINEL_VALUE,
+}
 
 
 def _load_base_executor():
@@ -209,7 +223,12 @@ def _validate_manifest(manifest):
     context = request.get("page_context") if isinstance(request, dict) else None
     if (not isinstance(context, dict)
             or context.get("page") != "private_domain_video"
-            or request.get("source_page") != "private_domain_video"):
+            or context.get("copy_text") != ""
+            or context.get("copy_count") != 0
+            or request.get("source_page") != "private_domain_video"
+            or request.get("prompt") != ACCEPTANCE_PROMPT
+            or acceptance.get("expected_action")
+            != ACCEPTANCE_EXPECTED_ACTION):
         raise ReleaseError("private-domain authenticated acceptance is missing")
     revision = request.get("page_revision")
     if (not isinstance(revision, str)
@@ -440,6 +459,26 @@ def _validate_sources(source_root, target_root, manifest, hooks):
         hooks.validate_import(validation_root, executor["import_modules"])
 
 
+def _validate_private_domain_acceptance_result(specification, job):
+    result = job.get("result") if isinstance(job, dict) else None
+    plan = result.get("plan") if isinstance(result, dict) else None
+    actions = plan.get("actions") if isinstance(plan, dict) else None
+    expected = specification.get("expected_action")
+    if (not isinstance(result, dict)
+            or result.get("type") != "director_agent"
+            or not isinstance(actions, list)
+            or plan.get("page_revision") !=
+            specification["request"]["page_revision"]
+            or not isinstance(expected, dict)
+            or not any(
+                action.get("type") == expected.get("type")
+                and action.get("field") == expected.get("field")
+                and action.get("value") == expected.get("value")
+                for action in actions if isinstance(action, dict)
+            )):
+        raise ReleaseError("private-domain Agent acceptance result is invalid")
+
+
 class SystemHooks(BASE.SystemHooks):
     """Use the historical system adapters with a v3-specific acceptance key."""
 
@@ -499,21 +538,7 @@ class SystemHooks(BASE.SystemHooks):
                 raise ReleaseError("authenticated acceptance returned the wrong job")
             status = str(job.get("status") or "")
             if status == "done":
-                result = job.get("result")
-                plan = result.get("plan") if isinstance(result, dict) else None
-                actions = plan.get("actions") if isinstance(plan, dict) else None
-                expected = specification.get("expected_action") or {}
-                if (not isinstance(result, dict)
-                        or result.get("type") != "director_agent"
-                        or not isinstance(actions, list)
-                        or plan.get("page_revision") !=
-                        specification["request"]["page_revision"]
-                        or not any(
-                            action.get("type") == expected.get("type")
-                            and action.get("field") == expected.get("field")
-                            for action in actions if isinstance(action, dict)
-                        )):
-                    raise ReleaseError("private-domain Agent acceptance result is invalid")
+                _validate_private_domain_acceptance_result(specification, job)
                 return
             if status in {"error", "failed"}:
                 raise ReleaseError("Director Agent acceptance job failed")
