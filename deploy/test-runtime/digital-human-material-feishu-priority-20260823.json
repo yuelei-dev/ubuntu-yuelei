@@ -32,15 +32,16 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
+    "base_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
+    "code_source_commit": "857b5bc2185a7947f387e914eed6d202bda10a3d",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-23 (read-only capture during this PR task; exact timestamp not retained)",
+    "captured_at": "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
     "target": "test@8.148.158.106",
-    "capture_method": "read-only SSH runtime SHA-256 and Git blob capture; no server file, database or service mutation",
-    "repository_main_commit": null,
-    "repository_git_metadata": "absent",
+    "capture_method": "read-only Git main preimage lock after the last evidenced successful test deployment; deployment fails closed if live runtime differs",
+    "repository_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
+    "repository_git_metadata": "available in the reviewed source checkout; no server access in this relock task",
     "service_state": "active",
     "health_status": 200,
     "files": 3
@@ -109,13 +110,13 @@
       "repository_path": "site/workbench/digital-human-oneclick.html",
       "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
       "classification": "static_runtime",
-      "source_blob": "326cc548a7a8d5acfe57e0949ca8eff1883abd3d",
-      "source_sha256": "2148016c41955e41bf8f5478a30f696638c5ad77d20a3c191efbebaec6365740",
+      "source_blob": "397d3becc700e23391392dc1badb248e85b63bbc",
+      "source_sha256": "e877da893b5645dbe2e1b1329d9df546688147973af1d6d4431f3afb545b21d6",
       "target_preimage_state": "file",
-      "target_preimage_blob": "68d00a3abf51bcf00d477a30936e03f00bcd2ff3",
-      "target_preimage_sha256": "8ff3497d40282b81a67cdb69e51ac53bd0761e90fa567a5c8df08a6f88223c1d",
-      "expected_postimage_blob": "326cc548a7a8d5acfe57e0949ca8eff1883abd3d",
-      "expected_postimage_sha256": "2148016c41955e41bf8f5478a30f696638c5ad77d20a3c191efbebaec6365740"
+      "target_preimage_blob": "289e095bb6869337b185a8ab3ee7eff153543f08",
+      "target_preimage_sha256": "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae",
+      "expected_postimage_blob": "397d3becc700e23391392dc1badb248e85b63bbc",
+      "expected_postimage_sha256": "e877da893b5645dbe2e1b1329d9df546688147973af1d6d4431f3afb545b21d6"
     }
   ],
   "release_contract_sources": [
@@ -146,8 +147,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "a2baa426909bf54e15889b9a2444dca316cf726e",
-      "source_sha256": "74d79425aac989da53b0a7c027bf93cc12c3ff9662c193b49cef55cc52229c2b"
+      "source_blob": "2d0020c2174d284b65747cb543db4524bcbad8ae",
+      "source_sha256": "1f2170b597a46e30de1f74fad2a568d6e813d7eb3d9639ea6d335deb3397cd1d"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -161,8 +162,8 @@
     },
     {
       "repository_path": "tests/test_unified_voice_v6_release.py",
-      "source_blob": "db808a9e1803b4f7a7e022588dc9c34e29188ae1",
-      "source_sha256": "e2abc1c6aaa6e20ff314d6390c02f1bf6d0704f9ca59319e3a7abc97f49ddd23"
+      "source_blob": "ec7c08781bd558f4e6b3ed66128f7875f7d0b7ca",
+      "source_sha256": "d6a93216cf16a697b437fcf2f0eae79d44abc83b2d8ccead35573671233163ae"
     }
   ],
   "release_commands": {
