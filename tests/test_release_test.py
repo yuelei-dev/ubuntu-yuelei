@@ -603,7 +603,8 @@ class ContractValidationTests(unittest.TestCase):
             real.chmod(0o755)
             tool.symlink_to(real)
             runner = release_test.CommandRunner(tool_root=root)
-            with self.assertRaisesRegex(release_test.ReleaseError, "unsafe"):
+            with self.assertRaisesRegex(
+                    release_test.ReleaseError, "escaped its approved directory"):
                 runner.validate({
                     "argv": ["/usr/bin/python3"], "cwd": "{source}",
                     "timeout_seconds": 1,
