@@ -7,6 +7,7 @@
   "last_successful_release": null,
   "managed_runtime_paths": [],
   "repository_paths": {},
+  "runtime_metadata": {},
   "runtime_catalog": {
     "blob_oid": "0000000000000000000000000000000000000000",
     "repository_path": "deploy/test-release/runtime-catalog.json",

@@ -27,14 +27,79 @@
     "server/test_wxpay.py"
   ],
   "ignored_repository_prefixes": [],
-  "unmanaged_runtime_paths": [],
-  "unmanaged_runtime_prefixes": [],
+  "ignored_runtime_directory_names": ["__pycache__"],
+  "inventory_roots": [
+    "/home/ubuntu/auth-service/",
+    "/home/ubuntu/content-api/",
+    "/home/ubuntu/dl-service/",
+    "/home/ubuntu/hermes-web/",
+    "/home/ubuntu/hq-drift/",
+    "/home/ubuntu/leadgen-A/",
+    "/home/ubuntu/leadgen-B/",
+    "/var/www/huangquechuanmei/"
+  ],
+  "unmanaged_runtime_paths": [
+    "/home/ubuntu/auth-service/auth.env",
+    "/home/ubuntu/auth-service/users.db",
+    "/home/ubuntu/auth-service/users.db-shm",
+    "/home/ubuntu/auth-service/users.db-wal",
+    "/home/ubuntu/content-api/admin_config.db",
+    "/home/ubuntu/content-api/admin_config.db-shm",
+    "/home/ubuntu/content-api/admin_config.db-wal",
+    "/home/ubuntu/content-api/audio_assets.db",
+    "/home/ubuntu/content-api/audio_assets.db-shm",
+    "/home/ubuntu/content-api/audio_assets.db-wal",
+    "/home/ubuntu/content-api/content.env",
+    "/home/ubuntu/content-api/content_jobs.db",
+    "/home/ubuntu/content-api/content_jobs.db-shm",
+    "/home/ubuntu/content-api/content_jobs.db-wal",
+    "/home/ubuntu/content-api/digital_human_oneclick.db",
+    "/home/ubuntu/content-api/digital_human_oneclick.db-shm",
+    "/home/ubuntu/content-api/digital_human_oneclick.db-wal",
+    "/home/ubuntu/content-api/feature_flags.db",
+    "/home/ubuntu/content-api/feature_flags.db-shm",
+    "/home/ubuntu/content-api/feature_flags.db-wal",
+    "/home/ubuntu/content-api/leads_crm.db",
+    "/home/ubuntu/content-api/leads_crm.db-shm",
+    "/home/ubuntu/content-api/leads_crm.db-wal",
+    "/home/ubuntu/content-api/runninghub.env",
+    "/home/ubuntu/content-api/tikhub_cache.db",
+    "/home/ubuntu/content-api/tikhub_cache.db-shm",
+    "/home/ubuntu/content-api/tikhub_cache.db-wal",
+    "/home/ubuntu/content-api/video_compose.db",
+    "/home/ubuntu/content-api/video_compose.db-shm",
+    "/home/ubuntu/content-api/video_compose.db-wal",
+    "/home/ubuntu/content-api/whisper.env",
+    "/home/ubuntu/hermes-web/.agnes_key",
+    "/home/ubuntu/hq-drift/.state.json",
+    "/home/ubuntu/hq-drift/baseline.json",
+    "/home/ubuntu/hq-drift/deploy_bless.jsonl",
+    "/home/ubuntu/hq-drift/sentinel.log",
+    "/home/ubuntu/leadgen-A/discovered.json",
+    "/home/ubuntu/leadgen-A/jobs.db",
+    "/home/ubuntu/leadgen-A/jobs.db-shm",
+    "/home/ubuntu/leadgen-A/jobs.db-wal",
+    "/home/ubuntu/leadgen-B/discovered.json",
+    "/home/ubuntu/leadgen-B/jobs.db",
+    "/home/ubuntu/leadgen-B/jobs.db-shm",
+    "/home/ubuntu/leadgen-B/jobs.db-wal"
+  ],
+  "unmanaged_runtime_prefixes": [
+    "/home/ubuntu/content-api/content_out/",
+    "/home/ubuntu/hermes-web/data/",
+    "/home/ubuntu/hermes-web/knowledge/",
+    "/home/ubuntu/hermes-web/media_library/",
+    "/home/ubuntu/leadgen-A/files/",
+    "/home/ubuntu/leadgen-B/files/"
+  ],
   "impact_prefix": "deploy/test-release/impacts/",
   "health_probes": {
     "admin-health": { "description": "GET http://127.0.0.1:8098/api/admin/health expects HTTP 200" },
     "auth-health": { "description": "GET http://127.0.0.1:8095/api/auth/health expects HTTP 200" },
+    "bitable-sync-contract": { "description": "Validate hq_bitable_sync_server.py without sending a Feishu request" },
     "content-health": { "description": "GET http://127.0.0.1:8096/api/gen/health expects HTTP 200" },
     "dl-health": { "description": "GET http://127.0.0.1:8097/api/gen/dl/health expects HTTP 200" },
+    "drift-sentinel-contract": { "description": "Run drift_sentinel.py --print without alerts or baseline writes" },
     "egress-active": { "description": "huangque-egress-tunnel.service is active; no paid request is submitted" },
     "hermes-health": { "description": "GET http://127.0.0.1:3102/healthz expects HTTP 200" },
     "imggen-health": { "description": "GET http://127.0.0.1:8101/api/gen/banana/health expects HTTP 200" },
@@ -62,7 +127,41 @@
     "xiaotan.service": "xiaotan-active"
   },
   "min_free_bytes": 16777216,
+  "runtime_owner_rules": [
+    { "runtime_prefix": "/etc/", "owner": "root", "group": "root" },
+    { "runtime_prefix": "/home/ubuntu/", "owner": "ubuntu", "group": "ubuntu" },
+    { "runtime_prefix": "/var/www/", "owner": "www-data", "group": "www-data" }
+  ],
   "rules": [
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "scripts/hq_bitable_sync_server.py",
+      "runtime": "/home/ubuntu/hq_bitable_sync_server.py",
+      "health_probe": "bitable-sync-contract",
+      "service": null
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "scripts/process_invite_reward_claims.py",
+      "runtime": "/home/ubuntu/auth-service/process_invite_reward_claims.py",
+      "service": "huangque-invite-reward-claims.timer"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "scripts/drift_sentinel.py",
+      "runtime": "/home/ubuntu/hq-drift/drift_sentinel.py",
+      "health_probe": "drift-sentinel-contract",
+      "service": null
+    },
     {
       "delete_allowed": false,
       "allow_unmanaged_runtime": false,
@@ -71,7 +170,26 @@
       "repository": "deploy/nginx-huangquechuanmei.conf",
       "runtime": "/etc/nginx/sites-available/huangquechuanmei",
       "health_probe": "site-loopback",
+      "planning_blocker": "nginx syntax validation and transactional reload are not supported in phase one",
       "service": null
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "scripts/pool_health.py",
+      "runtime": "/home/ubuntu/leadgen-A/pool_health.py",
+      "service": "leadgen-A.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "scripts/pool_health.py",
+      "runtime": "/home/ubuntu/leadgen-B/pool_health.py",
+      "service": "leadgen-B.service"
     },
     {
       "delete_allowed": false,
@@ -444,7 +562,11 @@
     "worker/"
   ],
   "runtime_candidate_paths": [
-    "deploy/nginx-huangquechuanmei.conf"
+    "deploy/nginx-huangquechuanmei.conf",
+    "scripts/drift_sentinel.py",
+    "scripts/hq_bitable_sync_server.py",
+    "scripts/pool_health.py",
+    "scripts/process_invite_reward_claims.py"
   ],
   "schema_version": 1,
   "target": {

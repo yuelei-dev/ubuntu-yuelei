@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import importlib.util
 import contextlib
@@ -48,8 +49,18 @@ def catalog_data():
         "runtime_candidate_paths": [],
         "ignored_repository_paths": ["server/test_example.py"],
         "ignored_repository_prefixes": [],
+        "ignored_runtime_directory_names": ["__pycache__"],
+        "inventory_roots": [
+            "/home/ubuntu/content-api/",
+            "/var/www/huangque/",
+        ],
         "unmanaged_runtime_paths": [],
         "unmanaged_runtime_prefixes": [],
+        "runtime_owner_rules": [
+            {"runtime_prefix": "/etc/", "owner": "test-owner", "group": "test-group"},
+            {"runtime_prefix": "/home/ubuntu/", "owner": "test-owner", "group": "test-group"},
+            {"runtime_prefix": "/var/www/", "owner": "test-owner", "group": "test-group"},
+        ],
         "health_probes": {
             "content-health": {"description": "approved content health contract"},
             "site-health": {"description": "approved site health contract"},
@@ -311,6 +322,46 @@ class CatalogAndImpactTests(unittest.TestCase):
                 base_catalog=self.catalog, enforce_catalog_isolation=True,
             )
 
+    def test_future_pr_cannot_modify_the_base_owned_verifier(self):
+        raw_catalog = release_test._json_bytes(catalog_data())
+        repo = FakeRepository(
+            {
+                BASE: {CATALOG_PATH: raw_catalog, "scripts/release_test.py": b"safe"},
+                HEAD: {CATALOG_PATH: raw_catalog, "scripts/release_test.py": b"return 0"},
+            },
+            {HEAD: [BASE]},
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "trust roots"):
+            release_test.collect_release_impact(
+                repo, self.catalog, BASE, HEAD,
+                base_catalog=self.catalog, enforce_catalog_isolation=True,
+            )
+
+    def test_malicious_head_cannot_replace_gate_verifier_catalog_and_runtime(self):
+        raw_catalog = release_test._json_bytes(catalog_data())
+        base_files = {
+            CATALOG_PATH: raw_catalog,
+            "scripts/release_test.py": b"safe verifier",
+            ".github/workflows/ci.yml": b"safe ci",
+            ".github/workflows/release-impact-gate.yml": b"safe base gate",
+            RUNTIME_REPOSITORY_PATH: b"before",
+        }
+        head_files = dict(base_files)
+        head_files.update({
+            "scripts/release_test.py": b"raise SystemExit(0)",
+            ".github/workflows/ci.yml": b"jobs: {}",
+            ".github/workflows/release-impact-gate.yml": b"jobs: {}",
+            CATALOG_PATH: release_test._json_bytes({**catalog_data(), "min_free_bytes": 2}),
+            RUNTIME_REPOSITORY_PATH: b"malicious runtime",
+        })
+        repo = FakeRepository({BASE: base_files, HEAD: head_files}, {HEAD: [BASE]})
+        with self.assertRaisesRegex(
+                release_test.ReleaseError, "trust roots|must be isolated"):
+            release_test.collect_release_impact(
+                repo, self.catalog, BASE, HEAD,
+                base_catalog=self.catalog, enforce_catalog_isolation=True,
+            )
+
     def test_runtime_git_symlink_is_blocked(self):
         repo = review_repository()
         repo.modes[(HEAD, RUNTIME_REPOSITORY_PATH)] = "120000"
@@ -367,6 +418,16 @@ class CatalogAndImpactTests(unittest.TestCase):
         with self.assertRaisesRegex(release_test.ReleaseError, "executable"):
             release_test.validate_impact(
                 impact_data(external_checks={}), self.catalog,
+            )
+
+    def test_boolean_schema_version_and_numeric_release_id_are_rejected(self):
+        with self.assertRaisesRegex(release_test.ReleaseError, "schema version"):
+            release_test.validate_impact(
+                impact_data(schema_version=True), self.catalog,
+            )
+        with self.assertRaisesRegex(release_test.ReleaseError, "id is invalid"):
+            release_test.validate_impact(
+                impact_data(release_id=123), self.catalog,
             )
 
     def test_systemd_dropin_derives_allowlisted_service(self):
@@ -480,6 +541,8 @@ class ReleaseEngineTests(unittest.TestCase):
             "repo": self.repo,
             "inspector": self.inspector,
             "environment": {"EXAMPLE_API_KEY": "present-never-logged"},
+            "owner_resolver": lambda _owner: getattr(os, "geteuid", lambda: 0)(),
+            "group_resolver": lambda _group: getattr(os, "getegid", lambda: 0)(),
         }
         arguments.update(overrides)
         return release_test.ReleaseEngine(
@@ -499,6 +562,9 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual([RUNTIME_PATH], state["managed_runtime_paths"])
         self.assertEqual(RUNTIME_REPOSITORY_PATH, state["repository_paths"][RUNTIME_PATH])
         self.assertEqual(CATALOG_PATH, state["runtime_catalog"]["repository_path"])
+        self.assertEqual(0o644, state["runtime_metadata"][RUNTIME_PATH]["mode"])
+        self.assertEqual("test-owner", state["runtime_metadata"][RUNTIME_PATH]["owner"])
+        self.assertEqual("test-group", state["runtime_metadata"][RUNTIME_PATH]["group"])
 
     def test_wrong_host_is_rejected(self):
         identity_path = self._mapped("/etc/huangque/release-identity.json")
@@ -507,6 +573,22 @@ class ReleaseEngineTests(unittest.TestCase):
         identity_path.write_text(json.dumps(identity), encoding="utf-8")
         with self.assertRaisesRegex(release_test.ReleaseError, "identity is wrong"):
             self.initialize()
+        self.assertFalse(self._mapped("/var/lib/huangque-release/release.lock").exists())
+
+    def test_wrong_host_does_not_change_an_existing_lock_file(self):
+        lock_path = self._mapped("/var/lib/huangque-release/release.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_bytes(b"existing-lock\n")
+        before_bytes = lock_path.read_bytes()
+        before_mtime = lock_path.stat().st_mtime_ns
+        identity_path = self._mapped("/etc/huangque/release-identity.json")
+        identity = json.loads(identity_path.read_text("utf-8"))
+        identity["host_id"] = "production"
+        identity_path.write_text(json.dumps(identity), encoding="utf-8")
+        with self.assertRaisesRegex(release_test.ReleaseError, "identity is wrong"):
+            self.initialize()
+        self.assertEqual(before_bytes, lock_path.read_bytes())
+        self.assertEqual(before_mtime, lock_path.stat().st_mtime_ns)
 
     def test_mixed_runtime_is_rejected_before_ledger_write(self):
         self._write_runtime(RUNTIME_PATH, b"mixed")
@@ -520,6 +602,35 @@ class ReleaseEngineTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(release_test.ReleaseError, "does not exactly match"):
             self.initialize()
+
+    def test_python_bytecode_cache_is_not_runtime_drift(self):
+        self._write_runtime(
+            "/home/ubuntu/content-api/content_domains/__pycache__/core.pyc", b"pyc",
+        )
+        self.assertEqual("initialized", self.initialize()["status"])
+        self.assertEqual("deployed", self.engine().status()["status"])
+
+    @unittest.skipIf(os.name != "posix", "POSIX mode semantics")
+    def test_wrong_runtime_mode_blocks_initialize(self):
+        self._mapped(RUNTIME_PATH).chmod(0o600)
+        with self.assertRaisesRegex(release_test.ReleaseError, "does not exactly match"):
+            self.initialize()
+
+    @unittest.skipIf(os.name != "posix", "POSIX owner semantics")
+    def test_wrong_runtime_owner_blocks_initialize(self):
+        wrong_uid = os.geteuid() + 1
+        with self.assertRaisesRegex(release_test.ReleaseError, "does not exactly match"):
+            self.engine(owner_resolver=lambda _owner: wrong_uid).initialize(
+                BASE, "test", verify_live_origin=False,
+            )
+
+    @unittest.skipIf(os.name != "posix", "POSIX group semantics")
+    def test_wrong_runtime_group_blocks_initialize(self):
+        wrong_gid = os.getegid() + 1
+        with self.assertRaisesRegex(release_test.ReleaseError, "does not exactly match"):
+            self.engine(group_resolver=lambda _group: wrong_gid).initialize(
+                BASE, "test", verify_live_origin=False,
+            )
 
     def test_status_reports_hash_drift(self):
         self.initialize()
@@ -544,6 +655,8 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual("planned_read_only", result["status"])
         self.assertEqual("planning_only_no_apply", result["phase"])
         self.assertEqual(RUNTIME_PATH, result["files"][0]["runtime_path"])
+        self.assertEqual("test-owner", result["files"][0]["owner"])
+        self.assertEqual("test-group", result["files"][0]["group"])
         self.assertEqual(HEAD, result["review_evidence"]["pr-999-example"]["head"])
 
     def test_plan_is_idempotent_when_target_equals_ledger(self):
@@ -655,6 +768,93 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual(["content-health"], result["pre_health_probes"])
         self.assertEqual(["content-health"], result["post_health_probes"])
 
+    def test_plan_reports_daemon_reload_for_systemd_change(self):
+        repository_path = "deploy/systemd/example.timer"
+        runtime_path = "/etc/systemd/system/example.timer"
+        impact = impact_data(
+            runtime_changes=[repository_path],
+            restart_services=["example.timer"],
+            required_env=[],
+            pre_health_checks=["timer-active"],
+            health_checks=["timer-active"],
+        )
+        raw_catalog = release_test._json_bytes(catalog_data())
+        raw_impact = json.dumps(impact, sort_keys=True).encode("utf-8")
+        repo = FakeRepository(
+            {
+                BASE: {CATALOG_PATH: raw_catalog, repository_path: b"before\n"},
+                HEAD: {
+                    CATALOG_PATH: raw_catalog,
+                    repository_path: b"after\n",
+                    IMPACT_PATH: raw_impact,
+                },
+                MERGE: {
+                    CATALOG_PATH: raw_catalog,
+                    repository_path: b"after\n",
+                    IMPACT_PATH: raw_impact,
+                },
+            },
+            {HEAD: [BASE], MERGE: [BASE, HEAD]},
+        )
+        self._mapped(RUNTIME_PATH).unlink()
+        self._write_runtime(runtime_path, b"before\n")
+        engine = self.engine(repo=repo, environment={})
+        engine.initialize(BASE, "test", verify_live_origin=False)
+        result = engine.build_plan(
+            MERGE, {"pr-999-example": {"base": BASE, "head": HEAD}},
+        )
+        self.assertTrue(result["daemon_reload_required"])
+        self.assertTrue(result["files"][0]["daemon_reload"])
+
+    def test_nginx_change_is_explicitly_not_releasable_in_phase_one(self):
+        repository_path = "deploy/nginx-huangquechuanmei.conf"
+        runtime_path = "/etc/nginx/sites-available/huangquechuanmei"
+        data = catalog_data()
+        data["runtime_candidate_paths"] = [repository_path]
+        data["rules"].append({
+            "kind": "exact",
+            "repository": repository_path,
+            "runtime": runtime_path,
+            "service": None,
+            "health_probe": "site-health",
+            "planning_blocker": (
+                "nginx syntax validation and transactional reload are not supported"
+            ),
+            "mode": "0644",
+            "delete_allowed": False,
+            "allow_unmanaged_runtime": False,
+        })
+        self.catalog = release_test.RuntimeCatalog(data)
+        (self.source / CATALOG_PATH).write_bytes(release_test._json_bytes(data))
+        impact = impact_data(
+            runtime_changes=[repository_path], restart_services=[], required_env=[],
+            pre_health_checks=["site-health"], health_checks=["site-health"],
+        )
+        raw_catalog = release_test._json_bytes(data)
+        raw_impact = json.dumps(impact, sort_keys=True).encode("utf-8")
+        repo = FakeRepository(
+            {
+                BASE: {CATALOG_PATH: raw_catalog, repository_path: b"before\n"},
+                HEAD: {
+                    CATALOG_PATH: raw_catalog, repository_path: b"after\n",
+                    IMPACT_PATH: raw_impact,
+                },
+                MERGE: {
+                    CATALOG_PATH: raw_catalog, repository_path: b"after\n",
+                    IMPACT_PATH: raw_impact,
+                },
+            },
+            {HEAD: [BASE], MERGE: [BASE, HEAD]},
+        )
+        self._mapped(RUNTIME_PATH).unlink()
+        self._write_runtime(runtime_path, b"before\n")
+        engine = self.engine(repo=repo, environment={})
+        engine.initialize(BASE, "test", verify_live_origin=False)
+        with self.assertRaisesRegex(release_test.ReleaseError, "merged_not_releasable"):
+            engine.build_plan(
+                MERGE, {"pr-999-example": {"base": BASE, "head": HEAD}},
+            )
+
     def test_stale_lock_file_does_not_block_initialization(self):
         lock = self._mapped("/var/lib/huangque-release/release.lock")
         lock.parent.mkdir(parents=True)
@@ -704,6 +904,63 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("github.event.pull_request.head.sha", workflow)
         self.assertIn("git rev-parse HEAD", workflow)
         self.assertIn("scripts/release_test.py check-impact", workflow)
+
+    def test_release_impact_gate_executes_only_the_base_owned_verifier(self):
+        workflow = (
+            ROOT / ".github/workflows/release-impact-gate.yml"
+        ).read_text("utf-8")
+        self.assertIn("pull_request_target:", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("refs/pull/$PR_NUMBER/head", workflow)
+        self.assertIn("Execute only the trusted base verifier", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("head.repo.clone_url", workflow)
+        self.assertNotIn("actions/checkout@v7\n        with:\n          ref: ${{ github.event.pull_request.head.sha", workflow)
+
+    def test_checked_in_catalog_matches_existing_authoritative_runtime_maps(self):
+        catalog = release_test.RuntimeCatalog.load(
+            ROOT, "deploy/test-release/runtime-catalog.json",
+        )
+        tree = ast.parse((ROOT / "scripts/drift_sentinel.py").read_text("utf-8"))
+        assignments = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id in {
+                            "BACKEND_RUNTIME", "AUTH_SHARED_RUNTIME"}:
+                        assignments[target.id] = ast.literal_eval(node.value)
+        self.assertEqual({"BACKEND_RUNTIME", "AUTH_SHARED_RUNTIME"}, set(assignments))
+        for repository_path, runtime_path in {
+                **assignments["BACKEND_RUNTIME"],
+                **assignments["AUTH_SHARED_RUNTIME"],
+        }.items():
+            with self.subTest(repository_path=repository_path, runtime_path=runtime_path):
+                self.assertTrue(catalog.is_candidate(repository_path))
+                self.assertIn(
+                    runtime_path,
+                    [item["runtime_path"] for item in catalog.mappings(repository_path)],
+                )
+        self.assertEqual(
+            {
+                "/home/ubuntu/leadgen-A/pool_health.py",
+                "/home/ubuntu/leadgen-B/pool_health.py",
+            },
+            {
+                item["runtime_path"]
+                for item in catalog.mappings("scripts/pool_health.py")
+            },
+        )
+
+    def test_checked_in_script_runtime_change_requires_an_impact_contract(self):
+        catalog = release_test.RuntimeCatalog.load(
+            ROOT, "deploy/test-release/runtime-catalog.json",
+        )
+        path = "scripts/process_invite_reward_claims.py"
+        repo = FakeRepository(
+            {BASE: {path: b"before"}, HEAD: {path: b"after"}}, {HEAD: [BASE]},
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "lack release impact"):
+            release_test.collect_release_impact(repo, catalog, BASE, HEAD)
 
     def test_phase_one_exposes_no_mutating_release_subcommands(self):
         script = (ROOT / "scripts/release_test.py").read_text("utf-8")
