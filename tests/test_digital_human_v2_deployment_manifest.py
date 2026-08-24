@@ -35,8 +35,8 @@ LOCKED_PREIMAGES = {
         "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "68d00a3abf51bcf00d477a30936e03f00bcd2ff3",
-        "8ff3497d40282b81a67cdb69e51ac53bd0761e90fa567a5c8df08a6f88223c1d",
+        "file", "289e095bb6869337b185a8ab3ee7eff153543f08",
+        "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae",
     ),
 }
 
@@ -53,6 +53,52 @@ def _read_locked_git_blob(blob_id):
         stderr=subprocess.PIPE,
     )
     return result.stdout
+
+
+def _git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _verify_manifest_relock(repository, manifest_path, head="HEAD"):
+    relative_path = manifest_path.relative_to(repository).as_posix()
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+    expected_parent = manifest["source"]["code_source_commit"]
+    expected_blob = _git_blob(manifest_bytes)
+    history = subprocess.run(
+        ["git", "rev-list", head, "--", relative_path], cwd=repository,
+        check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+    candidates = []
+    for commit in history:
+        blob = subprocess.run(
+            ["git", "rev-parse", "%s:%s" % (commit, relative_path)],
+            cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        if blob == expected_blob:
+            candidates.append(commit)
+    if not candidates:
+        raise AssertionError("current manifest bytes have no reachable locked commit")
+    locked_commit = candidates[0]
+    parents = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.split()
+    if len(parents) != 2 or parents[1] != expected_parent:
+        raise AssertionError("locked manifest parent does not match code source")
+    changed = set(filter(None, subprocess.run(
+        ["git", "diff", "--name-only", parents[1], locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()))
+    if changed != {relative_path}:
+        raise AssertionError("locked manifest commit is not manifest-only")
+    locked_bytes = subprocess.run(
+        ["git", "cat-file", "blob", "%s:%s" % (locked_commit, relative_path)],
+        cwd=repository, check=True, stdout=subprocess.PIPE,
+    ).stdout
+    if locked_bytes != manifest_bytes or _git_blob(locked_bytes) != expected_blob:
+        raise AssertionError("current manifest bytes do not match locked blob")
+    return locked_commit
 
 
 class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
@@ -94,6 +140,33 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
 
+    def test_successor_manifest_is_manifest_only_child_of_locked_code_source(self):
+        locked_commit = _verify_manifest_relock(ROOT, MANIFEST_PATH)
+        self.assertEqual(
+            self.manifest["source"]["code_source_commit"],
+            subprocess.run(
+                ["git", "rev-parse", locked_commit + "^"], cwd=ROOT,
+                check=True, text=True, stdout=subprocess.PIPE,
+            ).stdout.strip(),
+        )
+        code_source = self.manifest["source"]["code_source_commit"]
+        locks = (
+            self.manifest["files"]
+            + [self.manifest["executor"]]
+            + [self.manifest["executor"]["verifier"]]
+            + [self.manifest["executor"]["requirements_verifier"]]
+            + self.manifest["release_contract_sources"]
+        )
+        for lock in locks:
+            with self.subTest(repository_path=lock["repository_path"]):
+                actual_blob = subprocess.run(
+                    ["git", "rev-parse", "%s:%s" % (
+                        code_source, lock["repository_path"],
+                    )],
+                    cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                self.assertEqual(lock["source_blob"], actual_blob)
+
     def test_read_only_test_preimages_are_exact(self):
         actual = {
             entry["repository_path"]: (
@@ -112,13 +185,16 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("read-only", observation["capture_method"])
         self.assertEqual(
             observation["captured_at"],
-            "2026-08-23 (read-only capture during this PR task; exact timestamp not retained)",
+            "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
         )
-        self.assertIsNone(observation["repository_main_commit"])
-        self.assertEqual(observation["repository_git_metadata"], "absent")
+        self.assertEqual(
+            observation["repository_main_commit"],
+            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+        )
+        self.assertIn("no server access", observation["repository_git_metadata"])
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
+            "a858dec9d1d49a2432d40f2341512bd66291c6de",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
