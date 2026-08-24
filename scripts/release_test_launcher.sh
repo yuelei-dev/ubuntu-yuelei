@@ -3,7 +3,7 @@ set -eu
 
 LAUNCHER=/usr/local/sbin/huangque-release-test
 ENTRYPOINT=/usr/local/libexec/huangque-release/release_test.py
-EXPECTED_ENTRYPOINT_SHA256=fdcf583980ff62f9b3ec948cf1f182c17eb505534c689d0b0a2ae5a7a3c530ed
+EXPECTED_ENTRYPOINT_SHA256=d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb
 
 fail() {
     /usr/bin/printf '%s\n' "huangque release launcher: $1" >&2

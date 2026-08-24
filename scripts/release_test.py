@@ -1751,7 +1751,9 @@ class ReleaseEngine:
                 continue
             raw_target = os.readlink(target)
             resolved = os.path.abspath(os.path.join(os.path.dirname(runtime_path), raw_target))
-            if (resolved != expected_target or os.name == "posix" and info.st_uid != 0):
+            if (resolved != expected_target
+                    or os.name == "posix"
+                    and info.st_uid != self.owner_resolver("root")):
                 drift.add(runtime_path)
         return drift
 
