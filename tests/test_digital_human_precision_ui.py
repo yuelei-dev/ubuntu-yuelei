@@ -8,11 +8,28 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PAGE = (ROOT / "site/workbench/digital-human-oneclick.html").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "site/workbench/digital-human-unified.js").read_text(encoding="utf-8")
 STATE_SCRIPT = ROOT / "site/workbench/digital-human-unified-state.js"
+AGENT_SCRIPT = (ROOT / "site/workbench/script-agent.js").read_text(encoding="utf-8")
 LEGACY = (ROOT / "site/workbench/digital-human-one-click.html").read_text(encoding="utf-8")
 DIRECTOR = (ROOT / "site/workbench/script.html").read_text(encoding="utf-8")
 
 
 class DigitalHumanPrecisionUiTests(unittest.TestCase):
+    def test_customer_agent_is_available_in_both_digital_human_modes(self):
+        self.assertIn('src="script-agent.js?', PAGE)
+        self.assertIn("digital_human_oneclick", AGENT_SCRIPT)
+        self.assertIn("digital_human_script", AGENT_SCRIPT)
+        self.assertIn("precision_template", AGENT_SCRIPT)
+        for target in (
+            "photoDrop", "voiceUploadDrop", "customerMaterialsPicker",
+            "driveAudioDrop", "dhDrop", "dhConsent", "dhAnalyze", "dhStart",
+        ):
+            self.assertIn('id="%s"' % target, PAGE)
+        focus_branch = AGENT_SCRIPT[
+            AGENT_SCRIPT.index("if(action.type==='focus')"):
+            AGENT_SCRIPT.index("if(action.type==='navigate')")
+        ]
+        self.assertNotIn(".click(", focus_branch)
+
     def test_director_entry_opens_photo_mode_without_a_second_photo_tab(self):
         self.assertIn('data-active="script"', PAGE)
         self.assertIn('href="digital-human-oneclick.html">🎬 数字人一键生成</a>', DIRECTOR)

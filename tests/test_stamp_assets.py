@@ -41,8 +41,17 @@ class AssetRegistryTests(unittest.TestCase):
         """新增的共享资源必须进 ASSETS，否则戳永远不变。"""
         names = {a.name for a in stamp_assets.ASSETS}
         self.assertIn("cloud-shell.js", names)
+        self.assertIn("script-agent.js", names)
         self.assertIn("theme.css", names)
         self.assertIn("theme-init.js", names)
+
+    def test_director_agent_pages_use_current_agent_stamp(self):
+        asset = next(a for a in stamp_assets.ASSETS if a.name == "script-agent.js")
+        for name in ("script.html", "digital-human-oneclick.html"):
+            html = (ROOT / "site" / "workbench" / name).read_bytes()
+            match = asset.pattern.search(html)
+            self.assertIsNotNone(match, name)
+            self.assertEqual(asset.stamp().encode("ascii"), match.group(2), name)
 
     def test_only_shell_is_required(self):
         """普通工作台页必须有 shell；独立设备授权页显式排除。"""
