@@ -21,14 +21,58 @@
   "ignored_repository_paths": [
     "server/hermes_ip12/README.md",
     "server/hermes_ip12/prompt.md",
+    "server/nginx-huangquechuanmei.conf",
+    "worker/server_worker.py",
+    "worker/worker.py",
     "server/test_wxpay.py"
   ],
   "ignored_repository_prefixes": [],
   "unmanaged_runtime_paths": [],
   "unmanaged_runtime_prefixes": [],
   "impact_prefix": "deploy/test-release/impacts/",
+  "health_probes": {
+    "admin-health": { "description": "GET http://127.0.0.1:8098/api/admin/health expects HTTP 200" },
+    "auth-health": { "description": "GET http://127.0.0.1:8095/api/auth/health expects HTTP 200" },
+    "content-health": { "description": "GET http://127.0.0.1:8096/api/gen/health expects HTTP 200" },
+    "dl-health": { "description": "GET http://127.0.0.1:8097/api/gen/dl/health expects HTTP 200" },
+    "egress-active": { "description": "huangque-egress-tunnel.service is active; no paid request is submitted" },
+    "hermes-health": { "description": "GET http://127.0.0.1:3102/healthz expects HTTP 200" },
+    "imggen-health": { "description": "GET http://127.0.0.1:8101/api/gen/banana/health expects HTTP 200" },
+    "invite-claims-active": { "description": "huangque-invite-reward-claims.service is active when invoked" },
+    "invite-claims-timer-active": { "description": "huangque-invite-reward-claims.timer is active" },
+    "leadgen-a-active": { "description": "leadgen-A.service is active" },
+    "leadgen-api-health": { "description": "GET http://127.0.0.1:8100/api/gen/leadgen/health expects HTTP 200" },
+    "leadgen-b-active": { "description": "leadgen-B.service is active" },
+    "site-loopback": { "description": "GET the approved nginx loopback site endpoint without triggering a task" },
+    "xiaotan-active": { "description": "xiaotan.service is active" }
+  },
+  "service_health_probes": {
+    "hermes-ip12-preview.service": "hermes-health",
+    "huangque-admin.service": "admin-health",
+    "huangque-auth.service": "auth-health",
+    "huangque-content.service": "content-health",
+    "huangque-dl.service": "dl-health",
+    "huangque-egress-tunnel.service": "egress-active",
+    "huangque-imggen-api.service": "imggen-health",
+    "huangque-invite-reward-claims.service": "invite-claims-active",
+    "huangque-invite-reward-claims.timer": "invite-claims-timer-active",
+    "huangque-leadgen-api.service": "leadgen-api-health",
+    "leadgen-A.service": "leadgen-a-active",
+    "leadgen-B.service": "leadgen-b-active",
+    "xiaotan.service": "xiaotan-active"
+  },
   "min_free_bytes": 16777216,
   "rules": [
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "deploy/nginx-huangquechuanmei.conf",
+      "runtime": "/etc/nginx/sites-available/huangquechuanmei",
+      "health_probe": "site-loopback",
+      "service": null
+    },
     {
       "delete_allowed": false,
       "allow_unmanaged_runtime": false,
@@ -63,7 +107,7 @@
       "mode": "0644",
       "repository": "server/func_names.py",
       "runtime": "/home/ubuntu/content-api/func_names.py",
-      "service": "huangque-content.service"
+      "services": ["huangque-admin.service", "huangque-content.service"]
     },
     {
       "delete_allowed": false,
@@ -115,6 +159,258 @@
       "allow_unmanaged_runtime": false,
       "kind": "exact",
       "mode": "0644",
+      "repository": "server/hq_cli_api.py",
+      "runtime": "/home/ubuntu/auth-service/hq_cli_api.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/wechat_subscribe.py",
+      "runtime": "/home/ubuntu/auth-service/wechat_subscribe.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/invites.py",
+      "runtime": "/home/ubuntu/auth-service/invites.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/invite_network.py",
+      "runtime": "/home/ubuntu/auth-service/invite_network.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/business_cards.py",
+      "runtime": "/home/ubuntu/auth-service/business_cards.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/wxpay.py",
+      "runtime": "/home/ubuntu/auth-service/wxpay.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/wechat_virtual_pay.py",
+      "runtime": "/home/ubuntu/auth-service/wechat_virtual_pay.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/sync_virtual_pay_goods.py",
+      "runtime": "/home/ubuntu/auth-service/sync_virtual_pay_goods.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/inspiration_cases.py",
+      "runtime": "/home/ubuntu/content-api/inspiration_cases.py",
+      "service": "huangque-admin.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "prefix",
+      "mode": "0644",
+      "repository": "server/hermes_ip12/",
+      "runtime": "/home/ubuntu/hermes-web/",
+      "service": "hermes-ip12-preview.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/app.py",
+      "runtime": "/home/ubuntu/leadgen-A/app.py",
+      "service": "leadgen-A.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/app.py",
+      "runtime": "/home/ubuntu/leadgen-B/app.py",
+      "service": "leadgen-B.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/admin.html",
+      "runtime": "/home/ubuntu/leadgen-A/admin.html",
+      "service": "leadgen-A.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/admin.html",
+      "runtime": "/home/ubuntu/leadgen-B/admin.html",
+      "service": "leadgen-B.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/index.html",
+      "runtime": "/home/ubuntu/leadgen-A/index.html",
+      "service": "leadgen-A.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/index.html",
+      "runtime": "/home/ubuntu/leadgen-B/index.html",
+      "service": "leadgen-B.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/keywords.json",
+      "runtime": "/home/ubuntu/leadgen-A/keywords.json",
+      "service": "leadgen-A.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/keywords.json",
+      "runtime": "/home/ubuntu/leadgen-B/keywords.json",
+      "service": "leadgen-B.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/__init__.py",
+      "runtime": "/home/ubuntu/content-api/content_domains/__init__.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/__init__.py",
+      "runtime": "/home/ubuntu/auth-service/content_domains/__init__.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/cos.py",
+      "runtime": "/home/ubuntu/content-api/content_domains/cos.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/cos.py",
+      "runtime": "/home/ubuntu/auth-service/content_domains/cos.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/miniprogram_security.py",
+      "runtime": "/home/ubuntu/content-api/content_domains/miniprogram_security.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/miniprogram_security.py",
+      "runtime": "/home/ubuntu/auth-service/content_domains/miniprogram_security.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/pricing.py",
+      "runtime": "/home/ubuntu/content-api/content_domains/pricing.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/pricing.py",
+      "runtime": "/home/ubuntu/auth-service/content_domains/pricing.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/error_contract.py",
+      "runtime": "/home/ubuntu/content-api/content_domains/error_contract.py",
+      "service": "huangque-content.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
+      "repository": "server/content_domains/error_contract.py",
+      "runtime": "/home/ubuntu/auth-service/content_domains/error_contract.py",
+      "service": "huangque-auth.service"
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0644",
       "repository": "server/dl_service.py",
       "runtime": "/home/ubuntu/dl-service/dl_service.py",
       "service": "huangque-dl.service"
@@ -126,6 +422,7 @@
       "mode": "0644",
       "repository": "site/",
       "runtime": "/var/www/huangquechuanmei/",
+      "health_probe": "site-loopback",
       "service": null
     },
     {
@@ -145,6 +442,9 @@
     "server/",
     "site/",
     "worker/"
+  ],
+  "runtime_candidate_paths": [
+    "deploy/nginx-huangquechuanmei.conf"
   ],
   "schema_version": 1,
   "target": {

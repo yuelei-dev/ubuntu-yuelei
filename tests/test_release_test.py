@@ -1,5 +1,7 @@
 import hashlib
 import importlib.util
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -43,10 +45,20 @@ def catalog_data():
         },
         "impact_prefix": "deploy/test-release/impacts/",
         "runtime_candidate_prefixes": ["server/", "site/", "deploy/systemd/"],
+        "runtime_candidate_paths": [],
         "ignored_repository_paths": ["server/test_example.py"],
         "ignored_repository_prefixes": [],
         "unmanaged_runtime_paths": [],
         "unmanaged_runtime_prefixes": [],
+        "health_probes": {
+            "content-health": {"description": "approved content health contract"},
+            "site-health": {"description": "approved site health contract"},
+            "timer-active": {"description": "approved timer active contract"},
+        },
+        "service_health_probes": {
+            "huangque-content.service": "content-health",
+            "example.timer": "timer-active",
+        },
         "allowed_tools": ["/usr/bin/git", "/usr/bin/systemctl"],
         "allowed_units": ["huangque-content.service", "example.timer"],
         "min_free_bytes": 1,
@@ -65,6 +77,7 @@ def catalog_data():
                 "repository": "site/",
                 "runtime": "/var/www/huangque/",
                 "service": None,
+                "health_probe": "site-health",
                 "mode": "0644",
                 "delete_allowed": True,
                 "allow_unmanaged_runtime": False,
@@ -91,18 +104,8 @@ def impact_data(runtime_changes=None, **overrides):
         "runtime_changes": runtime_changes or [RUNTIME_REPOSITORY_PATH],
         "restart_services": ["huangque-content.service"],
         "required_env": ["EXAMPLE_API_KEY"],
-        "pre_health_checks": [{
-            "url": "http://127.0.0.1:8080/health",
-            "expected_statuses": [200],
-            "timeout_seconds": 1,
-            "interval_seconds": 0.1,
-        }],
-        "health_checks": [{
-            "url": "http://127.0.0.1:8080/health",
-            "expected_statuses": [200],
-            "timeout_seconds": 1,
-            "interval_seconds": 0.1,
-        }],
+        "pre_health_checks": ["content-health"],
+        "health_checks": ["content-health"],
         "external_checks": [],
         "migrations": [],
     }
@@ -117,6 +120,7 @@ class FakeRepository:
         self.modes = {}
         self.checkout_calls = []
         self.checkout_error = None
+        self.checkout_callback = None
 
     def require_commit(self, commit):
         if commit not in self.commits:
@@ -163,6 +167,13 @@ class FakeRepository:
             return None
         return self.modes.get((commit, path), "100644")
 
+    def file_oid_at(self, commit, path):
+        value = self.file_at(commit, path)
+        if value is None:
+            return None
+        header = ("blob %d\0" % len(value)).encode("ascii")
+        return hashlib.sha1(header + value).hexdigest()
+
     def files_at(self, commit):
         self.require_commit(commit)
         return sorted(self.commits[commit])
@@ -184,6 +195,8 @@ class FakeRepository:
         if self.checkout_error:
             raise release_test.ReleaseError(self.checkout_error)
         self.checkout_calls.append((target, expected_origin_url, verify_live_origin))
+        if self.checkout_callback:
+            self.checkout_callback(len(self.checkout_calls))
 
 
 class FakeInspector:
@@ -202,10 +215,12 @@ def review_repository(*, target_impact=None):
     before = b"before\n"
     after = b"after\n"
     raw_impact = json.dumps(target_impact or impact_data(), sort_keys=True).encode("utf-8")
-    base_files = {RUNTIME_REPOSITORY_PATH: before}
+    raw_catalog = release_test._json_bytes(catalog_data())
+    base_files = {RUNTIME_REPOSITORY_PATH: before, CATALOG_PATH: raw_catalog}
     head_files = {
         RUNTIME_REPOSITORY_PATH: after,
         IMPACT_PATH: raw_impact,
+        CATALOG_PATH: raw_catalog,
     }
     return FakeRepository(
         {
@@ -239,6 +254,14 @@ class CatalogAndImpactTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(release_test.ReleaseError, "no catalog mapping"):
             release_test.collect_release_impact(repo, self.catalog, BASE, HEAD)
+
+    def test_catalog_coverage_blocks_unchanged_unclassified_candidate(self):
+        repo = FakeRepository(
+            {BASE: {"server/unknown.py": b"a"}, HEAD: {"server/unknown.py": b"a"}},
+            {HEAD: [BASE]},
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "unclassified"):
+            release_test.validate_catalog_coverage(repo, self.catalog, HEAD)
 
     def test_ignored_repository_file_needs_no_impact(self):
         repo = FakeRepository(
@@ -303,6 +326,14 @@ class CatalogAndImpactTests(unittest.TestCase):
         with self.assertRaisesRegex(release_test.ReleaseError, "immutable"):
             release_test.collect_release_impact(repo, self.catalog, BASE, HEAD)
 
+    def test_release_ids_are_globally_unique_at_target_commit(self):
+        repo = review_repository()
+        repo.commits[HEAD]["deploy/test-release/impacts/duplicate.json"] = (
+            repo.commits[HEAD][IMPACT_PATH]
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "globally unique"):
+            release_test.collect_release_impact(repo, self.catalog, BASE, HEAD)
+
     def test_arbitrary_external_command_is_fail_closed(self):
         impact = impact_data(external_checks=[{
             "name": "claimed-no-charge",
@@ -323,13 +354,20 @@ class CatalogAndImpactTests(unittest.TestCase):
         with self.assertRaisesRegex(release_test.ReleaseError, "forbid database"):
             release_test.validate_impact(impact, self.catalog)
 
-    def test_public_health_check_is_rejected(self):
-        impact = impact_data(health_checks=[{
-            "url": "https://yuelei.huangquechuanmei.com/health",
-            "expected_statuses": [200],
-        }])
-        with self.assertRaisesRegex(release_test.ReleaseError, "loopback"):
+    def test_feature_pr_cannot_supply_an_unregistered_health_target(self):
+        impact = impact_data(health_checks=["unregistered-action-route"])
+        with self.assertRaisesRegex(release_test.ReleaseError, "probe ids"):
             release_test.validate_impact(impact, self.catalog)
+
+    def test_impact_fields_and_empty_execution_lists_are_strict(self):
+        with self.assertRaisesRegex(release_test.ReleaseError, "fields"):
+            release_test.validate_impact(
+                dict(impact_data(), unexpected=True), self.catalog,
+            )
+        with self.assertRaisesRegex(release_test.ReleaseError, "executable"):
+            release_test.validate_impact(
+                impact_data(external_checks={}), self.catalog,
+            )
 
     def test_systemd_dropin_derives_allowlisted_service(self):
         mapping = self.catalog.map(
@@ -368,6 +406,17 @@ class ReviewEvidenceTests(unittest.TestCase):
                 {"pr-wrong": {"base": BASE, "head": HEAD}},
             )
 
+    def test_merge_runtime_blob_must_equal_reviewed_head(self):
+        self.repo.commits[MERGE][RUNTIME_REPOSITORY_PATH] = b"unreviewed\n"
+        collected = release_test.collect_release_impact(
+            self.repo, self.catalog, BASE, MERGE,
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "differs"):
+            release_test.verify_review_evidence(
+                self.repo, self.catalog, BASE, MERGE, collected["impacts"],
+                {"pr-999-example": {"base": BASE, "head": HEAD}},
+            )
+
     def test_review_range_parser_requires_merge_base_and_head(self):
         parsed = release_test._parse_reviewed_head_arguments([
             "pr-999-example=%s..%s" % (BASE, HEAD),
@@ -391,6 +440,10 @@ class ReleaseEngineTests(unittest.TestCase):
         self.before = b"before\n"
         self.after = b"after\n"
         self.catalog = release_test.RuntimeCatalog(catalog_data())
+        (self.source / CATALOG_PATH).parent.mkdir(parents=True)
+        (self.source / CATALOG_PATH).write_bytes(
+            release_test._json_bytes(catalog_data())
+        )
         self.repo = review_repository()
         self.inspector = FakeInspector()
         self._write_runtime("/etc/hostname", b"test-host\n")
@@ -426,9 +479,7 @@ class ReleaseEngineTests(unittest.TestCase):
         arguments = {
             "repo": self.repo,
             "inspector": self.inspector,
-            "health_getter": lambda _url: 200,
             "environment": {"EXAMPLE_API_KEY": "present-never-logged"},
-            "sleeper": lambda _seconds: None,
         }
         arguments.update(overrides)
         return release_test.ReleaseEngine(
@@ -447,6 +498,7 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual(BASE, state["deployed_main_commit"])
         self.assertEqual([RUNTIME_PATH], state["managed_runtime_paths"])
         self.assertEqual(RUNTIME_REPOSITORY_PATH, state["repository_paths"][RUNTIME_PATH])
+        self.assertEqual(CATALOG_PATH, state["runtime_catalog"]["repository_path"])
 
     def test_wrong_host_is_rejected(self):
         identity_path = self._mapped("/etc/huangque/release-identity.json")
@@ -500,6 +552,85 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual("already_deployed", result["status"])
         self.assertEqual([], result["files"])
 
+    def test_idempotent_plan_still_requires_canonical_checkout(self):
+        self.initialize()
+        self.repo.checkout_error = "wrong checkout"
+        with self.assertRaisesRegex(release_test.ReleaseError, "wrong checkout"):
+            self.engine().build_plan(BASE, {})
+
+    def test_dirty_worktree_catalog_is_rejected(self):
+        self.initialize()
+        (self.source / CATALOG_PATH).write_bytes(b"{}\n")
+        with self.assertRaisesRegex(release_test.ReleaseError, "differs"):
+            self.engine().status()
+
+    def test_ledger_catalog_hash_mismatch_is_rejected(self):
+        self.initialize()
+        state_path = self._mapped("/var/lib/huangque-release/state.json")
+        state = json.loads(state_path.read_text("utf-8"))
+        state["runtime_catalog"]["sha256"] = "0" * 64
+        self._write_json("/var/lib/huangque-release/state.json", state)
+        with self.assertRaisesRegex(release_test.ReleaseError, "does not match Git"):
+            self.engine().status()
+
+    def test_initialize_rechecks_runtime_inside_lock_before_ledger_write(self):
+        def mutate_after_first_checkout(call_number):
+            if call_number == 1:
+                self._write_runtime(RUNTIME_PATH, b"changed-during-init")
+        self.repo.checkout_callback = mutate_after_first_checkout
+        with self.assertRaisesRegex(release_test.ReleaseError, "does not exactly match"):
+            self.initialize()
+        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
+
+    def test_initialize_rechecks_identity_before_ledger_write(self):
+        engine = self.engine()
+        original = engine.verify_identity
+        calls = 0
+
+        def mutate_after_first_identity_read():
+            nonlocal calls
+            calls += 1
+            result = original()
+            if calls == 1:
+                identity = dict(result)
+                identity["host_id"] = "changed-during-init"
+                self._write_json("/etc/huangque/release-identity.json", identity)
+            return result
+
+        engine.verify_identity = mutate_after_first_identity_read
+        with self.assertRaisesRegex(release_test.ReleaseError, "identity is wrong"):
+            engine.initialize(BASE, "test", verify_live_origin=False)
+        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
+
+    def test_initialize_rechecks_checkout_before_ledger_write(self):
+        def invalidate_after_first_checkout(call_number):
+            if call_number == 1:
+                self.repo.checkout_error = "checkout changed during initialization"
+        self.repo.checkout_callback = invalidate_after_first_checkout
+        with self.assertRaisesRegex(release_test.ReleaseError, "checkout changed"):
+            self.initialize()
+        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
+
+    def test_initialize_rechecks_extra_inventory_before_ledger_write(self):
+        engine = self.engine()
+        original = engine._inventory_drift
+        calls = 0
+
+        def add_extra_after_first_inventory(expected_paths):
+            nonlocal calls
+            calls += 1
+            result = original(expected_paths)
+            if calls == 1:
+                self._write_runtime(
+                    "/home/ubuntu/content-api/content_domains/late.py", b"late",
+                )
+            return result
+
+        engine._inventory_drift = add_extra_after_first_inventory
+        with self.assertRaisesRegex(release_test.ReleaseError, "changed during"):
+            engine.initialize(BASE, "test", verify_live_origin=False)
+        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
+
     def test_plan_fails_when_required_environment_name_is_missing(self):
         self.initialize()
         with self.assertRaisesRegex(release_test.ReleaseError, "EXAMPLE_API_KEY") as caught:
@@ -516,15 +647,13 @@ class ReleaseEngineTests(unittest.TestCase):
                 MERGE, {"pr-999-example": {"base": BASE, "head": HEAD}},
             )
 
-    def test_plan_fails_when_pre_release_loopback_is_unhealthy(self):
+    def test_plan_only_reports_named_health_probes_without_calling_routes(self):
         self.initialize()
-        with self.assertRaisesRegex(release_test.ReleaseError, "did not become ready"):
-            self.engine(
-                health_getter=lambda _url: 503,
-                clock=iter([0, 2]).__next__,
-            ).build_plan(
-                MERGE, {"pr-999-example": {"base": BASE, "head": HEAD}},
-            )
+        result = self.engine().build_plan(
+            MERGE, {"pr-999-example": {"base": BASE, "head": HEAD}},
+        )
+        self.assertEqual(["content-health"], result["pre_health_probes"])
+        self.assertEqual(["content-health"], result["post_health_probes"])
 
     def test_stale_lock_file_does_not_block_initialization(self):
         lock = self._mapped("/var/lib/huangque-release/release.lock")
@@ -582,6 +711,17 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertNotIn('add_parser("rollback")', script)
         self.assertNotIn('add_parser("recover")', script)
         self.assertIn("planning_only_no_apply", script)
+
+    def test_runtime_cli_rejects_alternate_trust_roots(self):
+        for flag, value in (
+            ("--catalog", "alternate.json"),
+            ("--identity-file", "/tmp/identity.json"),
+            ("--state-root", "/tmp/state"),
+            ("--runtime-root", "/tmp/runtime"),
+        ):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    release_test.main(["status", flag, value])
 
 
 if __name__ == "__main__":

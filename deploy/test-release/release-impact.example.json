@@ -1,22 +1,8 @@
 {
   "external_checks": [],
-  "health_checks": [
-    {
-      "expected_statuses": [200, 401],
-      "interval_seconds": 1,
-      "timeout_seconds": 60,
-      "url": "http://127.0.0.1:8080/api/content/health"
-    }
-  ],
+  "health_checks": ["content-health"],
   "migrations": [],
-  "pre_health_checks": [
-    {
-      "expected_statuses": [200, 401],
-      "interval_seconds": 1,
-      "timeout_seconds": 30,
-      "url": "http://127.0.0.1:8080/api/content/health"
-    }
-  ],
+  "pre_health_checks": ["content-health"],
   "release_id": "pr-000-example",
   "required_env": ["EXAMPLE_API_KEY"],
   "restart_services": ["huangque-content.service"],

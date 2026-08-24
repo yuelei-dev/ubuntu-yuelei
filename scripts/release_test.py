@@ -21,9 +21,6 @@ import stat
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -36,6 +33,7 @@ else:  # pragma: no cover - the release host is Linux
 SCHEMA_VERSION = 1
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 RELEASE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,79}$")
+PROBE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,79}$")
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,79}$")
 UNIT_RE = re.compile(r"^[A-Za-z0-9@_.:-]+\.(?:service|timer)$")
 DEFAULT_CATALOG = "deploy/test-release/runtime-catalog.json"
@@ -323,6 +321,22 @@ class GitRepository:
             raise ReleaseError("Git tree returned an invalid file record")
         return header[0].decode("ascii", "strict")
 
+    def file_oid_at(self, commit, repository_path):
+        self.require_commit(commit)
+        repository_path = _relative_repository_path(repository_path)
+        raw = self.run(
+            ["ls-tree", "-z", commit, "--", repository_path], binary=True,
+        ).stdout
+        if not raw:
+            return None
+        header = raw.split(b"\t", 1)[0].split()
+        if len(header) != 3 or header[1] != b"blob":
+            raise ReleaseError("Git tree returned an invalid blob record")
+        value = header[2].decode("ascii", "strict")
+        if not re.fullmatch(r"[0-9a-f]{40,64}", value):
+            raise ReleaseError("Git blob object id is invalid")
+        return value
+
     def files_at(self, commit):
         self.require_commit(commit)
         raw = self.run(
@@ -356,9 +370,13 @@ class GitRepository:
 
 
 class RuntimeCatalog:
-    def __init__(self, data):
+    def __init__(self, data, *, source_bytes=None,
+                 repository_path=DEFAULT_CATALOG):
         if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
             raise ReleaseError("runtime catalog schema version is unsupported")
+        self.repository_path = _relative_repository_path(repository_path)
+        self.source_bytes = bytes(source_bytes or _json_bytes(data))
+        self.source_sha256 = _sha256(self.source_bytes)
         target = data.get("target") or {}
         if (target.get("environment") != "test" or not target.get("host_id")
                 or target.get("origin_url") !=
@@ -371,6 +389,10 @@ class RuntimeCatalog:
         self.candidate_prefixes = tuple(
             _relative_repository_path(item).rstrip("/") + "/"
             for item in data.get("runtime_candidate_prefixes") or []
+        )
+        self.candidate_paths = frozenset(
+            _relative_repository_path(item)
+            for item in data.get("runtime_candidate_paths") or []
         )
         self.ignored_paths = frozenset(
             _relative_repository_path(item)
@@ -397,6 +419,29 @@ class RuntimeCatalog:
             _absolute_runtime_path(item).rstrip("/") + "/"
             for item in data.get("unmanaged_runtime_prefixes") or []
         )
+        raw_probes = data.get("health_probes")
+        if not isinstance(raw_probes, dict) or not raw_probes:
+            raise ReleaseError("runtime catalog health probes are incomplete")
+        self.health_probes = {}
+        for probe_id, raw in raw_probes.items():
+            if not PROBE_ID_RE.fullmatch(str(probe_id)) or not isinstance(raw, dict):
+                raise ReleaseError("runtime catalog health probe is invalid")
+            if set(raw) != {"description"} or not str(raw["description"]).strip():
+                raise ReleaseError("runtime catalog health probe contract is invalid")
+            self.health_probes[str(probe_id)] = {
+                "id": str(probe_id),
+                "description": str(raw["description"]).strip(),
+            }
+        raw_service_probes = data.get("service_health_probes")
+        if not isinstance(raw_service_probes, dict):
+            raise ReleaseError("runtime catalog service health probes are invalid")
+        self.service_health_probes = {}
+        for unit, probe_id in raw_service_probes.items():
+            if (not UNIT_RE.fullmatch(str(unit))
+                    or str(unit) not in self.allowed_units
+                    or str(probe_id) not in self.health_probes):
+                raise ReleaseError("runtime catalog service health probe is invalid")
+            self.service_health_probes[str(unit)] = str(probe_id)
         self.rules = []
         for raw in data.get("rules") or []:
             kind = raw.get("kind")
@@ -408,27 +453,42 @@ class RuntimeCatalog:
                 repository = repository.rstrip("/") + "/"
                 runtime = runtime.rstrip("/") + "/"
             service = raw.get("service")
+            services = raw.get("services")
             service_from_repository = raw.get("service_from_repository") is True
+            if services is not None and (
+                    not isinstance(services, list) or not services
+                    or len(set(services)) != len(services)
+                    or any(not UNIT_RE.fullmatch(str(item)) for item in services)):
+                raise ReleaseError("runtime catalog service list is invalid")
             if service is not None and not UNIT_RE.fullmatch(str(service)):
                 raise ReleaseError("runtime catalog service name is invalid")
-            if service is not None and service_from_repository:
+            if service is not None and services is not None:
                 raise ReleaseError("runtime catalog service strategy is ambiguous")
-            if service is not None and service not in self.allowed_units:
+            if (service is not None or services is not None) and service_from_repository:
+                raise ReleaseError("runtime catalog service strategy is ambiguous")
+            rule_services = ([str(service)] if service is not None
+                             else [str(item) for item in services or []])
+            if not set(rule_services).issubset(self.allowed_units):
                 raise ReleaseError("runtime catalog service is not allowlisted")
             if service_from_repository and kind != "prefix":
                 raise ReleaseError("derived systemd units require a prefix mapping")
             mode_text = str(raw.get("mode") or "0644")
             if not re.fullmatch(r"0[0-7]{3}", mode_text):
                 raise ReleaseError("runtime catalog file mode is invalid")
+            health_probe = raw.get("health_probe")
+            if health_probe is not None and str(health_probe) not in self.health_probes:
+                raise ReleaseError("runtime catalog rule health probe is invalid")
             self.rules.append({
                 "kind": kind,
                 "repository": repository,
                 "runtime": runtime,
                 "service": service,
+                "services": rule_services,
                 "service_from_repository": service_from_repository,
                 "daemon_reload": raw.get("daemon_reload") is True,
                 "delete_allowed": raw.get("delete_allowed") is True,
                 "allow_unmanaged_runtime": raw.get("allow_unmanaged_runtime") is True,
+                "health_probe": None if health_probe is None else str(health_probe),
                 "mode": int(mode_text, 8),
             })
         if (not self.rules or not self.candidate_prefixes
@@ -440,7 +500,13 @@ class RuntimeCatalog:
     @classmethod
     def load(cls, source_root, path):
         relative = _relative_repository_path(path)
-        return cls(_load_json(Path(source_root) / relative, "runtime catalog"))
+        source = Path(source_root) / relative
+        try:
+            raw = source.read_bytes()
+            data = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ReleaseError("runtime catalog is unavailable or invalid") from exc
+        return cls(data, source_bytes=raw, repository_path=relative)
 
     @classmethod
     def load_from_git(cls, repo, commit, path, *, required=True):
@@ -454,11 +520,13 @@ class RuntimeCatalog:
             data = json.loads(raw.decode("utf-8"))
         except (UnicodeError, json.JSONDecodeError) as exc:
             raise ReleaseError("runtime catalog in Git is invalid") from exc
-        return cls(data)
+        return cls(data, source_bytes=raw, repository_path=relative)
 
     def is_candidate(self, repository_path):
         path = _relative_repository_path(repository_path)
-        return any(path.startswith(prefix) for prefix in self.candidate_prefixes)
+        return path in self.candidate_paths or any(
+            path.startswith(prefix) for prefix in self.candidate_prefixes
+        )
 
     def is_ignored(self, repository_path):
         path = _relative_repository_path(repository_path)
@@ -472,10 +540,10 @@ class RuntimeCatalog:
             path.startswith(prefix) for prefix in self.unmanaged_runtime_prefixes
         )
 
-    def map(self, repository_path, *, strict_candidate=True):
+    def mappings(self, repository_path, *, strict_candidate=True):
         path = _relative_repository_path(repository_path)
         if self.is_ignored(path):
-            return None
+            return []
         matches = []
         for rule in self.rules:
             if rule["kind"] == "exact" and path == rule["repository"]:
@@ -488,57 +556,54 @@ class RuntimeCatalog:
         if not matches:
             if strict_candidate and self.is_candidate(path):
                 raise ReleaseError("runtime candidate has no catalog mapping: %s" % path)
-            return None
+            return []
         longest = max(item[0] for item in matches)
         strongest = [item for item in matches if item[0] == longest]
-        if len(strongest) != 1:
-            raise ReleaseError("runtime catalog has ambiguous mappings for: %s" % path)
-        _, rule, suffix = strongest[0]
-        mapped = dict(rule)
-        if rule["service_from_repository"]:
-            first = suffix.split("/", 1)[0]
-            if first.endswith((".service.d", ".timer.d")):
-                first = first[:-2]
-            if not UNIT_RE.fullmatch(first):
-                raise ReleaseError(
-                    "systemd runtime path does not identify a service or timer: %s" % path
-                )
-            mapped["service"] = first
-            if first not in self.allowed_units:
-                raise ReleaseError("derived systemd unit is not allowlisted")
-        mapped["repository_path"] = path
-        mapped["runtime_path"] = (
-            rule["runtime"] + suffix if rule["kind"] == "prefix"
-            else rule["runtime"]
+        results = []
+        seen_runtime = set()
+        for _length, rule, suffix in strongest:
+            mapped = dict(rule)
+            if rule["service_from_repository"]:
+                first = suffix.split("/", 1)[0]
+                if first.endswith((".service.d", ".timer.d")):
+                    first = first[:-2]
+                if not UNIT_RE.fullmatch(first):
+                    raise ReleaseError(
+                        "systemd runtime path does not identify a service or timer: %s" % path
+                    )
+                mapped["service"] = first
+                mapped["services"] = [first]
+                if first not in self.allowed_units:
+                    raise ReleaseError("derived systemd unit is not allowlisted")
+            mapped["repository_path"] = path
+            mapped["runtime_path"] = (
+                rule["runtime"] + suffix if rule["kind"] == "prefix"
+                else rule["runtime"]
+            )
+            if mapped["runtime_path"] in seen_runtime:
+                raise ReleaseError("runtime catalog repeats a runtime mapping for: %s" % path)
+            seen_runtime.add(mapped["runtime_path"])
+            results.append(mapped)
+        return results
+
+    def map(self, repository_path, *, strict_candidate=True):
+        mappings = self.mappings(
+            repository_path, strict_candidate=strict_candidate,
         )
-        return mapped
-
-
-def _validate_health_check(item):
-    if not isinstance(item, dict):
-        raise ReleaseError("health check must be an object")
-    url = str(item.get("url") or "")
-    parsed = urllib.parse.urlsplit(url)
-    if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
-            or parsed.port is None or parsed.username is not None
-            or parsed.password is not None or parsed.query or parsed.fragment
-            or not parsed.path.startswith("/")):
-        raise ReleaseError("health checks must use an exact loopback HTTP URL")
-    statuses = item.get("expected_statuses")
-    if (not isinstance(statuses, list) or not statuses
-            or any(not isinstance(value, int) or not 100 <= value <= 599
-                   for value in statuses)):
-        raise ReleaseError("health check expected statuses are invalid")
-    return {
-        "url": url,
-        "expected_statuses": sorted(set(statuses)),
-        "timeout_seconds": min(max(int(item.get("timeout_seconds") or 60), 1), 120),
-        "interval_seconds": min(max(float(item.get("interval_seconds") or 1), .1), 5),
-    }
+        if len(mappings) > 1:
+            raise ReleaseError("runtime path has multiple catalog targets: %s" % repository_path)
+        return mappings[0] if mappings else None
 
 
 def validate_impact(data, catalog):
-    if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION:
+    required_fields = {
+        "schema_version", "release_id", "runtime_changes", "restart_services",
+        "required_env", "pre_health_checks", "health_checks",
+        "external_checks", "migrations",
+    }
+    if not isinstance(data, dict) or set(data) != required_fields:
+        raise ReleaseError("release impact fields are invalid")
+    if data.get("schema_version") != SCHEMA_VERSION:
         raise ReleaseError("release impact schema version is unsupported")
     release_id = str(data.get("release_id") or "")
     if not RELEASE_ID_RE.fullmatch(release_id):
@@ -548,36 +613,57 @@ def validate_impact(data, catalog):
             or len(set(runtime_changes)) != len(runtime_changes)):
         raise ReleaseError("release impact must declare unique runtime changes")
     runtime_changes = [_relative_repository_path(item) for item in runtime_changes]
-    mappings = [catalog.map(item) for item in runtime_changes]
-    if any(item is None for item in mappings):
+    mapping_groups = [catalog.mappings(item) for item in runtime_changes]
+    if any(not item for item in mapping_groups):
         raise ReleaseError("release impact declared a non-runtime path")
-    services = data.get("restart_services") or []
+    mappings = [mapping for group in mapping_groups for mapping in group]
+    services = data.get("restart_services")
     if (not isinstance(services, list) or len(set(services)) != len(services)
             or any(not UNIT_RE.fullmatch(str(item)) for item in services)
             or not set(services).issubset(catalog.allowed_units)):
         raise ReleaseError("release impact services are invalid")
-    required_services = {item["service"] for item in mappings if item.get("service")}
+    required_services = {
+        service for item in mappings for service in item.get("services", [])
+    }
     if not required_services.issubset(set(services)):
         raise ReleaseError("release impact omits a required service restart")
-    required_env = data.get("required_env") or []
+    required_env = data.get("required_env")
     if (not isinstance(required_env, list) or len(set(required_env)) != len(required_env)
             or any(not ENV_NAME_RE.fullmatch(str(item)) for item in required_env)):
         raise ReleaseError("release impact environment declarations are invalid")
-    pre_health_checks = [
-        _validate_health_check(item) for item in data.get("pre_health_checks") or []
-    ]
-    health_checks = [
-        _validate_health_check(item) for item in data.get("health_checks") or []
-    ]
-    if runtime_changes and not health_checks:
-        raise ReleaseError("runtime changes require a loopback health check")
-    if services and not pre_health_checks:
-        raise ReleaseError("a service restart requires a pre-release loopback health check")
-    if data.get("external_checks"):
+    pre_health_checks = data.get("pre_health_checks")
+    health_checks = data.get("health_checks")
+    for label, values in (
+            ("pre-release", pre_health_checks), ("post-release", health_checks)):
+        if (not isinstance(values, list) or len(set(values)) != len(values)
+                or any(not isinstance(item, str)
+                       or item not in catalog.health_probes for item in values)):
+            raise ReleaseError("%s health probe ids are invalid" % label)
+    if not health_checks:
+        raise ReleaseError("runtime changes require a named post-release health probe")
+    required_probes = {
+        catalog.service_health_probes[service]
+        for service in services if service in catalog.service_health_probes
+    } | {
+        mapping["health_probe"] for mapping in mappings if mapping.get("health_probe")
+    }
+    missing_service_probes = sorted(
+        service for service in services
+        if service not in catalog.service_health_probes
+    )
+    if missing_service_probes:
+        raise ReleaseError(
+            "runtime catalog lacks health probes for services: %s"
+            % ", ".join(missing_service_probes)
+        )
+    if (not required_probes.issubset(set(pre_health_checks))
+            or not required_probes.issubset(set(health_checks))):
+        raise ReleaseError("release impact omits required named health probes")
+    if not isinstance(data.get("external_checks"), list) or data["external_checks"]:
         raise ReleaseError(
             "phase-one release contracts forbid executable external checks"
         )
-    if data.get("migrations"):
+    if not isinstance(data.get("migrations"), list) or data["migrations"]:
         raise ReleaseError(
             "phase-one release contracts forbid database migrations"
         )
@@ -592,6 +678,40 @@ def validate_impact(data, catalog):
         "external_checks": [],
         "migrations": [],
     }
+
+
+def collect_impact_index(repo, catalog, commit):
+    records = {}
+    for path in repo.files_at(commit):
+        if not path.startswith(catalog.impact_prefix) or not path.endswith(".json"):
+            continue
+        raw = repo.file_at(commit, path)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (AttributeError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ReleaseError("release impact JSON is invalid: %s" % path) from exc
+        if not isinstance(data, dict) or not RELEASE_ID_RE.fullmatch(
+                str(data.get("release_id") or "")):
+            raise ReleaseError("release impact id is invalid: %s" % path)
+        release_id = str(data["release_id"])
+        if release_id in records:
+            raise ReleaseError("release impact ids must be globally unique")
+        records[release_id] = {"repository_path": path, "sha256": _sha256(raw)}
+    return records
+
+
+def validate_catalog_coverage(repo, catalog, commit):
+    unmapped = []
+    for path in repo.files_at(commit):
+        if not catalog.is_candidate(path) or catalog.is_ignored(path):
+            continue
+        if not catalog.mappings(path, strict_candidate=False):
+            unmapped.append(path)
+    if unmapped:
+        raise ReleaseError(
+            "runtime catalog leaves candidate files unclassified: %s"
+            % ", ".join(sorted(unmapped))
+        )
 
 
 def collect_release_impact(
@@ -626,12 +746,11 @@ def collect_release_impact(
         mapping_errors = []
         for item in catalogs:
             try:
-                mapping = item.map(path)
+                mapping = item.mappings(path)
             except ReleaseError as exc:
                 mapping_errors.append(exc)
                 continue
-            if mapping is not None:
-                mappings.append(mapping)
+            mappings.extend(mapping)
         if not mappings and mapping_errors:
             raise mapping_errors[0]
         if not mappings:
@@ -674,6 +793,7 @@ def collect_release_impact(
         raise ReleaseError(
             "release impact declares unchanged runtime paths: %s" % ", ".join(extra)
         )
+    collect_impact_index(repo, catalog, newer)
     release_ids = [item["release_id"] for item in impacts]
     if len(set(release_ids)) != len(release_ids):
         raise ReleaseError("release impact ids must be unique in a commit range")
@@ -726,8 +846,10 @@ def verify_review_evidence(repo, catalog, older, target, impacts, evidence):
                 "reviewed Head is not the unique second parent of a main merge commit"
             )
         merge_commit, first_parent = matches[0]
-        if repo.merge_base(first_parent, head) != base:
-            raise ReleaseError("review evidence merge base does not match Git topology")
+        if base != first_parent or repo.merge_base(first_parent, head) != base:
+            raise ReleaseError(
+                "reviewed Head must include the exact main parent used by the merge"
+            )
         pr_contract = collect_release_impact(repo, catalog, base, head)
         if len(pr_contract["impacts"]) != 1:
             raise ReleaseError("reviewed PR range must contain exactly one release impact")
@@ -737,6 +859,12 @@ def verify_review_evidence(repo, catalog, older, target, impacts, evidence):
                 or reviewed_impact["blob_sha256"] != impact["blob_sha256"]
                 or reviewed_impact["runtime_changes"] != impact["runtime_changes"]):
             raise ReleaseError("reviewed Head is not bound to the target impact blob")
+        for repository_path in impact["runtime_changes"]:
+            if repo.file_at(merge_commit, repository_path) != repo.file_at(
+                    head, repository_path):
+                raise ReleaseError(
+                    "merge commit runtime content differs from the reviewed Head"
+                )
         results[release_id] = {
             "merge_base": base,
             "head": head,
@@ -783,8 +911,7 @@ class ReleaseEngine:
     def __init__(
             self, source_root, runtime_root, catalog, *,
             identity_path=DEFAULT_IDENTITY_FILE, state_root=DEFAULT_STATE_ROOT,
-            repo=None, inspector=None, health_getter=None, environment=None,
-            clock=None, sleeper=None):
+            repo=None, inspector=None, environment=None):
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime_root = Path(os.path.abspath(runtime_root))
         self.catalog = catalog
@@ -793,10 +920,40 @@ class ReleaseEngine:
         self.state_root = _mapped_path(self.runtime_root, self.state_root_path)
         self.repo = repo or GitRepository(self.source_root)
         self.inspector = inspector or SystemInspector()
-        self.health_getter = health_getter or self._http_status
         self.environment = dict(os.environ if environment is None else environment)
-        self.clock = clock or time.monotonic
-        self.sleeper = sleeper or time.sleep
+
+    def _catalog_record(self, commit, *, expected=None):
+        path = DEFAULT_CATALOG
+        if self.catalog.repository_path != path:
+            raise ReleaseError("release engine must use the canonical runtime catalog")
+        raw = self.repo.file_at(commit, path)
+        oid = self.repo.file_oid_at(commit, path)
+        if raw is None or oid is None:
+            raise ReleaseError("canonical runtime catalog is missing from Git")
+        source = self.source_root / Path(*PurePosixPath(path).parts)
+        resolved_root = self.source_root.resolve(strict=True)
+        try:
+            resolved_source = source.resolve(strict=True)
+            info = os.lstat(source)
+        except (FileNotFoundError, OSError) as exc:
+            raise ReleaseError("canonical runtime catalog is unavailable") from exc
+        if (os.path.commonpath((str(resolved_root), str(resolved_source)))
+                != str(resolved_root) or resolved_source != source.absolute()
+                or stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)):
+            raise ReleaseError("canonical runtime catalog path is unsafe")
+        worktree_raw = source.read_bytes()
+        record = {
+            "repository_path": path,
+            "blob_oid": oid,
+            "sha256": _sha256(raw),
+            "schema_version": SCHEMA_VERSION,
+        }
+        if (worktree_raw != raw or self.catalog.source_bytes != raw
+                or self.catalog.source_sha256 != record["sha256"]):
+            raise ReleaseError("working tree runtime catalog differs from locked Git blob")
+        if expected is not None and record != expected:
+            raise ReleaseError("deployment ledger runtime catalog does not match Git")
+        return record
 
     @property
     def state_path(self):
@@ -924,7 +1081,8 @@ class ReleaseEngine:
         required_keys = {
             "schema_version", "environment", "host_id", "deployed_main_commit",
             "runtime_hashes", "repository_paths", "managed_runtime_paths",
-            "last_release_id", "last_successful_release",
+            "last_release_id", "last_successful_release", "runtime_catalog",
+            "accepted_impacts",
         }
         if set(state) != required_keys:
             raise ReleaseError("deployment ledger fields are invalid")
@@ -934,10 +1092,32 @@ class ReleaseEngine:
                 or not COMMIT_RE.fullmatch(str(state["deployed_main_commit"]))
                 or not isinstance(state["runtime_hashes"], dict)
                 or not isinstance(state["repository_paths"], dict)
+                or not isinstance(state["accepted_impacts"], dict)
                 or not isinstance(state["managed_runtime_paths"], list)
                 or sorted(state["runtime_hashes"]) != sorted(state["managed_runtime_paths"])
                 or set(state["runtime_hashes"]) != set(state["repository_paths"])):
             raise ReleaseError("deployment ledger is invalid")
+        catalog_record = state["runtime_catalog"]
+        if (not isinstance(catalog_record, dict)
+                or set(catalog_record) != {
+                    "repository_path", "blob_oid", "sha256", "schema_version",
+                }
+                or catalog_record.get("repository_path") != DEFAULT_CATALOG
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(
+                    catalog_record.get("blob_oid") or ""))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(
+                    catalog_record.get("sha256") or ""))
+                or catalog_record.get("schema_version") != SCHEMA_VERSION):
+            raise ReleaseError("deployment ledger runtime catalog record is invalid")
+        for release_id, record in state["accepted_impacts"].items():
+            if (not RELEASE_ID_RE.fullmatch(str(release_id))
+                    or not isinstance(record, dict)
+                    or set(record) != {"repository_path", "sha256"}
+                    or not str(record.get("repository_path") or "").startswith(
+                        self.catalog.impact_prefix)
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(
+                        record.get("sha256") or ""))):
+                raise ReleaseError("deployment ledger accepted impact record is invalid")
         for runtime_path, expected in state["runtime_hashes"].items():
             _absolute_runtime_path(runtime_path)
             _relative_repository_path(state["repository_paths"][runtime_path])
@@ -957,17 +1137,18 @@ class ReleaseEngine:
         runtime_hashes = {}
         repository_paths = {}
         for repository_path in self.repo.files_at(commit):
-            mapping = self.catalog.map(repository_path, strict_candidate=False)
-            if mapping is None:
+            mappings = self.catalog.mappings(repository_path)
+            if not mappings:
                 continue
             if self.repo.file_mode_at(commit, repository_path) not in {"100644", "100755"}:
                 raise ReleaseError("runtime source must be a regular Git blob")
-            runtime_path = mapping["runtime_path"]
-            if runtime_path in repository_paths:
-                raise ReleaseError("multiple repository files map to one runtime path")
             content = self.repo.file_at(commit, repository_path)
-            runtime_hashes[runtime_path] = self._state_hash(content)
-            repository_paths[runtime_path] = repository_path
+            for mapping in mappings:
+                runtime_path = mapping["runtime_path"]
+                if runtime_path in repository_paths:
+                    raise ReleaseError("multiple repository files map to one runtime path")
+                runtime_hashes[runtime_path] = self._state_hash(content)
+                repository_paths[runtime_path] = repository_path
         if not runtime_hashes:
             raise ReleaseError("runtime catalog produced no managed targets")
         return runtime_hashes, repository_paths
@@ -1021,6 +1202,13 @@ class ReleaseEngine:
     def status(self):
         self.verify_identity()
         state = self.load_state()
+        self._catalog_record(
+            state["deployed_main_commit"], expected=state["runtime_catalog"],
+        )
+        if collect_impact_index(
+                self.repo, self.catalog, state["deployed_main_commit"]
+        ) != state["accepted_impacts"]:
+            raise ReleaseError("deployment ledger accepted impacts differ from Git")
         drift = []
         for runtime_path, expected in sorted(state["runtime_hashes"].items()):
             if self._state_hash(_read_regular(self.runtime_root, runtime_path)) != expected:
@@ -1040,33 +1228,59 @@ class ReleaseEngine:
     def initialize(self, deployed_commit, confirmation, *, verify_live_origin=True):
         if confirmation != "test":
             raise ReleaseError("initialize requires exact test environment confirmation")
-        identity = self.verify_identity()
-        if _read_regular(self.runtime_root, self._state_runtime_path("state.json")) is not None:
-            raise ReleaseError("deployment ledger is already initialized")
-        self.repo.verify_checkout(
-            deployed_commit, self.catalog.target["origin_url"],
-            verify_live_origin=verify_live_origin,
-        )
-        runtime_hashes, repository_paths = self._expected_runtime(deployed_commit)
-        mismatches = [
-            path for path, expected in runtime_hashes.items()
-            if self._state_hash(_read_regular(self.runtime_root, path)) != expected
-        ]
-        unexpected = self._inventory_drift(set(runtime_hashes))
-        if mismatches or unexpected:
-            raise ReleaseError("runtime inventory does not exactly match deployed commit")
-        state = {
-            "schema_version": SCHEMA_VERSION,
-            "environment": identity["environment"],
-            "host_id": identity["host_id"],
-            "deployed_main_commit": deployed_commit,
-            "runtime_hashes": runtime_hashes,
-            "repository_paths": repository_paths,
-            "managed_runtime_paths": sorted(runtime_hashes),
-            "last_release_id": None,
-            "last_successful_release": None,
-        }
         with self._release_lock():
+            if _read_regular(self.runtime_root, self._state_runtime_path("state.json")) is not None:
+                raise ReleaseError("deployment ledger was initialized concurrently")
+            identity = self.verify_identity()
+            self.repo.verify_checkout(
+                deployed_commit, self.catalog.target["origin_url"],
+                verify_live_origin=verify_live_origin,
+            )
+            catalog_record = self._catalog_record(deployed_commit)
+            validate_catalog_coverage(self.repo, self.catalog, deployed_commit)
+            runtime_hashes, repository_paths = self._expected_runtime(deployed_commit)
+            mismatches = [
+                path for path, expected in runtime_hashes.items()
+                if self._state_hash(_read_regular(self.runtime_root, path)) != expected
+            ]
+            unexpected = self._inventory_drift(set(runtime_hashes))
+            if mismatches or unexpected:
+                raise ReleaseError("runtime inventory does not exactly match deployed commit")
+            accepted_impacts = collect_impact_index(
+                self.repo, self.catalog, deployed_commit,
+            )
+            state = {
+                "schema_version": SCHEMA_VERSION,
+                "environment": identity["environment"],
+                "host_id": identity["host_id"],
+                "deployed_main_commit": deployed_commit,
+                "runtime_catalog": catalog_record,
+                "accepted_impacts": accepted_impacts,
+                "runtime_hashes": runtime_hashes,
+                "repository_paths": repository_paths,
+                "managed_runtime_paths": sorted(runtime_hashes),
+                "last_release_id": None,
+                "last_successful_release": None,
+            }
+            # Repeat every mutable observation immediately before the ledger write.
+            if self.verify_identity() != identity:
+                raise ReleaseError("release identity changed during initialization")
+            self.repo.verify_checkout(
+                deployed_commit, self.catalog.target["origin_url"],
+                verify_live_origin=False,
+            )
+            self._catalog_record(deployed_commit, expected=catalog_record)
+            if collect_impact_index(
+                    self.repo, self.catalog, deployed_commit
+            ) != accepted_impacts:
+                raise ReleaseError("release impacts changed during initialization")
+            mismatches = [
+                path for path, expected in runtime_hashes.items()
+                if self._state_hash(_read_regular(self.runtime_root, path)) != expected
+            ]
+            unexpected = self._inventory_drift(set(runtime_hashes))
+            if mismatches or unexpected:
+                raise ReleaseError("runtime changed during initialization")
             if _read_regular(self.runtime_root, self._state_runtime_path("state.json")) is not None:
                 raise ReleaseError("deployment ledger was initialized concurrently")
             self._write_state(state)
@@ -1077,31 +1291,6 @@ class ReleaseEngine:
             "tracked_runtime_paths": len(runtime_hashes),
         }
 
-    def _http_status(self, url):
-        request = urllib.request.Request(url, headers={"User-Agent": "hq-release-plan"})
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        try:
-            with opener.open(request, timeout=8) as response:
-                return int(response.status)
-        except urllib.error.HTTPError as exc:
-            return int(exc.code)
-
-    def _verify_health(self, checks):
-        for check in checks:
-            deadline = self.clock() + check["timeout_seconds"]
-            last = None
-            while True:
-                try:
-                    last = self.health_getter(check["url"])
-                except (OSError, TimeoutError, ConnectionError, urllib.error.URLError):
-                    last = None
-                if last in check["expected_statuses"]:
-                    break
-                remaining = deadline - self.clock()
-                if remaining <= 0:
-                    raise ReleaseError("loopback health check did not become ready")
-                self.sleeper(min(check["interval_seconds"], remaining))
-
     def build_plan(self, target_commit, reviewed_evidence=None):
         identity = self.verify_identity()
         state = self.load_state()
@@ -1111,6 +1300,10 @@ class ReleaseEngine:
         target_commit = str(target_commit or "")
         self.repo.require_commit(target_commit)
         older = state["deployed_main_commit"]
+        self.repo.verify_checkout(
+            target_commit, self.catalog.target["origin_url"], verify_live_origin=True,
+        )
+        self._catalog_record(target_commit, expected=state["runtime_catalog"])
         if older == target_commit:
             return {
                 "ok": True,
@@ -1124,9 +1317,7 @@ class ReleaseEngine:
                 "review_evidence": {},
             }
         self.repo.require_ancestor(older, target_commit)
-        self.repo.verify_checkout(
-            target_commit, self.catalog.target["origin_url"], verify_live_origin=True,
-        )
+        validate_catalog_coverage(self.repo, self.catalog, target_commit)
         collected = collect_release_impact(self.repo, self.catalog, older, target_commit)
         impacts = collected["impacts"]
         evidence = verify_review_evidence(
@@ -1147,38 +1338,41 @@ class ReleaseEngine:
             inactive = [service for service in services if not self.inspector.is_active(service)]
             if inactive:
                 raise ReleaseError("required systemd units are not active: %s" % ", ".join(inactive))
-        pre_checks = [
+        pre_checks = sorted({
             check for impact in impacts for check in impact["pre_health_checks"]
-        ]
-        self._verify_health(pre_checks)
+        })
+        post_checks = sorted({
+            check for impact in impacts for check in impact["health_checks"]
+        })
         files = []
         seen_runtime = set()
         total_bytes = 0
         for status_value, repository_path in collected["changed_paths"]:
-            mapping = self.catalog.map(repository_path)
-            if mapping is None:
+            mappings = self.catalog.mappings(repository_path)
+            if not mappings:
                 continue
             before = self.repo.file_at(older, repository_path)
             after = self.repo.file_at(target_commit, repository_path)
-            if status_value == "D" and not mapping["delete_allowed"]:
-                raise ReleaseError("runtime deletion is not allowed by catalog")
-            runtime_path = mapping["runtime_path"]
-            if runtime_path in seen_runtime:
-                raise ReleaseError("multiple repository files map to one runtime path")
-            seen_runtime.add(runtime_path)
-            if state["repository_paths"].get(runtime_path) not in {None, repository_path}:
-                raise ReleaseError("catalog mapping changed relative to the deployment ledger")
-            if self._state_hash(_read_regular(self.runtime_root, runtime_path)) != self._state_hash(before):
-                raise ReleaseError("runtime drift detected before release planning")
-            files.append({
-                "repository_path": repository_path,
-                "runtime_path": runtime_path,
-                "change": "delete" if after is None else "write",
-                "before": self._state_hash(before),
-                "after": self._state_hash(after),
-                "service": mapping.get("service"),
-                "mode": mapping["mode"],
-            })
+            for mapping in mappings:
+                if status_value == "D" and not mapping["delete_allowed"]:
+                    raise ReleaseError("runtime deletion is not allowed by catalog")
+                runtime_path = mapping["runtime_path"]
+                if runtime_path in seen_runtime:
+                    raise ReleaseError("multiple repository files map to one runtime path")
+                seen_runtime.add(runtime_path)
+                if state["repository_paths"].get(runtime_path) not in {None, repository_path}:
+                    raise ReleaseError("catalog mapping changed relative to the deployment ledger")
+                if self._state_hash(_read_regular(self.runtime_root, runtime_path)) != self._state_hash(before):
+                    raise ReleaseError("runtime drift detected before release planning")
+                files.append({
+                    "repository_path": repository_path,
+                    "runtime_path": runtime_path,
+                    "change": "delete" if after is None else "write",
+                    "before": self._state_hash(before),
+                    "after": self._state_hash(after),
+                    "services": mapping.get("services", []),
+                    "mode": mapping["mode"],
+                })
             total_bytes += (0 if before is None else len(before)) + (
                 0 if after is None else len(after)
             )
@@ -1198,6 +1392,8 @@ class ReleaseEngine:
             "release_ids": [item["release_id"] for item in impacts],
             "review_evidence": evidence,
             "restart_services": services,
+            "pre_health_probes": pre_checks,
+            "post_health_probes": post_checks,
             "required_env": required_env,
             "required_free_bytes": required_free,
         }
@@ -1205,19 +1401,15 @@ class ReleaseEngine:
 
 def _engine_from_args(args):
     source_root = Path(os.path.abspath(args.source_root))
-    catalog = RuntimeCatalog.load(source_root, args.catalog)
+    catalog = RuntimeCatalog.load(source_root, DEFAULT_CATALOG)
     return ReleaseEngine(
-        source_root, args.runtime_root, catalog,
-        identity_path=args.identity_file, state_root=args.state_root,
+        source_root, "/", catalog,
+        identity_path=DEFAULT_IDENTITY_FILE, state_root=DEFAULT_STATE_ROOT,
     )
 
 
 def _add_runtime_arguments(parser):
     parser.add_argument("--source-root", default=".")
-    parser.add_argument("--runtime-root", default="/")
-    parser.add_argument("--catalog", default=DEFAULT_CATALOG)
-    parser.add_argument("--identity-file", default=DEFAULT_IDENTITY_FILE)
-    parser.add_argument("--state-root", default=DEFAULT_STATE_ROOT)
 
 
 def main(argv=None):
@@ -1227,7 +1419,6 @@ def main(argv=None):
     subparsers = parser.add_subparsers(dest="command", required=True)
     impact_parser = subparsers.add_parser("check-impact")
     impact_parser.add_argument("--source-root", default=".")
-    impact_parser.add_argument("--catalog", default=DEFAULT_CATALOG)
     impact_parser.add_argument("--base", required=True)
     impact_parser.add_argument("--target", required=True)
     initialize_parser = subparsers.add_parser("initialize")
@@ -1248,13 +1439,18 @@ def main(argv=None):
         if args.command == "check-impact":
             source_root = Path(os.path.abspath(args.source_root))
             repo = GitRepository(source_root)
-            catalog = RuntimeCatalog.load_from_git(repo, args.target, args.catalog)
-            base_catalog = RuntimeCatalog.load_from_git(
-                repo, args.base, args.catalog, required=False,
+            catalog = RuntimeCatalog.load_from_git(
+                repo, args.target, DEFAULT_CATALOG,
             )
+            base_catalog = RuntimeCatalog.load_from_git(
+                repo, args.base, DEFAULT_CATALOG, required=False,
+            )
+            validate_catalog_coverage(repo, catalog, args.target)
+            if base_catalog is not None:
+                validate_catalog_coverage(repo, base_catalog, args.base)
             result = collect_release_impact(
                 repo, catalog, args.base, args.target,
-                base_catalog=base_catalog, catalog_path=args.catalog,
+                base_catalog=base_catalog, catalog_path=DEFAULT_CATALOG,
                 enforce_catalog_isolation=True,
             )
             if len(result["impacts"]) > 1:

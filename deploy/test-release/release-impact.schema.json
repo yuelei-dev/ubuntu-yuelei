@@ -8,17 +8,25 @@
       "type": "array"
     },
     "health_checks": {
-      "items": { "$ref": "#/$defs/healthCheck" },
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
+        "type": "string"
+      },
       "minItems": 1,
-      "type": "array"
+      "type": "array",
+      "uniqueItems": true
     },
     "migrations": {
       "maxItems": 0,
       "type": "array"
     },
     "pre_health_checks": {
-      "items": { "$ref": "#/$defs/healthCheck" },
-      "type": "array"
+      "items": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
     },
     "release_id": {
       "pattern": "^[a-z0-9][a-z0-9._-]{2,79}$",
@@ -57,23 +65,5 @@
     "migrations"
   ],
   "title": "Huangque test release impact",
-  "type": "object",
-  "$defs": {
-    "healthCheck": {
-      "additionalProperties": false,
-      "properties": {
-        "expected_statuses": {
-          "items": { "maximum": 599, "minimum": 100, "type": "integer" },
-          "minItems": 1,
-          "type": "array",
-          "uniqueItems": true
-        },
-        "interval_seconds": { "maximum": 5, "minimum": 0.1, "type": "number" },
-        "timeout_seconds": { "maximum": 120, "minimum": 1, "type": "integer" },
-        "url": { "pattern": "^http://127\\.0\\.0\\.1:[0-9]+/", "type": "string" }
-      },
-      "required": ["url", "expected_statuses"],
-      "type": "object"
-    }
-  }
+  "type": "object"
 }
