@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "77a5dfb1c0f9b3e68a7143f4c2a78b968d16e84c",
+    "code_source_commit": "7865fbc576464f2b68683d7ad9bcb74eb8384d03",
     "review_lock": "deploy only a merged main commit containing the exact independently reviewed PR Head; the reviewed Head parent must equal code_source_commit"
   },
   "expected_preimage": {
@@ -39,8 +39,8 @@
   "release_executor": {
     "contract": "director_digital_human_agent_four_file_v3",
     "repository_path": "scripts/deploy_director_digital_human_agent_v3_locked_manifest.py",
-    "git_blob": "e5ccac3427e690959b39a35ddb5188e09f6a664d",
-    "sha256": "70b328f8f6f4a0ee8c3c7b093a06d48fe80ca55a321dcca81e7048c8f279dea2",
+    "git_blob": "1a6ffedac5570ee386ea520ec82b6d4152a29226",
+    "sha256": "34ac64a108ec4bd15ab4cc2464bbe673d6d802229e46b84711e770f517f9771a",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -94,7 +94,7 @@
       "request": {
         "prompt": "把下面这段顾客文案原样填入当前照片数字人的口播文案字段：发布验收数字人口播。可以定位人物照片上传，但不要上传、不要勾选授权、不要分析或生成。",
         "session_id": "release_digital_human_agent_v3_acceptance",
-        "page_revision": "77a5dfb1c0f9b3e6",
+        "page_revision": "7865fbc576464f2b",
         "page_context": {
           "page": "digital_human_oneclick",
           "path": "/workbench/digital-human-oneclick.html",
