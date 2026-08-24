@@ -72,6 +72,35 @@ def digital_human_payload(**overrides):
     return value
 
 
+def private_domain_payload(**overrides):
+    value = {
+        "prompt": "帮我填入文案并选择温暖模板",
+        "session_id": "private_domain_session_123",
+        "page_revision": "c1d2e3f4",
+        "page_context": {
+            "page": "private_domain_video",
+            "path": "/workbench/private-domain-video.html",
+            "mode": "plan",
+            "copy_text": "第一条文案\n\n第二条文案",
+            "copy_count": 2,
+            "template": "data",
+            "duration": "8",
+            "bgm": "random",
+            "bgm_values": ["growth.mp3", "steady.mp3"],
+            "asset_count": 18,
+            "selected_asset_count": 4,
+            "catalog_status": "ready",
+            "active_job_status": "idle",
+        },
+        "history": [],
+        "source_page": "private_domain_video",
+        "provider": "openai_responses",
+        "quoted_cost": 0,
+    }
+    value.update(overrides)
+    return value
+
+
 class DirectorAgentTests(unittest.TestCase):
     def test_payload_is_strict_and_free(self):
         cleaned = director_agent.validate_payload(payload())
@@ -133,6 +162,43 @@ class DirectorAgentTests(unittest.TestCase):
             bad_path["page_context"], path="/workbench/assets.html")
         with self.assertRaisesRegex(ValueError, "不属于数字人"):
             director_agent.validate_payload(bad_path)
+
+    def test_private_domain_context_is_strict_and_bgm_is_page_bound(self):
+        cleaned = director_agent.validate_payload(private_domain_payload())
+        self.assertEqual(cleaned["source_page"], "private_domain_video")
+        self.assertEqual(cleaned["page_context"]["copy_count"], 2)
+        self.assertEqual(cleaned["page_context"]["bgm_values"], ["growth.mp3", "steady.mp3"])
+        bad_path = private_domain_payload()
+        bad_path["page_context"] = dict(bad_path["page_context"], path="/workbench/script.html")
+        with self.assertRaisesRegex(ValueError, "不属于私域批量成片"):
+            director_agent.validate_payload(bad_path)
+        duplicate = private_domain_payload()
+        duplicate["page_context"] = dict(duplicate["page_context"], bgm_values=["growth.mp3", "growth.mp3"])
+        with self.assertRaisesRegex(ValueError, "选项重复"):
+            director_agent.validate_payload(duplicate)
+        with self.assertRaisesRegex(ValueError, "页面来源"):
+            director_agent.validate_payload(private_domain_payload(source_page="script"))
+
+    def test_private_domain_actions_reject_cross_page_and_forged_bgm(self):
+        request = director_agent.validate_payload(private_domain_payload())
+        allowed = json.dumps({
+            "content": "已经按要求准备好页面设置。", "stage": "setup",
+            "actions": [
+                {"type": "fill_field", "field": "private_domain_copy", "value": "新文案", "label": "填入文案"},
+                {"type": "choose_option", "field": "private_domain_template", "value": "warm", "label": "温暖模板"},
+                {"type": "choose_option", "field": "private_domain_bgm", "value": "growth.mp3", "label": "成长音乐"},
+            ], "warnings": [],
+        }, ensure_ascii=False)
+        result = director_agent.normalize_model_result(allowed, request)
+        self.assertEqual(len(result["plan"]["actions"]), 3)
+        forged = json.loads(allowed)
+        forged["actions"][-1]["value"] = "../../secret.mp3"
+        with self.assertRaisesRegex(ValueError, "选项值无效"):
+            director_agent.normalize_model_result(json.dumps(forged, ensure_ascii=False), request)
+        cross_page = json.loads(allowed)
+        cross_page["actions"] = [{"type": "fill_field", "field": "topic", "value": "越权", "label": "越权"}]
+        with self.assertRaisesRegex(ValueError, "不属于当前页面"):
+            director_agent.normalize_model_result(json.dumps(cross_page, ensure_ascii=False), request)
 
     def test_provider_routing_never_crosses_custom_and_global_credentials(self):
         with (

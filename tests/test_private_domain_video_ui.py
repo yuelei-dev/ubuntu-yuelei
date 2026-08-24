@@ -40,6 +40,25 @@ class PrivateDomainVideoUiTests(unittest.TestCase):
         for label in ("数据对比·高转化", "同城圈层·招募", "女性成长·温暖", "品质社交·轻奢"):
             self.assertIn(label, PAGE)
         self.assertIn("首帧保护", PAGE)
+        self.assertIn("SAFE_FRAME_SECONDS=0.12", PAGE)
+        self.assertIn("function protectFirstFrame(video,autoplay)", PAGE)
+        self.assertIn("video.currentTime=Math.min(SAFE_FRAME_SECONDS", PAGE)
+        self.assertIn("video.poster=canvas.toDataURL('image/jpeg',.82)", PAGE)
+
+    def test_deployed_page_fails_closed_when_server_catalogs_are_unavailable(self):
+        self.assertIn("LOCAL_PREVIEW=/^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/", PAGE)
+        self.assertIn("bgms=LOCAL_PREVIEW?fallbackBgms.slice():[]", PAGE)
+        self.assertIn("allAssets=[];selected=[]", PAGE)
+        self.assertIn("if(!bgms.length)return toast('BGM 清单没有可用音乐')", PAGE)
+
+    def test_breakdown_hash_initializes_and_tracks_hash_changes(self):
+        self.assertIn("location.hash==='#breakdown'?'breakdown'", SCRIPT)
+        self.assertIn("window.addEventListener('hashchange',applyHashMode)", SCRIPT)
+        self.assertIn("switchMode(initialHashMode||currentMode)", SCRIPT)
+
+    def test_private_page_loads_agent_with_strict_page_marker(self):
+        self.assertIn('<body data-page="private_domain_video">', PAGE)
+        self.assertIn('src="script-agent.js?v=b1c3f8c3"', PAGE)
 
 
 if __name__ == "__main__":

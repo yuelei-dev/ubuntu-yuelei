@@ -116,7 +116,9 @@ jobs:
         run: node tests/test_script_director_fields.js
 
       - name: 测试编导顾客助手
-        run: node tests/test_director_agent.js
+        run: |
+          node tests/test_director_agent.js
+          node tests/test_private_domain_video_media.js
 
       - name: 测试画布 API 与短剧工作区
         run: |

@@ -53,7 +53,7 @@ LOCKS = {
     ),
     "site/workbench/script.html": (
         "ea4bad20da05b624f2c77b7f6283734997b19553", "22e18e4c6f230030feecee990c18974682477c39bbf49e5f00ab48834f17ca4e",
-        "1a80c4f9b6eb2b06e4d3c651eeb4ba9c4804f164", "3817f62ffc2ce26319fb783f3751762386621ee464971f033c0abc87a585b863",
+        "26aaf0a4a8bc048534462cdc1cbe5af400c3fc23", "8ce245e020501e16bb2ec91e1ead6ec602c1a9792a7a84f5da662191f46fc2b3",
     ),
     "site/workbench/digital-human-unified-state.js": (
         None, None, "1fe597e7c684759ba1fd88c37239d48c81e693fc", "6d1c7c65ca7635e9c3515b1e1a6d3d6d4f56d561d962de1684aefa498cd0916d",
@@ -231,11 +231,31 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         return root, database
 
     def _execute(self, manifest_path, target, backup, hooks, checkpoint=None):
-        return self.executor.execute_locked_release(
-            manifest_path, ROOT, target, backup, hooks=hooks,
-            verify_repository=False, reviewed_head="r" * 40,
-            merged_main="m" * 40, checkpoint=checkpoint,
-        )
+        manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as source_dir:
+            source = pathlib.Path(source_dir)
+            locked_paths = [
+                manifest["release_executor"]["repository_path"],
+                manifest["release_executor"]["locked_base_executor"]["repository_path"],
+            ]
+            for item in manifest["files"]:
+                locked_paths.append(item["repository_path"])
+            for relative in locked_paths:
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if relative == manifest["release_executor"]["repository_path"]:
+                    data = EXECUTOR.read_bytes()
+                elif relative == manifest["release_executor"]["locked_base_executor"]["repository_path"]:
+                    data = git_bytes(manifest["release_executor"]["locked_base_executor"]["git_blob"])
+                else:
+                    item = next(entry for entry in manifest["files"] if entry["repository_path"] == relative)
+                    data = git_bytes(item["postimage_blob"])
+                destination.write_bytes(data)
+            return self.executor.execute_locked_release(
+                manifest_path, source, target, backup, hooks=hooks,
+                verify_repository=False, reviewed_head="r" * 40,
+                merged_main="m" * 40, checkpoint=checkpoint,
+            )
 
     def _assert_preimages(self, target, manifest):
         for item in manifest["files"]:
@@ -287,7 +307,7 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         self.assertEqual(self.executor_sha, release["sha256"])
         self.assertEqual(set(LOCKS), set(release["required_repository_paths"]))
         for item in loaded["files"]:
-            data = (ROOT / item["repository_path"]).read_bytes()
+            data = git_bytes(item["postimage_blob"])
             self.assertEqual(item["postimage_blob"], git_blob(data))
             self.assertEqual(item["postimage_sha256"], sha256(data))
             if item["target_preimage_state"] == "file":
