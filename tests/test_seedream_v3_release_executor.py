@@ -13,16 +13,20 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUCCESSOR_PATH = (
     ROOT / "deploy" / "test-runtime" /
-    "digital-human-material-seedream-v3-20260821.json"
+    "digital-human-material-feishu-priority-20260823.json"
 )
 HISTORICAL_MANIFEST_PATH = (
+    ROOT / "deploy" / "test-runtime" /
+    "digital-human-material-seedream-v3-20260821.json"
+)
+REJECTED_HISTORICAL_MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
 )
 HISTORICAL_EXECUTOR_PATH = ROOT / "scripts" / "deploy_content_whisper_runtime.py"
 VERSIONED_EXECUTOR_PATH = ROOT / "scripts" / "deploy_seedream_v3_locked_manifest.py"
-HISTORICAL_MANIFEST_BLOB = "e7d139001c065f6a3e8ec7137057abdc86bf5d06"
+HISTORICAL_MANIFEST_BLOB = "1a1bef4ec64323208fe0212961e72e38206a69bf"
 HISTORICAL_MANIFEST_SHA256 = (
-    "44006751e15f56c946d8dfadeb4ad74f497dab44ceda66512bdb9603b919e453"
+    "1cb48ad76a69d05ea39d96f3bc0607ee18d2566354d7317e5bdb0dd6308d8578"
 )
 HISTORICAL_EXECUTOR_BLOB = "c9dd02ba92e03a476751ae15e03f4e1c5f68886a"
 HISTORICAL_EXECUTOR_SHA256 = (
@@ -121,7 +125,7 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
     def test_versioned_executor_rejects_historical_manifest(self):
         manifest = dict(self.manifest)
         manifest["_manifest_path"] = str(
-            self.source_root / HISTORICAL_MANIFEST_PATH.relative_to(ROOT)
+            self.source_root / REJECTED_HISTORICAL_MANIFEST_PATH.relative_to(ROOT)
         )
         with self.assertRaisesRegex(
                 self.versioned.ReleaseError,

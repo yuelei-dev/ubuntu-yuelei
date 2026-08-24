@@ -15,6 +15,7 @@ import re
 import secrets
 import sqlite3
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -29,10 +30,12 @@ PLAN_PATH = "/api/gen/digital-human-v2/plan"
 CONSENT_PATH = "/api/gen/digital-human-v2/consent"
 AUDIO_UPLOAD_PATH = "/api/gen/digital-human-v2/audio-upload"
 MATERIAL_RESOLVE_PATH = "/api/gen/digital-human-v2/material-resolve"
+HISTORY_PATH = "/api/gen/digital-human-v2/history"
 CONSENT_VERSION = "digital-human-material-v2"
 CONSENT_PURPOSE = "digital_human_material_v2"
 CONSENT_TTL_SECONDS = legacy.CONSENT_TTL_SECONDS
 DigitalHumanRequestError = legacy.DigitalHumanRequestError
+MATERIAL_SOURCE_PRIORITY = ("customer_upload", "feishu", "ai_optional")
 
 _STAGE_KINDS = {
     "material": "image",
@@ -50,13 +53,26 @@ _AUDIO_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 _MATERIAL_ASSET_ID_RE = re.compile(r"^dhm_[0-9a-f]{32}$")
 _MAX_MATERIAL_BYTES = 20 * 1024 * 1024
 _MATERIAL_TTL_SECONDS = 24 * 60 * 60
-_FEISHU_APP_TOKEN = os.environ.get("DIGITAL_HUMAN_FEISHU_APP_TOKEN", "RRiFbxY9CaJLV2saos2cyyhLnhe").strip()
+# The authenticated material-upload route already performs ownership, hash,
+# decode and content-security checks under this approval purpose.  Reuse that
+# vetted temporary asset; do not upload the customer's bytes to an AI provider.
+_CUSTOMER_MATERIAL_UPLOAD_PURPOSE = "smart_montage"
+_FEISHU_APP_TOKEN = os.environ.get(
+    "DIGITAL_HUMAN_MATERIAL_LIBRARY_APP_TOKEN", "TYqUb6KaQaLPQ2sLrLFcdsWanPZ",
+).strip()
 _FEISHU_TABLES = (
-    (os.environ.get("DIGITAL_HUMAN_FEISHU_TABLE_1", "tbliH1WHvDwhvFMi").strip(),
-     os.environ.get("DIGITAL_HUMAN_FEISHU_VIEW_1", "vewPfJzNVq").strip()),
-    (os.environ.get("DIGITAL_HUMAN_FEISHU_TABLE_2", "tblVAOaI3CTAkTaL").strip(),
-     os.environ.get("DIGITAL_HUMAN_FEISHU_VIEW_2", "vewAu1VvKG").strip()),
+    (os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_1", "tbl58c0UkQ5ZaR2z").strip(),
+     os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1", "vewa9ZW0Og").strip()),
+    (os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_2", "").strip(),
+     os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_2", "").strip()),
 )
+_FEISHU_PAGE_SIZE = 100
+_FEISHU_MAX_PAGES_PER_TABLE = 20
+_FEISHU_CATALOG_TTL_SECONDS = 5 * 60
+_FEISHU_TOKEN_LOCK = threading.Lock()
+_FEISHU_CATALOG_LOCK = threading.Lock()
+_FEISHU_TOKEN_CACHE = {"identity": "", "token": "", "expires_at": 0.0}
+_FEISHU_CATALOG_CACHE = {"key": None, "loaded_at": 0.0, "items": []}
 _MATERIAL_MIMES = {
     "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"),
     "image/webp": ("image", ".webp"), "video/mp4": ("video", ".mp4"),
@@ -374,59 +390,111 @@ def _feishu_token():
     app_id = os.environ.get("FEISHU_APP_ID", "").strip()
     app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
     if not app_id or not app_secret or not _FEISHU_APP_TOKEN:
-        return ""
-    request = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"}, method="POST",
-    )
-    result = _read_http_json(request)
-    return str(result.get("tenant_access_token") or "").strip()
+        raise ValueError("飞书素材库尚未完成服务端配置")
+    identity = hashlib.sha256((app_id + "\0" + app_secret).encode("utf-8")).hexdigest()
+    with _FEISHU_TOKEN_LOCK:
+        now = time.monotonic()
+        if (_FEISHU_TOKEN_CACHE["identity"] == identity
+                and _FEISHU_TOKEN_CACHE["token"]
+                and float(_FEISHU_TOKEN_CACHE["expires_at"]) > now):
+            return str(_FEISHU_TOKEN_CACHE["token"])
+        request = urllib.request.Request(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"}, method="POST",
+        )
+        result = _read_http_json(request)
+        if int(result.get("code") or 0) != 0:
+            raise ValueError("飞书素材库鉴权失败")
+        token = str(result.get("tenant_access_token") or "").strip()
+        if not token:
+            raise ValueError("飞书素材库鉴权未返回访问令牌")
+        try:
+            expires_in = int(result.get("expire") or result.get("expires_in") or 7200)
+        except (TypeError, ValueError):
+            expires_in = 7200
+        _FEISHU_TOKEN_CACHE.update({
+            "identity": identity, "token": token,
+            "expires_at": now + max(1, expires_in - 60),
+        })
+        return token
+
+
+def _feishu_catalog(token):
+    cache_key = (_FEISHU_APP_TOKEN, _FEISHU_TABLES)
+    with _FEISHU_CATALOG_LOCK:
+        now = time.monotonic()
+        if (_FEISHU_CATALOG_CACHE["key"] == cache_key
+                and now - float(_FEISHU_CATALOG_CACHE["loaded_at"])
+                < _FEISHU_CATALOG_TTL_SECONDS):
+            return list(_FEISHU_CATALOG_CACHE["items"])
+        items = []
+        for table_id, view_id in _FEISHU_TABLES:
+            if not table_id:
+                continue
+            page_token = ""
+            for page_index in range(_FEISHU_MAX_PAGES_PER_TABLE):
+                query_params = {"page_size": _FEISHU_PAGE_SIZE}
+                if view_id:
+                    query_params["view_id"] = view_id
+                if page_token:
+                    query_params["page_token"] = page_token
+                params = urllib.parse.urlencode(query_params)
+                url = ("https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
+                       (urllib.parse.quote(_FEISHU_APP_TOKEN, safe=""),
+                        urllib.parse.quote(table_id, safe=""), params))
+                result = _read_http_json(urllib.request.Request(
+                    url, headers={"Authorization": "Bearer " + token},
+                ))
+                if int(result.get("code") or 0) != 0:
+                    raise ValueError("飞书素材库记录读取失败")
+                data = result.get("data") or {}
+                for record in (data.get("items") or []):
+                    texts, attachments = [], []
+                    _flatten_fields(record.get("fields") or {}, texts, attachments)
+                    if attachments:
+                        items.append((" ".join(texts), tuple(attachments)))
+                if not data.get("has_more"):
+                    break
+                next_page = str(data.get("page_token") or "").strip()
+                if not next_page or next_page == page_token:
+                    raise ValueError("飞书素材库分页游标无效")
+                page_token = next_page
+                if page_index + 1 == _FEISHU_MAX_PAGES_PER_TABLE:
+                    raise ValueError("飞书素材库记录超过安全分页上限")
+        _FEISHU_CATALOG_CACHE.update({
+            "key": cache_key, "loaded_at": time.monotonic(), "items": list(items),
+        })
+        return items
+
+
+def _feishu_attachment_mime(attachment):
+    mime = str(attachment.get("type") or attachment.get("mime_type") or "").lower()
+    if mime in _MATERIAL_MIMES:
+        return mime
+    extension = os.path.splitext(str(attachment.get("name") or "").lower())[1]
+    return {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm",
+        ".mov": "video/quicktime",
+    }.get(extension, "")
 
 
 def _feishu_material(query, preferred_type):
     token = _feishu_token()
-    if not token:
-        return None
     query_words = _keywords(query)
     best = None
-    for table_id, view_id in _FEISHU_TABLES:
-        if not table_id:
-            continue
-        page_token = ""
-        for _page in range(5):
-            query_params = {"page_size": 100}
-            if view_id:
-                query_params["view_id"] = view_id
-            if page_token:
-                query_params["page_token"] = page_token
-            params = urllib.parse.urlencode(query_params)
-            url = ("https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
-                   (urllib.parse.quote(_FEISHU_APP_TOKEN, safe=""),
-                    urllib.parse.quote(table_id, safe=""), params))
-            result = _read_http_json(urllib.request.Request(
-                url, headers={"Authorization": "Bearer " + token},
-            ))
-            data = result.get("data") or {}
-            for record in (data.get("items") or []):
-                texts, attachments = [], []
-                _flatten_fields(record.get("fields") or {}, texts, attachments)
-                score = len(query_words & _keywords(" ".join(texts)))
-                for attachment in attachments:
-                    mime = str(attachment.get("type") or attachment.get("mime_type") or "").lower()
-                    media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
-                    if not media_type or score <= 0:
-                        continue
-                    type_bonus = 3 if media_type == preferred_type else 0
-                    candidate = (score + type_bonus, attachment, mime)
-                    if best is None or candidate[0] > best[0]:
-                        best = candidate
-            if not data.get("has_more"):
-                break
-            next_page = str(data.get("page_token") or "").strip()
-            if not next_page or next_page == page_token:
-                break
-            page_token = next_page
+    for searchable_text, attachments in _feishu_catalog(token):
+        score = len(query_words & _keywords(searchable_text))
+        for attachment in attachments:
+            mime = _feishu_attachment_mime(attachment)
+            media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
+            if not media_type or score <= 0:
+                continue
+            type_bonus = 3 if media_type == preferred_type else 0
+            candidate = (score + type_bonus, attachment, mime)
+            if best is None or candidate[0] > best[0]:
+                best = candidate
     if not best or not best[1].get("file_token"):
         return None
     url = ("https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
@@ -437,48 +505,27 @@ def _feishu_material(query, preferred_type):
     return raw, mime, "feishu"
 
 
-def _wikimedia_material(query, preferred_type):
-    search = str(query or "").strip()[:120]
-    if not search:
-        return None
-    if preferred_type == "video":
-        search += " filetype:video"
-    params = urllib.parse.urlencode({
-        "action": "query", "generator": "search", "gsrsearch": search,
-        "gsrnamespace": 6, "gsrlimit": 12, "prop": "imageinfo",
-        "iiprop": "url|mime|extmetadata", "iiurlwidth": 1080,
-        "format": "json", "formatversion": 2,
-    })
-    result = _read_http_json(urllib.request.Request(
-        "https://commons.wikimedia.org/w/api.php?" + params,
-        headers={"User-Agent": "HuangqueDigitalHuman/2.0"},
-    ))
-    candidates = []
-    for page in ((result.get("query") or {}).get("pages") or []):
-        info = ((page.get("imageinfo") or [{}])[0])
-        metadata = info.get("extmetadata") or {}
-        license_name = str((metadata.get("LicenseShortName") or {}).get("value") or "").lower()
-        if not ("public domain" in license_name or "cc0" in license_name):
-            continue
-        mime = str(info.get("mime") or "").lower()
-        media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
-        if not media_type:
-            continue
-        url = str((info.get("url") if media_type == "video" else info.get("thumburl"))
-                  or info.get("url") or "")
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname != "upload.wikimedia.org":
-            continue
-        candidates.append((3 if media_type == preferred_type else 0, url, mime))
-    if not candidates:
-        return None
-    _score, url, expected_mime = max(candidates, key=lambda item: item[0])
-    raw, mime = _read_http_media(urllib.request.Request(
-        url, headers={"User-Agent": "HuangqueDigitalHuman/2.0"},
-    ))
-    if mime != expected_mime and _MATERIAL_MIMES[mime][0] != _MATERIAL_MIMES[expected_mime][0]:
-        raise ValueError("公开素材响应格式发生变化")
-    return raw, mime, "public_web"
+def _customer_material(upload_id, username):
+    from . import cli_uploads
+
+    try:
+        raw, metadata = cli_uploads.read_image_bytes(upload_id, username)
+    except ValueError as exc:
+        raise DigitalHumanRequestError(
+            str(exc), "customer_material_unavailable", 409,
+        ) from exc
+    if str(metadata.get("approved_for") or "") != _CUSTOMER_MATERIAL_UPLOAD_PURPOSE:
+        raise DigitalHumanRequestError(
+            "顾客上传素材未通过当前素材入口校验，请重新上传",
+            "customer_material_unapproved", 409,
+        )
+    mime = str(metadata.get("mime") or "").lower()
+    if mime not in _MATERIAL_MIMES or _MATERIAL_MIMES[mime][0] != "image":
+        raise DigitalHumanRequestError(
+            "顾客上传素材格式不受支持，请重新上传 PNG、JPEG 或 WebP",
+            "customer_material_invalid", 409,
+        )
+    return raw, mime, "customer_upload"
 
 
 def _store_material_asset(raw, mime, provider, username, run_id, plan_digest,
@@ -581,6 +628,7 @@ def resolve_material_response(payload, username, db_factory=None):
         "digital_human_plan_digest", "digital_human_consent_token",
         "digital_human_script",
         "digital_human_narration_mode", "digital_human_audio_upload_id",
+        "digital_human_allow_ai_materials", "digital_human_customer_upload_ids",
         "digital_human_item_index",
     }
     unknown = sorted(set(payload) - allowed)
@@ -614,22 +662,40 @@ def resolve_material_response(payload, username, db_factory=None):
         )
         return {"ok": True, "source": asset["provider"],
                 "material_asset_id": asset["asset_id"], "media_type": asset["media_type"]}
-    preferred = "video" if material["scene_type"] == "video" else "image"
-    fetched = None
-    failures = []
-    for provider in ("feishu", "public_web"):
+    customer_upload_ids = frozen.get("customer_upload_ids") or []
+    if item_index < len(customer_upload_ids):
+        fetched = _customer_material(customer_upload_ids[item_index], username)
+        raw, mime, provider = fetched
         try:
-            fetched = (_feishu_material(material["material_query"], preferred)
-                       if provider == "feishu" else
-                       _wikimedia_material(material["material_query"], preferred))
+            asset = _store_material_asset(
+                raw, mime, provider, username, record["run_id"], record["plan_digest"],
+                item_index, db_factory=db_factory,
+            )
         except Exception as exc:
-            failures.append(provider + ":" + str(exc)[:80])
-            fetched = None
-        if fetched:
-            break
+            raise DigitalHumanRequestError(
+                "顾客上传素材无法安全读取；因该素材必须进入成片，任务已暂停",
+                "customer_material_unavailable", 409,
+            ) from exc
+        return {"ok": True, "source": provider,
+                "material_asset_id": asset["asset_id"], "media_type": asset["media_type"]}
+    preferred = "video" if material["scene_type"] == "video" else "image"
+    try:
+        fetched = _feishu_material(material["material_query"], preferred)
+    except DigitalHumanRequestError:
+        raise
+    except Exception as exc:
+        raise DigitalHumanRequestError(
+            "飞书素材库暂时不可用，已暂停生成且不会创建付费生图任务",
+            "feishu_material_unavailable", 503,
+        ) from exc
     if not fetched:
+        if not frozen.get("allow_ai_materials", True):
+            raise DigitalHumanRequestError(
+                "顾客素材和飞书素材库均未找到匹配画面；当前方案未允许 AI 补图",
+                "material_unavailable_without_ai", 409,
+            )
         return {"ok": True, "source": "ai", "ai_fallback": True,
-                "retryable_sources": bool(failures)}
+                "retryable_sources": False}
     raw, mime, provider = fetched
     try:
         asset = _store_material_asset(
@@ -637,9 +703,11 @@ def resolve_material_response(payload, username, db_factory=None):
             item_index, db_factory=db_factory,
         )
     except Exception:
-        # A remote result that cannot be decoded or committed is not safe to
-        # use. Continue with the existing paid AI fallback instead of leaving
-        # the whole customer run in a half-finished material state.
+        if not frozen.get("allow_ai_materials", True):
+            raise DigitalHumanRequestError(
+                "飞书素材无法安全读取；当前方案未允许 AI 补图",
+                "material_unavailable_without_ai", 409,
+            )
         return {"ok": True, "source": "ai", "ai_fallback": True,
                 "retryable_sources": True}
     return {"ok": True, "source": provider,
@@ -705,33 +773,123 @@ def _audio_plan(asset):
                 plan_digest=timeline._digest(core))
 
 
+def _material_policy_values(payload):
+    allow_key = ("digital_human_allow_ai_materials"
+                 if "digital_human_allow_ai_materials" in payload else
+                 "allow_ai_materials")
+    ids_key = ("digital_human_customer_upload_ids"
+               if "digital_human_customer_upload_ids" in payload else
+               "customer_upload_ids")
+    explicit = allow_key in payload or ids_key in payload
+    allow_ai = payload.get(allow_key, True)
+    if not isinstance(allow_ai, bool):
+        raise DigitalHumanRequestError(
+            "AI 补图选项必须为布尔值", "invalid_material_policy",
+        )
+    raw_ids = payload.get(ids_key, [])
+    if not isinstance(raw_ids, list):
+        raise DigitalHumanRequestError(
+            "顾客上传素材列表格式无效", "invalid_customer_materials",
+        )
+    upload_ids = []
+    for raw_id in raw_ids:
+        upload_id = str(raw_id or "").strip().lower()
+        if not re.fullmatch(r"img_[0-9a-f]{32}", upload_id):
+            raise DigitalHumanRequestError(
+                "顾客上传素材编号无效", "invalid_customer_materials",
+            )
+        if upload_id in upload_ids:
+            raise DigitalHumanRequestError(
+                "同一张顾客素材不能重复用于多个镜头", "duplicate_customer_material",
+            )
+        upload_ids.append(upload_id)
+    return allow_ai, upload_ids, explicit
+
+
+def _bind_material_policy(base_plan, allow_ai, upload_ids, explicit):
+    if not explicit:
+        return base_plan
+    if len(upload_ids) > int(base_plan.get("material_count") or 0):
+        raise DigitalHumanRequestError(
+            "顾客上传素材超过当前方案的内容镜头数量",
+            "customer_material_count_exceeded", 409,
+        )
+    core = dict(base_plan)
+    segment_count = int(core.pop("segment_count"))
+    material_count = int(core.pop("material_count"))
+    core.pop("plan_digest", None)
+    core["materials"] = [
+        dict(item, source_priority=list(MATERIAL_SOURCE_PRIORITY))
+        for item in core.get("materials") or []
+    ]
+    core["source_priority"] = list(MATERIAL_SOURCE_PRIORITY)
+    core["allow_ai_materials"] = bool(allow_ai)
+    core["customer_upload_ids"] = list(upload_ids)
+    return dict(
+        core, segment_count=segment_count, material_count=material_count,
+        plan_digest=timeline._digest(core),
+    )
+
+
+def _validate_customer_uploads(upload_ids, username):
+    if not upload_ids:
+        return
+    from . import cli_uploads
+
+    for upload_id in upload_ids:
+        try:
+            metadata = cli_uploads.inspect_image(upload_id, username)
+        except ValueError as exc:
+            raise DigitalHumanRequestError(
+                str(exc), "customer_material_unavailable", 409,
+            ) from exc
+        if str(metadata.get("approved_for") or "") != _CUSTOMER_MATERIAL_UPLOAD_PURPOSE:
+            raise DigitalHumanRequestError(
+                "顾客上传素材未通过当前素材入口校验，请重新上传",
+                "customer_material_unapproved", 409,
+            )
+
+
 def plan_response(payload, username=None):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     mode = str(payload.get("narration_mode") or "text").strip().lower()
     try:
+        allow_ai, upload_ids, explicit = _material_policy_values(payload)
+        request_payload = dict(payload)
+        request_payload.pop("allow_ai_materials", None)
+        request_payload.pop("customer_upload_ids", None)
         if mode == "audio":
             allowed = {"narration_mode", "audio_upload_id"}
-            unknown = sorted(set(payload) - allowed)
+            unknown = sorted(set(request_payload) - allowed)
             if unknown:
                 raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
-            asset = _load_audio_asset(payload.get("audio_upload_id"), username)
-            return {"ok": True, "plan": _audio_plan(asset)}
-        return timeline.plan_response(payload)
+            asset = _load_audio_asset(request_payload.get("audio_upload_id"), username)
+            base_plan = _audio_plan(asset)
+        else:
+            base_plan = timeline.plan_response(request_payload)["plan"]
+        plan = _bind_material_policy(base_plan, allow_ai, upload_ids, explicit)
+        _validate_customer_uploads(upload_ids, username)
+        return {"ok": True, "plan": plan}
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
 
 def _authoritative_plan(payload, username=None):
     try:
+        allow_ai, upload_ids, explicit = _material_policy_values(payload)
         if str(payload.get("digital_human_narration_mode") or
                payload.get("narration_mode") or "text").strip().lower() == "audio":
             asset = _load_audio_asset(
                 payload.get("digital_human_audio_upload_id") or payload.get("audio_upload_id"),
                 username,
             )
-            return _audio_plan(asset)
-        return timeline.plan_text(payload.get("digital_human_script") or payload.get("script"))
+            base_plan = _audio_plan(asset)
+        else:
+            base_plan = timeline.plan_text(
+                payload.get("digital_human_script") or payload.get("script"),
+            )
+        return _bind_material_policy(base_plan, allow_ai, upload_ids, explicit)
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
@@ -743,6 +901,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
         "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
         "script", "photo_sha256", "voice_mode", "voice_ref",
         "voice_sha256", "narration_mode", "audio_upload_id",
+        "allow_ai_materials", "customer_upload_ids",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -765,9 +924,8 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     try:
         audio_asset = (_load_audio_asset(payload.get("audio_upload_id"), username)
                        if narration_mode == "audio" else None)
-        frozen = (_audio_plan(audio_asset)
-                  if audio_asset else
-                  timeline.plan_text(payload.get("script")))
+        frozen = _authoritative_plan(payload, username)
+        _validate_customer_uploads(frozen.get("customer_upload_ids") or [], username)
     except Exception as exc:
         raise _as_request_error(exc) from exc
     plan_digest = legacy._required_sha256(payload.get("plan_digest"), "制作方案")
@@ -916,6 +1074,8 @@ def verify_clone_submission(payload, username):
         )
     cleaned = dict(payload)
     cleaned.pop("digital_human_consent_token", None)
+    cleaned.pop("allow_ai_materials", None)
+    cleaned.pop("customer_upload_ids", None)
     cleaned["digital_human_consent_id"] = record["id"]
     return cleaned
 
@@ -1026,6 +1186,17 @@ def verify_child_submission_with_record(payload, username, kind):
     if stage == "material":
         if not 0 <= item_index < frozen["material_count"]:
             raise DigitalHumanRequestError("正文素材步骤编号无效", "consent_plan_mismatch", 409)
+        customer_upload_ids = frozen.get("customer_upload_ids") or []
+        if item_index < len(customer_upload_ids):
+            raise DigitalHumanRequestError(
+                "这个镜头已绑定顾客上传素材，禁止改用 AI 重新生成",
+                "customer_material_required", 409,
+            )
+        if not frozen.get("allow_ai_materials", True):
+            raise DigitalHumanRequestError(
+                "当前方案未允许 AI 补图，未创建付费生图任务",
+                "ai_material_not_allowed", 409,
+            )
         material = frozen["materials"][item_index]
         references = cleaned.get("reference_images")
         cleaned.pop("images", None)
@@ -1292,6 +1463,108 @@ def _visual_items(windows, slots):
     return sorted(items, key=lambda item: (float(item["start"]), 0 if item["kind"] == "presenter" else 1))
 
 
+def _history_video_url(result):
+    """Return only a playable URL from a completed private compose result."""
+    for key in ("video_url", "url"):
+        value = str(result.get(key) or "").strip()
+        if value.startswith("/api/gen/file/") or value.startswith("https://"):
+            return value
+    rel = str(result.get("video_file") or "").strip().replace("\\", "/")
+    if not rel:
+        return ""
+    try:
+        path = (OUT_DIR / rel).resolve()
+        path.relative_to(OUT_DIR.resolve())
+    except Exception:
+        return ""
+    if not path.is_file() or path.stat().st_size <= 0:
+        return ""
+    return "/api/gen/file/" + urllib.parse.quote(rel, safe="/")
+
+
+def _history_number(value, integer=False):
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return int(parsed) if integer else round(parsed, 3)
+
+
+def history_response(username, limit=20, offset=0, db_factory=None):
+    """List the authenticated user's completed v2 videos, including old rows.
+
+    Pagination is applied after the exact pipeline filter so another pipeline's
+    jobs cannot create gaps or leak through this dedicated endpoint.
+    """
+    username = str(username or "").strip()
+    if not username:
+        raise DigitalHumanRequestError("未登录或登录已过期", "authentication_required", 401)
+    try:
+        limit = int(limit)
+        offset = int(offset)
+    except (TypeError, ValueError) as exc:
+        raise DigitalHumanRequestError("历史记录分页参数无效") from exc
+    limit = max(1, min(limit, 50))
+    offset = max(0, min(offset, 2000))
+    target = offset + limit + 1
+    scanned = 0
+    matched = []
+    factory = db_factory or jdb
+    while len(matched) < target and scanned < 2000:
+        batch_size = min(120, 2000 - scanned)
+        with closing(factory()) as connection:
+            rows = connection.execute(
+                "SELECT id,status,payload,result,created_at FROM jobs "
+                "WHERE username=? AND kind='script_to_video' AND status='done' "
+                "AND COALESCE(deleted,0)=0 ORDER BY id DESC LIMIT ? OFFSET ?",
+                (username, batch_size, scanned),
+            ).fetchall()
+        if not rows:
+            break
+        scanned += len(rows)
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+                result = json.loads(row["result"] or "{}")
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or not isinstance(result, dict):
+                continue
+            if str(payload.get("pipeline") or "").strip().lower() != PIPELINE:
+                continue
+            video_url = _history_video_url(result)
+            if not video_url:
+                continue
+            verification = result.get("verification")
+            if not isinstance(verification, dict):
+                verification = {}
+            text = str(payload.get("copy") or payload.get("script")
+                       or payload.get("digital_human_script") or "").strip()
+            matched.append({
+                "job_id": int(row["id"]),
+                "status": "done",
+                "video_url": video_url,
+                "text": text[:160],
+                "duration": _history_number(result.get("duration")),
+                "width": _history_number(result.get("width"), integer=True),
+                "height": _history_number(result.get("height"), integer=True),
+                "created_at": _history_number(row["created_at"], integer=True),
+                "subtitle": str(verification.get("subtitle") or ""),
+                "mode": PIPELINE,
+            })
+            if len(matched) >= target:
+                break
+        if len(rows) < batch_size:
+            break
+    visible = matched[offset:offset + limit]
+    return {
+        "items": visible,
+        "limit": limit,
+        "offset": offset,
+        "has_more": len(matched) > offset + len(visible),
+    }
+
+
 def compose(payload, persist_state=None):
     from . import video as video_domain
 
@@ -1406,8 +1679,12 @@ def compose(payload, persist_state=None):
         video_domain, final_rel, duration,
     )
     result = {
-        "pipeline": PIPELINE, "video_file": final_rel,
-        "url": "/api/gen/file/" + final_rel, "duration": round(final_duration, 3),
+        "pipeline": PIPELINE, "mode": PIPELINE, "video_file": final_rel,
+        "url": "/api/gen/file/" + final_rel,
+        "video_url": "/api/gen/file/" + final_rel,
+        "text": str(payload.get("copy") or ""),
+        "resolution": "1080p", "ratio": "9:16",
+        "duration": round(final_duration, 3),
         "width": width, "height": height,
         "video_count": len(videos), "material_count": len(materials),
         "presenter_windows": windows,

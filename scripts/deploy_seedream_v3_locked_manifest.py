@@ -29,6 +29,7 @@ AUTHORIZED_TARGET = "test@8.148.158.106"
 DEFAULT_BACKUP_ROOT = "/opt/huangque-deploy-backups"
 MANIFEST_REPOSITORY_PATHS = {
     "deploy/test-runtime/digital-human-material-seedream-v3-20260821.json",
+    "deploy/test-runtime/digital-human-material-feishu-priority-20260823.json",
 }
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
