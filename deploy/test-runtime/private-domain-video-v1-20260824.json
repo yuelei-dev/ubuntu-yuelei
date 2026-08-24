@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "47681a2e007474c09e045ab029908f598ffbbb9f"
+    "code_source_commit": "a472861f1f1588837a8018abd401eeeff356d4f4"
   },
   "expected_preimage": {
     "development_base_commit": "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
@@ -27,8 +27,8 @@
   "release_executor": {
     "contract": "private_domain_video_six_file_v2",
     "repository_path": "scripts/deploy_private_domain_video_v1_locked_manifest.py",
-    "git_blob": "6b907f8b801f0e33a0ccb012bfba07a40f6a1ba3",
-    "sha256": "bc3f47f82dc7b32b7ec146c04f9a51ac315ae32dc38e12dcdc2348c9481265ea",
+    "git_blob": "37cf66cd7d08a2a0af4a9661e80724517f26b5cc",
+    "sha256": "265285a78e7c72c53b1d7dffd70132d405f06e9bcffd5d84c54327bab2e79c4f",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
