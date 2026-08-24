@@ -211,16 +211,19 @@ class PrivateDomainReleaseTests(unittest.TestCase):
             self.assertEqual(self.original_feature, self._feature_row())
 
     def test_current_head_is_manifest_only_child_of_locked_code_source(self):
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True,
-            text=True, stdout=subprocess.PIPE,
-        ).stdout.strip()
+        parents = subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.split()
+        # pull_request CI checks out GitHub's synthetic merge commit. Its second
+        # parent is the exact PR Head; a normal branch checkout uses HEAD itself.
+        candidate = parents[2] if len(parents) == 3 else parents[0]
         parent = subprocess.run(
-            ["git", "rev-parse", "HEAD^"], cwd=ROOT, check=True,
+            ["git", "rev-parse", candidate + "^"], cwd=ROOT, check=True,
             text=True, stdout=subprocess.PIPE,
         ).stdout.strip()
         changed = set(filter(None, subprocess.run(
-            ["git", "diff", "--name-only", parent, head], cwd=ROOT,
+            ["git", "diff", "--name-only", parent, candidate], cwd=ROOT,
             check=True, text=True, stdout=subprocess.PIPE,
         ).stdout.splitlines()))
         self.assertEqual(parent, self.manifest["source"]["code_source_commit"])
