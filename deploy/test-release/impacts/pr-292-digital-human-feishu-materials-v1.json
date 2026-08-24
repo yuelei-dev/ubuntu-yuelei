@@ -1,0 +1,28 @@
+{
+  "external_checks": [],
+  "health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "release_id": "pr-292-digital-human-feishu-materials-v1",
+  "required_env": {
+    "huangque-content.service": [
+      "FEISHU_APP_ID",
+      "FEISHU_APP_SECRET"
+    ]
+  },
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "runtime_changes": [
+    "server/content_domains/digital_human_v2.py",
+    "server/content_domains/script_to_video.py",
+    "site/workbench/digital-human-oneclick.html"
+  ],
+  "schema_version": 1
+}
