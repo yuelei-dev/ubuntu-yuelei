@@ -3,15 +3,28 @@ const agent = require('../site/workbench/script-agent.js');
 
 function node(value, options) {
   options = options || {};
-  return {
+  const classes = new Set(options.classes || []);
+  const result = {
     value: value || '', textContent: options.textContent || value || '', hidden: false,
     style: { display: options.display || '' }, disabled: !!options.disabled,
+    checked: !!options.checked, files: options.files || [],
     attributes: options.attributes || {}, clicked: false, focused: false,
-    classList: { add() {}, remove() {}, toggle() {} },
+    classList: {
+      add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
+      contains(name) { return classes.has(name); },
+      toggle(name, force) {
+        if(force === true) classes.add(name);
+        else if(force === false) classes.delete(name);
+        else if(classes.has(name)) classes.delete(name); else classes.add(name);
+      },
+    },
     getAttribute(name) { return this.attributes[name] || null; },
     click() { this.clicked = true; }, focus() { this.focused = true; },
     scrollIntoView() {}, dispatchEvent() {},
   };
+  if(options.options) result.options = options.options;
+  if(options.noValue) delete result.value;
+  return result;
 }
 
 function fixture(mode, breakdownTool) {
@@ -52,6 +65,81 @@ function fixture(mode, breakdownTool) {
     querySelectorAll(selector) { return lists[selector] || []; },
   };
   return { doc, nodes, lists };
+}
+
+function digitalHumanFixture(mode, narrationMode) {
+  mode = mode || 'photo';
+  narrationMode = narrationMode || 'text';
+  const photoTab = node('数字人一键生成', {
+    attributes: {'data-dh-mode': 'photo'}, classes: mode === 'photo' ? ['on'] : [],
+  });
+  const videoTab = node('真人视频 Precision', {
+    attributes: {'data-dh-mode': 'video'}, classes: mode === 'video' ? ['on'] : [],
+  });
+  const textMode = node('text', {checked: narrationMode === 'text', attributes: {value: 'text'}});
+  const audioMode = node('audio', {checked: narrationMode === 'audio', attributes: {value: 'audio'}});
+  const templates = [
+    node('参考片高频剪辑', {attributes: {'data-template': 'viral-talking-head-v1'}, classes: ['on']}),
+    node('专业讲解', {attributes: {'data-template': 'professional-explainer-v1'}}),
+    node('纯净口播', {attributes: {'data-template': 'clean-talking-v1'}}),
+  ];
+  const nodes = {
+    dhPhotoMode: node('', {display: mode === 'photo' ? '' : 'none'}),
+    dhVideoMode: node('', {display: mode === 'video' ? '' : 'none'}),
+    script: node('照片模式口播'), dhScript: node('真人视频新口播'),
+    photo: node(''), photoName: node('portrait.png', {classes: ['file-ready']}),
+    dhVideoFile: node(''), dhVideoName: node('真人视频 #8', {classes: ['file-ready']}),
+    voiceSource: node('vip_personal'), voice: node(''), driveAudio: node(''),
+    customerMaterialCount: node('', {textContent: '2 / 6', noValue: true}),
+    consent: node('', {checked: false}), dhConsent: node('', {checked: false}),
+    result: node(''), dhPrecisionResult: node(''), dhVoicePreview: node('', {disabled: mode !== 'video'}),
+    photoDrop: node(''), voiceUploadDrop: node(''), customerMaterialsPicker: node(''),
+    driveAudioDrop: node(''), dhDrop: node(''), analyze: node(''), start: node(''),
+    dhAnalyze: node(''), dhStart: node(''),
+  };
+  const options = {
+    '[data-dh-mode].on': mode === 'video' ? videoTab : photoTab,
+    'input[name="narrationMode"]:checked': narrationMode === 'audio' ? audioMode : textMode,
+    '.precision-template.on': templates[0], '.precision-source.on': null,
+    '.step.failed': null, '.step.running': null,
+  };
+  const lists = {
+    '[data-dh-mode]': [photoTab, videoTab],
+    'input[name="narrationMode"]': [textMode, audioMode],
+    '.precision-template': templates,
+  };
+  const doc = {
+    defaultView: {Event: function Event() {}},
+    getElementById(id) { const value = nodes[id] || null; if(value) value.ownerDocument = doc; return value; },
+    querySelector(selector) { return options[selector] || null; },
+    querySelectorAll(selector) { return lists[selector] || []; },
+  };
+  return {doc, nodes, lists};
+}
+
+function privateDomainFixture() {
+  const templateOptions = [node('数据', {attributes: {value: 'data'}}), node('温暖', {attributes: {value: 'warm'}})];
+  const durationOptions = [node('8秒', {attributes: {value: '8'}}), node('10秒', {attributes: {value: '10'}})];
+  const bgmOptions = [node('随机', {attributes: {value: 'random'}}), node('成长', {attributes: {value: 'growth.mp3'}})];
+  templateOptions.forEach(item => { item.value = item.attributes.value; });
+  durationOptions.forEach(item => { item.value = item.attributes.value; });
+  bgmOptions.forEach(item => { item.value = item.attributes.value; });
+  const nodes = {
+    copy: node('第一条文案\n\n第二条文案'),
+    template: node('data', {options: templateOptions}),
+    duration: node('8', {options: durationOptions}),
+    bgm: node('random', {options: bgmOptions}),
+    materials: node('', {attributes: {'data-asset-count': '18', 'data-selected-count': '4'}}),
+    serverState: node('', {textContent: '测试服务器素材库已连接', noValue: true}),
+    randomize: node(''), plan: node(''),
+  };
+  const body = node('', {attributes: {'data-page': 'private_domain_video'}});
+  const doc = {
+    body, defaultView: {Event: function Event() {}},
+    getElementById(id) { const value = nodes[id] || null; if(value) value.ownerDocument = doc; return value; },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+  };
+  return {doc, nodes};
 }
 
 {
@@ -98,6 +186,63 @@ function fixture(mode, breakdownTool) {
   assert.equal(context.scene_count, 3);
 }
 
+{
+  const {doc} = digitalHumanFixture('photo', 'text');
+  const context = agent.createPageContext(doc);
+  assert.equal(context.page, 'digital_human_oneclick');
+  assert.equal(context.mode, 'photo');
+  assert.equal(context.narration_mode, 'text');
+  assert.equal(context.script_text, '照片模式口播');
+  assert.equal(context.script_length, 6);
+  assert.equal(context.has_portrait, true);
+  assert.equal(context.has_voice_source, true);
+  assert.equal(context.customer_material_count, 2);
+  assert.equal(context.consent_confirmed, false);
+  assert.equal(context.active_job_status, 'idle');
+  doc.getElementById('voiceSource').value = '__clone__';
+  assert.equal(agent.createPageContext(doc).has_voice_source, false);
+  const body = agent.buildPayload('把文案填进去', doc, {messages: []}, {
+    getItem() { return 'digital_session_123'; }, setItem() {},
+  });
+  assert.equal(body.source_page, 'digital_human_oneclick');
+  assert.equal(body.page_context.page, 'digital_human_oneclick');
+}
+{
+  const {doc} = digitalHumanFixture('video', 'text');
+  const context = agent.createPageContext(doc);
+  assert.equal(context.mode, 'video');
+  assert.equal(context.script_text, '真人视频新口播');
+  assert.equal(context.has_video_source, true);
+  assert.equal(context.has_voice_source, true);
+  assert.equal(context.precision_template, 'viral-talking-head-v1');
+}
+
+{
+  const {doc, nodes} = privateDomainFixture();
+  const context = agent.createPageContext(doc);
+  assert.equal(context.page, 'private_domain_video');
+  assert.equal(context.copy_count, 2);
+  assert.equal(context.template, 'data');
+  assert.equal(context.duration, '8');
+  assert.deepEqual(context.bgm_values, ['growth.mp3']);
+  assert.equal(context.asset_count, 18);
+  assert.equal(context.selected_asset_count, 4);
+  assert.equal(context.catalog_status, 'ready');
+  const body = agent.buildPayload('改成温暖模板', doc, {messages: []}, {
+    getItem() { return 'private_session_123'; }, setItem() {},
+  });
+  assert.equal(body.source_page, 'private_domain_video');
+  const before = agent.createPageSnapshot(doc).page_revision;
+  agent.applyAction({type:'fill_field',field:'private_domain_copy',value:'新文案',label:'填入文案'}, doc, {});
+  assert.equal(nodes.copy.value, '新文案');
+  assert.notEqual(agent.createPageSnapshot(doc).page_revision, before);
+  agent.applyAction({type:'choose_option',field:'private_domain_template',value:'warm',label:'温暖模板'}, doc, {});
+  assert.equal(nodes.template.value, 'warm');
+  agent.applyAction({type:'focus',target:'private_domain_plan',label:'查看生成按钮'}, doc, {});
+  assert.equal(nodes.plan.focused, true);
+  assert.throws(() => agent.applyAction({type:'choose_option',field:'private_domain_bgm',value:'evil.mp3',label:'伪造音乐'}, doc, {}), /没有找到/);
+}
+
 
 {
   const { doc, nodes, lists } = fixture();
@@ -121,6 +266,22 @@ function fixture(mode, breakdownTool) {
   agent.applyAction({type:'navigate',target:'assets',label:'去素材库'}, doc, win);
   assert.equal(win.location.href, '/workbench/assets.html');
   assert.throws(() => agent.applyAction({type:'navigate',target:'https://evil.example',label:'外链'}, doc, win), /站内目标无效/);
+}
+{
+  const {doc, nodes, lists} = digitalHumanFixture('photo', 'text');
+  agent.applyAction({type:'fill_field',field:'digital_human_script',value:'顾客发来的新文案',label:'填入口播'}, doc, {});
+  assert.equal(nodes.script.value, '顾客发来的新文案');
+  agent.applyAction({type:'choose_option',field:'narration_mode',value:'audio',label:'使用完整录音'}, doc, {});
+  assert.equal(lists['input[name="narrationMode"]'][1].clicked, true);
+  agent.applyAction({type:'choose_option',field:'precision_template',value:'professional-explainer-v1',label:'选择专业讲解'}, doc, {});
+  assert.equal(lists['.precision-template'][1].clicked, true);
+  agent.applyAction({type:'switch_mode',mode:'video',label:'切换真人视频'}, doc, {});
+  assert.equal(lists['[data-dh-mode]'][1].clicked, true);
+  agent.applyAction({type:'focus',target:'photo_upload',label:'上传照片'}, doc, {});
+  assert.equal(nodes.photoDrop.focused, true);
+  agent.applyAction({type:'focus',target:'generate_photo_video',label:'查看生成按钮'}, doc, {});
+  assert.equal(nodes.start.focused, true);
+  assert.equal(nodes.start.clicked, false);
 }
 
 {
@@ -155,12 +316,17 @@ function fixture(mode, breakdownTool) {
 }
 
 const source = require('fs').readFileSync(require('path').join(__dirname, '../site/workbench/script-agent.js'), 'utf8');
+const digitalHumanPage = require('fs').readFileSync(require('path').join(__dirname, '../site/workbench/digital-human-oneclick.html'), 'utf8');
 assert.ok(source.includes('currentPlan.actions.map(function(action){return applyAction(action,doc,win);}'));
 assert.ok(source.includes('health.director_agent_enabled!==true'));
 assert.ok(source.includes('涉及扣点或生成时，仍需要你点击原页面按钮确认'));
-assert.ok(source.indexOf('state.pending_request=record; saveState(storage,state);') <
+assert.ok(source.indexOf('state.pending_request=record; persist();') <
   source.indexOf('runPending(record,false);'));
 assert.ok(source.includes('if(state.pending_request) runPending(state.pending_request,true);'));
+assert.ok(digitalHumanPage.includes('src="script-agent.js?'));
+for(const id of ['photoDrop','voiceUploadDrop','customerMaterialsPicker','driveAudioDrop']) {
+  assert.ok(digitalHumanPage.includes('id="'+id+'"'));
+}
 
 (async function(){
   let mounted = 0;
@@ -188,6 +354,14 @@ assert.ok(source.includes('if(state.pending_request) runPending(state.pending_re
   }, function(){ mounted += 1; });
   assert.equal(unavailable, null);
   assert.equal(mounted, 1);
+  const digitalHealthDoc = {
+    getElementById(id){ return id === 'dhPhotoMode' ? {} : null; },
+  };
+  const digitalEnabled = await agent.bootstrap(digitalHealthDoc, {
+    fetch(){ return Promise.resolve(healthResponse({director_agent_enabled:true})); },
+  }, function(){ mounted += 1; return 'digital-mounted'; });
+  assert.equal(digitalEnabled, 'digital-mounted');
+  assert.equal(mounted, 2);
   let calls = 0;
   const win = {fetch(){
     calls += 1;

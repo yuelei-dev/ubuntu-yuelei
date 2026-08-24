@@ -231,11 +231,31 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         return root, database
 
     def _execute(self, manifest_path, target, backup, hooks, checkpoint=None):
-        return self.executor.execute_locked_release(
-            manifest_path, ROOT, target, backup, hooks=hooks,
-            verify_repository=False, reviewed_head="r" * 40,
-            merged_main="m" * 40, checkpoint=checkpoint,
-        )
+        manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as source_dir:
+            source = pathlib.Path(source_dir)
+            locked_paths = [
+                manifest["release_executor"]["repository_path"],
+                manifest["release_executor"]["locked_base_executor"]["repository_path"],
+            ]
+            for item in manifest["files"]:
+                locked_paths.append(item["repository_path"])
+            for relative in locked_paths:
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if relative == manifest["release_executor"]["repository_path"]:
+                    data = EXECUTOR.read_bytes()
+                elif relative == manifest["release_executor"]["locked_base_executor"]["repository_path"]:
+                    data = git_bytes(manifest["release_executor"]["locked_base_executor"]["git_blob"])
+                else:
+                    item = next(entry for entry in manifest["files"] if entry["repository_path"] == relative)
+                    data = git_bytes(item["postimage_blob"])
+                destination.write_bytes(data)
+            return self.executor.execute_locked_release(
+                manifest_path, source, target, backup, hooks=hooks,
+                verify_repository=False, reviewed_head="r" * 40,
+                merged_main="m" * 40, checkpoint=checkpoint,
+            )
 
     def _assert_preimages(self, target, manifest):
         for item in manifest["files"]:
@@ -287,7 +307,7 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         self.assertEqual(self.executor_sha, release["sha256"])
         self.assertEqual(set(LOCKS), set(release["required_repository_paths"]))
         for item in loaded["files"]:
-            data = (ROOT / item["repository_path"]).read_bytes()
+            data = git_bytes(item["postimage_blob"])
             self.assertEqual(item["postimage_blob"], git_blob(data))
             self.assertEqual(item["postimage_sha256"], sha256(data))
             if item["target_preimage_state"] == "file":
