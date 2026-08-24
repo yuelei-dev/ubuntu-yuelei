@@ -20,8 +20,8 @@
 
 ## 不可绕过的边界
 
-- 脚本不包含 SSH；必须在测试机本地、规范仓库的精确 `main` checkout 中运行。
-- Git 固定使用 `/usr/bin/git` 和最小环境；origin 必须精确等于 `https://github.com/yuelei-dev/ubuntu-yuelei.git`。
+- 脚本不包含 SSH；运行命令只能从 root 安装的固定入口 `/usr/local/libexec/huangque-release/release_test.py` 启动，数据源只能是 root 管理的规范镜像 `/opt/huangque-test-release`。禁止通过 `sudo` 直接执行 checkout 内的 `scripts/release_test.py`。
+- Git 固定使用 `/usr/bin/git` 和最小环境；禁用 replace、grafts、alternates、shallow、fsmonitor、hooks、credential helper、askpass、URL rewrite、代理、SSL 降级和可写 optional locks。规范 GitHub `main` 通过不使用系统或环境代理的固定 HTTPS API 与系统 CA 独立读取，不使用本地 Git transport 配置。
 - 功能 PR 只能引用不可变 catalog 中的命名健康探针，不能提交 URL、端口或路由；第一阶段 `plan` 不发送这些 HTTP 请求。
 - 生产 CLI 固定使用 `deploy/test-release/runtime-catalog.json`、`/etc/huangque/release-identity.json`、`/var/lib/huangque-release` 和 `/` 运行根；这些信任根不能通过命令行替换。测试注入只允许通过 Python 构造器。
 - 第一阶段 `external_checks` 和 `migrations` 必须是空数组；`no_charge: true` 不能作为执行任意命令的授权。
@@ -33,7 +33,11 @@
 
 `.github/workflows/release-impact-gate.yml` 是未来功能 PR 的权威发布影响门禁。它在 `pull_request_target` 上运行，但只授予 `contents: read` 与 `pull-requests: read`，只执行 Base checkout 中的 `scripts/release_test.py`；Head 仅作为 Git 数据供 Base 校验器读取。
 
-PR #294 是该门禁的一次性 bootstrap：它的 Base 尚不存在这份工作流，所以本 PR 必须依靠精确 Head 常规 CI 和独立复审完成启动审核。合并本 PR 本身不等于门禁已经生效；仓库管理员还必须把 `Base-owned test release impact gate` 设置为 main 分支的 required check，并验证一次普通功能 PR 无法绕过，之后才能允许新的运行时功能 PR 合并。没有这项仓库侧验收时，状态必须保持 `merged_not_releasable`。
+PR #294 是该门禁的一次性 bootstrap：它的 Base 尚不存在这份工作流，所以本 PR 必须依靠精确 Head 常规 CI 和独立复审完成启动审核。合并本 PR 本身不等于门禁已经生效。
+
+如果仓库所在账户支持 organization/enterprise ruleset 的 **Require workflows to pass before merging**，必须用它绑定可信仓库中的精确 `.github/workflows/release-impact-gate.yml`，不能只按 job/check 名称绑定。若当前账户不支持 required workflow，则只能暂用 strict required status check，并锁定 GitHub Actions 为 expected source；启用后必须用一个新增同名 job 的恶意演练 PR 验证真正的 Base-owned gate 失败仍会阻断合并。该演练通过前，后续运行时功能 PR 必须保持 `merged_not_releasable`。
+
+Base 校验器还会拒绝 bootstrap 后任何 `.github/workflows/**` 增删改，防止普通功能 PR新增同名检查冒充门禁。未来工作流治理变更必须走新的受控 bootstrap；不能与业务运行文件混在同一 PR 中。
 
 第一阶段把以下信任根视为不可变：常规 CI、Base-owned gate、统一校验器和 runtime catalog。后续若要升级平台，必须作为新的受控 bootstrap 独立审核并同步切换 required check，不能与业务运行文件混在同一功能 PR 中。
 
@@ -64,14 +68,16 @@ bootstrap 会扫描目标 commit 中全部候选文件，而不只扫描本 PR d
 
 catalog 允许一个仓库文件映射到多个运行位，例如 leadgen A/B 双槽及 content/auth 共享模块；也允许一个运行文件声明多个受影响服务，例如 `func_names.py` 同时要求 admin 与 content 的健康合同。台账按每一个实际运行路径记录哈希，不能用单一源码路径掩盖 fan-out。
 
-当前 catalog 同时交叉校验 `drift_sentinel.py` 的后端权威映射，并覆盖其列出的三项服务器脚本；`scripts/pool_health.py` 也显式 fan-out 到 leadgen A/B。初始化前必须只读核对 catalog 中列出的全部运行数据豁免项与真实测试机，任何未登记文件都会阻断初始化，不能为了通过门禁临时扩大豁免。
+当前 catalog 同时交叉校验 `drift_sentinel.py` 的后端权威映射，并覆盖其列出的三项服务器脚本；`scripts/pool_health.py` 也显式 fan-out 到 leadgen A/B。Hermes 的 `prompt.md`、`README.md` 和 migration helper 已按权威部署脚本纳入受管映射。`content-api/.deploy/whisper-runtime-20260815/`、Hermes `backups/`、日志、cookies、`*.bak*`、`*_backup.py` 和其他历史文件没有获得目录级豁免：在完成真实只读盘点、逐项证明为运行数据或经授权退役前，它们会作为未分类文件阻断初始化。不能用宽泛前缀掩盖可执行历史产物。
 
 ## 一次性初始化
 
 合并第一阶段仍不等于操作服务器。后续只能先做只读核对：测试服所有受管文件及目录库存必须完整对应一个已合并 main commit。混合版本、额外文件或缺失文件都会阻断初始化，禁止伪造台账迁就漂移。
 
+首次服务器 bootstrap 是独立的管理员操作，不由功能 PR 或本 PR 自动执行。管理员必须从已审核并合并的精确 commit 制作产物，把 `scripts/release_test.py` 安装为 root:root、`0755` 的 `/usr/local/libexec/huangque-release/release_test.py`，把该精确产物 SHA-256 写入 `deploy/test-release/bootstrap.example.json` 后安装为 root:root、`0600` 的 `/etc/huangque/release-bootstrap.json`，并把完整仓库镜像安装到 root:root、部署账户不可写的 `/opt/huangque-test-release`。镜像必须是完整历史且 `.git` 全部由 root 持有、group/other 不可写，不得含 replace refs、grafts、alternates、shallow 元数据或隐藏执行/路由 Git 配置。安装、身份文件和真实 inventory 核对都需要另行授权；未满足任一项时运行命令必须 fail-closed。
+
 ```bash
-sudo /usr/bin/python3 scripts/release_test.py initialize \
+sudo /usr/bin/python3 /usr/local/libexec/huangque-release/release_test.py initialize \
   --deployed-commit "$MAIN_SHA" \
   --confirm-environment test
 ```
@@ -81,9 +87,9 @@ sudo /usr/bin/python3 scripts/release_test.py initialize \
 ## 状态与只读预演
 
 ```bash
-sudo /usr/bin/python3 scripts/release_test.py status
+sudo /usr/bin/python3 /usr/local/libexec/huangque-release/release_test.py status
 
-sudo /usr/bin/python3 scripts/release_test.py plan \
+sudo /usr/bin/python3 /usr/local/libexec/huangque-release/release_test.py plan \
   --target-commit "$MERGED_MAIN_SHA" \
   --reviewed-head "pr-123=$MERGE_BASE_SHA..$REVIEWED_HEAD_SHA"
 ```

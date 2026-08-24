@@ -17,11 +17,14 @@ import json
 import os
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
 import time
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path, PurePosixPath
 
 if os.name == "posix":
@@ -40,11 +43,15 @@ DEFAULT_CATALOG = "deploy/test-release/runtime-catalog.json"
 DEFAULT_IMPACT_PREFIX = "deploy/test-release/impacts/"
 DEFAULT_IDENTITY_FILE = "/etc/huangque/release-identity.json"
 DEFAULT_STATE_ROOT = "/var/lib/huangque-release"
+DEFAULT_SOURCE_ROOT = "/opt/huangque-test-release"
+RUNTIME_ENTRYPOINT = "/usr/local/libexec/huangque-release/release_test.py"
+RUNTIME_BOOTSTRAP_MANIFEST = "/etc/huangque/release-bootstrap.json"
 GIT_BINARY = "/usr/bin/git"
 TRUST_ROOT_PATHS = frozenset({
     ".github/workflows/ci.yml",
     ".github/workflows/release-impact-gate.yml",
     DEFAULT_CATALOG,
+    "deploy/test-release/bootstrap.example.json",
     "scripts/release_test.py",
 })
 
@@ -196,13 +203,88 @@ def _atomic_write(root: Path, runtime_path: str, data: bytes, mode: int):
 
 def _minimal_subprocess_environment():
     return {
+        "GIT_ASKPASS": "/bin/false",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_PROTOCOL_FROM_USER": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
         "GIT_TERMINAL_PROMPT": "0",
         "HOME": "/nonexistent",
         "LANG": "C.UTF-8",
         "LC_ALL": "C.UTF-8",
         "PATH": "/usr/bin:/bin",
+        "SSH_ASKPASS": "/bin/false",
     }
+
+
+def _github_main_commit(origin_url, *, timeout=30):
+    if origin_url != "https://github.com/yuelei-dev/ubuntu-yuelei.git":
+        raise ReleaseError("live origin resolver only accepts the approved repository")
+    url = "https://api.github.com/repos/yuelei-dev/ubuntu-yuelei/git/ref/heads/main"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "huangque-test-release/1",
+        },
+        method="GET",
+    )
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            if response.geturl() != url:
+                raise ReleaseError("live origin verification was redirected")
+            raw = response.read(128 * 1024 + 1)
+    except (OSError, urllib.error.URLError) as exc:
+        raise ReleaseError("live approved origin is unavailable") from exc
+    if len(raw) > 128 * 1024:
+        raise ReleaseError("live origin response exceeded its size limit")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        commit = payload["object"]["sha"]
+    except (KeyError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("live origin response is invalid") from exc
+    if not COMMIT_RE.fullmatch(str(commit or "")):
+        raise ReleaseError("live origin main commit is invalid")
+    return commit
+
+
+def _verify_runtime_entrypoint(source_root):
+    if os.name != "posix" or os.geteuid() != 0:
+        raise ReleaseError("runtime release commands require the root-owned installed entrypoint")
+    manifest_record = _read_regular_record(Path("/"), RUNTIME_BOOTSTRAP_MANIFEST)
+    if (manifest_record is None or manifest_record[1].st_uid != 0
+            or stat.S_IMODE(manifest_record[1].st_mode) != 0o600):
+        raise ReleaseError("runtime release bootstrap manifest is not trusted")
+    manifest_raw = manifest_record[0]
+    try:
+        manifest = json.loads(manifest_raw.decode("utf-8"))
+    except (AttributeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ReleaseError("runtime release bootstrap manifest is unavailable") from exc
+    if (not isinstance(manifest, dict)
+            or set(manifest) != {
+                "schema_version", "entrypoint", "entrypoint_sha256", "source_root",
+            }
+            or type(manifest.get("schema_version")) is not int
+            or manifest["schema_version"] != SCHEMA_VERSION
+            or manifest.get("entrypoint") != RUNTIME_ENTRYPOINT
+            or not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("entrypoint_sha256") or ""))
+            or manifest.get("source_root") != DEFAULT_SOURCE_ROOT):
+        raise ReleaseError("runtime release bootstrap manifest is invalid")
+    if os.path.abspath(__file__) != RUNTIME_ENTRYPOINT:
+        raise ReleaseError("runtime release command was not launched from the installed entrypoint")
+    record = _read_regular_record(Path("/"), RUNTIME_ENTRYPOINT)
+    if (record is None or record[1].st_uid != 0
+            or stat.S_IMODE(record[1].st_mode) != 0o755
+            or _sha256(record[0]) != manifest["entrypoint_sha256"]):
+        raise ReleaseError("installed runtime release entrypoint is not trusted")
+    if os.path.abspath(source_root) != DEFAULT_SOURCE_ROOT:
+        raise ReleaseError("runtime release source root is not the bootstrap-approved mirror")
 
 
 def _default_owner_resolver(owner):
@@ -249,17 +331,102 @@ def _validate_executable(path: str, *, approved_parent=None):
 
 class GitRepository:
     def __init__(self, source_root, *, timeout=90, git_binary=GIT_BINARY,
-                 validate_binary=True):
+                 validate_binary=True, validate_repository=True,
+                 remote_main_resolver=None):
         self.root = Path(os.path.abspath(source_root))
         self.timeout = int(timeout)
         self.git_binary = _absolute_runtime_path(git_binary)
         if validate_binary:
             _validate_executable(self.git_binary, approved_parent="/usr/bin")
         self.environment = _minimal_subprocess_environment()
+        self.git_prefix = [
+            self.git_binary,
+            "--no-optional-locks",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "credential.helper=",
+            "-c", "core.askPass=",
+            "-c", "http.proxy=",
+            "-c", "https.proxy=",
+            "-c", "http.sslVerify=true",
+            "-c", "protocol.file.allow=never",
+            "-c", "protocol.ext.allow=never",
+            "-c", "protocol.git.allow=never",
+            "-c", "protocol.ssh.allow=never",
+            "-c", "protocol.http.allow=never",
+            "-c", "protocol.https.allow=always",
+        ]
+        self.remote_main_resolver = remote_main_resolver or _github_main_commit
+        if validate_repository:
+            self._verify_controlled_repository()
+
+    def _verify_controlled_repository(self):
+        if os.name != "posix":  # pragma: no cover - release host and CI are Linux
+            return
+        expected_uid = os.geteuid()
+        for path, kind in ((self.root, "source root"), (self.root / ".git", "Git root")):
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError as exc:
+                raise ReleaseError("release %s is missing" % kind) from exc
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != expected_uid or info.st_mode & 0o022):
+                raise ReleaseError(
+                    "release %s must be a real current-user-owned non-writable directory"
+                    % kind
+                )
+        git_root = self.root / ".git"
+        forbidden_metadata = (
+            git_root / "objects" / "info" / "alternates",
+            git_root / "objects" / "info" / "http-alternates",
+            git_root / "info" / "grafts",
+            git_root / "refs" / "replace",
+            git_root / "shallow",
+        )
+        if any(path.exists() or path.is_symlink() for path in forbidden_metadata):
+            raise ReleaseError("Git replacement, graft, alternate, or shallow metadata is not allowed")
+        for directory, names, filenames in os.walk(self.root, followlinks=False):
+            directory_path = Path(directory)
+            for name in list(names) + list(filenames):
+                candidate = directory_path / name
+                info = os.lstat(candidate)
+                if (stat.S_ISLNK(info.st_mode) or info.st_uid != expected_uid
+                        or info.st_mode & 0o022):
+                    raise ReleaseError(
+                        "release repository files must be current-user-owned and non-writable"
+                    )
+        config_path = git_root / "config"
+        try:
+            config_text = config_path.read_text("utf-8").lower()
+        except (OSError, UnicodeError) as exc:
+            raise ReleaseError("Git local configuration is unavailable") from exc
+        forbidden_sections = (
+            '[alias', '[credential', '[diff', '[filter', '[http', '[include', '[url',
+        )
+        forbidden_keys = (
+            "fsmonitor", "hookspath", "askpass", "sshcommand", "proxy",
+            "sslverify", "helper", "external", "textconv", "process",
+            "insteadof", "pushinsteadof", "worktree",
+        )
+        for raw_line in config_text.splitlines():
+            line = raw_line.strip()
+            if (line.startswith("[") and line.startswith(forbidden_sections)):
+                raise ReleaseError("Git local configuration contains a forbidden section")
+            key = line.split("=", 1)[0].strip().replace(" ", "")
+            if key and any(item in key for item in forbidden_keys):
+                raise ReleaseError("Git local configuration contains a forbidden key")
+        packed_refs = git_root / "packed-refs"
+        if packed_refs.exists():
+            try:
+                packed_text = packed_refs.read_text("utf-8")
+            except (OSError, UnicodeError) as exc:
+                raise ReleaseError("Git packed refs are unavailable") from exc
+            if any(" refs/replace/" in line for line in packed_text.splitlines()):
+                raise ReleaseError("Git packed replacement refs are not allowed")
 
     def run(self, arguments, *, allow_failure=False, binary=False):
         result = subprocess.run(
-            [self.git_binary, "-C", str(self.root)] + list(arguments),
+            self.git_prefix + ["-C", str(self.root)] + list(arguments),
             check=False, capture_output=True, timeout=self.timeout,
             env=self.environment, **({} if binary else {"text": True}),
         )
@@ -395,10 +562,7 @@ class GitRepository:
         if head != target_commit or origin_main != target_commit:
             raise ReleaseError("HEAD and local origin/main must equal target commit")
         if verify_live_origin:
-            line = self.output([
-                "ls-remote", "--exit-code", expected_origin_url, "refs/heads/main",
-            ])
-            remote_main = line.split()[0] if line else ""
+            remote_main = self.remote_main_resolver(expected_origin_url)
             if remote_main != target_commit:
                 raise ReleaseError("live approved origin/main must equal target commit")
 
@@ -444,9 +608,10 @@ class RuntimeCatalog:
         self.allowed_units = frozenset(str(item) for item in data.get("allowed_units") or [])
         if any(not UNIT_RE.fullmatch(item) for item in self.allowed_units):
             raise ReleaseError("runtime catalog contains an invalid systemd unit")
-        self.min_free_bytes = int(data.get("min_free_bytes") or 0)
-        if self.min_free_bytes < 0:
+        raw_min_free_bytes = data.get("min_free_bytes")
+        if type(raw_min_free_bytes) is not int or raw_min_free_bytes < 0:
             raise ReleaseError("runtime catalog minimum free bytes is invalid")
+        self.min_free_bytes = raw_min_free_bytes
         self.unmanaged_runtime_paths = frozenset(
             _absolute_runtime_path(item)
             for item in data.get("unmanaged_runtime_paths") or []
@@ -510,6 +675,11 @@ class RuntimeCatalog:
             self.service_health_probes[str(unit)] = str(probe_id)
         self.rules = []
         for raw in data.get("rules") or []:
+            for field in (
+                    "service_from_repository", "daemon_reload", "delete_allowed",
+                    "allow_unmanaged_runtime"):
+                if field in raw and type(raw[field]) is not bool:
+                    raise ReleaseError("runtime catalog rule boolean is invalid")
             kind = raw.get("kind")
             repository = _relative_repository_path(raw.get("repository") or "")
             runtime = _absolute_runtime_path(raw.get("runtime") or "")
@@ -813,7 +983,8 @@ def collect_release_impact(
     impact_prefixes = {item.impact_prefix for item in catalogs}
     catalog_changed = any(path == catalog_path for _status, path in changes)
     trust_root_changes = sorted(
-        path for _status, path in changes if path in TRUST_ROOT_PATHS
+        path for _status, path in changes
+        if path in TRUST_ROOT_PATHS or path.startswith(".github/workflows/")
     )
     impact_changes = [
         (status_value, path) for status_value, path in changes
@@ -1159,7 +1330,8 @@ class ReleaseEngine:
             "environment": self.catalog.target["environment"],
             "host_id": self.catalog.target["host_id"],
         }
-        if any(identity.get(key) != value for key, value in required.items()):
+        if (type(identity.get("schema_version")) is not int
+                or any(identity.get(key) != value for key, value in required.items())):
             raise ReleaseError("release identity is wrong for this target")
         hostname_bytes = _read_regular(self.runtime_root, "/etc/hostname")
         machine_bytes = _read_regular(self.runtime_root, "/etc/machine-id")
@@ -1188,7 +1360,8 @@ class ReleaseEngine:
         }
         if set(state) != required_keys:
             raise ReleaseError("deployment ledger fields are invalid")
-        if (state["schema_version"] != SCHEMA_VERSION
+        if (type(state["schema_version"]) is not int
+                or state["schema_version"] != SCHEMA_VERSION
                 or state["environment"] != self.catalog.target["environment"]
                 or state["host_id"] != self.catalog.target["host_id"]
                 or not COMMIT_RE.fullmatch(str(state["deployed_main_commit"]))
@@ -1211,6 +1384,7 @@ class ReleaseEngine:
                     catalog_record.get("blob_oid") or ""))
                 or not re.fullmatch(r"[0-9a-f]{64}", str(
                     catalog_record.get("sha256") or ""))
+                or type(catalog_record.get("schema_version")) is not int
                 or catalog_record.get("schema_version") != SCHEMA_VERSION):
             raise ReleaseError("deployment ledger runtime catalog record is invalid")
         for release_id, record in state["accepted_impacts"].items():
@@ -1585,7 +1759,7 @@ def _engine_from_args(args):
 
 
 def _add_runtime_arguments(parser):
-    parser.add_argument("--source-root", default=".")
+    parser.add_argument("--source-root", default=DEFAULT_SOURCE_ROOT)
 
 
 def main(argv=None):
@@ -1638,6 +1812,7 @@ def main(argv=None):
                 "release_ids": [item["release_id"] for item in result["impacts"]],
             }
         else:
+            _verify_runtime_entrypoint(args.source_root)
             engine = _engine_from_args(args)
             if args.command == "initialize":
                 output = engine.initialize(

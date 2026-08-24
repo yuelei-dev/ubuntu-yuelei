@@ -5,9 +5,12 @@ import contextlib
 import io
 import json
 import os
+import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -322,12 +325,65 @@ class CatalogAndImpactTests(unittest.TestCase):
                 base_catalog=self.catalog, enforce_catalog_isolation=True,
             )
 
+    def test_catalog_rejects_boolean_integer_and_non_boolean_rule_values(self):
+        invalid_catalogs = []
+        for value in (True, False, "1024", 1.5):
+            data = catalog_data()
+            data["min_free_bytes"] = value
+            invalid_catalogs.append(data)
+        for field, value in (
+                ("delete_allowed", 1),
+                ("allow_unmanaged_runtime", "false"),
+                ("daemon_reload", 0),
+                ("service_from_repository", "true")):
+            data = catalog_data()
+            data["rules"][-1][field] = value
+            invalid_catalogs.append(data)
+        for data in invalid_catalogs:
+            with self.subTest(value=data), self.assertRaises(release_test.ReleaseError):
+                release_test.RuntimeCatalog(data)
+
     def test_future_pr_cannot_modify_the_base_owned_verifier(self):
         raw_catalog = release_test._json_bytes(catalog_data())
         repo = FakeRepository(
             {
                 BASE: {CATALOG_PATH: raw_catalog, "scripts/release_test.py": b"safe"},
                 HEAD: {CATALOG_PATH: raw_catalog, "scripts/release_test.py": b"return 0"},
+            },
+            {HEAD: [BASE]},
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "trust roots"):
+            release_test.collect_release_impact(
+                repo, self.catalog, BASE, HEAD,
+                base_catalog=self.catalog, enforce_catalog_isolation=True,
+            )
+
+    def test_future_pr_cannot_add_a_same_named_spoof_workflow(self):
+        raw_catalog = release_test._json_bytes(catalog_data())
+        spoof = ".github/workflows/spoof-required-check.yml"
+        repo = FakeRepository(
+            {
+                BASE: {CATALOG_PATH: raw_catalog},
+                HEAD: {
+                    CATALOG_PATH: raw_catalog,
+                    spoof: b"jobs:\n  spoof:\n    name: Base-owned test release impact gate\n",
+                },
+            },
+            {HEAD: [BASE]},
+        )
+        with self.assertRaisesRegex(release_test.ReleaseError, "trust roots"):
+            release_test.collect_release_impact(
+                repo, self.catalog, BASE, HEAD,
+                base_catalog=self.catalog, enforce_catalog_isolation=True,
+            )
+
+    def test_future_pr_cannot_delete_any_workflow(self):
+        raw_catalog = release_test._json_bytes(catalog_data())
+        workflow = ".github/workflows/ordinary.yml"
+        repo = FakeRepository(
+            {
+                BASE: {CATALOG_PATH: raw_catalog, workflow: b"jobs: {}\n"},
+                HEAD: {CATALOG_PATH: raw_catalog},
             },
             {HEAD: [BASE]},
         )
@@ -575,6 +631,14 @@ class ReleaseEngineTests(unittest.TestCase):
             self.initialize()
         self.assertFalse(self._mapped("/var/lib/huangque-release/release.lock").exists())
 
+    def test_identity_schema_rejects_json_boolean(self):
+        identity_path = self._mapped("/etc/huangque/release-identity.json")
+        identity = json.loads(identity_path.read_text("utf-8"))
+        identity["schema_version"] = True
+        self._write_json("/etc/huangque/release-identity.json", identity)
+        with self.assertRaisesRegex(release_test.ReleaseError, "identity is wrong"):
+            self.initialize()
+
     def test_wrong_host_does_not_change_an_existing_lock_file(self):
         lock_path = self._mapped("/var/lib/huangque-release/release.lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -685,6 +749,21 @@ class ReleaseEngineTests(unittest.TestCase):
         self._write_json("/var/lib/huangque-release/state.json", state)
         with self.assertRaisesRegex(release_test.ReleaseError, "does not match Git"):
             self.engine().status()
+
+    def test_ledger_schema_values_reject_json_booleans(self):
+        self.initialize()
+        state_path = self._mapped("/var/lib/huangque-release/state.json")
+        original = json.loads(state_path.read_text("utf-8"))
+        for field_path in (("schema_version",), ("runtime_catalog", "schema_version")):
+            state = json.loads(json.dumps(original))
+            if len(field_path) == 1:
+                state[field_path[0]] = True
+            else:
+                state[field_path[0]][field_path[1]] = True
+            self._write_json("/var/lib/huangque-release/state.json", state)
+            with self.subTest(field_path=field_path), self.assertRaisesRegex(
+                    release_test.ReleaseError, "ledger"):
+                self.engine().status()
 
     def test_initialize_rechecks_runtime_inside_lock_before_ledger_write(self):
         def mutate_after_first_checkout(call_number):
@@ -909,13 +988,77 @@ class RepositoryContractTests(unittest.TestCase):
         workflow = (
             ROOT / ".github/workflows/release-impact-gate.yml"
         ).read_text("utf-8")
+        action_pin = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
         self.assertIn("pull_request_target:", workflow)
+        self.assertRegex(
+            workflow,
+            r"(?ms)^permissions:\n  contents: read\n  pull-requests: read\n\n",
+        )
+        self.assertNotRegex(workflow, r"(?m)^\s*[^#\n]*:\s*write\s*$")
+        self.assertNotIn("secrets", workflow.lower())
+        self.assertEqual(1, len(re.findall(r"(?m)^\s*uses:\s*", workflow)))
+        self.assertEqual(1, workflow.count(action_pin))
         self.assertIn("github.event.pull_request.base.sha", workflow)
         self.assertIn("refs/pull/$PR_NUMBER/head", workflow)
         self.assertIn("Execute only the trusted base verifier", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertNotIn("head.repo.clone_url", workflow)
-        self.assertNotIn("actions/checkout@v7\n        with:\n          ref: ${{ github.event.pull_request.head.sha", workflow)
+        self.assertNotIn("ref: ${{ github.event.pull_request.head.sha", workflow)
+        self.assertIn('path.startswith(".github/workflows/")', (
+            ROOT / "scripts/release_test.py"
+        ).read_text("utf-8"))
+
+    def test_checked_in_bootstrap_manifest_binds_the_exact_installed_entrypoint(self):
+        manifest = json.loads((
+            ROOT / "deploy/test-release/bootstrap.example.json"
+        ).read_text("utf-8"))
+        entrypoint = (ROOT / "scripts/release_test.py").read_bytes()
+        self.assertEqual({
+            "schema_version": 1,
+            "entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
+            "entrypoint_sha256": hashlib.sha256(entrypoint).hexdigest(),
+            "source_root": "/opt/huangque-test-release",
+        }, manifest)
+        readme = (ROOT / "deploy/test-release/README.md").read_text("utf-8")
+        self.assertNotRegex(
+            readme,
+            r"sudo\s+/usr/bin/python3\s+scripts/release_test\.py",
+        )
+
+    @unittest.skipIf(os.name != "posix", "Installed entrypoint trust is Linux-only")
+    def test_runtime_commands_reject_a_deployment_user_worktree_entrypoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                result = release_test.main(["status", "--source-root", directory])
+        self.assertEqual(2, result)
+        self.assertIn("root-owned installed entrypoint", output.getvalue())
+
+    @unittest.skipIf(os.name != "posix", "Installed entrypoint trust is Linux-only")
+    def test_runtime_entrypoint_requires_root_owned_exact_mode_manifest_and_hash(self):
+        script_bytes = (ROOT / "scripts/release_test.py").read_bytes()
+        manifest = release_test._json_bytes({
+            "schema_version": 1,
+            "entrypoint": release_test.RUNTIME_ENTRYPOINT,
+            "entrypoint_sha256": hashlib.sha256(script_bytes).hexdigest(),
+            "source_root": release_test.DEFAULT_SOURCE_ROOT,
+        })
+        manifest_info = mock.Mock(st_uid=0, st_mode=0o100600)
+        script_info = mock.Mock(st_uid=0, st_mode=0o100755)
+        records = {
+            release_test.RUNTIME_BOOTSTRAP_MANIFEST: (manifest, manifest_info),
+            release_test.RUNTIME_ENTRYPOINT: (script_bytes, script_info),
+        }
+        with mock.patch.object(release_test.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    release_test, "__file__", release_test.RUNTIME_ENTRYPOINT,
+                ), mock.patch.object(
+                    release_test, "_read_regular_record",
+                    side_effect=lambda _root, path: records.get(path),
+                ):
+            release_test._verify_runtime_entrypoint(release_test.DEFAULT_SOURCE_ROOT)
+            manifest_info.st_mode = 0o100644
+            with self.assertRaisesRegex(release_test.ReleaseError, "manifest is not trusted"):
+                release_test._verify_runtime_entrypoint(release_test.DEFAULT_SOURCE_ROOT)
 
     def test_checked_in_catalog_matches_existing_authoritative_runtime_maps(self):
         catalog = release_test.RuntimeCatalog.load(
@@ -950,6 +1093,139 @@ class RepositoryContractTests(unittest.TestCase):
                 for item in catalog.mappings("scripts/pool_health.py")
             },
         )
+        for repository_path in (
+                "server/hermes_ip12/README.md",
+                "server/hermes_ip12/prompt.md"):
+            with self.subTest(repository_path=repository_path):
+                self.assertFalse(catalog.is_ignored(repository_path))
+                self.assertEqual(
+                    "/home/ubuntu/hermes-web/" + repository_path.rsplit("/", 1)[1],
+                    catalog.map(repository_path)["runtime_path"],
+                )
+        migration = catalog.map("scripts/migrate_hermes_artifacts.py")
+        self.assertEqual(
+            "/home/ubuntu/hermes-web/scripts/migrate_hermes_artifacts.py",
+            migration["runtime_path"],
+        )
+        self.assertEqual(0o755, migration["mode"])
+        release_script = (ROOT / "deploy/hermes-ip12-release.sh").read_text("utf-8")
+        self.assertIn('"$HERMES_RELEASE_DIR/server/hermes_ip12/" "$APP_DIR/"', release_script)
+        self.assertIn('"$APP_DIR/scripts/migrate_hermes_artifacts.py"', release_script)
+
+    @unittest.skipIf(os.name != "posix", "Git metadata trust is Linux-only")
+    def test_untrusted_git_fsmonitor_config_is_rejected_without_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-b", "main", str(root)],
+                check=True, capture_output=True,
+            )
+            marker = Path(directory) / "fsmonitor-ran"
+            payload = Path(directory) / "payload.sh"
+            payload.write_text(
+                "#!/bin/sh\ntouch '%s'\n" % marker.as_posix(), encoding="utf-8",
+            )
+            payload.chmod(0o755)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(root), "config", "core.fsmonitor", str(payload)],
+                check=True,
+            )
+            with self.assertRaisesRegex(release_test.ReleaseError, "forbidden key"):
+                release_test.GitRepository(root)
+            self.assertFalse(marker.exists())
+
+    @unittest.skipIf(os.name != "posix", "Git metadata trust is Linux-only")
+    def test_untrusted_git_url_rewrite_is_rejected_before_live_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-b", "main", str(root)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "/usr/bin/git", "-C", str(root), "config",
+                    "url.file:///tmp/forged/.insteadOf",
+                    "https://github.com/yuelei-dev/ubuntu-yuelei.git",
+                ],
+                check=True,
+            )
+            with self.assertRaisesRegex(release_test.ReleaseError, "forbidden section"):
+                release_test.GitRepository(root)
+
+    @unittest.skipIf(os.name != "posix", "Git metadata trust is Linux-only")
+    def test_git_history_replacement_metadata_and_writable_metadata_are_rejected(self):
+        cases = {
+            "objects/info/alternates": "/tmp/alternate-objects\n",
+            "info/grafts": "%s %s\n" % ("1" * 40, "2" * 40),
+            "refs/replace/" + "1" * 40: "2" * 40 + "\n",
+            "shallow": "1" * 40 + "\n",
+        }
+        for relative, content in cases.items():
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "repo"
+                subprocess.run(
+                    ["/usr/bin/git", "init", "-b", "main", str(root)],
+                    check=True, capture_output=True,
+                )
+                target = root / ".git" / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(
+                        release_test.ReleaseError,
+                        "replacement, graft, alternate, or shallow"):
+                    release_test.GitRepository(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-b", "main", str(root)],
+                check=True, capture_output=True,
+            )
+            config = root / ".git" / "config"
+            config.chmod(0o666)
+            with self.assertRaisesRegex(release_test.ReleaseError, "repository files"):
+                release_test.GitRepository(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-b", "main", str(root)],
+                check=True, capture_output=True,
+            )
+            untrusted = root / "deploy" / "test-release" / "runtime-catalog.json"
+            untrusted.parent.mkdir(parents=True)
+            untrusted.write_text("{}\n", encoding="utf-8")
+            untrusted.chmod(0o666)
+            with self.assertRaisesRegex(release_test.ReleaseError, "repository files"):
+                release_test.GitRepository(root)
+
+    @unittest.skipIf(os.name != "posix", "Git metadata trust is Linux-only")
+    def test_packed_replacement_ref_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-b", "main", str(root)],
+                check=True, capture_output=True,
+            )
+            (root / ".git" / "packed-refs").write_text(
+                "%s refs/replace/%s\n" % ("2" * 40, "1" * 40),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(release_test.ReleaseError, "replacement refs"):
+                release_test.GitRepository(root)
+
+    def test_git_subprocess_environment_disables_replace_and_optional_locks(self):
+        environment = release_test._minimal_subprocess_environment()
+        self.assertEqual("1", environment["GIT_NO_REPLACE_OBJECTS"])
+        self.assertEqual("0", environment["GIT_OPTIONAL_LOCKS"])
+        self.assertEqual("/dev/null", environment["GIT_CONFIG_GLOBAL"])
+
+    def test_live_origin_verification_does_not_use_git_remote_transport(self):
+        script = (ROOT / "scripts/release_test.py").read_text("utf-8")
+        self.assertNotIn('"ls-remote"', script)
+        self.assertIn("urllib.request.ProxyHandler({})", script)
+        self.assertIn("ssl.create_default_context()", script)
 
     def test_checked_in_script_runtime_change_requires_an_impact_contract(self):
         catalog = release_test.RuntimeCatalog.load(

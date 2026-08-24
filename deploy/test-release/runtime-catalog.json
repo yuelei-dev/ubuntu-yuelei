@@ -19,8 +19,6 @@
     "xiaotan.service"
   ],
   "ignored_repository_paths": [
-    "server/hermes_ip12/README.md",
-    "server/hermes_ip12/prompt.md",
     "server/nginx-huangquechuanmei.conf",
     "worker/server_worker.py",
     "worker/worker.py",
@@ -71,6 +69,8 @@
     "/home/ubuntu/content-api/video_compose.db-wal",
     "/home/ubuntu/content-api/whisper.env",
     "/home/ubuntu/hermes-web/.agnes_key",
+    "/home/ubuntu/hermes-web/agnes_key.txt",
+    "/home/ubuntu/hermes-web/nohup.out",
     "/home/ubuntu/hq-drift/.state.json",
     "/home/ubuntu/hq-drift/baseline.json",
     "/home/ubuntu/hq-drift/deploy_bless.jsonl",
@@ -142,6 +142,16 @@
       "runtime": "/home/ubuntu/hq_bitable_sync_server.py",
       "health_probe": "bitable-sync-contract",
       "service": null
+    },
+    {
+      "delete_allowed": false,
+      "allow_unmanaged_runtime": false,
+      "kind": "exact",
+      "mode": "0755",
+      "repository": "scripts/migrate_hermes_artifacts.py",
+      "runtime": "/home/ubuntu/hermes-web/scripts/migrate_hermes_artifacts.py",
+      "health_probe": "hermes-health",
+      "service": "hermes-ip12-preview.service"
     },
     {
       "delete_allowed": false,
@@ -565,6 +575,7 @@
     "deploy/nginx-huangquechuanmei.conf",
     "scripts/drift_sentinel.py",
     "scripts/hq_bitable_sync_server.py",
+    "scripts/migrate_hermes_artifacts.py",
     "scripts/pool_health.py",
     "scripts/process_invite_reward_claims.py"
   ],

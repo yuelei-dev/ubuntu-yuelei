@@ -1,0 +1,6 @@
+{
+  "entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
+  "entrypoint_sha256": "4f0263e675565ac511c614e46b06101454142dd681b09ab42c91a8135bb9dd14",
+  "schema_version": 1,
+  "source_root": "/opt/huangque-test-release"
+}
