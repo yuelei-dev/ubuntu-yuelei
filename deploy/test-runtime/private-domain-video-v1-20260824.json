@@ -9,7 +9,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "cd7aab9139c4581da21fac86c2090c1b3fdf6a75"
+    "code_source_commit": "b22c16f918572c036b613b26d28f6ee2b69060a1"
   },
   "expected_preimage": {
     "development_base_commit": "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
@@ -69,7 +69,7 @@
       "request": {
         "prompt": "把顾客给出的两条文案原样填入批量文案框，不要随机素材、不要生成、不要上传、不要删除或发布。",
         "session_id": "release_private_domain_video_v1_acceptance",
-        "page_revision": "cd7aab9139c4581d",
+        "page_revision": "b22c16f918572c03",
         "page_context": {
           "page": "private_domain_video",
           "path": "/workbench/private-domain-video.html",
