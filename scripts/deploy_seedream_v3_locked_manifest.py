@@ -713,7 +713,11 @@ class ContentWhisperRelease:
                 or parsed.password is not None
                 or parsed.query
                 or parsed.fragment
-                or parsed.path not in {"/api/gen/health", "/api/gen/history"}):
+                or parsed.path not in {
+                    "/api/gen/health",
+                    "/api/gen/history",
+                    "/api/gen/digital-human-v2/history",
+                }):
             raise ReleaseError("health probe URL is not an approved local endpoint")
         request = urllib.request.Request(url, headers={"User-Agent": "hq-release-probe"})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

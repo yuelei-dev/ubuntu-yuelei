@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.error
 from unittest import mock
 
 
@@ -191,6 +192,37 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 self.versioned.ReleaseError, "credentials are missing"):
             release._verify_feishu_operational("pre-deployment")
+
+    def test_default_http_status_accepts_only_locked_digital_human_history_url(self):
+        locked_url = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            locked_url, 401, "Unauthorized", {}, None,
+        )
+        release = self._release(self.versioned)
+        with mock.patch.object(
+                self.versioned.urllib.request, "build_opener",
+                return_value=opener):
+            self.assertEqual(401, release._http_status(locked_url))
+        request = opener.open.call_args.args[0]
+        self.assertEqual(locked_url, request.full_url)
+
+    def test_default_http_status_rejects_unapproved_path_even_if_manifest_locked(self):
+        unapproved_url = "http://127.0.0.1:8096/api/gen/arbitrary"
+        self.manifest["health_checks"].append({
+            "url": unapproved_url,
+            "expected_status": 401,
+        })
+        release = self._release(self.versioned)
+        with mock.patch.object(
+                self.versioned.urllib.request, "build_opener") as build_opener:
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "health probe URL is not an approved local endpoint"):
+                release._http_status(unapproved_url)
+        build_opener.assert_not_called()
 
     def test_feishu_preflight_rejects_table_or_view_permission_failure(self):
         responses = iter([
