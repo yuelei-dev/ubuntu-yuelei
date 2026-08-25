@@ -29,6 +29,7 @@ MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
 SNAPSHOT_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SNAPSHOT_CACHE_TTL_SECONDS = 6 * 60 * 60
 SNAPSHOT_SUFFIX = ".blob"
+SNAPSHOT_LEASE_SUFFIX = ".lease"
 SNAPSHOT_LOCK_FILE = ".snapshot-cache.lock"
 SNAPSHOT_LOCK_TIMEOUT_SECONDS = 30
 _CACHE_LOCK = threading.Lock()
@@ -111,6 +112,11 @@ def _snapshot_files(root):
         elif (path.name.startswith(".pending-")
                 and path.name.endswith(".part")):
             kind = "pending"
+        elif path.name.endswith(SNAPSHOT_LEASE_SUFFIX):
+            digest = path.name[:-len(SNAPSHOT_LEASE_SUFFIX)]
+            if not SHA256_RE.fullmatch(digest):
+                continue
+            kind = "lease"
         else:
             digest = path.name[:-len(SNAPSHOT_SUFFIX)]
             if (not path.name.endswith(SNAPSHOT_SUFFIX)
@@ -165,16 +171,61 @@ def _snapshot_cache_lock(root):
             release()
 
 
+def _snapshot_lease_path(path):
+    return path.with_name(path.name[:-len(SNAPSHOT_SUFFIX)] + SNAPSHOT_LEASE_SUFFIX)
+
+
+def _lock_snapshot_lease(lease_file, exclusive, blocking):
+    if os.name == "nt":
+        return True
+    import fcntl
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if not blocking:
+        operation |= fcntl.LOCK_NB
+    try:
+        fcntl.flock(lease_file.fileno(), operation)
+        return True
+    except (BlockingIOError, OSError):
+        return False
+
+
+def _unlock_snapshot_lease(lease_file):
+    if os.name != "nt":
+        import fcntl
+        fcntl.flock(lease_file.fileno(), fcntl.LOCK_UN)
+
+
 def _remove_snapshot(path):
+    lease_file = None
+    lease_path = None
+    if path.name.endswith(SNAPSHOT_SUFFIX):
+        lease_path = _snapshot_lease_path(path)
+        try:
+            lease_file = lease_path.open("a+b")
+        except OSError:
+            return False
+        if not _lock_snapshot_lease(lease_file, exclusive=True, blocking=False):
+            lease_file.close()
+            return False
     try:
         path.chmod(0o600)
     except OSError:
         pass
     try:
         path.unlink()
-        return True
+        removed = True
     except OSError:
-        return False
+        removed = False
+    finally:
+        if lease_file is not None:
+            _unlock_snapshot_lease(lease_file)
+            lease_file.close()
+    if removed and lease_path is not None:
+        try:
+            lease_path.unlink()
+        except OSError:
+            pass
+    return removed
 
 
 def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
@@ -354,11 +405,14 @@ def _materialize_snapshot_locked(
 class VerifiedMaterial:
     """A stable content-addressed handle with a live source-identity guard."""
 
-    def __init__(self, path, source, source_identity, snapshot_identity):
+    def __init__(
+            self, path, source, source_identity, snapshot_identity,
+            lease_file=None):
         self.path = path
         self._source = source
         self._source_identity = source_identity
         self._snapshot_identity = snapshot_identity
+        self._lease_file = lease_file
 
     def _identities_are_current(self):
         try:
@@ -386,6 +440,10 @@ class VerifiedMaterial:
 
     def close(self):
         self._source.close()
+        if self._lease_file is not None:
+            _unlock_snapshot_lease(self._lease_file)
+            self._lease_file.close()
+            self._lease_file = None
 
     def __str__(self):
         return str(self.path)
@@ -467,10 +525,6 @@ def _safe_record(root, record, protected_digests):
         "media_type": media_type,
         "relative_path": relative_path,
         "sha256": digest,
-        "stream_url": (
-            "/api/gen/private-domain/material?path="
-            + urllib.parse.quote(relative_path, safe="")
-        ),
         "category": str(record.get("一级场景") or "").strip()[:80],
         "scene": str(record.get("二级场景") or "").strip()[:80],
         "usage": _string_list(record.get("使用环节")),
@@ -480,6 +534,10 @@ def _safe_record(root, record, protected_digests):
         "_identity": source_identity,
     }
     if snapshot is not None:
+        item["stream_url"] = (
+            "/api/gen/private-domain/material?path="
+            + urllib.parse.quote(relative_path, safe="")
+        )
         item["_snapshot_path"] = snapshot_path
         item["_snapshot_identity"] = snapshot_identity
     return item
@@ -516,6 +574,22 @@ def _cached_items_current(root):
                 identity = None
         if identity != expected_identity:
             return False
+    now = time.time()
+    for item in _CACHE_ITEMS:
+        snapshot_path = item.get("_snapshot_path")
+        snapshot_identity = item.get("_snapshot_identity")
+        if snapshot_path is None and snapshot_identity is None:
+            continue
+        if snapshot_path is None or snapshot_identity is None:
+            return False
+        try:
+            snapshot_stat = snapshot_path.lstat()
+        except OSError:
+            return False
+        if (not stat_module.S_ISREG(snapshot_stat.st_mode)
+                or _snapshot_identity(snapshot_stat) != snapshot_identity
+                or now - snapshot_stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
+            return False
     return True
 
 
@@ -525,7 +599,7 @@ def _snapshot_cache_ready():
         _prepare_snapshot_capacity(cache_root, 0, set())
 
 
-def _catalog_items():
+def _catalog_items(allow_rebuild=True):
     global _CACHE_KEY, _CACHE_ITEMS, _CACHE_WATCHED
     root = _material_root()
     catalog = root / CATALOG_FILE
@@ -538,6 +612,8 @@ def _catalog_items():
     with _CACHE_LOCK:
         if key == _CACHE_KEY and _cached_items_current(root):
             return list(_CACHE_ITEMS)
+        if not allow_rebuild:
+            return []
         items = []
         watched = {}
         protected_digests = set()
@@ -582,7 +658,7 @@ def list_materials(limit=300):
 def resolve_material(relative_path):
     relative_path = str(relative_path or "").replace("\\", "/").strip("/")
     item = next(
-        (item for item in _catalog_items()
+        (item for item in _catalog_items(allow_rebuild=False)
          if item["relative_path"] == relative_path),
         None,
     )
@@ -601,9 +677,19 @@ def resolve_material(relative_path):
 
         snapshot_path = item.get("_snapshot_path")
         expected_snapshot_identity = item.get("_snapshot_identity")
+        if snapshot_path is None or expected_snapshot_identity is None:
+            return None
+        lease_file = None
         source = None
-        if snapshot_path is not None and expected_snapshot_identity is not None:
-            try:
+        try:
+            cache_root = _snapshot_cache_root()
+            with _snapshot_cache_lock(cache_root):
+                if os.name != "nt":
+                    lease_file = _snapshot_lease_path(snapshot_path).open("a+b")
+                    if not _lock_snapshot_lease(
+                            lease_file, exclusive=False, blocking=True):
+                        lease_file.close()
+                        return None
                 snapshot_stat = snapshot_path.lstat()
                 if (not stat_module.S_ISREG(snapshot_stat.st_mode)
                         or _snapshot_identity(snapshot_stat)
@@ -613,40 +699,20 @@ def resolve_material(relative_path):
                     raise OSError("cached material snapshot is stale")
                 source = snapshot_path.open("rb")
                 snapshot_identity = _snapshot_identity(os.fstat(source.fileno()))
-            except OSError:
-                if source is not None:
-                    source.close()
-                source = None
-            if source is not None and snapshot_identity != expected_snapshot_identity:
+        except (OSError, SnapshotTransientError):
+            if source is not None:
                 source.close()
-                source = None
-
-        if source is None:
-            try:
-                snapshot = _materialize_snapshot(
-                    path, item["sha256"], {item["sha256"]}
-                )
-            except (SnapshotCapacityError, SnapshotTransientError):
-                return None
-            if snapshot is None:
-                return None
-            materialized_identity, snapshot_path, snapshot_identity = snapshot
-            if materialized_identity != item["_identity"]:
-                return None
-            try:
-                source = snapshot_path.open("rb")
-                opened_identity = _snapshot_identity(os.fstat(source.fileno()))
-            except OSError:
-                if source is not None:
-                    source.close()
-                return None
-            if opened_identity != snapshot_identity:
-                source.close()
-                return None
-            item["_snapshot_path"] = snapshot_path
-            item["_snapshot_identity"] = snapshot_identity
-
+            if lease_file is not None:
+                _unlock_snapshot_lease(lease_file)
+                lease_file.close()
+            return None
+        if snapshot_identity != expected_snapshot_identity:
+            source.close()
+            if lease_file is not None:
+                _unlock_snapshot_lease(lease_file)
+                lease_file.close()
+            return None
         return VerifiedMaterial(
             path, source, item["_identity"],
-            item["_snapshot_identity"],
+            item["_snapshot_identity"], lease_file,
         )

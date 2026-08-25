@@ -110,6 +110,7 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
         undeclared = self.root / "files/视频/undeclared.mp4"
         undeclared.write_bytes(b"video")
         with self._catalog():
+            private_domain_media.list_materials(300)
             allowed = private_domain_media.resolve_material("files/视频/allowed.mp4")
             denied = private_domain_media.resolve_material("files/视频/undeclared.mp4")
             escaped = private_domain_media.resolve_material("../outside.mp4")
@@ -143,6 +144,7 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
         self._write_record(relative_path, "视频", content=reviewed)
         path = self.root.joinpath(*pathlib.PurePosixPath(relative_path).parts)
         with self._catalog():
+            private_domain_media.list_materials(300)
             resolved = private_domain_media.resolve_material(relative_path)
             self.assertIsNotNone(resolved)
             path.write_bytes(b"in-place replacement")
@@ -230,30 +232,36 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
         self.assertEqual(2, len(private_domain_media._CACHE_ITEMS))
         self.assertEqual(2, first_call_count)
         self.assertEqual(first_call_count, materialize.call_count)
+        self.assertEqual(1, sum("stream_url" in item for item in first))
         self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
         self.assertLessEqual(sum(
             path.stat().st_size for path in self.snapshot_root.iterdir()
             if path.is_file()
         ), 10)
 
-    def test_evicted_and_unresident_items_are_rematerialized_within_capacity(self):
+    def test_unresident_item_is_not_advertised_or_materialized_by_range_request(self):
         first_path = "files/视频/first.mp4"
         second_path = "files/视频/second.mp4"
         self._write_record(first_path, "视频", content=b"123456")
         self._write_record(second_path, "视频", content=b"abcdef")
         with self._catalog(), mock.patch.object(
                 private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
-            self.assertEqual(2, len(private_domain_media.list_materials(300)))
-            second = private_domain_media.resolve_material(second_path)
-            self.assertIsNotNone(second)
-            self.assertEqual(b"abcdef", second.open("rb").read())
-            second.close()
-            self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
-
-            first = private_domain_media.resolve_material(first_path)
-            self.assertIsNotNone(first)
-            self.assertEqual(b"123456", first.open("rb").read())
-            first.close()
+            items = private_domain_media.list_materials(300)
+            self.assertEqual(2, len(items))
+            self.assertIn("stream_url", items[0])
+            self.assertNotIn("stream_url", items[1])
+            with mock.patch.object(
+                    private_domain_media, "_materialize_snapshot",
+                    wraps=private_domain_media._materialize_snapshot) as materialize:
+                for _ in range(3):
+                    resident = private_domain_media.resolve_material(first_path)
+                    self.assertIsNotNone(resident)
+                    self.assertEqual(b"1", resident.open("rb").read(1))
+                    resident.close()
+                    self.assertIsNone(
+                        private_domain_media.resolve_material(second_path)
+                    )
+            self.assertEqual(0, materialize.call_count)
 
         self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
         self.assertLessEqual(sum(
@@ -419,11 +427,53 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
             with mock.patch.object(
                     private_domain_media, "_materialize_snapshot",
                     wraps=private_domain_media._materialize_snapshot) as materialize:
+                items = private_domain_media.list_materials(300)
                 resolved = private_domain_media.resolve_material(relative_path)
+        self.assertEqual(1, len(items))
         self.assertIsNotNone(resolved)
         resolved.close()
         self.assertEqual(1, materialize.call_count)
         self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+
+    def test_active_reader_lease_prevents_hidden_unlinked_capacity(self):
+        first_path = "files/视频/first.mp4"
+        second_path = "files/视频/second.mp4"
+        self._write_record(first_path, "视频", content=b"123456")
+        self._write_record(second_path, "视频", content=b"abcdef")
+        second_source = self.root.joinpath(
+            *pathlib.PurePosixPath(second_path).parts
+        )
+        second_digest = hashlib.sha256(b"abcdef").hexdigest()
+
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
+            private_domain_media.list_materials(300)
+            reader = private_domain_media.resolve_material(first_path)
+            self.assertIsNotNone(reader)
+            first_snapshot = next(self.snapshot_root.glob("*.blob"))
+            self.assertGreater(os.fstat(reader._source.fileno()).st_nlink, 0)
+
+            with self.assertRaises(private_domain_media.SnapshotCapacityError):
+                private_domain_media._materialize_snapshot(
+                    second_source, second_digest, {second_digest}
+                )
+            self.assertTrue(first_snapshot.exists())
+            self.assertGreater(os.fstat(reader._source.fileno()).st_nlink, 0)
+            self.assertLessEqual(sum(
+                path.stat().st_size for path in self.snapshot_root.iterdir()
+                if path.is_file()
+            ), 10)
+
+            reader.close()
+            admitted = private_domain_media._materialize_snapshot(
+                second_source, second_digest, {second_digest}
+            )
+            self.assertIsNotNone(admitted)
+            self.assertFalse(first_snapshot.exists())
+            self.assertLessEqual(sum(
+                path.stat().st_size for path in self.snapshot_root.iterdir()
+                if path.is_file()
+            ), 10)
 
     def test_snapshot_creation_failure_removes_partial_file(self):
         self._write_record("files/视频/failure.mp4", "视频", content=b"failure")
