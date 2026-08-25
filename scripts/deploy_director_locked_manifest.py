@@ -33,6 +33,15 @@ class ReleaseError(RuntimeError):
 _DIRECTOR_REVISION_PATTERN = re.compile(r"[a-f0-9]{8,32}")
 _NODE_FALLBACK = "/home/ubuntu/.local/hq-node/bin/node"
 _NODE_FALLBACK_ENVIRONMENT = "HQ_NODE_BINARY"
+_DIRECTOR_AGENT_CLI_CONTRACT = "director_agent_cli_bridge_v1"
+_DIRECTOR_AGENT_CLI_RUNTIME_ROOT = "/opt/huangque-repository/tools/hq-cli"
+_DIRECTOR_AGENT_CLI_FILES = {
+    "src/hq_cli/__init__.py", "src/hq_cli/__main__.py",
+    "src/hq_cli/catalog.py", "src/hq_cli/cli.py", "src/hq_cli/client.py",
+}
+_DIRECTOR_AGENT_CLI_CAPABILITIES = {
+    "script", "digital-presenter-capability", "assets-page",
+}
 
 
 def _sha256(data):
@@ -86,7 +95,10 @@ def _load_manifest(path):
 
 def _validate_director_contract(manifest):
     executor = manifest.get("release_executor", {})
-    if executor.get("contract") != "director_agent_seven_file_v2":
+    contract = executor.get("contract")
+    if contract not in {
+        "director_agent_seven_file_v2", _DIRECTOR_AGENT_CLI_CONTRACT,
+    }:
         return
     acceptance = executor.get("authenticated_acceptance")
     if not isinstance(acceptance, dict):
@@ -109,6 +121,48 @@ def _validate_director_contract(manifest):
     if (not isinstance(interval, (int, float)) or isinstance(interval, bool)
             or interval <= 0 or interval > timeout):
         raise ReleaseError("Director Agent rollback health interval is invalid")
+    if contract != _DIRECTOR_AGENT_CLI_CONTRACT:
+        return
+    expected_files = {
+        "/home/ubuntu/content-api/content_domains/director_agent.py",
+        "/home/ubuntu/content-api/content_domains/director_cli.py",
+    }
+    if {item.get("runtime_path") for item in manifest["files"]} != expected_files:
+        raise ReleaseError("Director Agent CLI release must contain exactly two files")
+    feature = manifest.get("feature_activation", {})
+    if (feature.get("expected_preimage_enabled") is not True
+            or feature.get("target_enabled") is not True
+            or feature.get("disable_during_release") is not True):
+        raise ReleaseError("Director Agent CLI feature lifecycle is invalid")
+    dependency = executor.get("cli_dependency")
+    if not isinstance(dependency, dict):
+        raise ReleaseError("Director Agent CLI dependency lock is missing")
+    if dependency.get("runtime_root") != _DIRECTOR_AGENT_CLI_RUNTIME_ROOT:
+        raise ReleaseError("Director Agent CLI runtime root is invalid")
+    files = dependency.get("files")
+    if (not isinstance(files, list)
+            or {item.get("path") for item in files if isinstance(item, dict)}
+            != _DIRECTOR_AGENT_CLI_FILES):
+        raise ReleaseError("Director Agent CLI dependency file set is invalid")
+    probes = dependency.get("probes")
+    expected_probes = {
+        ("capabilities", None),
+        *(('describe', item) for item in _DIRECTOR_AGENT_CLI_CAPABILITIES),
+    }
+    actual_probes = set()
+    for probe in probes if isinstance(probes, list) else []:
+        if not isinstance(probe, dict):
+            raise ReleaseError("Director Agent CLI probe is invalid")
+        arguments = probe.get("arguments")
+        if arguments == ["capabilities"]:
+            actual_probes.add(("capabilities", None))
+        elif (isinstance(arguments, list) and len(arguments) == 2
+              and arguments[0] == "describe"):
+            actual_probes.add(("describe", arguments[1]))
+        else:
+            raise ReleaseError("Director Agent CLI probe command is not allowed")
+    if actual_probes != expected_probes:
+        raise ReleaseError("Director Agent CLI probes do not cover every page")
 
 
 def _resolve_node_binary(environment=None):
@@ -250,6 +304,58 @@ class SystemHooks:
 
     def validate_node(self, path):
         _run([_resolve_node_binary(), "--check", str(path)])
+
+    def validate_cli(self, cli_root, probes, expected_version):
+        cli_root = pathlib.Path(cli_root)
+        source_root = cli_root / "src"
+        run_module = (
+            "import runpy,sys;"
+            "sys.path.insert(0,sys.argv.pop(1));"
+            "runpy.run_module('hq_cli',run_name='__main__')"
+        )
+        environment = {
+            "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PYTHONIOENCODING": "utf-8",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        }
+        for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        for probe in probes:
+            arguments = list(probe["arguments"])
+            completed = subprocess.run(
+                [sys.executable, "-I", "-X", "utf8", "-c", run_module,
+                 str(source_root), *arguments, "--json"],
+                cwd=str(cli_root), env=environment, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding="utf-8", errors="replace", timeout=10, check=False,
+            )
+            if completed.returncode != 0:
+                raise ReleaseError("Director Agent CLI preflight command failed")
+            if (len(completed.stdout.encode("utf-8")) > 256 * 1024
+                    or len(completed.stderr.encode("utf-8")) > 256 * 1024):
+                raise ReleaseError("Director Agent CLI preflight output is too large")
+            try:
+                payload = json.loads(completed.stdout)
+            except (TypeError, ValueError) as error:
+                raise ReleaseError("Director Agent CLI preflight returned invalid JSON") from error
+            if payload.get("cli_version") != expected_version:
+                raise ReleaseError("Director Agent CLI version does not match lock")
+            if arguments == ["capabilities"]:
+                if payload.get("schema") != "hq.capabilities/v1":
+                    raise ReleaseError("Director Agent CLI catalog schema is invalid")
+                available = {
+                    item.get("id") for item in payload.get("capabilities", [])
+                    if isinstance(item, dict)
+                }
+                if not _DIRECTOR_AGENT_CLI_CAPABILITIES.issubset(available):
+                    raise ReleaseError("Director Agent CLI page capabilities are incomplete")
+            else:
+                capability = payload.get("capability")
+                if (payload.get("schema") != "hq.describe/v1"
+                        or not isinstance(capability, dict)
+                        or capability.get("id") != arguments[1]):
+                    raise ReleaseError("Director Agent CLI describe contract is invalid")
 
     def acceptance(self, specification):
         token_name = specification["token_environment"]
@@ -474,6 +580,46 @@ def _verify_director_checkout(source_root, manifest, reviewed_head, merged_main)
     return head
 
 
+def _verify_cli_dependency(source_root, target_root, executor, hooks):
+    dependency = executor.get("cli_dependency")
+    if not dependency:
+        return []
+    repository_root = (source_root / dependency["repository_root"]).resolve()
+    runtime_root = _mapped_path(target_root, dependency["runtime_root"])
+    if (source_root not in repository_root.parents
+            or not repository_root.is_dir() or repository_root.is_symlink()):
+        raise ReleaseError("Director Agent CLI repository root is unsafe")
+    if not runtime_root.is_dir() or runtime_root.is_symlink():
+        raise ReleaseError("Director Agent CLI runtime root is unsafe")
+    audit = []
+    for item in dependency["files"]:
+        relative = pathlib.PurePosixPath(str(item["path"]))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ReleaseError("Director Agent CLI dependency path is unsafe")
+        source = repository_root.joinpath(*relative.parts).resolve()
+        runtime = runtime_root.joinpath(*relative.parts).resolve()
+        if (repository_root not in source.parents
+                or runtime_root not in runtime.parents):
+            raise ReleaseError("Director Agent CLI dependency path escapes root")
+        if (not source.is_file() or source.is_symlink()
+                or not runtime.is_file() or runtime.is_symlink()):
+            raise ReleaseError("Director Agent CLI dependency file is unsafe")
+        source_data, runtime_data = source.read_bytes(), runtime.read_bytes()
+        if (_sha256(source_data) != item.get("sha256")
+                or _git_blob(source_data) != item.get("git_blob")
+                or _sha256(runtime_data) != item.get("sha256")
+                or _git_blob(runtime_data) != item.get("git_blob")):
+            raise ReleaseError("Director Agent CLI dependency lock mismatch")
+        audit.append({
+            "path": item["path"], "sha256": item["sha256"],
+            "git_blob": item["git_blob"],
+        })
+    hooks.validate_cli(
+        runtime_root, dependency["probes"], dependency["version"],
+    )
+    return audit
+
+
 def _execute_director_release(
     manifest, source_root, target_root, backup_root, *, hooks, replace,
     verify_repository, checkpoint, reviewed_head, merged_main,
@@ -496,6 +642,9 @@ def _execute_director_release(
         raise ReleaseError("release executor lock does not match source")
 
     _validate_director_sources(source_root, manifest, hooks)
+    cli_dependency_audit = _verify_cli_dependency(
+        source_root, target_root, executor, hooks,
+    )
     entries = []
     for item in manifest["files"]:
         source = (source_root / item["repository_path"]).resolve()
@@ -532,8 +681,15 @@ def _execute_director_release(
     feature = manifest["feature_activation"]
     feature_db = _mapped_path(target_root, feature["database_path"])
     feature_snapshot = _capture_feature_row(feature_db, feature["feature"])
-    if feature_snapshot.get("enabled"):
+    expected_preimage_enabled = feature.get("expected_preimage_enabled")
+    if (expected_preimage_enabled is not None
+            and bool(feature_snapshot.get("enabled"))
+            is not bool(expected_preimage_enabled)):
+        raise ReleaseError("Director Agent feature preimage does not match manifest")
+    if expected_preimage_enabled is None and feature_snapshot.get("enabled"):
         raise ReleaseError("Director Agent must be disabled before release")
+    target_enabled = bool(feature.get("target_enabled", True))
+    disable_during_release = bool(feature.get("disable_during_release", False))
     if not hooks.service_active(manifest["target"]["service"]):
         raise ReleaseError("target service is not active before release")
 
@@ -550,6 +706,7 @@ def _execute_director_release(
         "executor_sha256": _sha256(executor_data),
         "executor_git_blob": _git_blob(executor_data),
         "feature_preimage": feature_snapshot, "files": [],
+        "cli_dependency": cli_dependency_audit,
     }
     for index, (item, _, target, mode, uid, gid) in enumerate(entries):
         saved = None
@@ -580,6 +737,15 @@ def _execute_director_release(
 
     service = manifest["target"]["service"]
     try:
+        if disable_during_release:
+            _set_feature_row(
+                feature_db, feature["feature"], False, feature["actor"],
+            )
+            checkpoint("after_deactivate")
+            hooks.probe_feature(
+                executor["health_url"], executor["health_feature_field"], False,
+            )
+            checkpoint("after_health_disabled_preinstall")
         for index, (item, source, target, mode, uid, gid) in enumerate(entries):
             _atomic_install(source, target, mode, replace, uid, gid)
             checkpoint("after_replace_%d" % index)
@@ -602,11 +768,12 @@ def _execute_director_release(
         )
         checkpoint("after_health_disabled")
         _set_feature_row(
-            feature_db, feature["feature"], True, feature["actor"],
+            feature_db, feature["feature"], target_enabled, feature["actor"],
         )
         checkpoint("after_activate")
         hooks.probe_feature(
-            executor["health_url"], executor["health_feature_field"], True,
+            executor["health_url"], executor["health_feature_field"],
+            target_enabled,
         )
         for probe in executor.get("static_probes", []):
             hooks.probe_static(
@@ -614,7 +781,8 @@ def _execute_director_release(
                 probe["expected_sha256"],
             )
         checkpoint("after_health_enabled")
-        hooks.acceptance(executor["authenticated_acceptance"])
+        if target_enabled:
+            hooks.acceptance(executor["authenticated_acceptance"])
         checkpoint("after_acceptance")
         audit["status"] = "deployed"
         audit["feature_postimage"] = _capture_feature_row(
@@ -770,6 +938,7 @@ def execute_locked_release(
 
     if manifest["release_executor"].get("contract") in {
         "director_agent_seven_file_v1", "director_agent_seven_file_v2",
+        _DIRECTOR_AGENT_CLI_CONTRACT,
     }:
         return _execute_director_release(
             manifest, source_root, target_root, backup_root,
