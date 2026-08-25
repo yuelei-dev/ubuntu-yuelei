@@ -38,8 +38,8 @@
   "release_executor": {
     "contract": "director_agent_seven_file_v2",
     "repository_path": "scripts/deploy_director_locked_manifest.py",
-    "git_blob": "8ec459d1c6f4e9896d043a3fec4461b614a6ea25",
-    "sha256": "7135fa5376f74de8e773be52c20c0fbc893be3b0421b8778508aba89a9dc0386",
+    "git_blob": "5ef4781c867d52a2366e9160bd8bdc7a495659e2",
+    "sha256": "ee330540195e001e2844970c5039877e1d12b080a927d3360213af41a29adfde",
     "runtime_python_root": "/home/ubuntu/content-api",
     "import_modules": [
       "content_domains.core",

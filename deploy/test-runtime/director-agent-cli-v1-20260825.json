@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "purpose": "Deploy the Director Agent to HQ CLI bridge as one locked test-runtime transaction.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service",
+    "backend_root": "/home/ubuntu/content-api"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "ba85aef82152f38b65e89df5f78c5dc3e74d1029",
+    "review_lock": "deploy only an exact merged main commit containing the unchanged independently reviewed PR Head"
+  },
+  "deployment_policy": {
+    "production_server_write_allowed": false,
+    "require_merged_main": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "backup_all_targets_before_first_write": true,
+    "disable_feature_during_release": true,
+    "atomic_replace_each_file": true,
+    "restart_backend_once": true,
+    "rollback_all_files_and_feature_state_as_one_unit": true,
+    "copy_environment_or_database": false
+  },
+  "release_executor": {
+    "contract": "director_agent_cli_bridge_v1",
+    "repository_path": "scripts/deploy_director_locked_manifest.py",
+    "git_blob": "5ef4781c867d52a2366e9160bd8bdc7a495659e2",
+    "sha256": "ee330540195e001e2844970c5039877e1d12b080a927d3360213af41a29adfde",
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": [
+      "content_domains.director_cli",
+      "content_domains.director_agent"
+    ],
+    "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "health_feature_field": "director_agent_enabled",
+    "rollback_health_policy": {
+      "timeout_seconds": 30,
+      "interval_seconds": 1
+    },
+    "cli_dependency": {
+      "repository_root": "tools/hq-cli",
+      "runtime_root": "/opt/huangque-repository/tools/hq-cli",
+      "version": "0.6.0",
+      "files": [
+        {
+          "path": "src/hq_cli/__init__.py",
+          "sha256": "7556cbb54da91f04de111d147292967ace2210c0918eb3a7d97269a33b2b8e85",
+          "git_blob": "1e3f46fa89f7011a9f105cc0b0ef6c6218f88722"
+        },
+        {
+          "path": "src/hq_cli/__main__.py",
+          "sha256": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+          "git_blob": "eb53e2f31b2f703ad32ef64b8a41faa3e7d18e08"
+        },
+        {
+          "path": "src/hq_cli/catalog.py",
+          "sha256": "8b3f0a4b206b6e49e9a5e11a5c8d9f0599ecdb37643f47ae4442df09ae5f86fb",
+          "git_blob": "626f820a53d91c43d090d93acdd08a12c23928c3"
+        },
+        {
+          "path": "src/hq_cli/cli.py",
+          "sha256": "7726162846ee2254c4a6168bd553f8579402e99fce93158260763df22f303e0c",
+          "git_blob": "7df4db305d2ae36c7f15c8b9ceeafed5d3aa3489"
+        },
+        {
+          "path": "src/hq_cli/client.py",
+          "sha256": "56aa342ec5d7a590706b41e4e4af56fb2056043cd715f51967c8369baeb7e928",
+          "git_blob": "f3f6ae25a8b6d2aca015fa5b8c907509fb7cd674"
+        }
+      ],
+      "probes": [
+        {
+          "arguments": ["capabilities"]
+        },
+        {
+          "arguments": ["describe", "script"]
+        },
+        {
+          "arguments": ["describe", "digital-presenter-capability"]
+        },
+        {
+          "arguments": ["describe", "assets-page"]
+        }
+      ],
+      "forbidden_commands": [
+        "run",
+        "login",
+        "upload",
+        "confirm",
+        "quote-token"
+      ]
+    },
+    "authenticated_acceptance": {
+      "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "job_timeout_seconds": 120,
+      "submit_url": "https://yuelei.huangquechuanmei.com/api/gen/director_agent",
+      "job_url_template": "https://yuelei.huangquechuanmei.com/api/gen/job/{job_id}",
+      "request": {
+        "prompt": "发布验收：读取编导 CLI 后告诉我如何填写选题，不要执行生成。",
+        "session_id": "release_director_cli_acceptance",
+        "page_revision": "c1a20260825",
+        "page_context": {
+          "page": "script",
+          "path": "/workbench/script.html",
+          "mode": "write",
+          "topic": "",
+          "selling_points": "",
+          "style": "口播",
+          "duration": "30s",
+          "platform": "抖音",
+          "has_script": false,
+          "scene_count": 0,
+          "has_breakdown": false,
+          "breakdown_scene_count": 0,
+          "breakdown_url": "",
+          "breakdown_tool": "scenes",
+          "has_reverse_prompt": false,
+          "active_job_status": "idle"
+        },
+        "history": [],
+        "source_page": "script",
+        "provider": "openai_responses",
+        "quoted_cost": 0
+      }
+    }
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/director_agent.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/director_agent.py",
+      "classification": "backend_runtime",
+      "source_blob": "879fb1ba333eacce9d300203523841d5219d90bd",
+      "source_sha256": "eac81bc03e586f7636f2c12a490aee6ea93015106f3c0ddf3edd82ae3e76991e",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "2f207eadc6305cd5e5edd5689941196b1b0e44a5",
+      "target_preimage_sha256": "271fca23e2b148c845528c26b429eb0ac5184e40d990577c7bbdff17be8526df",
+      "expected_postimage_blob": "879fb1ba333eacce9d300203523841d5219d90bd",
+      "expected_postimage_sha256": "eac81bc03e586f7636f2c12a490aee6ea93015106f3c0ddf3edd82ae3e76991e"
+    },
+    {
+      "repository_path": "server/content_domains/director_cli.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/director_cli.py",
+      "classification": "backend_runtime",
+      "source_blob": "91ccdc1c586cf583514d94abe56decaefedefc7a",
+      "source_sha256": "34d255ddb132776c32b03dd21b0c788d4c47f9ccc1f8fcd7928f302f1739a71f",
+      "target_preimage_state": "absent",
+      "target_preimage_blob": null,
+      "target_preimage_sha256": null,
+      "install_mode": "0644",
+      "expected_postimage_blob": "91ccdc1c586cf583514d94abe56decaefedefc7a",
+      "expected_postimage_sha256": "34d255ddb132776c32b03dd21b0c788d4c47f9ccc1f8fcd7928f302f1739a71f"
+    }
+  ],
+  "feature_activation": {
+    "feature": "director_agent",
+    "database_path": "/home/ubuntu/content-api/feature_flags.db",
+    "actor": "release:director-agent-cli-v1",
+    "expected_preimage_enabled": true,
+    "disable_during_release": true,
+    "target_enabled": true
+  },
+  "release_sequence": [
+    "verify exact reviewed Head ancestry inside an exact clean merged main checkout",
+    "verify the five locked HQ CLI files and execute capabilities plus three page-bound describe probes",
+    "capture both runtime file states and the exact enabled feature row in one audit backup",
+    "disable Director Agent and verify disabled health before replacing files",
+    "atomically install both Python files and validate hashes and imports",
+    "restart huangque-content.service once and verify disabled health",
+    "restore Director Agent enabled state and run authenticated zero-cost Agent acceptance",
+    "on any post-backup failure restore both files and the original feature row, restart and verify health"
+  ],
+  "rollback": {
+    "backup_root": "/opt/huangque-deploy-backups",
+    "preserve_mode_owner_group": true,
+    "restore_absent_preimage_by_removing_only_the_created_file": true,
+    "restore_exact_feature_row": true,
+    "failure_injection_required_for_every_stage": true
+  }
+}

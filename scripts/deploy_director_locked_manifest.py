@@ -139,18 +139,37 @@ def _validate_director_contract(manifest):
         raise ReleaseError("Director Agent CLI dependency lock is missing")
     if dependency.get("runtime_root") != _DIRECTOR_AGENT_CLI_RUNTIME_ROOT:
         raise ReleaseError("Director Agent CLI runtime root is invalid")
+    if dependency.get("repository_root") != "tools/hq-cli":
+        raise ReleaseError("Director Agent CLI repository root is invalid")
+    if (not isinstance(dependency.get("version"), str)
+            or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", dependency["version"])
+            is None):
+        raise ReleaseError("Director Agent CLI version lock is invalid")
     files = dependency.get("files")
-    if (not isinstance(files, list)
+    if (not isinstance(files, list) or len(files) != len(_DIRECTOR_AGENT_CLI_FILES)
             or {item.get("path") for item in files if isinstance(item, dict)}
             != _DIRECTOR_AGENT_CLI_FILES):
         raise ReleaseError("Director Agent CLI dependency file set is invalid")
+    for item in files:
+        if (not isinstance(item, dict)
+                or re.fullmatch(r"[a-f0-9]{64}", str(item.get("sha256") or ""))
+                is None
+                or re.fullmatch(r"[a-f0-9]{40}", str(item.get("git_blob") or ""))
+                is None):
+            raise ReleaseError("Director Agent CLI dependency file lock is invalid")
+    if set(dependency.get("forbidden_commands") or []) != {
+        "run", "login", "upload", "confirm", "quote-token",
+    }:
+        raise ReleaseError("Director Agent CLI forbidden command set is invalid")
     probes = dependency.get("probes")
     expected_probes = {
         ("capabilities", None),
         *(('describe', item) for item in _DIRECTOR_AGENT_CLI_CAPABILITIES),
     }
+    if not isinstance(probes, list):
+        raise ReleaseError("Director Agent CLI probes are missing")
     actual_probes = set()
-    for probe in probes if isinstance(probes, list) else []:
+    for probe in probes:
         if not isinstance(probe, dict):
             raise ReleaseError("Director Agent CLI probe is invalid")
         arguments = probe.get("arguments")
@@ -161,7 +180,7 @@ def _validate_director_contract(manifest):
             actual_probes.add(("describe", arguments[1]))
         else:
             raise ReleaseError("Director Agent CLI probe command is not allowed")
-    if actual_probes != expected_probes:
+    if actual_probes != expected_probes or len(probes) != len(expected_probes):
         raise ReleaseError("Director Agent CLI probes do not cover every page")
 
 

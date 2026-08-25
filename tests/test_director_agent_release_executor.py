@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -47,6 +48,11 @@ class FakeHooks:
         self._record("compile")
         if not pathlib.Path(python_root).is_dir() or not modules:
             raise AssertionError("invalid import validation contract")
+
+    def validate_cli(self, cli_root, probes, expected_version):
+        self._record("cli:%s:%s" % (expected_version, len(probes)))
+        if not pathlib.Path(cli_root).is_dir():
+            raise AssertionError("invalid CLI validation contract")
 
     def service_active(self, service):
         self._record("active:" + service)
@@ -526,6 +532,217 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
                 hooks.probe_static(
                     "https://test.example/static.js", 200, "0" * 64,
                 )
+
+
+class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
+    MANIFEST = (
+        ROOT / "deploy" / "test-runtime" /
+        "director-agent-cli-v1-20260825.json"
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_executor()
+        cls.base_manifest = json.loads(cls.MANIFEST.read_text(encoding="utf-8"))
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temporary.name)
+        self.runtime = self.root / "runtime"
+        self.backups = self.root / "backups"
+        self.runtime.mkdir()
+        self.manifest = copy.deepcopy(self.base_manifest)
+        self.original = {}
+        for entry in self.manifest["files"]:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            entry["source_sha256"] = hashlib.sha256(source).hexdigest()
+            entry["source_blob"] = DirectorAgentReleaseExecutorTests._blob(source)
+            entry["expected_postimage_sha256"] = entry["source_sha256"]
+            entry["expected_postimage_blob"] = entry["source_blob"]
+            target = self._target(entry["runtime_path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if entry["target_preimage_state"] == "file":
+                data = ("old:" + entry["repository_path"]).encode("utf-8")
+                target.write_bytes(data)
+                os.chmod(target, 0o640)
+                entry["target_preimage_sha256"] = hashlib.sha256(data).hexdigest()
+                entry["target_preimage_blob"] = (
+                    DirectorAgentReleaseExecutorTests._blob(data)
+                )
+                self.original[entry["runtime_path"]] = data
+            else:
+                self.original[entry["runtime_path"]] = None
+
+        cli_root = self._target(
+            self.manifest["release_executor"]["cli_dependency"]["runtime_root"]
+        )
+        for item in self.manifest["release_executor"]["cli_dependency"]["files"]:
+            source = ROOT / "tools" / "hq-cli" / pathlib.PurePosixPath(item["path"])
+            target = cli_root / pathlib.PurePosixPath(item["path"])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+        python_root = self._target("/home/ubuntu/content-api")
+        (python_root / "content_domains").mkdir(parents=True, exist_ok=True)
+        database = self._target(
+            self.manifest["feature_activation"]["database_path"]
+        )
+        with closing(sqlite3.connect(str(database))) as connection:
+            connection.execute(
+                """CREATE TABLE feature_flags(
+                    feature TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+                    updated_by TEXT, updated_at INTEGER NOT NULL
+                )"""
+            )
+            connection.execute(
+                "INSERT INTO feature_flags VALUES(?,?,?,?)",
+                ("director_agent", 1, "before-cli-release", 987654),
+            )
+            connection.commit()
+        self.original_feature = self._feature_row()
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def _target(self, runtime_path):
+        return self.runtime.joinpath(
+            *pathlib.PurePosixPath(runtime_path).parts[1:]
+        )
+
+    def _feature_row(self):
+        database = self._target(
+            self.manifest["feature_activation"]["database_path"]
+        )
+        with closing(sqlite3.connect(str(database))) as connection:
+            return connection.execute(
+                "SELECT feature,enabled,updated_by,updated_at FROM feature_flags "
+                "WHERE feature='director_agent'"
+            ).fetchone()
+
+    def _snapshot(self):
+        result = {}
+        for entry in self.manifest["files"]:
+            target = self._target(entry["runtime_path"])
+            result[entry["runtime_path"]] = (
+                target.read_bytes()
+                if target.is_file() and not target.is_symlink() else None
+            )
+        return result
+
+    def _execute(self, checkpoint=None, hooks=None):
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(self.manifest, ensure_ascii=False), encoding="utf-8"
+        )
+        hooks = hooks or FakeHooks()
+        result = self.module.execute_locked_release(
+            manifest_path, ROOT, self.runtime, self.backups,
+            hooks=hooks, verify_repository=False,
+            checkpoint=checkpoint, reviewed_head="3" * 40,
+            merged_main="4" * 40,
+        )
+        return result, hooks
+
+    def test_manifest_and_real_cli_preflight_cover_all_agent_pages(self):
+        loaded = self.module._load_manifest(self.MANIFEST)
+        self.assertEqual(
+            "director_agent_cli_bridge_v1",
+            loaded["release_executor"]["contract"],
+        )
+        dependency = loaded["release_executor"]["cli_dependency"]
+        self.assertEqual(5, len(dependency["files"]))
+        executor_data = EXECUTOR.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(executor_data).hexdigest(),
+            loaded["release_executor"]["sha256"],
+        )
+        self.assertEqual(
+            DirectorAgentReleaseExecutorTests._blob(executor_data),
+            loaded["release_executor"]["git_blob"],
+        )
+        for entry in loaded["files"]:
+            source = (ROOT / entry["repository_path"]).read_bytes()
+            self.assertEqual(
+                hashlib.sha256(source).hexdigest(), entry["source_sha256"],
+            )
+            self.assertEqual(
+                DirectorAgentReleaseExecutorTests._blob(source),
+                entry["source_blob"],
+            )
+        for item in dependency["files"]:
+            source = (
+                ROOT / dependency["repository_root"] /
+                pathlib.PurePosixPath(item["path"])
+            ).read_bytes()
+            self.assertEqual(hashlib.sha256(source).hexdigest(), item["sha256"])
+            self.assertEqual(
+                DirectorAgentReleaseExecutorTests._blob(source),
+                item["git_blob"],
+            )
+        self.module.SystemHooks().validate_cli(
+            ROOT / dependency["repository_root"],
+            dependency["probes"], dependency["version"],
+        )
+
+    def test_success_disables_then_restores_enabled_agent(self):
+        result, hooks = self._execute()
+        self.assertEqual("deployed", result["status"])
+        self.assertEqual(1, self._feature_row()[1])
+        self.assertEqual("release:director-agent-cli-v1", self._feature_row()[2])
+        self.assertEqual(1, sum(call == "cli:0.6.0:4" for call in hooks.calls))
+        self.assertGreaterEqual(
+            hooks.calls.count("feature:director_agent_enabled:False"), 2,
+        )
+        self.assertIn("feature:director_agent_enabled:True", hooks.calls)
+        self.assertIn("acceptance", hooks.calls)
+        self.assertEqual(1, sum(call.startswith("restart:") for call in hooks.calls))
+        audit = json.loads(
+            (pathlib.Path(result["backup"]) / "audit.json").read_text("utf-8")
+        )
+        self.assertEqual(5, len(audit["cli_dependency"]))
+        self.assertEqual(2, len(audit["files"]))
+        self.assertEqual(2, len(audit["final_files"]))
+
+    def test_every_post_backup_failure_restores_two_files_and_feature_row(self):
+        stages = [
+            "after_deactivate", "after_health_disabled_preinstall",
+            "after_replace_0", "after_replace_1", "after_compile",
+            "after_restart", "after_health_disabled", "after_activate",
+            "after_health_enabled", "after_acceptance", "after_final_audit",
+        ]
+        for stage in stages:
+            with self.subTest(stage=stage):
+                def inject(current, expected=stage):
+                    if current == expected:
+                        raise RuntimeError("injected %s failure" % expected)
+
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    self._execute(checkpoint=inject)
+                self.assertEqual(self.original, self._snapshot())
+                self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_cli_dependency_failure_is_before_backup_and_feature_write(self):
+        dependency = self.manifest["release_executor"]["cli_dependency"]
+        dependency["files"][0]["sha256"] = "0" * 64
+        hooks = FakeHooks()
+        with self.assertRaisesRegex(
+            self.module.ReleaseError, "CLI dependency lock mismatch",
+        ):
+            self._execute(hooks=hooks)
+        self.assertFalse(self.backups.exists())
+        self.assertEqual(self.original, self._snapshot())
+        self.assertEqual(self.original_feature, self._feature_row())
+        self.assertFalse(any(call.startswith("feature:") for call in hooks.calls))
+
+    def test_feature_preimage_mismatch_fails_before_backup(self):
+        self.manifest["feature_activation"]["expected_preimage_enabled"] = False
+        hooks = FakeHooks()
+        with self.assertRaisesRegex(
+            self.module.ReleaseError, "feature lifecycle is invalid",
+        ):
+            self._execute(hooks=hooks)
+        self.assertFalse(self.backups.exists())
+        self.assertEqual(self.original_feature, self._feature_row())
 
 
 if __name__ == "__main__":
