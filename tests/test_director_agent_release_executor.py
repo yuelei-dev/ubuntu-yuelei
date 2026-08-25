@@ -536,7 +536,7 @@ class DirectorAgentReleaseExecutorTests(unittest.TestCase):
 
 class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
     MANIFEST = (
-        ROOT / "deploy" / "test-runtime" /
+        ROOT / "release-manifests" / "test-runtime" /
         "director-agent-cli-v1-20260825.json"
     )
 
