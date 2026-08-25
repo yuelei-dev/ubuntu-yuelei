@@ -1067,13 +1067,14 @@ class ContentWhisperRelease:
         return min(float(value), float(policy["max_retry_after_seconds"]))
 
     def _feishu_request_with_retry(
-            self, getter, request, environment, request_label):
+            self, getter, request, environment, request_label, deadline=None):
         policy = self._validate_feishu_retry_policy()
-        deadline = self.monotonic() + policy["total_deadline_seconds"]
+        if deadline is None:
+            deadline = self.monotonic() + policy["total_deadline_seconds"]
         retryable = set(policy["retryable_http_statuses"])
         max_attempts = policy["max_attempts"]
         for attempt in range(1, max_attempts + 1):
-            if attempt > 1 and self.monotonic() >= deadline:
+            if self.monotonic() >= deadline:
                 raise ReleaseError(
                     "Feishu %s retry deadline exhausted after %s attempts" %
                     (request_label, attempt - 1)
@@ -1116,7 +1117,10 @@ class ContentWhisperRelease:
         config = requirements.get("feishu", {})
         if config.get("operational_probe_required") is not True:
             raise ReleaseError("Feishu operational probe must be required")
-        self._validate_feishu_retry_policy()
+        retry_policy = self._validate_feishu_retry_policy()
+        retry_deadline = (
+            self.monotonic() + retry_policy["total_deadline_seconds"]
+        )
         environment = self.service_environment_getter()
         credential_names = config.get("secret_environment_names")
         if credential_names != ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]:
@@ -1152,7 +1156,7 @@ class ContentWhisperRelease:
             }).encode("utf-8"),
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
-            ), environment, "token request",
+            ), environment, "token request", retry_deadline,
         )
         if int(token_result.get("code") or 0) != 0:
             raise ReleaseError("%s Feishu credential verification failed" % phase)
@@ -1174,7 +1178,7 @@ class ContentWhisperRelease:
             result = self._feishu_request_with_retry(
                 self.feishu_json_getter, urllib.request.Request(
                 url, headers={"Authorization": "Bearer " + tenant_token},
-                ), environment, "records request",
+                ), environment, "records request", retry_deadline,
             )
             if int(result.get("code") or 0) != 0:
                 raise ReleaseError(
@@ -1202,7 +1206,7 @@ class ContentWhisperRelease:
         self._feishu_request_with_retry(
             self.feishu_media_getter, urllib.request.Request(
                 media_url, headers={"Authorization": "Bearer " + tenant_token},
-            ), environment, "attachment request",
+            ), environment, "attachment request", retry_deadline,
         )
         self.checkpoint("%s_feishu_operational" % phase)
 

@@ -677,6 +677,36 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         self.assertEqual(calls, {"token": 2, "records": 2, "media": 1})
         self.assertEqual(clock.now, 3.0)
 
+    def test_token_records_and_attachment_share_one_total_deadline(self):
+        clock = FakeClock()
+        calls = {"token": 0, "records": 0}
+
+        def json_getter(request, _environment):
+            if "/auth/" in request.full_url:
+                calls["token"] += 1
+                if calls["token"] < 4:
+                    raise _http_error(429, "15")
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            calls["records"] += 1
+            raise _http_error(503, "15")
+
+        release = self._release(
+            self.versioned,
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=json_getter,
+            feishu_media_getter=lambda _request, _environment: self.fail(
+                "attachment must not run after the shared deadline"
+            ),
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError,
+                "records request retry deadline exhausted after 1 attempts"):
+            release._verify_feishu_operational("pre-deployment")
+        self.assertEqual(calls, {"token": 4, "records": 1})
+        self.assertEqual(clock.now, 60.0)
+
     def test_retry_after_invalid_negative_and_excessive_values_are_bounded(self):
         for retry_after, expected_wait in (
                 ("1.5", 1.5), ("not-a-number", 1.0),
