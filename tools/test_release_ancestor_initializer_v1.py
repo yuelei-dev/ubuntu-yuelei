@@ -20,6 +20,8 @@ SOURCE_ROOT = "/opt/huangque-test-release"
 STATE_ROOT = "/var/lib/huangque-release"
 INITIALIZER_ENTRYPOINT = "/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py"
 PHASE_ONE_ENTRYPOINT = "/usr/local/libexec/huangque-release/release_test.py"
+BOUNDARY_ENTRYPOINT = "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py"
+BOUNDARY_CONTRACT = "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json"
 LAUNCHER = "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1"
 BOOTSTRAP = "/etc/huangque/release-ancestor-initializer-v1.json"
 EXPECTED_ENVIRONMENT = {
@@ -114,7 +116,8 @@ def _load_bootstrap():
     required = {
         "schema_version", "source_root", "state_root", "initializer_entrypoint",
         "initializer_sha256", "phase_one_entrypoint", "phase_one_sha256",
-        "launcher", "launcher_sha256",
+        "boundary_entrypoint", "boundary_sha256", "boundary_contract",
+        "boundary_contract_sha256", "launcher", "launcher_sha256",
     }
     if (not isinstance(value, dict) or set(value) != required
             or value.get("schema_version") != SCHEMA_VERSION
@@ -122,9 +125,12 @@ def _load_bootstrap():
             or value.get("state_root") != STATE_ROOT
             or value.get("initializer_entrypoint") != INITIALIZER_ENTRYPOINT
             or value.get("phase_one_entrypoint") != PHASE_ONE_ENTRYPOINT
+            or value.get("boundary_entrypoint") != BOUNDARY_ENTRYPOINT
+            or value.get("boundary_contract") != BOUNDARY_CONTRACT
             or value.get("launcher") != LAUNCHER
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(value.get(key) or ""))
-                   for key in ("initializer_sha256", "phase_one_sha256", "launcher_sha256"))):
+                   for key in ("initializer_sha256", "phase_one_sha256", "boundary_sha256",
+                               "boundary_contract_sha256", "launcher_sha256"))):
         raise InitializerError("initializer bootstrap fields are invalid")
     return value
 
@@ -156,6 +162,14 @@ def _load_verified_phase_one():
         PHASE_ONE_ENTRYPOINT, bootstrap["phase_one_sha256"], "phase-one entrypoint",
         final_mode=0o755,
     )
+    boundary_raw = _locked_regular(
+        BOUNDARY_ENTRYPOINT, bootstrap["boundary_sha256"], "external boundary entrypoint",
+        final_mode=0o755,
+    )
+    boundary_contract_raw = _locked_regular(
+        BOUNDARY_CONTRACT, bootstrap["boundary_contract_sha256"],
+        "external boundary contract", final_mode=0o644,
+    )
     _locked_regular(
         LAUNCHER, bootstrap["launcher_sha256"], "initializer launcher", final_mode=0o755,
     )
@@ -167,6 +181,14 @@ def _load_verified_phase_one():
         exec(compile(phase_raw, PHASE_ONE_ENTRYPOINT, "exec"), module.__dict__)
     except Exception as exc:
         raise InitializerError("verified phase-one entrypoint could not be loaded") from exc
+    boundary = types.ModuleType("huangque_locked_external_boundaries")
+    boundary.__file__ = BOUNDARY_ENTRYPOINT
+    try:
+        exec(compile(boundary_raw, BOUNDARY_ENTRYPOINT, "exec"), boundary.__dict__)
+        module._external_boundary_module = boundary
+        module._external_boundary_contract = boundary.load_contract(boundary_contract_raw)
+    except Exception as exc:
+        raise InitializerError("verified external boundary contract could not be loaded") from exc
     return module
 
 
@@ -216,6 +238,7 @@ class AncestorInitializer:
         accepted_impacts = self.phase_one.collect_impact_index(
             self.repo, self.catalog, deployed_commit,
         )
+        external_boundaries = self.engine.external_boundary_snapshot()
         return {
             "identity": identity,
             "latest_main": latest_main,
@@ -224,6 +247,7 @@ class AncestorInitializer:
             "runtime_hashes": runtime_hashes,
             "repository_paths": repository_paths,
             "runtime_metadata": runtime_metadata,
+            "external_boundaries": external_boundaries,
         }
 
     def initialize(self, deployed_commit, confirmation):
@@ -280,7 +304,10 @@ def main(argv=None):
         phase_one = _load_verified_phase_one()
         phase_one._verify_runtime_entrypoint(SOURCE_ROOT)
         catalog = phase_one.RuntimeCatalog.load(SOURCE_ROOT, phase_one.DEFAULT_CATALOG)
-        engine = phase_one.ReleaseEngine(SOURCE_ROOT, "/", catalog)
+        catalog, engine_class, _policy = phase_one._external_boundary_module.install(
+            phase_one, catalog, phase_one._external_boundary_contract,
+        )
+        engine = engine_class(SOURCE_ROOT, "/", catalog)
         result = AncestorInitializer(phase_one, engine).initialize(
             args.deployed_commit, args.confirm_environment,
         )

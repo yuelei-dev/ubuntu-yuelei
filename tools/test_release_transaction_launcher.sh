@@ -3,7 +3,7 @@ set -eu
 
 LAUNCHER=/usr/local/sbin/huangque-release-test-transaction
 ENTRYPOINT=/usr/local/libexec/huangque-release/test_release_transaction.py
-EXPECTED_ENTRYPOINT_SHA256=a118326075df8ae5659b18faf5a84f9fced96d08a80f191b457c4608d05d9392
+EXPECTED_ENTRYPOINT_SHA256=b4a6a9b4bd1d368dbd33d30588a4cee151c9446f6fef172c4fca2881e82fba61
 
 fail() {
   /usr/bin/printf '%s\n' "huangque transaction launcher: $1" >&2

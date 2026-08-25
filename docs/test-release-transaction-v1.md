@@ -11,6 +11,11 @@ and install the executor as
 `/usr/local/libexec/huangque-release/test_release_transaction.py`, owned by
 root and mode `0755`, and install `tools/test_release_transaction_launcher.sh`
 as `/usr/local/sbin/huangque-release-test-transaction`, root-owned mode `0755`.
+The same operation installs the reviewed external-boundary Python module at
+`/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py`
+(root:root `0755`) and JSON contract at
+`/usr/local/share/huangque-release/test_release_external_boundaries_v1.json`
+(root:root `0644`).
 `/etc/huangque/release-transaction-v1.json`
 must be root-owned, mode `0600`, and contain exactly:
 
@@ -19,11 +24,15 @@ must be root-owned, mode `0600`, and contain exactly:
   "schema_version": 1,
   "source_root": "/opt/huangque-test-release",
   "transaction_entrypoint": "/usr/local/libexec/huangque-release/test_release_transaction.py",
-  "transaction_sha256": "a118326075df8ae5659b18faf5a84f9fced96d08a80f191b457c4608d05d9392",
+  "transaction_sha256": "b4a6a9b4bd1d368dbd33d30588a4cee151c9446f6fef172c4fca2881e82fba61",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
+  "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
+  "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
+  "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
+  "boundary_contract_sha256": "c16bef8ebd8463958e2e0cd2194b8f1eb8e78fe789030b2cf61d1bfa2b485e5a",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
-  "launcher_sha256": "12b22371780252b5dee5a970deb4a9bc94b524c0fa734e3f872ae47f94e84e65",
+  "launcher_sha256": "8163285d21e7de7e003e0b361f2d10ebe1500457473b8c03c01dcb27690d8a9d",
   "state_root": "/var/lib/huangque-release"
 }
 ```
@@ -103,6 +112,24 @@ states are recoverable, so a crash cannot create invisible persistent backups.
 Any third ledger commit, corrupt journal, missing/tampered backup, identity
 change, unsafe path, health failure, or rollback failure stops fail-closed and
 preserves evidence for operator review.
+
+The journal also binds the complete external-boundary snapshot. Apply verifies
+it after planning, after backup, before every managed write, after post-health
+and postimage checks, on both sides of final inventory acceptance, and directly
+before ledger write. Rollback and every crash-recovery completion branch verify
+the exact journal snapshot again before restoring or deleting evidence. Hermes'
+externally managed current-release link and Leadgen's shared
+runtime-data links are never transaction targets and are never followed; an
+undeclared link or any declared link, target, owner, mode or parent-chain drift
+fails closed with the affected runtime path.
+The observed `/home/ubuntu` parent is locked to exact mode `0751`; `0755`,
+`0775`, and `0777` are deliberately rejected rather than treated as aliases.
+
+Upgrade the boundary module and JSON first, then transaction entrypoint and
+launcher, and finally atomically replace the private bootstrap. Do not run apply
+or recover while the set is mixed. Rollback restores the previous reviewed
+module, JSON, transaction, launcher and bootstrap as one unit. It does not alter
+Hermes or Leadgen links and does not roll back business files by itself.
 
 V1 implements fixed loopback HTTP checks for the catalog's admin, auth,
 content, download, Hermes, image-generation, and lead-generation health IDs,

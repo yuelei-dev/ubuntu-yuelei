@@ -14,6 +14,11 @@ administrator must install:
 - `tools/test_release_ancestor_initializer_v1_launcher.sh` as
   `/usr/local/sbin/huangque-release-test-initialize-ancestor-v1`, root:root mode
   `0755`;
+- `tools/test_release_external_boundaries_v1.py` as
+  `/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py`,
+  root:root mode `0755`, and its JSON contract as
+  `/usr/local/share/huangque-release/test_release_external_boundaries_v1.json`,
+  root:root mode `0644`;
 - `/etc/huangque/release-ancestor-initializer-v1.json`, root:root mode `0600`,
   with exactly the reviewed values below.
 
@@ -23,11 +28,15 @@ administrator must install:
   "source_root": "/opt/huangque-test-release",
   "state_root": "/var/lib/huangque-release",
   "initializer_entrypoint": "/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py",
-  "initializer_sha256": "fc28aadf3692c000fd683c7c59f0c52e87823534904f9846deeb4a3777c7d2a0",
+  "initializer_sha256": "4427899f2586dbf8c7195c72bc641bdc0afe3256fcc7a6811137166697e92014",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
+  "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
+  "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
+  "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
+  "boundary_contract_sha256": "c16bef8ebd8463958e2e0cd2194b8f1eb8e78fe789030b2cf61d1bfa2b485e5a",
   "launcher": "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1",
-  "launcher_sha256": "99ab88bbb59c3da1c84cf8ac4d0ea84287f3e607b8de2a064aa3697456bd9b3a"
+  "launcher_sha256": "a194d305a95548766c2310e74a42e49ff023bc1081ba3450806dbf3acf3459f4"
 }
 ```
 
@@ -52,10 +61,26 @@ Git ancestor (or equal it). The initializer uses the deployed commit's exact
 catalog blob, accepted impacts, complete expected runtime inventory and
 metadata to write the existing phase-one ledger schema. The worktree catalog
 must still match that older blob byte-for-byte. Identity, source/live main,
-ancestry, catalog, impacts and inventory are repeated before the lock, inside
+ancestry, catalog, impacts, inventory and every declared external-boundary
+link/target/parent lstat identity are repeated before the lock, inside
 the lock and immediately before state write. Existing state, mixed inventory,
 catalog evolution or any TOCTOU drift fails closed.
 
 After success, the unchanged phase-one `status`/`plan` and the v1 transaction
 executor consume the ledger directly. There is no migration, alternate path,
 live-origin bypass, plan, apply, rollback or recover command in this tool.
+
+Hermes' `/home/ubuntu/hermes-web` code root remains owned by its independent
+atomic release manager. Leadgen A/B shared JSON, database and files links remain
+shared runtime data. Both classes are explicit catalog extensions with
+`never_follow_never_write`; the root transaction inventory validates link and
+target metadata but never follows or hashes their mutable target contents.
+The reviewed contract binds the observed `/home/ubuntu` parent to exact mode
+`0751`; broader `0755`, `0775`, or `0777` modes are not accepted.
+
+Upgrade order is boundary module, boundary JSON, initializer, launcher, then the
+private bootstrap in one root-controlled maintenance operation. Verify every
+installed SHA before invoking initialize. Rollback restores the previously
+reviewed four installed files and private bootstrap together; never roll back
+only one hash-bound component, and never change the runtime symlinks as part of
+this tooling upgrade.
