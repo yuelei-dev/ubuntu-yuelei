@@ -24,15 +24,15 @@ must be root-owned, mode `0600`, and contain exactly:
   "schema_version": 1,
   "source_root": "/opt/huangque-test-release",
   "transaction_entrypoint": "/usr/local/libexec/huangque-release/test_release_transaction.py",
-  "transaction_sha256": "cf0e2834c3c78d6d4a7429d3a22ba4c24997dcd37512696f404985014dd19b44",
+  "transaction_sha256": "b4a6a9b4bd1d368dbd33d30588a4cee151c9446f6fef172c4fca2881e82fba61",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
   "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
   "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
-  "boundary_contract_sha256": "80dda99f0df2324cbde48acc799cff416ddd353dea2c51cb626151a6c68b4fb6",
+  "boundary_contract_sha256": "c16bef8ebd8463958e2e0cd2194b8f1eb8e78fe789030b2cf61d1bfa2b485e5a",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
-  "launcher_sha256": "8ec0fc8f58244442646eb54fa79d663044cf6108eb95cf4fb35ed8a7615d112f",
+  "launcher_sha256": "8163285d21e7de7e003e0b361f2d10ebe1500457473b8c03c01dcb27690d8a9d",
   "state_root": "/var/lib/huangque-release"
 }
 ```
@@ -114,12 +114,16 @@ change, unsafe path, health failure, or rollback failure stops fail-closed and
 preserves evidence for operator review.
 
 The journal also binds the complete external-boundary snapshot. Apply verifies
-it after planning, after backup, before every managed write, and before final
-inventory acceptance. Rollback and crash recovery verify it before every
-restore. Hermes' externally managed current-release link and Leadgen's shared
+it after planning, after backup, before every managed write, after post-health
+and postimage checks, on both sides of final inventory acceptance, and directly
+before ledger write. Rollback and every crash-recovery completion branch verify
+the exact journal snapshot again before restoring or deleting evidence. Hermes'
+externally managed current-release link and Leadgen's shared
 runtime-data links are never transaction targets and are never followed; an
 undeclared link or any declared link, target, owner, mode or parent-chain drift
 fails closed with the affected runtime path.
+The observed `/home/ubuntu` parent is locked to exact mode `0751`; `0755`,
+`0775`, and `0777` are deliberately rejected rather than treated as aliases.
 
 Upgrade the boundary module and JSON first, then transaction entrypoint and
 launcher, and finally atomically replace the private bootstrap. Do not run apply

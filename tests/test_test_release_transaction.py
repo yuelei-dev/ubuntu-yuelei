@@ -295,6 +295,26 @@ class TransactionTests(unittest.TestCase):
             self.executor.recover()
         self.assertTrue(self.executor.journal_path.exists())
 
+    def test_external_boundary_switch_after_last_write_never_commits_ledger(self):
+        original_health = self.hooks.health
+
+        def switch_after_write(probe, phase, expected_response=None):
+            original_health(probe, phase, expected_response)
+            if phase == "post":
+                self.planner.external_snapshot = [
+                    {"runtime_path": "/external/managed-link", "token": "other-valid-target"},
+                ]
+
+        self.hooks.health = switch_after_write
+        with self.assertRaisesRegex(transaction.TransactionError, "rollback failed"):
+            self.executor.apply(MERGE, EVIDENCE)
+        self.assertEqual(BASE, self.planner.state["deployed_main_commit"])
+        self.assertEqual([], self.planner.written_states)
+        self.assertTrue(self.executor.journal_path.exists())
+        journal = json.loads(self.executor.journal_path.read_text("utf-8"))
+        self.assertEqual("rollback_failed", journal["status"])
+        self.assertEqual("TransactionError", journal["original_error"])
+
     def test_partial_write_process_crash_is_recovered_from_persistent_backup(self):
         original_plan = self.planner.build_plan
         self.planner.repo.files[(MERGE, SECOND_SOURCE)] = SECOND_NEW

@@ -918,9 +918,12 @@ class TransactionExecutor:
                     raise TransactionError("release identity changed during apply")
                 for record in journal["files"]:
                     self._observe(record["plan"], "after")
+                self._verify_external_boundaries(journal["external_boundaries"])
                 if not self.planner.verify_target_inventory(target_commit):
                     raise TransactionError("complete runtime inventory differs from target commit")
+                self._verify_external_boundaries(journal["external_boundaries"])
                 state = self._new_ledger(journal)
+                self._verify_external_boundaries(journal["external_boundaries"])
                 self.planner._write_state(state)
                 journal["status"] = "committed"
                 self._atomic_state_file(self.journal_path, journal)
@@ -955,6 +958,7 @@ class TransactionExecutor:
                     raise TransactionError("committed recovery target inventory has drifted")
                 self.planner.verify_services(journal["restart_services"])
                 self._run_health(journal["post_health_probes"], "post", journal["files"], "after")
+                self._verify_external_boundaries(journal["external_boundaries"])
                 self._finish(journal)
                 return {"ok": True, "status": "committed_recovered",
                         "transaction_id": journal["transaction_id"]}
@@ -963,10 +967,12 @@ class TransactionExecutor:
             if journal["status"] in {"backing_up", "cleaning"}:
                 self._verify_all(journal["files"], "before")
                 self._run_health(journal["pre_health_probes"], "rollback", journal["files"], "before")
+                self._verify_external_boundaries(journal["external_boundaries"])
                 self._finish(journal)
                 return {"ok": True, "status": "prewrite_recovered",
                         "transaction_id": journal["transaction_id"]}
             self._restore(journal)
+            self._verify_external_boundaries(journal["external_boundaries"])
             self._finish(journal)
             return {"ok": True, "status": "rolled_back_recovered",
                     "transaction_id": journal["transaction_id"]}

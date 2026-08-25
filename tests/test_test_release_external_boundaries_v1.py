@@ -31,10 +31,10 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
         self.gid = os.getgid()
         self.sha = "9f298737e19e4eea5df7d20bbfeffb466b0b4b2d"
         modes = {
-            "home": 0o755, "home/ubuntu": 0o755,
+            "home": 0o755, "home/ubuntu": 0o751,
             "home/ubuntu/hermes-ip12-releases": 0o755,
             "home/ubuntu/hermes-ip12-releases/" + self.sha: 0o775,
-            "home/ubuntu/leadgen-A": 0o755, "home/ubuntu/leadgen-B": 0o755,
+            "home/ubuntu/leadgen-A": 0o775, "home/ubuntu/leadgen-B": 0o775,
             "home/ubuntu/leadgen-server": 0o755,
             "home/ubuntu/leadgen-server/files": 0o775,
         }
@@ -68,6 +68,18 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
         shared.write_text('{"mutable":true}', encoding="utf-8")
         shared.chmod(0o644)
         self.assertEqual(snapshot, self.policy.verify_snapshot(snapshot))
+
+    def test_home_ubuntu_requires_exact_observed_0751(self):
+        home_ubuntu = self.root / "home/ubuntu"
+        self.assertEqual(0o751, stat.S_IMODE(os.lstat(home_ubuntu).st_mode))
+        self.policy.snapshot()
+        for mode in (0o755, 0o775, 0o777):
+            with self.subTest(mode=oct(mode)):
+                home_ubuntu.chmod(mode)
+                with self.assertRaisesRegex(
+                        boundaries.BoundaryError, r"external target parent is unsafe: /home/ubuntu/hermes-web"):
+                    self.policy.snapshot()
+                home_ubuntu.chmod(0o751)
 
     def test_relative_escape_dangling_chain_target_parent_and_mode_fail_closed(self):
         hermes = self.root / "home/ubuntu/hermes-web"
@@ -139,6 +151,22 @@ class ExternalBoundaryContractTests(unittest.TestCase):
                          {item["kind"] for item in policy.contracts})
         self.assertTrue(all(item["write_policy"] == "never_follow_never_write"
                             for item in policy.contracts))
+        home_modes = [parent["modes"] for item in policy.contracts
+                      for parent in item["link_parent_contracts"] + item["parent_contracts"]
+                      if parent["path"] == "/home/ubuntu"]
+        self.assertTrue(home_modes)
+        self.assertTrue(all(modes == frozenset({0o751}) for modes in home_modes))
+        expected_parent_modes = {
+            "/home": frozenset({0o755}),
+            "/home/ubuntu/hermes-ip12-releases": frozenset({0o755}),
+            "/home/ubuntu/leadgen-A": frozenset({0o775}),
+            "/home/ubuntu/leadgen-B": frozenset({0o775}),
+            "/home/ubuntu/leadgen-server": frozenset({0o755}),
+        }
+        actual = {parent["path"]: parent["modes"] for item in policy.contracts
+                  for parent in item["link_parent_contracts"] + item["parent_contracts"]
+                  if parent["path"] in expected_parent_modes}
+        self.assertEqual(expected_parent_modes, actual)
         altered = json.loads(json.dumps(CONTRACT))
         altered["external_code_roots"][0]["write_policy"] = "follow"
         with self.assertRaisesRegex(boundaries.BoundaryError, "metadata"):
