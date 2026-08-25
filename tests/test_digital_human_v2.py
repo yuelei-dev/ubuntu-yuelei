@@ -8,6 +8,7 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -68,6 +69,24 @@ class DigitalHumanV2Tests(unittest.TestCase):
         connection = sqlite3.connect(self.consent_db)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _store_audio(self, raw, run_id="dh-v2-run-audio-reupload-001", now=1000):
+        transcript = [{
+            "start": 0.0, "end": 12.0,
+            "text": "这是用于验证过期录音重新上传的完整口播。",
+        }]
+
+        def create_slice(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"verified-audio-slice")
+
+        with mock.patch.object(self.domain.time, "time", return_value=now), \
+                mock.patch.object(self.domain, "_probe_audio_duration", return_value=12.0), \
+                mock.patch.object(self.domain, "_transcribe_audio", return_value=transcript), \
+                mock.patch.object(self.legacy, "_run", side_effect=create_slice):
+            return self.domain.audio_upload_response(
+                io.BytesIO(raw), len(raw), "yuelei", run_id, "audio/mpeg",
+                hashlib.sha256(raw).hexdigest(),
+            )
 
     def _consent(self, script, portrait=PNG_2X2, allow_ai=None, upload_ids=None,
                  run_id="dh-v2-run-test-001"):
@@ -471,6 +490,87 @@ class DigitalHumanV2Tests(unittest.TestCase):
         self.assertNotEqual(cleaned["audio_data"], "forged")
         decoded = base64.b64decode(cleaned["audio_data"].split(",", 1)[1])
         self.assertEqual(hashlib.sha256(decoded).hexdigest(), expected_slice["sha256"])
+
+    def test_expired_unbound_audio_reupload_replaces_record_after_full_validation(self):
+        raw = b"expired-audio-upload-replaced-after-validation"
+        first = self._store_audio(raw, now=1000)
+        with closing(self._consent_connection()) as connection:
+            old_row = connection.execute(
+                "SELECT source_file FROM digital_human_audio_uploads WHERE asset_id=?",
+                (first["audio_upload_id"],),
+            ).fetchone()
+        old_directory = (self.root / old_row["source_file"]).parent
+        self.assertTrue(old_directory.is_dir())
+
+        replaced = self._store_audio(
+            raw, now=1000 + self.domain._AUDIO_UPLOAD_TTL_SECONDS + 1,
+        )
+
+        self.assertNotEqual(first["audio_upload_id"], replaced["audio_upload_id"])
+        self.assertGreater(replaced["expires_at"], first["expires_at"])
+        self.assertFalse(old_directory.exists())
+        with closing(self._consent_connection()) as connection:
+            rows = connection.execute(
+                "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads"
+            ).fetchall()
+        self.assertEqual(1, len(rows))
+        self.assertEqual(replaced["audio_upload_id"], rows[0]["asset_id"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), rows[0]["source_sha256"])
+
+    def test_expired_authorized_audio_requires_explicit_new_run(self):
+        raw = b"expired-authorized-audio-cannot-be-rebound"
+        first = self._store_audio(raw, now=2000)
+        self.legacy.init_db(self._consent_connection)
+        with closing(self._consent_connection()) as connection:
+            connection.execute(
+                """INSERT INTO digital_human_consents(
+                    id,username,run_id,consent_version,purpose,plan_digest,
+                    photo_sha256,voice_mode,voice_ref,voice_sha256,token_hash,
+                    created_at,expires_at,last_used_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "dhc_expired_audio", "yuelei", "dh-v2-run-audio-reupload-001",
+                    self.domain.CONSENT_VERSION, self.domain.CONSENT_PURPOSE,
+                    "a" * 64, "b" * 64, "audio", first["audio_upload_id"], "",
+                    "c" * 64, 2000, 2000 + self.domain.CONSENT_TTL_SECONDS, 2000,
+                ),
+            )
+            connection.commit()
+        stream = io.BytesIO(raw)
+
+        with mock.patch.object(
+                self.domain.time, "time",
+                return_value=2000 + self.domain._AUDIO_UPLOAD_TTL_SECONDS + 1,
+        ), self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+            self.domain.store_audio_upload(
+                stream, len(raw), "yuelei", "dh-v2-run-audio-reupload-001",
+                "audio/mpeg", hashlib.sha256(raw).hexdigest(),
+            )
+
+        self.assertEqual("audio_upload_restart_required", caught.exception.code)
+        self.assertIn("放弃上次任务并重新设置", str(caught.exception))
+        self.assertEqual(0, stream.tell())
+        with closing(self._consent_connection()) as connection:
+            row = connection.execute(
+                "SELECT asset_id FROM digital_human_audio_uploads"
+            ).fetchone()
+        self.assertEqual(first["audio_upload_id"], row["asset_id"])
+
+    def test_unexpired_audio_upload_keeps_idempotency_and_binding(self):
+        first_raw = b"active-audio-upload-remains-idempotent"
+        first = self._store_audio(first_raw, now=3000)
+        duplicate = self._store_audio(first_raw, now=3001)
+        self.assertEqual(first["audio_upload_id"], duplicate["audio_upload_id"])
+
+        other = b"active-run-must-not-silently-change-audio"
+        with mock.patch.object(self.domain.time, "time", return_value=3002), \
+                self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+            self.domain.store_audio_upload(
+                io.BytesIO(other), len(other), "yuelei",
+                "dh-v2-run-audio-reupload-001", "audio/mpeg",
+                hashlib.sha256(other).hexdigest(),
+            )
+        self.assertEqual("audio_upload_binding_conflict", caught.exception.code)
 
     def test_short_audio_boundaries_keep_material_contract(self):
         for duration, expected_count in ((6.0, 0), (6.05, 0), (6.06, 1)):

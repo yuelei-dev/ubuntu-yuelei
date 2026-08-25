@@ -137,6 +137,28 @@ def _safe_audio_upload_id(value):
     return value
 
 
+def _audio_run_has_consent(connection, username, run_id):
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='digital_human_consents'"
+    ).fetchone()
+    if not table:
+        return False
+    return connection.execute(
+        "SELECT 1 FROM digital_human_consents WHERE username=? AND run_id=? LIMIT 1",
+        (username, run_id),
+    ).fetchone() is not None
+
+
+def _remove_audio_asset_files(source_file):
+    import shutil
+
+    root = (OUT_DIR / "digital_human_audio").resolve()
+    source = (OUT_DIR / str(source_file or "")).resolve()
+    if source.parent == root or root not in source.parents:
+        return
+    shutil.rmtree(str(source.parent), ignore_errors=True)
+
+
 def _load_audio_asset(asset_id, username, now=None, db_factory=None):
     asset_id = _safe_audio_upload_id(asset_id)
     now = int(time.time() if now is None else now)
@@ -233,7 +255,8 @@ def _slice_text(transcript_segments, start, end):
 
 def store_audio_upload(stream, length, username, run_id, content_type,
                        claimed_sha256, db_factory=None):
-    if not legacy._RUN_ID_RE.fullmatch(str(run_id or "").strip()):
+    run_id = str(run_id or "").strip()
+    if not legacy._RUN_ID_RE.fullmatch(run_id):
         raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
     if type(length) is not int or length <= 0 or length > _MAX_AUDIO_UPLOAD_BYTES:
         raise DigitalHumanRequestError("录音文件必须小于 30MB", "audio_upload_size_invalid")
@@ -242,12 +265,22 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         raise DigitalHumanRequestError("仅支持 MP3、WAV、M4A 或 AAC 录音", "audio_upload_type_invalid")
     claimed = legacy._required_sha256(claimed_sha256, "完整录音")
     username = str(username or "").strip()
+    now = int(time.time())
+    expired = None
     with closing(_audio_db(db_factory)) as connection:
         existing = connection.execute(
-            "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
-            "WHERE username=? AND run_id=?", (username, str(run_id).strip()),
+            "SELECT asset_id,source_sha256,source_file,expires_at "
+            "FROM digital_human_audio_uploads WHERE username=? AND run_id=?",
+            (username, run_id),
         ).fetchone()
-    if existing:
+        if existing and int(existing["expires_at"]) <= now:
+            if _audio_run_has_consent(connection, username, run_id):
+                raise DigitalHumanRequestError(
+                    "录音已过期，且本次流程已经授权；请先放弃上次任务并重新设置，再上传录音",
+                    "audio_upload_restart_required", 409,
+                )
+            expired = dict(existing)
+    if existing and expired is None:
         if not hmac.compare_digest(str(existing["source_sha256"]), claimed):
             raise DigitalHumanRequestError(
                 "同一制作流程不能更换完整录音，请重新开始",
@@ -296,17 +329,33 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         now = int(time.time())
         try:
             with closing(_audio_db(db_factory)) as connection:
-                connection.execute(
-                    """INSERT INTO digital_human_audio_uploads(
-                        asset_id,username,run_id,source_sha256,source_file,duration,
-                        transcript,slices_json,created_at,expires_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (asset_id, username, str(run_id).strip(), claimed,
-                     source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
-                     transcript, json.dumps(slices, ensure_ascii=False), now,
-                     now + _AUDIO_UPLOAD_TTL_SECONDS),
+                values = (
+                    asset_id, claimed,
+                    source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
+                    transcript, json.dumps(slices, ensure_ascii=False), now,
+                    now + _AUDIO_UPLOAD_TTL_SECONDS,
                 )
+                if expired is not None:
+                    updated = connection.execute(
+                        """UPDATE digital_human_audio_uploads SET
+                            asset_id=?,source_sha256=?,source_file=?,duration=?,
+                            transcript=?,slices_json=?,created_at=?,expires_at=?
+                           WHERE asset_id=? AND username=? AND run_id=? AND expires_at<=?""",
+                        values + (expired["asset_id"], username, run_id, now),
+                    )
+                    if updated.rowcount != 1:
+                        raise sqlite3.IntegrityError("expired audio upload was replaced concurrently")
+                else:
+                    connection.execute(
+                        """INSERT INTO digital_human_audio_uploads(
+                            asset_id,username,run_id,source_sha256,source_file,duration,
+                            transcript,slices_json,created_at,expires_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (asset_id, username, run_id) + values[1:],
+                    )
                 connection.commit()
+            if expired is not None:
+                _remove_audio_asset_files(expired["source_file"])
         except sqlite3.IntegrityError:
             # A browser retry can race the first upload. Reuse the committed,
             # owner-bound asset instead of returning a transient server error.
@@ -314,7 +363,7 @@ def store_audio_upload(stream, length, username, run_id, content_type,
                 winner = connection.execute(
                     "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
                     "WHERE username=? AND run_id=?",
-                    (username, str(run_id).strip()),
+                    (username, run_id),
                 ).fetchone()
             if winner and hmac.compare_digest(str(winner["source_sha256"]), claimed):
                 import shutil

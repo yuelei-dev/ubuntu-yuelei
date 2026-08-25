@@ -15,6 +15,15 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("/api/gen/digital-human-v2/audio-upload", self.page)
         self.assertIn("不需要再输入文案或选择音色", self.page)
 
+    def test_expired_authorized_audio_points_to_explicit_restart(self):
+        self.assertIn("audio_upload_restart_required", self.page)
+        self.assertIn(
+            "录音已过期；请先点击“放弃上次任务并重新设置”，再上传录音",
+            self.page,
+        )
+        self.assertIn("new Error(publicErrorMessage(data)||'完整录音上传失败')", self.page)
+        self.assertIn('id="restartSetup"', self.page)
+
     def test_authorized_portrait_directly_drives_presenter_segments(self):
         self.assertIn("原图将直接用于全部真人出镜片段", self.page)
         self.assertIn("reference_images:photoData?[photoData]:[]", self.page)
