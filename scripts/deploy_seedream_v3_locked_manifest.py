@@ -103,6 +103,8 @@ FEISHU_RETRY_POLICY = {
     "max_retry_after_seconds": 15,
     "total_deadline_seconds": 60,
     "fallback_backoff_seconds": [1, 2, 4],
+    "json_request_timeout_seconds": 15,
+    "attachment_request_timeout_seconds": 30,
 }
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -988,12 +990,12 @@ class ContentWhisperRelease:
         return urllib.request.ProxyHandler(proxies)
 
     @staticmethod
-    def _read_feishu_json(request, environment):
+    def _read_feishu_json(request, environment, timeout):
         opener = urllib.request.build_opener(
             ContentWhisperRelease._feishu_proxy_handler(environment)
         )
         try:
-            with opener.open(request, timeout=15) as response:
+            with opener.open(request, timeout=timeout) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
         except urllib.error.HTTPError:
             raise
@@ -1015,7 +1017,7 @@ class ContentWhisperRelease:
         return result
 
     @staticmethod
-    def _read_feishu_media(request, environment):
+    def _read_feishu_media(request, environment, timeout):
         allowed_mimes = {
             "image/jpeg", "image/png", "image/webp", "video/mp4",
             "video/webm", "video/quicktime",
@@ -1024,7 +1026,7 @@ class ContentWhisperRelease:
             ContentWhisperRelease._feishu_proxy_handler(environment)
         )
         try:
-            with opener.open(request, timeout=30) as response:
+            with opener.open(request, timeout=timeout) as response:
                 mime = str(response.headers.get("Content-Type") or "").split(
                     ";", 1
                 )[0].lower()
@@ -1067,7 +1069,8 @@ class ContentWhisperRelease:
         return min(float(value), float(policy["max_retry_after_seconds"]))
 
     def _feishu_request_with_retry(
-            self, getter, request, environment, request_label, deadline=None):
+            self, getter, request, environment, request_label,
+            request_timeout_cap, deadline=None):
         policy = self._validate_feishu_retry_policy()
         if deadline is None:
             deadline = self.monotonic() + policy["total_deadline_seconds"]
@@ -1080,7 +1083,22 @@ class ContentWhisperRelease:
                     (request_label, attempt - 1)
                 )
             try:
-                return getter(request, environment)
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt - 1)
+                    )
+                result = getter(
+                    request, environment,
+                    min(float(request_timeout_cap), remaining),
+                )
+                if self.monotonic() >= deadline:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt)
+                    )
+                return result
             except urllib.error.HTTPError as exc:
                 status = int(exc.code)
                 if status not in retryable or attempt == max_attempts:
@@ -1156,7 +1174,8 @@ class ContentWhisperRelease:
             }).encode("utf-8"),
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
-            ), environment, "token request", retry_deadline,
+            ), environment, "token request",
+            retry_policy["json_request_timeout_seconds"], retry_deadline,
         )
         if int(token_result.get("code") or 0) != 0:
             raise ReleaseError("%s Feishu credential verification failed" % phase)
@@ -1178,7 +1197,8 @@ class ContentWhisperRelease:
             result = self._feishu_request_with_retry(
                 self.feishu_json_getter, urllib.request.Request(
                 url, headers={"Authorization": "Bearer " + tenant_token},
-                ), environment, "records request", retry_deadline,
+                ), environment, "records request",
+                retry_policy["json_request_timeout_seconds"], retry_deadline,
             )
             if int(result.get("code") or 0) != 0:
                 raise ReleaseError(
@@ -1206,7 +1226,8 @@ class ContentWhisperRelease:
         self._feishu_request_with_retry(
             self.feishu_media_getter, urllib.request.Request(
                 media_url, headers={"Authorization": "Bearer " + tenant_token},
-            ), environment, "attachment request", retry_deadline,
+            ), environment, "attachment request",
+            retry_policy["attachment_request_timeout_seconds"], retry_deadline,
         )
         self.checkpoint("%s_feishu_operational" % phase)
 

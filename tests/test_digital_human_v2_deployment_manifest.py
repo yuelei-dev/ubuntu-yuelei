@@ -322,6 +322,8 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             "max_retry_after_seconds": 15,
             "total_deadline_seconds": 60,
             "fallback_backoff_seconds": [1, 2, 4],
+            "json_request_timeout_seconds": 15,
+            "attachment_request_timeout_seconds": 30,
         })
         runtime = self.manifest["configuration_requirements"]["service_runtime"]
         self.assertEqual(runtime["user"], "ubuntu")
