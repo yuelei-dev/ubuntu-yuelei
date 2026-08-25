@@ -76,13 +76,13 @@ catalog 允许一个仓库文件映射到多个运行位，例如 leadgen A/B �
 
 ## 一次性初始化
 
-合并第一阶段仍不等于操作服务器。后续只能先做只读核对：测试服所有受管文件及目录库存必须完整对应一个已合并 main commit。混合版本、额外文件或缺失文件都会阻断初始化，禁止伪造台账迁就漂移。
+合并第一阶段仍不等于操作服务器。后续只能先做只读核对：测试服所有受管文件及目录库存必须完整对应一个已合并 main commit。初始化时，checkout `HEAD`、本地 `origin/main` 和 live approved `origin/main` 必须精确等于同一个最新 main SHA；`--deployed-commit` 可以落后，但必须存在且通过严格 Git ancestor 校验（也可与最新 main 相同）。台账的 catalog blob、accepted impacts 和完整 expected runtime inventory 全部从 `deployed_commit` 建立，并要求最新 main 工作树里的 catalog 字节仍与该旧提交完全相同。catalog 演进、混合版本、额外文件或缺失文件都会阻断初始化，禁止伪造台账迁就漂移。
 
 首次服务器 bootstrap 是独立的管理员操作，不由功能 PR 或本 PR 自动执行。管理员必须从已审核并合并的精确 commit 制作产物：把 `scripts/release_test_launcher.sh` 安装为 root:root、`0755` 的 `/usr/local/sbin/huangque-release-test`，把 `scripts/release_test.py` 安装为 root:root、`0755` 的 `/usr/local/libexec/huangque-release/release_test.py`，把二者精确 SHA-256 写入 `deploy/test-release/bootstrap.example.json` 后安装为 root:root、`0600` 的 `/etc/huangque/release-bootstrap.json`，并把完整仓库镜像安装到 root:root、部署账户不可写的 `/opt/huangque-test-release`。启动器路径只能在 sudoers 中按固定命令授权，不能授予部署账户任意 root Python。镜像必须是完整历史且全部文件及 `.git` 由 root 持有、group/other 不可写，不得含 symlink、replace refs、grafts、alternates、shallow 元数据或隐藏执行/路由 Git 配置。初始化前还必须清除运行根中的全部 `__pycache__`/`.pyc`，并在后续独立 systemd 硬化 PR 中为会导入可写源码的 Python 服务设置 `PYTHONDONTWRITEBYTECODE=1`；在该 PR 合并部署并复审以前，平台保持 fail-closed，不允许伪造库存通过。安装、身份文件和真实 inventory 核对都需要另行授权；未满足任一项时运行命令必须 fail-closed。
 
 ```bash
 sudo /usr/local/sbin/huangque-release-test initialize \
-  --deployed-commit "$MAIN_SHA" \
+  --deployed-commit "$DEPLOYED_MAIN_ANCESTOR_SHA" \
   --confirm-environment test
 ```
 
