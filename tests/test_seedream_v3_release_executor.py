@@ -87,6 +87,13 @@ class FakeClock:
         self.now += seconds
 
 
+def _http_error(status, retry_after=None):
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    return urllib.error.HTTPError(
+        "https://redacted.invalid", status, "transient", headers, None,
+    )
+
+
 class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -635,6 +642,230 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         with self.assertRaisesRegex(
                 self.versioned.ReleaseError, "permission verification failed"):
             release._verify_feishu_operational("pre-deployment")
+
+    def test_token_429_and_records_503_share_bounded_retry_policy(self):
+        clock = FakeClock()
+        calls = {"token": 0, "records": 0, "media": 0}
+
+        def json_getter(request, _environment):
+            if "/auth/" in request.full_url:
+                calls["token"] += 1
+                if calls["token"] == 1:
+                    raise _http_error(429, "2")
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            calls["records"] += 1
+            if calls["records"] == 1:
+                raise _http_error(503)
+            return {"code": 0, "data": {
+                "items": [{"fields": {"material": [{
+                    "file_token": "locked-attachment",
+                }]}}],
+                "has_more": False,
+            }}
+
+        release = self._release(
+            self.versioned,
+            monotonic=clock.monotonic,
+            sleeper=clock.sleep,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=json_getter,
+            feishu_media_getter=lambda _request, _environment: calls.__setitem__(
+                "media", calls["media"] + 1,
+            ),
+        )
+        release._verify_feishu_operational("pre-deployment")
+        self.assertEqual(calls, {"token": 2, "records": 2, "media": 1})
+        self.assertEqual(clock.now, 3.0)
+
+    def test_retry_after_invalid_negative_and_excessive_values_are_bounded(self):
+        for retry_after, expected_wait in (
+                ("1.5", 1.5), ("not-a-number", 1.0),
+                ("-5", 1.0), ("999", 15.0)):
+            with self.subTest(retry_after=retry_after):
+                clock = FakeClock()
+                attempts = []
+
+                def getter(_request, _environment):
+                    attempts.append(True)
+                    if len(attempts) == 1:
+                        raise _http_error(429, retry_after)
+                    return {"ok": True}
+
+                release = self._release(
+                    self.versioned,
+                    monotonic=clock.monotonic,
+                    sleeper=clock.sleep,
+                )
+                result = release._feishu_request_with_retry(
+                    getter, urllib.request.Request("https://redacted.invalid"),
+                    {}, "test request",
+                )
+                self.assertEqual(result, {"ok": True})
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(clock.now, expected_wait)
+
+    def test_non_retryable_auth_statuses_fail_on_the_first_request(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                calls = []
+
+                def getter(_request, _environment):
+                    calls.append(True)
+                    raise _http_error(status, "15")
+
+                release = self._release(self.versioned)
+                with self.assertRaisesRegex(
+                        self.versioned.ReleaseError,
+                        "HTTP status %s after 1 attempt" % status):
+                    release._feishu_request_with_retry(
+                        getter,
+                        urllib.request.Request("https://redacted.invalid"),
+                        {}, "token request",
+                    )
+                self.assertEqual(len(calls), 1)
+
+    def test_retry_error_does_not_expose_request_or_credentials(self):
+        secret_url = "https://redacted.invalid/records?tenant_token=secret-token"
+        error = urllib.error.HTTPError(
+            secret_url, 429, "transient", {"Retry-After": "0"}, None,
+        )
+        release = self._release(self.versioned)
+        with self.assertRaises(self.versioned.ReleaseError) as raised:
+            release._feishu_request_with_retry(
+                lambda _request, _environment: (_ for _ in ()).throw(error),
+                urllib.request.Request(
+                    secret_url, headers={"Authorization": "Bearer hidden"},
+                ),
+                {"FEISHU_APP_SECRET": "hidden-secret"},
+                "records request",
+            )
+        message = str(raised.exception)
+        self.assertIn("HTTP status 429 after 4 attempts", message)
+        for secret in (secret_url, "secret-token", "Bearer", "hidden-secret"):
+            self.assertNotIn(secret, message)
+
+    def test_retry_policy_drift_is_rejected_before_any_request(self):
+        self.manifest["configuration_requirements"]["feishu"][
+            "retry_policy"
+        ]["max_attempts"] = 5
+        release = self._release(
+            self.versioned,
+            service_environment_getter=lambda: self.fail(
+                "service environment must not be read"
+            ),
+            feishu_json_getter=lambda _request, _environment: self.fail(
+                "Feishu request must not run"
+            ),
+        )
+        with self.assertRaisesRegex(
+                self.versioned.ReleaseError,
+                "retry policy does not match the locked contract"):
+            release._verify_feishu_operational("pre-deployment")
+
+    def test_four_transient_failures_stop_before_backup_or_install(self):
+        health = "http://127.0.0.1:8096/api/gen/health"
+        history = "http://127.0.0.1:8096/api/gen/history"
+        digital_history = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        release, _calls = self._prepare_execute_release({
+            health: [200], history: [401], digital_history: [404],
+        })
+        release._verify_feishu_operational = types.MethodType(
+            self.versioned.ContentWhisperRelease._verify_feishu_operational,
+            release,
+        )
+        attempts = []
+
+        def exhausted(_request, _environment):
+            attempts.append(True)
+            raise _http_error(429, "0")
+
+        release.feishu_json_getter = exhausted
+        start_states = self._start_states("needs_install")
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=start_states):
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "token request HTTP status 429 after 4 attempts"):
+                release.execute("test@8.148.158.106")
+        self.assertEqual(len(attempts), 4)
+        release._backup_all.assert_not_called()
+        release._install_all.assert_not_called()
+
+    def test_attachment_429_retries_and_still_enforces_mime_allowlist(self):
+        def json_getter(request, _environment):
+            if "/auth/" in request.full_url:
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            return {"code": 0, "data": {
+                "items": [{"fields": {"material": [{
+                    "file_token": "locked-attachment",
+                }]}}],
+                "has_more": False,
+            }}
+
+        for mime, should_pass in (("image/png", True), ("text/plain", False)):
+            with self.subTest(mime=mime):
+                clock = FakeClock()
+                response = mock.MagicMock()
+                response.__enter__.return_value.headers = {
+                    "Content-Type": mime + "; charset=binary",
+                }
+                response.__enter__.return_value.read.return_value = b"material"
+                opener = mock.Mock()
+                opener.open.side_effect = [_http_error(429, "0"), response]
+                release = self._release(
+                    self.versioned,
+                    monotonic=clock.monotonic,
+                    sleeper=clock.sleep,
+                    service_environment_getter=self._service_environment,
+                    feishu_json_getter=json_getter,
+                )
+                with mock.patch.object(
+                        self.versioned.urllib.request, "build_opener",
+                        return_value=opener):
+                    if should_pass:
+                        release._verify_feishu_operational("pre-deployment")
+                    else:
+                        with self.assertRaisesRegex(
+                                self.versioned.ReleaseError,
+                                "MIME is not an approved material type"):
+                            release._verify_feishu_operational("pre-deployment")
+                self.assertEqual(opener.open.call_count, 2)
+
+    def test_attachment_retry_success_still_enforces_20mb_limit(self):
+        def json_getter(request, _environment):
+            if "/auth/" in request.full_url:
+                return {"code": 0, "tenant_access_token": "tenant-token"}
+            return {"code": 0, "data": {
+                "items": [{"fields": {"material": [{
+                    "file_token": "locked-attachment",
+                }]}}],
+                "has_more": False,
+            }}
+
+        response = mock.MagicMock()
+        response.__enter__.return_value.headers = {"Content-Type": "image/png"}
+        response.__enter__.return_value.read.return_value = (
+            b"x" * (20 * 1024 * 1024 + 1)
+        )
+        opener = mock.Mock()
+        opener.open.side_effect = [_http_error(503), response]
+        release = self._release(
+            self.versioned,
+            service_environment_getter=self._service_environment,
+            feishu_json_getter=json_getter,
+            sleeper=lambda _seconds: None,
+        )
+        with mock.patch.object(
+                self.versioned.urllib.request, "build_opener",
+                return_value=opener):
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "attachment is empty or exceeds 20MB"):
+                release._verify_feishu_operational("pre-deployment")
+        self.assertEqual(opener.open.call_count, 2)
 
     def test_feishu_preflight_rejects_invalid_pagination_before_attachment(self):
         responses = iter([

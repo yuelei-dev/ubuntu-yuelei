@@ -316,6 +316,13 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertTrue(feishu["operational_probe_required"])
         self.assertTrue(feishu["probe_all_pages"])
         self.assertTrue(feishu["probe_attachment_download_and_mime"])
+        self.assertEqual(feishu["retry_policy"], {
+            "retryable_http_statuses": [429, 500, 502, 503, 504],
+            "max_attempts": 4,
+            "max_retry_after_seconds": 15,
+            "total_deadline_seconds": 60,
+            "fallback_backoff_seconds": [1, 2, 4],
+        })
         runtime = self.manifest["configuration_requirements"]["service_runtime"]
         self.assertEqual(runtime["user"], "ubuntu")
         self.assertEqual(
