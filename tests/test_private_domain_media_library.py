@@ -2,10 +2,12 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import multiprocessing
 import os
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -14,6 +16,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
 from content_domains import private_domain_media
+
+
+def _hold_snapshot_cache_lock(cache_root, active, release):
+    root = pathlib.Path(cache_root)
+    with private_domain_media._snapshot_cache_lock(root):
+        (root / ".pending-active.part").write_bytes(b"in progress")
+        active.set()
+        release.wait(timeout=5)
 
 
 class PrivateDomainMediaLibraryTests(unittest.TestCase):
@@ -210,10 +220,91 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
                 private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
             items = private_domain_media.list_materials(300)
         self.assertEqual(1, len(items))
-        self.assertLessEqual(
-            sum(path.stat().st_size for path in self.snapshot_root.glob("*.blob")),
-            10,
-        )
+        self.assertLessEqual(sum(
+            path.stat().st_size for path in self.snapshot_root.iterdir()
+            if path.is_file()
+        ), 10)
+
+    def test_restart_removes_orphaned_part_before_capacity_decision(self):
+        self._write_record("files/视频/restart.mp4", "视频", content=b"v")
+        with self._catalog():
+            self.assertEqual(1, len(private_domain_media.list_materials(300)))
+        orphan = self.snapshot_root / ".pending-crashed.part"
+        orphan.write_bytes(b"x" * 12)
+        private_domain_media._CACHE_KEY = None
+        private_domain_media._CACHE_ITEMS = ()
+        private_domain_media._CACHE_WATCHED = ()
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
+            items = private_domain_media.list_materials(300)
+        self.assertEqual(1, len(items))
+        self.assertFalse(orphan.exists())
+        self.assertLessEqual(sum(
+            path.stat().st_size for path in self.snapshot_root.iterdir()
+            if path.is_file()
+        ), 10)
+
+    def test_active_part_is_protected_by_cross_process_cache_lock(self):
+        self._write_record("files/视频/active.mp4", "视频", content=b"active")
+        context = multiprocessing.get_context("spawn")
+        active = context.Event()
+        release = context.Event()
+
+        with self._catalog():
+            cache_root = private_domain_media._snapshot_cache_root()
+            part = cache_root / ".pending-active.part"
+            holder = context.Process(
+                target=_hold_snapshot_cache_lock,
+                args=(str(cache_root), active, release),
+            )
+            holder.start()
+            try:
+                self.assertTrue(active.wait(timeout=3))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(private_domain_media.list_materials, 300)
+                    time.sleep(0.1)
+                    self.assertFalse(future.done())
+                    self.assertTrue(part.exists())
+                    release.set()
+                    items = future.result(timeout=5)
+            finally:
+                release.set()
+                holder.join(timeout=3)
+                if holder.is_alive():
+                    holder.terminate()
+                    holder.join(timeout=2)
+
+        self.assertFalse(holder.is_alive())
+        self.assertEqual(0, holder.exitcode)
+        self.assertEqual(1, len(items))
+        self.assertFalse(part.exists())
+
+    def test_uncleanable_orphan_counts_toward_capacity_and_fails_closed(self):
+        self.snapshot_root.mkdir(parents=True)
+        orphan = self.snapshot_root / ".pending-uncleanable.part"
+        orphan.write_bytes(b"x" * 12)
+        self._write_record("files/视频/blocked.mp4", "视频", content=b"v")
+        original_remove = private_domain_media._remove_snapshot
+
+        def deny_orphan_removal(path):
+            if path == orphan:
+                return False
+            return original_remove(path)
+
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10), \
+                mock.patch.object(
+                    private_domain_media, "_remove_snapshot",
+                    side_effect=deny_orphan_removal):
+            items = private_domain_media.list_materials(300)
+
+        self.assertEqual([], items)
+        self.assertTrue(orphan.exists())
+        self.assertEqual([], list(self.snapshot_root.glob("*.blob")))
+        self.assertGreater(sum(
+            path.stat().st_size for path in self.snapshot_root.iterdir()
+            if path.is_file()
+        ), 10)
 
     def test_expired_snapshot_is_rebuilt_and_old_object_removed(self):
         relative_path = "files/视频/ttl.mp4"

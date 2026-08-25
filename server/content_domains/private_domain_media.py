@@ -8,6 +8,7 @@ tokens and other provenance details from index.jsonl never cross the API.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -28,6 +29,8 @@ MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
 SNAPSHOT_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 SNAPSHOT_CACHE_TTL_SECONDS = 6 * 60 * 60
 SNAPSHOT_SUFFIX = ".blob"
+SNAPSHOT_LOCK_FILE = ".snapshot-cache.lock"
+SNAPSHOT_LOCK_TIMEOUT_SECONDS = 30
 _CACHE_LOCK = threading.Lock()
 _CACHE_KEY = None
 _CACHE_ITEMS = ()
@@ -83,7 +86,7 @@ def _snapshot_path(root, digest):
 def _snapshot_files(root):
     result = []
     try:
-        candidates = root.glob("*" + SNAPSHOT_SUFFIX)
+        candidates = root.iterdir()
     except OSError:
         return result
     for path in candidates:
@@ -91,12 +94,63 @@ def _snapshot_files(root):
             stat = path.lstat()
         except OSError:
             continue
-        digest = path.name[:-len(SNAPSHOT_SUFFIX)]
-        if (not SHA256_RE.fullmatch(digest)
-                or not stat_module.S_ISREG(stat.st_mode)):
+        if not stat_module.S_ISREG(stat.st_mode):
             continue
-        result.append((path, stat))
+        if path.name == SNAPSHOT_LOCK_FILE:
+            kind = "lock"
+        elif (path.name.startswith(".pending-")
+                and path.name.endswith(".part")):
+            kind = "pending"
+        else:
+            digest = path.name[:-len(SNAPSHOT_SUFFIX)]
+            if (not path.name.endswith(SNAPSHOT_SUFFIX)
+                    or not SHA256_RE.fullmatch(digest)):
+                continue
+            kind = "snapshot"
+        result.append((path, stat, kind))
     return result
+
+
+@contextlib.contextmanager
+def _snapshot_cache_lock(root):
+    lock_path = root / SNAPSHOT_LOCK_FILE
+    with lock_path.open("a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+
+            def acquire():
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def release():
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def acquire():
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def release():
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+        deadline = time.monotonic() + SNAPSHOT_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                acquire()
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline:
+                    raise OSError("material snapshot cache lock timed out")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            release()
 
 
 def _remove_snapshot(path):
@@ -117,16 +171,23 @@ def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
     now = time.time()
     entries = _snapshot_files(root)
     retained = []
-    for path, stat in entries:
-        digest = path.name[:-len(SNAPSHOT_SUFFIX)]
-        expired = now - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS
-        if expired and digest not in protected_digests and _remove_snapshot(path):
+    for path, stat, kind in entries:
+        if kind == "pending" and _remove_snapshot(path):
             continue
-        retained.append((path, stat))
-    total = sum(stat.st_size for _, stat in retained)
-    for path, stat in sorted(retained, key=lambda entry: entry[1].st_mtime):
+        digest = path.name[:-len(SNAPSHOT_SUFFIX)] if kind == "snapshot" else None
+        expired = (kind == "snapshot"
+                   and now - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS)
+        if (expired and digest not in protected_digests
+                and _remove_snapshot(path)):
+            continue
+        retained.append((path, stat, kind))
+    total = sum(stat.st_size for _, stat, _ in retained)
+    for path, stat, kind in sorted(
+            retained, key=lambda entry: entry[1].st_mtime):
         if total + required_bytes <= SNAPSHOT_CACHE_MAX_BYTES:
             break
+        if kind != "snapshot":
+            continue
         digest = path.name[:-len(SNAPSHOT_SUFFIX)]
         if digest in protected_digests:
             continue
@@ -155,8 +216,25 @@ def _verified_existing_snapshot(path, digest):
 
 
 def _materialize_snapshot(path, digest, protected_digests):
-    cache_root = _snapshot_cache_root()
+    try:
+        cache_root = _snapshot_cache_root()
+        with _snapshot_cache_lock(cache_root):
+            return _materialize_snapshot_locked(
+                cache_root, path, digest, protected_digests
+            )
+    except OSError:
+        return None
+
+
+def _materialize_snapshot_locked(
+        cache_root, path, digest, protected_digests):
     cache_path = _snapshot_path(cache_root, digest)
+    try:
+        _prepare_snapshot_capacity(
+            cache_root, 0, set(protected_digests) | {digest}
+        )
+    except OSError:
+        return None
     snapshot_identity = _verified_existing_snapshot(cache_path, digest)
     if snapshot_identity is not None:
         try:
