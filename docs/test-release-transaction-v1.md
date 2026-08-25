@@ -30,7 +30,7 @@ must be root-owned, mode `0600`, and contain exactly:
   "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
   "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
   "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
-  "boundary_contract_sha256": "c16bef8ebd8463958e2e0cd2194b8f1eb8e78fe789030b2cf61d1bfa2b485e5a",
+  "boundary_contract_sha256": "98889991d7b2db6f151ff1671b17670e3e62a1b1bc5deee25d921f58aba79e19",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
   "launcher_sha256": "8163285d21e7de7e003e0b361f2d10ebe1500457473b8c03c01dcb27690d8a9d",
   "state_root": "/var/lib/huangque-release"
@@ -124,6 +124,9 @@ undeclared link or any declared link, target, owner, mode or parent-chain drift
 fails closed with the affected runtime path.
 The observed `/home/ubuntu` parent is locked to exact mode `0751`; `0755`,
 `0775`, and `0777` are deliberately rejected rather than treated as aliases.
+The Hermes releases parent is separately locked to root:root `0755`; its
+selected release directory remains ubuntu:ubuntu `0775`, so parent ownership
+cannot be accidentally inferred from the child release ownership.
 
 Upgrade the boundary module and JSON first, then transaction entrypoint and
 launcher, and finally atomically replace the private bootstrap. Do not run apply

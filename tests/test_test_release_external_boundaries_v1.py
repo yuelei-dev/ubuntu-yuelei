@@ -19,6 +19,8 @@ SPEC.loader.exec_module(boundaries)
 CONTRACT = json.loads((
     ROOT / "tools/test_release_external_boundaries_v1.json"
 ).read_text("utf-8"))
+OWNER_IDS = {"root": 41001, "ubuntu": 41002}
+GROUP_IDS = {"root": 42001, "ubuntu": 42002}
 
 
 @unittest.skipUnless(os.name == "posix", "requires real POSIX lstat/symlink semantics")
@@ -27,8 +29,10 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.uid = os.getuid()
-        self.gid = os.getgid()
+        self.owner_ids = dict(OWNER_IDS)
+        self.group_ids = dict(GROUP_IDS)
+        self.hermes_releases_owner = "root"
+        self.real_lstat = os.lstat
         self.sha = "9f298737e19e4eea5df7d20bbfeffb466b0b4b2d"
         modes = {
             "home": 0o755, "home/ubuntu": 0o751,
@@ -52,11 +56,36 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
             for name in ("discovered.json", "files", "jobs.db", "keywords.json"):
                 os.symlink("/home/ubuntu/leadgen-server/" + name,
                            self.root / ("home/ubuntu/leadgen-%s" % side) / name)
+        self.lstat_patcher = mock.patch.object(
+            boundaries.os, "lstat", side_effect=self._contract_lstat,
+        )
+        self.lstat_patcher.start()
+        self.addCleanup(self.lstat_patcher.stop)
         self.policy = boundaries.ExternalBoundaryPolicy(
             CONTRACT, runtime_root=self.root,
-            owner_resolver=lambda _name: self.uid,
-            group_resolver=lambda _name: self.gid,
+            owner_resolver=self.owner_ids.__getitem__,
+            group_resolver=self.group_ids.__getitem__,
         )
+
+    def _contract_lstat(self, path):
+        info = self.real_lstat(path)
+        try:
+            runtime_path = "/" + Path(path).relative_to(self.root).as_posix()
+        except ValueError:
+            return info
+        if runtime_path in {"/home", "/home/ubuntu/hermes-web"}:
+            owner = "root"
+        elif runtime_path == "/home/ubuntu/hermes-ip12-releases":
+            owner = self.hermes_releases_owner
+        else:
+            owner = "ubuntu"
+        return type("ContractStat", (), {
+            "st_mode": info.st_mode,
+            "st_uid": self.owner_ids[owner],
+            "st_gid": self.group_ids[owner],
+            "st_dev": info.st_dev,
+            "st_ino": info.st_ino,
+        })()
 
     def test_declared_external_code_and_shared_data_are_never_write_snapshots(self):
         snapshot = self.policy.snapshot()
@@ -71,7 +100,7 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
 
     def test_home_ubuntu_requires_exact_observed_0751(self):
         home_ubuntu = self.root / "home/ubuntu"
-        self.assertEqual(0o751, stat.S_IMODE(os.lstat(home_ubuntu).st_mode))
+        self.assertEqual(0o751, stat.S_IMODE(self.real_lstat(home_ubuntu).st_mode))
         self.policy.snapshot()
         for mode in (0o755, 0o775, 0o777):
             with self.subTest(mode=oct(mode)):
@@ -80,6 +109,16 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
                         boundaries.BoundaryError, r"external target parent is unsafe: /home/ubuntu/hermes-web"):
                     self.policy.snapshot()
                 home_ubuntu.chmod(0o751)
+
+    def test_hermes_releases_parent_requires_root_not_ubuntu_owner(self):
+        self.assertNotEqual(self.owner_ids["root"], self.owner_ids["ubuntu"])
+        self.assertNotEqual(self.group_ids["root"], self.group_ids["ubuntu"])
+        self.policy.snapshot()
+        self.hermes_releases_owner = "ubuntu"
+        with self.assertRaisesRegex(
+                boundaries.BoundaryError,
+                r"external target parent is unsafe: /home/ubuntu/hermes-web"):
+            self.policy.snapshot()
 
     def test_relative_escape_dangling_chain_target_parent_and_mode_fail_closed(self):
         hermes = self.root / "home/ubuntu/hermes-web"
@@ -144,8 +183,8 @@ class ExternalBoundaryPosixTests(unittest.TestCase):
 class ExternalBoundaryContractTests(unittest.TestCase):
     def test_contract_is_strict_and_contains_only_two_never_write_classes(self):
         policy = boundaries.ExternalBoundaryPolicy(
-            CONTRACT, runtime_root="/", owner_resolver=lambda _name: 0,
-            group_resolver=lambda _name: 0,
+            CONTRACT, runtime_root="/", owner_resolver=OWNER_IDS.__getitem__,
+            group_resolver=GROUP_IDS.__getitem__,
         )
         self.assertEqual({"external_code_root", "shared_runtime_data"},
                          {item["kind"] for item in policy.contracts})
@@ -167,11 +206,20 @@ class ExternalBoundaryContractTests(unittest.TestCase):
                   for parent in item["link_parent_contracts"] + item["parent_contracts"]
                   if parent["path"] in expected_parent_modes}
         self.assertEqual(expected_parent_modes, actual)
+        hermes = next(item for item in policy.contracts
+                      if item["kind"] == "external_code_root")
+        releases_parent = next(parent for parent in hermes["parent_contracts"]
+                               if parent["path"] == "/home/ubuntu/hermes-ip12-releases")
+        self.assertEqual(("root", "root", frozenset({0o755})), (
+            releases_parent["owner"], releases_parent["group"], releases_parent["modes"],
+        ))
         altered = json.loads(json.dumps(CONTRACT))
         altered["external_code_roots"][0]["write_policy"] = "follow"
         with self.assertRaisesRegex(boundaries.BoundaryError, "metadata"):
-            boundaries.ExternalBoundaryPolicy(altered, owner_resolver=lambda _: 0,
-                                              group_resolver=lambda _: 0)
+            boundaries.ExternalBoundaryPolicy(
+                altered, owner_resolver=OWNER_IDS.__getitem__,
+                group_resolver=GROUP_IDS.__getitem__,
+            )
 
     def test_effective_catalog_removes_only_declared_never_write_mappings(self):
         class RuntimeCatalog:
@@ -205,7 +253,7 @@ class ExternalBoundaryContractTests(unittest.TestCase):
         )
         effective, _engine, policy = boundaries.install(
             phase, catalog, CONTRACT, runtime_root="/",
-            owner_resolver=lambda _name: 0, group_resolver=lambda _name: 0,
+            owner_resolver=OWNER_IDS.__getitem__, group_resolver=GROUP_IDS.__getitem__,
         )
         self.assertEqual([{"repository": "server/app.py"}], effective.rules)
         self.assertEqual(("/home/ubuntu/leadgen-A/",), effective.inventory_roots)
