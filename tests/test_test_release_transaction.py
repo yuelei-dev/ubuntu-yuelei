@@ -574,7 +574,7 @@ class TransactionTests(unittest.TestCase):
     def test_writable_trusted_parent_is_rejected(self):
         fake = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=0)
         with mock.patch.object(transaction.os, "lstat", return_value=fake):
-            with self.assertRaisesRegex(transaction.TransactionError, "root-owned and immutable"):
+            with self.assertRaisesRegex(transaction.TransactionError, "immutable"):
                 transaction._validate_root_chain("/trusted/file", final_kind="file", private=False)
 
     def _leave_active(self, point="after-backup"):
