@@ -8,10 +8,12 @@ tokens and other provenance details from index.jsonl never cross the API.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
 import re
+import tempfile
 import threading
 import urllib.parse
 
@@ -24,6 +26,75 @@ MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
 _CACHE_LOCK = threading.Lock()
 _CACHE_KEY = None
 _CACHE_ITEMS = ()
+_CACHE_WATCHED = ()
+
+
+def _file_identity(stat):
+    return (
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_size,
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+    )
+
+
+def _sha256_open_file(source):
+    digest = hashlib.sha256()
+    source.seek(0)
+    while True:
+        chunk = source.read(1024 * 1024)
+        if not chunk:
+            break
+        digest.update(chunk)
+    source.seek(0)
+    return digest.hexdigest()
+
+
+def _snapshot_material(path):
+    snapshot = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            before = _file_identity(os.fstat(source.fileno()))
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                snapshot.write(chunk)
+            after = _file_identity(os.fstat(source.fileno()))
+        snapshot.seek(0)
+        return snapshot, before, after, digest.hexdigest()
+    except OSError:
+        snapshot.close()
+        raise
+
+
+class VerifiedMaterial:
+    """An already verified file handle; streaming reuses these exact bytes."""
+
+    def __init__(self, path, source):
+        self.path = path
+        self._source = source
+
+    @property
+    def name(self):
+        return self.path.name
+
+    def stat(self):
+        return os.fstat(self._source.fileno())
+
+    def open(self, mode):
+        if mode != "rb" or self._source.closed:
+            raise OSError("verified material is not readable")
+        return self._source
+
+    def close(self):
+        self._source.close()
+
+    def __str__(self):
+        return str(self.path)
 
 
 def _material_root():
@@ -68,6 +139,15 @@ def _safe_record(root, record):
     path = _safe_material_path(root, relative_path)
     if not media_type or path is None or not SHA256_RE.fullmatch(digest):
         return None
+    try:
+        with path.open("rb") as source:
+            before = _file_identity(os.fstat(source.fileno()))
+            actual_digest = _sha256_open_file(source)
+            after = _file_identity(os.fstat(source.fileno()))
+    except OSError:
+        return None
+    if before != after or actual_digest != digest:
+        return None
     title = str(record.get("素材名称") or path.stem).strip()[:160]
     return {
         "id": digest,
@@ -85,11 +165,46 @@ def _safe_record(root, record):
         "tags": _string_list(record.get("标签")),
         "content_safety": str(record.get("内容安全") or "").strip()[:80],
         "license": str(record.get("许可类型") or "").strip()[:80],
+        "_identity": after,
     }
 
 
+def _record_watch(root, record):
+    if not isinstance(record, dict):
+        return None
+    relative_path = str(record.get("server_relative_path") or "")
+    value = relative_path.replace("\\", "/").strip("/")
+    pure = pathlib.PurePosixPath(value)
+    if (not value or pure.is_absolute() or not pure.parts
+            or pure.parts[0] != "files"
+            or any(part in {"", ".", ".."} for part in pure.parts)):
+        return None
+    path = _safe_material_path(root, value)
+    if path is None:
+        return value, None
+    try:
+        return value, _file_identity(path.stat())
+    except OSError:
+        return value, None
+
+
+def _cached_items_current(root):
+    for relative_path, expected_identity in _CACHE_WATCHED:
+        path = _safe_material_path(root, relative_path)
+        if path is None:
+            identity = None
+        else:
+            try:
+                identity = _file_identity(path.stat())
+            except OSError:
+                identity = None
+        if identity != expected_identity:
+            return False
+    return True
+
+
 def _catalog_items():
-    global _CACHE_KEY, _CACHE_ITEMS
+    global _CACHE_KEY, _CACHE_ITEMS, _CACHE_WATCHED
     root = _material_root()
     catalog = root / CATALOG_FILE
     try:
@@ -99,16 +214,21 @@ def _catalog_items():
     except (OSError, ValueError):
         return []
     with _CACHE_LOCK:
-        if key == _CACHE_KEY:
+        if key == _CACHE_KEY and _cached_items_current(root):
             return list(_CACHE_ITEMS)
         items = []
+        watched = {}
         try:
             with catalog.open("r", encoding="utf-8") as source:
                 for line in source:
                     if len(items) >= MAX_CATALOG_ITEMS:
                         break
                     try:
-                        item = _safe_record(root, json.loads(line))
+                        record = json.loads(line)
+                        watch = _record_watch(root, record)
+                        if watch is not None:
+                            watched[watch[0]] = watch[1]
+                        item = _safe_record(root, record)
                     except (UnicodeError, json.JSONDecodeError):
                         continue
                     if item is not None:
@@ -117,6 +237,7 @@ def _catalog_items():
             return []
         _CACHE_KEY = key
         _CACHE_ITEMS = tuple(items)
+        _CACHE_WATCHED = tuple(watched.items())
         return list(items)
 
 
@@ -125,12 +246,31 @@ def list_materials(limit=300):
         limit = int(limit)
     except (TypeError, ValueError):
         limit = 300
-    return _catalog_items()[:max(1, min(500, limit))]
+    items = _catalog_items()[:max(1, min(500, limit))]
+    return [
+        {key: value for key, value in item.items() if not key.startswith("_")}
+        for item in items
+    ]
 
 
 def resolve_material(relative_path):
     relative_path = str(relative_path or "").replace("\\", "/").strip("/")
-    allowed = {item["relative_path"] for item in _catalog_items()}
-    if relative_path not in allowed:
+    item = next(
+        (item for item in _catalog_items()
+         if item["relative_path"] == relative_path),
+        None,
+    )
+    if item is None:
         return None
-    return _safe_material_path(_material_root(), relative_path)
+    path = _safe_material_path(_material_root(), relative_path)
+    if path is None:
+        return None
+    try:
+        source, before, after, actual_digest = _snapshot_material(path)
+    except OSError:
+        return None
+    if (before != after or after != item["_identity"]
+            or actual_digest != item["sha256"]):
+        source.close()
+        return None
+    return VerifiedMaterial(path, source)

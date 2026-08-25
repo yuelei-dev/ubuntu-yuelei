@@ -4157,7 +4157,10 @@ class H(BaseHTTPRequestHandler):
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             fp = private_domain_media.resolve_material((q.get("path") or [""])[0])
             if fp is None: return self._send(404, {"detail": "no file"})
-            _send_out_file(self, fp, sensitive=True)
+            try:
+                _send_out_file(self, fp, sensitive=True)
+            finally:
+                fp.close()
             return
         if p == "/api/gen/audio/slots":
             user = verify(self._token())
