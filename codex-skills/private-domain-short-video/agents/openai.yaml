@@ -1,0 +1,7 @@
+interface:
+  display_name: "Private-Domain Short Video"
+  short_description: "Turn Chinese copy and local footage into vertical conversion videos"
+  default_prompt: "Use $private-domain-short-video to turn my Chinese copy and material library into a finished vertical conversion video."
+
+policy:
+  allow_implicit_invocation: true
