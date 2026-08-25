@@ -19,11 +19,11 @@ must be root-owned, mode `0600`, and contain exactly:
   "schema_version": 1,
   "source_root": "/opt/huangque-test-release",
   "transaction_entrypoint": "/usr/local/libexec/huangque-release/test_release_transaction.py",
-  "transaction_sha256": "REPLACE_WITH_REVIEWED_EXECUTOR_SHA256",
+  "transaction_sha256": "a118326075df8ae5659b18faf5a84f9fced96d08a80f191b457c4608d05d9392",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
-  "launcher_sha256": "REPLACE_WITH_REVIEWED_LAUNCHER_SHA256",
+  "launcher_sha256": "12b22371780252b5dee5a970deb4a9bc94b524c0fa734e3f872ae47f94e84e65",
   "state_root": "/var/lib/huangque-release"
 }
 ```
@@ -33,11 +33,15 @@ replace both the installed phase-one file and this transaction bootstrap value
 with that same reviewed SHA-256 before running the transaction launcher. A
 mixed old/new pair remains fail-closed.
 
-The launcher starts exact `/usr/bin/python3` through `env -i` with
+The launcher verifies the transaction entrypoint against its reviewed
+SHA-256, then starts exact `/usr/bin/python3` through `env -i` with
 `-I -E -s -B` and one exact minimal environment. The command checks its exact
 installed `__file__`, interpreter and isolation flags, validates complete
 root-owned/non-writable path chains, and validates both installed entrypoint
 hashes before compiling the phase-one planner from those same verified bytes.
+The interpreter check compares the resolved target of `sys.executable` with
+the resolved target of `/usr/bin/python3`, accepting the approved distro
+symlink to its versioned binary but rejecting every different resolved target.
 It accepts
 no alternate source, catalog, identity, state, service, health dispatcher, or
 runtime root from the CLI.

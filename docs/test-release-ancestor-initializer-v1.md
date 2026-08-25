@@ -23,11 +23,11 @@ administrator must install:
   "source_root": "/opt/huangque-test-release",
   "state_root": "/var/lib/huangque-release",
   "initializer_entrypoint": "/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py",
-  "initializer_sha256": "42661c08c28fa5c65a36e335615b77a0211571346e5fb2c44b94c79d8e829db6",
+  "initializer_sha256": "fc28aadf3692c000fd683c7c59f0c52e87823534904f9846deeb4a3777c7d2a0",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1",
-  "launcher_sha256": "4f4eb1c062c2587a6daac4df6dac4d9792bb1deab9d349c1e4442941fdfc164d"
+  "launcher_sha256": "99ab88bbb59c3da1c84cf8ac4d0ea84287f3e607b8de2a064aa3697456bd9b3a"
 }
 ```
 
@@ -35,7 +35,10 @@ The launcher requires root, exact installed paths and root-owned non-writable
 path chains, verifies the initializer SHA, and starts exact `/usr/bin/python3`
 through `env -i` with `-I -E -s -B`. The initializer then verifies its own,
 the launcher, and the already-installed phase-one bytes against the private
-bootstrap before compiling the verified phase-one bytes in memory.
+bootstrap before compiling the verified phase-one bytes in memory. Python is
+approved by comparing the resolved target of `sys.executable` with the resolved
+target of `/usr/bin/python3`; the normal distro symlink to its versioned binary
+is accepted, while any different resolved interpreter remains rejected.
 
 ```text
 sudo /usr/local/sbin/huangque-release-test-initialize-ancestor-v1 initialize \

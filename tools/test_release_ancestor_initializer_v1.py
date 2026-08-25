@@ -134,7 +134,7 @@ def _runtime_is_isolated():
     return (
         os.name == "posix"
         and os.geteuid() == 0
-        and os.path.realpath(sys.executable) == "/usr/bin/python3"
+        and os.path.realpath(sys.executable) == os.path.realpath("/usr/bin/python3")
         and os.path.realpath(__file__) == INITIALIZER_ENTRYPOINT
         and flags.isolated == 1
         and flags.ignore_environment == 1

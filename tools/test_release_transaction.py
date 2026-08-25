@@ -1113,7 +1113,7 @@ def _runtime_environment_is_isolated():
     return (
         os.name == "posix"
         and os.geteuid() == 0
-        and os.path.realpath(sys.executable) == "/usr/bin/python3"
+        and os.path.realpath(sys.executable) == os.path.realpath("/usr/bin/python3")
         and os.path.realpath(__file__) == TRANSACTION_ENTRYPOINT
         and flags.isolated == 1
         and flags.ignore_environment == 1
@@ -1165,7 +1165,9 @@ def _load_production_planner():
         raise TransactionError("transaction bootstrap fields are invalid")
     _validate_root_chain(DEFAULT_SOURCE_ROOT, final_kind="directory", private=False)
     _validate_root_chain(DEFAULT_STATE_ROOT, final_kind="directory", private=True, final_mode=0o700)
-    _validate_root_chain("/usr/bin/python3", final_kind="file", private=False)
+    _validate_root_chain(
+        os.path.realpath("/usr/bin/python3"), final_kind="file", private=False,
+    )
     _locked_regular(
         TRANSACTION_ENTRYPOINT, bootstrap["transaction_sha256"], "transaction entrypoint",
         final_mode=0o755,

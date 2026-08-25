@@ -12,7 +12,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE = "14f23da7d2cf8e0e61a117a2309904eaabd59db5"
+BASE = "709311d5b92a559da50c4284321c5aa4504b9002"
 OLD = "1" * 40
 LATEST = "2" * 40
 OTHER = "3" * 40
@@ -433,6 +433,59 @@ class AncestorInitializerTests(unittest.TestCase):
                     self.assertRaisesRegex(initializer.InitializerError, "SHA-256"):
                 initializer._locked_regular(path, "0" * 64, "locked file")
 
+    def test_isolated_runtime_accepts_approved_python_symlink_target(self):
+        flags = types.SimpleNamespace(
+            isolated=1, ignore_environment=1, no_user_site=1, dont_write_bytecode=1,
+        )
+        environment = dict(initializer.EXPECTED_ENVIRONMENT)
+
+        def realpath(value):
+            value = str(value)
+            if value in {"/usr/bin/python3", "/usr/bin/python3.10"}:
+                return "/usr/bin/python3.10"
+            return value
+
+        with mock.patch.object(initializer.os, "name", "posix"), \
+                mock.patch.object(initializer.os, "geteuid", return_value=0, create=True), \
+                mock.patch.object(initializer.os.path, "realpath", side_effect=realpath), \
+                mock.patch.object(initializer.sys, "executable", "/usr/bin/python3"), \
+                mock.patch.object(initializer.sys, "flags", flags), \
+                mock.patch.object(initializer, "__file__", initializer.INITIALIZER_ENTRYPOINT), \
+                mock.patch.dict(initializer.os.environ, environment, clear=True):
+            self.assertTrue(initializer._runtime_is_isolated())
+
+    def test_isolated_runtime_rejects_other_interpreter_flags_environment_and_path(self):
+        good_flags = types.SimpleNamespace(
+            isolated=1, ignore_environment=1, no_user_site=1, dont_write_bytecode=1,
+        )
+        cases = (
+            ("executable", "/opt/unapproved/python3", good_flags,
+             dict(initializer.EXPECTED_ENVIRONMENT), initializer.INITIALIZER_ENTRYPOINT),
+            ("flags", "/usr/bin/python3", types.SimpleNamespace(
+                isolated=0, ignore_environment=1, no_user_site=1, dont_write_bytecode=1,
+            ), dict(initializer.EXPECTED_ENVIRONMENT), initializer.INITIALIZER_ENTRYPOINT),
+            ("environment", "/usr/bin/python3", good_flags,
+             {**initializer.EXPECTED_ENVIRONMENT, "EXTRA": "1"},
+             initializer.INITIALIZER_ENTRYPOINT),
+            ("path", "/usr/bin/python3", good_flags,
+             dict(initializer.EXPECTED_ENVIRONMENT), "/tmp/replaced.py"),
+        )
+
+        def realpath(value):
+            value = str(value)
+            return "/usr/bin/python3.10" if value == "/usr/bin/python3" else value
+
+        for label, executable, flags, environment, loaded_path in cases:
+            with self.subTest(label=label), \
+                    mock.patch.object(initializer.os, "name", "posix"), \
+                    mock.patch.object(initializer.os, "geteuid", return_value=0, create=True), \
+                    mock.patch.object(initializer.os.path, "realpath", side_effect=realpath), \
+                    mock.patch.object(initializer.sys, "executable", executable), \
+                    mock.patch.object(initializer.sys, "flags", flags), \
+                    mock.patch.object(initializer, "__file__", loaded_path), \
+                    mock.patch.dict(initializer.os.environ, environment, clear=True):
+                self.assertFalse(initializer._runtime_is_isolated())
+
     def test_checked_in_hashes_launcher_isolation_and_old_trust_roots(self):
         entrypoint = (ROOT / "tools/test_release_ancestor_initializer_v1.py").read_bytes()
         launcher = (ROOT / "tools/test_release_ancestor_initializer_v1_launcher.sh").read_bytes()
@@ -456,6 +509,19 @@ class AncestorInitializerTests(unittest.TestCase):
                 cwd=ROOT, check=True, capture_output=True,
             ).stdout
             self.assertEqual(base, current, path)
+
+        protected_paths = (
+            ".github/workflows",
+            "deploy/test-release/runtime-catalog.json",
+            "server/content_domains/core.py",
+            "server/content_domains/private_domain_media.py",
+            "site/workbench/private-domain-video.html",
+        )
+        for path in protected_paths:
+            result = subprocess.run(
+                ["git", "diff", "--quiet", BASE, "--", path], cwd=ROOT,
+            )
+            self.assertEqual(0, result.returncode, path)
 
 
 if __name__ == "__main__":
