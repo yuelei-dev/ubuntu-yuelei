@@ -7,7 +7,7 @@ import stat
 import tempfile
 import types
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
 
@@ -572,9 +572,17 @@ class TransactionTests(unittest.TestCase):
             self.assertFalse(transaction._runtime_environment_is_isolated())
 
     def test_writable_trusted_parent_is_rejected(self):
-        fake = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=0)
-        with mock.patch.object(transaction.os, "lstat", return_value=fake):
-            with self.assertRaisesRegex(transaction.TransactionError, "immutable"):
+        trusted_root = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        writable_parent = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=0)
+
+        def lstat(path):
+            return trusted_root if PurePosixPath(path) == PurePosixPath("/") else writable_parent
+
+        with mock.patch.object(transaction.os, "name", "posix"), \
+                mock.patch.object(transaction.os.path, "abspath", return_value="/trusted/file"), \
+                mock.patch.object(transaction, "Path", PurePosixPath), \
+                mock.patch.object(transaction.os, "lstat", side_effect=lstat):
+            with self.assertRaisesRegex(transaction.TransactionError, "root-owned and immutable"):
                 transaction._validate_root_chain("/trusted/file", final_kind="file", private=False)
 
     def _leave_active(self, point="after-backup"):
