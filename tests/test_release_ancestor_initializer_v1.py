@@ -48,6 +48,7 @@ class FakeCatalog:
         "host_id": "test-01",
     }
     impact_prefix = "deploy/test-release/impacts/"
+    min_free_bytes = 0
 
 
 class FakeRepo:
@@ -180,6 +181,8 @@ class CompatibleConsumerEngine(FakeEngine):
     def _runtime_json(self, _runtime_path, _label):
         return json.loads(self.runtime_root.state.decode("utf-8"))
 
+    state_root = ROOT
+
     def load_state(self):
         return phase_one.ReleaseEngine.load_state(self)
 
@@ -243,26 +246,94 @@ class AncestorInitializerTests(unittest.TestCase):
         consumer = CompatibleConsumerEngine()
         consumer.runtime_root.state = producer.runtime_root.state
         consumer.repo.commits[OLD]["catalog"] = CATALOG
-        consumer.repo.head = OLD
-        consumer.repo.local_main = OLD
-        consumer.repo.live_main = OLD
-        consumer.repo.output = mock.Mock(side_effect=lambda arguments: {
-            ("status", "--porcelain", "--untracked-files=normal"): "",
-            ("symbolic-ref", "--short", "HEAD"): "main",
-            ("remote", "get-url", "origin"): FakeCatalog.target["origin_url"],
-            ("rev-parse", "HEAD"): OLD,
-            ("rev-parse", "refs/remotes/origin/main"): OLD,
-        }[tuple(arguments)])
         consumer.repo.verify_checkout = mock.Mock()
-        with mock.patch.object(phase_one, "collect_impact_index", return_value={}):
+        release_collection = {"impacts": [], "changed_paths": []}
+        with mock.patch.object(phase_one, "collect_impact_index", return_value={}), \
+                mock.patch.object(phase_one, "validate_catalog_coverage"), \
+                mock.patch.object(
+                    phase_one, "collect_release_impact", return_value=release_collection,
+                ), mock.patch.object(phase_one, "verify_review_evidence", return_value={}):
             loaded = consumer.load_state()
             status = consumer.status()
-            plan = consumer.build_plan(OLD)
+            plan = consumer.build_plan(LATEST)
+            adapter = transaction.TrustedPlannerAdapter(phase_one, consumer)
+            transaction_plan = adapter.build_plan(LATEST, {})
         self.assertEqual(OLD, loaded["deployed_main_commit"])
         self.assertEqual("deployed", status["status"])
-        self.assertEqual("already_deployed", plan["status"])
-        adapter = transaction.TrustedPlannerAdapter(phase_one, consumer)
+        self.assertEqual("planned_read_only", plan["status"])
+        self.assertEqual(OLD, plan["from_commit"])
+        self.assertEqual(LATEST, plan["target_commit"])
+        self.assertEqual("planned_read_only", transaction_plan["status"])
         self.assertEqual(loaded, adapter.load_state())
+        consumer.repo.verify_checkout.assert_called_with(
+            LATEST, FakeCatalog.target["origin_url"], verify_live_origin=True,
+        )
+
+    def test_phase_one_runtime_trust_check_precedes_catalog_and_engine(self):
+        calls = []
+
+        class RuntimeCatalog:
+            @staticmethod
+            def load(source_root, repository_path):
+                calls.append(("catalog", source_root, repository_path))
+                return object()
+
+        class ReleaseEngine:
+            def __init__(self, source_root, runtime_root, _catalog):
+                calls.append(("engine", source_root, runtime_root))
+
+            @staticmethod
+            def initialize(deployed_commit, confirmation):
+                calls.append(("initialize", deployed_commit, confirmation))
+                return {"ok": True}
+
+        delegated = types.SimpleNamespace(
+            DEFAULT_CATALOG="deploy/test-release/runtime-catalog.json",
+            RuntimeCatalog=RuntimeCatalog,
+            ReleaseEngine=ReleaseEngine,
+            _verify_runtime_entrypoint=lambda source_root: calls.append(
+                ("trust", source_root),
+            ),
+        )
+        with mock.patch.object(initializer, "_load_verified_phase_one", return_value=delegated), \
+                mock.patch.object(initializer, "AncestorInitializer") as subject, \
+                contextlib.redirect_stdout(io.StringIO()):
+            subject.return_value.initialize.return_value = {"ok": True}
+            result = initializer.main([
+                "initialize", "--deployed-commit", OLD,
+                "--confirm-environment", "test",
+            ])
+        self.assertEqual(0, result)
+        self.assertEqual(("trust", initializer.SOURCE_ROOT), calls[0])
+        self.assertEqual("catalog", calls[1][0])
+        self.assertEqual("engine", calls[2][0])
+
+    def test_phase_one_runtime_trust_failure_creates_no_engine_lock_or_state(self):
+        for error in (
+                "source parent is writable or symlinked",
+                "installed phase-one manifest or launcher differs"):
+            with self.subTest(error=error):
+                catalog_load = mock.Mock()
+                engine_constructor = mock.Mock()
+                delegated = types.SimpleNamespace(
+                    DEFAULT_CATALOG="deploy/test-release/runtime-catalog.json",
+                    RuntimeCatalog=types.SimpleNamespace(load=catalog_load),
+                    ReleaseEngine=engine_constructor,
+                    _verify_runtime_entrypoint=mock.Mock(side_effect=RuntimeError(error)),
+                )
+                with mock.patch.object(
+                        initializer, "_load_verified_phase_one", return_value=delegated,
+                    ), contextlib.redirect_stdout(io.StringIO()):
+                    result = initializer.main([
+                        "initialize", "--deployed-commit", OLD,
+                        "--confirm-environment", "test",
+                    ])
+                self.assertEqual(2, result)
+                delegated._verify_runtime_entrypoint.assert_called_once_with(
+                    initializer.SOURCE_ROOT,
+                )
+                catalog_load.assert_not_called()
+                engine_constructor.assert_not_called()
 
     def test_non_ancestor_and_missing_deployed_commit_fail_closed(self):
         with self.assertRaisesRegex(RuntimeError, "ancestry"):

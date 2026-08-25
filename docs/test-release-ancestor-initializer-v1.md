@@ -23,11 +23,11 @@ administrator must install:
   "source_root": "/opt/huangque-test-release",
   "state_root": "/var/lib/huangque-release",
   "initializer_entrypoint": "/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py",
-  "initializer_sha256": "5ab5a71b60e070906f3987f88f8fad95b045a99bb86abcdca1ae755ba638f445",
+  "initializer_sha256": "42661c08c28fa5c65a36e335615b77a0211571346e5fb2c44b94c79d8e829db6",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1",
-  "launcher_sha256": "b52fc98f061c57ca40b6a0d1312110d6a2845f50c99f5e94122f8f62b0878aa4"
+  "launcher_sha256": "4f4eb1c062c2587a6daac4df6dac4d9792bb1deab9d349c1e4442941fdfc164d"
 }
 ```
 

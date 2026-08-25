@@ -278,6 +278,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         phase_one = _load_verified_phase_one()
+        phase_one._verify_runtime_entrypoint(SOURCE_ROOT)
         catalog = phase_one.RuntimeCatalog.load(SOURCE_ROOT, phase_one.DEFAULT_CATALOG)
         engine = phase_one.ReleaseEngine(SOURCE_ROOT, "/", catalog)
         result = AncestorInitializer(phase_one, engine).initialize(
