@@ -99,10 +99,12 @@ V1 implements fixed loopback HTTP checks for the catalog's admin, auth,
 content, download, Hermes, image-generation, and lead-generation health IDs,
 plus fixed `systemctl is-active` checks for its service-only health IDs. It
 also implements `site-loopback` by connecting only to `127.0.0.1:443`, using
-fixed TLS SNI and HTTP Host `huangquechuanmei.com`, requesting only
+fixed TLS SNI and HTTP Host `yuelei.huangquechuanmei.com`, requesting only
 `/workbench/private-domain-video.html`, and requiring a verified certificate,
-HTTP 200, HTML/nosniff headers, an HTML document marker, and a 2 MiB response
-limit. It rejects redirects, proxies, arbitrary URLs, arbitrary units, and the catalog's
+HTTP 200, HTML/nosniff headers, and a complete response of at most 2 MiB whose
+length and SHA-256 exactly match the transaction's locked managed page for the
+current pre, post, or rollback phase. The TLS connection is always closed. It
+rejects redirects, proxies, arbitrary URLs, arbitrary units, and the catalog's
 specialized Bitable and drift-sentinel contracts until separately
 reviewed write-safe implementations exist. Probe IDs must already exist in the
 immutable catalog; the executor never accepts a URL or shell command from an

@@ -69,8 +69,10 @@ BACKUP_NAME_RE = re.compile(r"^[0-9]{4}\.bin$")
 TYPE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
 OWNER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 SITE_LOOPBACK_ADDRESS = ("127.0.0.1", 443)
-SITE_LOOPBACK_HOST = "huangquechuanmei.com"
+SITE_LOOPBACK_HOST = "yuelei.huangquechuanmei.com"
 SITE_LOOPBACK_PATH = "/workbench/private-domain-video.html"
+SITE_LOOPBACK_REPOSITORY_PATH = "site/workbench/private-domain-video.html"
+SITE_LOOPBACK_RUNTIME_PATH = "/var/www/huangquechuanmei/workbench/private-domain-video.html"
 SITE_LOOPBACK_MAX_BYTES = 2 * 1024 * 1024
 
 
@@ -226,7 +228,7 @@ class HostHooks:
         subprocess.run([SYSTEMCTL, "daemon-reload"], check=True, timeout=60,
                        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
 
-    def health(self, probe_id, phase):
+    def health(self, probe_id, phase, expected_response=None):
         if not PROBE_RE.fullmatch(str(probe_id)) or phase not in {"pre", "post", "rollback"}:
             raise TransactionError("health invocation is invalid")
         if probe_id in SERVICE_HEALTH_PROBES:
@@ -238,8 +240,15 @@ class HostHooks:
                 raise TransactionError("named service health is not active")
             return
         if probe_id == "site-loopback":
+            if (not isinstance(expected_response, dict)
+                    or set(expected_response) != {"sha256", "length"}
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(expected_response["sha256"]))
+                    or type(expected_response["length"]) is not int
+                    or not 0 <= expected_response["length"] <= SITE_LOOPBACK_MAX_BYTES):
+                raise TransactionError("site loopback response lock is invalid")
             context = ssl.create_default_context(cafile="/etc/ssl/certs/ca-certificates.crt")
             raw_socket = socket.create_connection(SITE_LOOPBACK_ADDRESS, timeout=10)
+            connection = None
             try:
                 connection = context.wrap_socket(raw_socket, server_hostname=SITE_LOOPBACK_HOST)
                 request = (
@@ -256,11 +265,15 @@ class HostHooks:
             except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
                 raise TransactionError("site loopback health request failed") from exc
             finally:
+                if connection is not None:
+                    with contextlib.suppress(Exception):
+                        connection.close()
                 with contextlib.suppress(Exception):
                     raw_socket.close()
             if (response.status != 200 or not content_type.startswith("text/html")
                     or nosniff != "nosniff" or len(body) > SITE_LOOPBACK_MAX_BYTES
-                    or b"<!doctype html" not in body[:4096].lower()):
+                    or len(body) != expected_response["length"]
+                    or _sha256(body) != expected_response["sha256"]):
                 raise TransactionError("site loopback response contract is invalid")
             return
         url = HTTP_HEALTH_PROBES.get(probe_id)
@@ -584,9 +597,35 @@ class TransactionExecutor:
         for record in records:
             self._observe(record["plan"], which)
 
-    def _run_health(self, probes, phase):
+    def _site_loopback_response_lock(self, files, which):
+        matches = [
+            record["plan"] if "plan" in record else record
+            for record in files
+            if (record["plan"] if "plan" in record else record).get("repository_path")
+            == SITE_LOOPBACK_REPOSITORY_PATH
+            and (record["plan"] if "plan" in record else record).get("runtime_path")
+            == SITE_LOOPBACK_RUNTIME_PATH
+        ]
+        if len(matches) != 1:
+            raise TransactionError("site loopback requires one exact managed page")
+        item = matches[0]
+        locked = item[which]
+        if locked["state"] != "file":
+            raise TransactionError("site loopback managed page must be a locked file")
+        record, _metadata = self._observe(item, which)
+        if record is None:
+            raise TransactionError("site loopback managed page is absent")
+        raw, _info = record
+        if len(raw) > SITE_LOOPBACK_MAX_BYTES:
+            raise TransactionError("site loopback managed page exceeds response limit")
+        return {"sha256": locked["sha256"], "length": len(raw)}
+
+    def _run_health(self, probes, phase, files, which):
+        site_lock = None
+        if "site-loopback" in probes:
+            site_lock = self._site_loopback_response_lock(files, which)
         for probe in probes:
-            self.hooks.health(probe, phase)
+            self.hooks.health(probe, phase, site_lock if probe == "site-loopback" else None)
 
     def _identity(self):
         verify = getattr(self.planner, "verify_identity", None)
@@ -744,7 +783,7 @@ class TransactionExecutor:
             except Exception as exc:
                 errors.append("service:%s:%s" % (unit, type(exc).__name__))
         try:
-            self._run_health(journal["pre_health_probes"], "rollback")
+            self._run_health(journal["pre_health_probes"], "rollback", journal["files"], "before")
         except Exception as exc:
             errors.append("health:%s" % type(exc).__name__)
         if errors:
@@ -829,7 +868,7 @@ class TransactionExecutor:
             if (identity["environment"] != plan["environment"]
                     or identity["host_id"] != plan["host_id"]):
                 raise TransactionError("release plan identity differs from the host")
-            self._run_health(plan["pre_health_probes"], "pre")
+            self._run_health(plan["pre_health_probes"], "pre", plan["files"], "before")
             transaction_id = "release-%s-%s" % (target_commit[:12], uuid.uuid4().hex[:12])
             files = self._prepare_backup_records(plan)
             journal = {
@@ -858,7 +897,7 @@ class TransactionExecutor:
             try:
                 self._install(journal)
                 self._restart(journal)
-                self._run_health(journal["post_health_probes"], "post")
+                self._run_health(journal["post_health_probes"], "post", journal["files"], "after")
                 if self._identity() != identity:
                     raise TransactionError("release identity changed during apply")
                 for record in journal["files"]:
@@ -899,7 +938,7 @@ class TransactionExecutor:
                 if not self.planner.verify_target_inventory(journal["target_commit"]):
                     raise TransactionError("committed recovery target inventory has drifted")
                 self.planner.verify_services(journal["restart_services"])
-                self._run_health(journal["post_health_probes"], "post")
+                self._run_health(journal["post_health_probes"], "post", journal["files"], "after")
                 self._finish(journal)
                 return {"ok": True, "status": "committed_recovered",
                         "transaction_id": journal["transaction_id"]}
@@ -907,7 +946,7 @@ class TransactionExecutor:
                 raise TransactionError("ledger commit matches neither side of active transaction")
             if journal["status"] in {"backing_up", "cleaning"}:
                 self._verify_all(journal["files"], "before")
-                self._run_health(journal["pre_health_probes"], "rollback")
+                self._run_health(journal["pre_health_probes"], "rollback", journal["files"], "before")
                 self._finish(journal)
                 return {"ok": True, "status": "prewrite_recovered",
                         "transaction_id": journal["transaction_id"]}

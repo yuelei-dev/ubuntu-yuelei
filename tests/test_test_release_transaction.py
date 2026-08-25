@@ -29,6 +29,10 @@ OLD = b"old\n"
 NEW = b"new\n"
 SECOND_OLD = b"second-old\n"
 SECOND_NEW = b"second-new\n"
+PAGE_RUNTIME = "/var/www/huangquechuanmei/workbench/private-domain-video.html"
+PAGE_SOURCE = "site/workbench/private-domain-video.html"
+PAGE_OLD = b"<!doctype html><title>old private domain</title>\n"
+PAGE_NEW = b"<!doctype html><title>new private domain</title>\n"
 
 
 def digest(raw):
@@ -157,6 +161,7 @@ class FakeHooks:
         self.fail_post_health = False
         self.fail_rollback_health = False
         self.fail_restore = False
+        self.site_response_by_phase = {}
 
     @staticmethod
     def _info(mode):
@@ -192,12 +197,16 @@ class FakeHooks:
             self.fail_restart = False
             raise OSError("restart failed")
 
-    def health(self, probe, phase):
+    def health(self, probe, phase, expected_response=None):
         self.events.append("health:%s:%s" % (phase, probe))
         if phase == "post" and self.fail_post_health:
             raise OSError("health failed")
         if phase == "rollback" and self.fail_rollback_health:
             raise OSError("rollback health failed")
+        if probe == "site-loopback":
+            raw = self.site_response_by_phase.get(phase, self.files.get(PAGE_RUNTIME))
+            if raw is None or expected_response != {"sha256": digest(raw), "length": len(raw)}:
+                raise transaction.TransactionError("site response differs from locked page")
 
 
 class TransactionTests(unittest.TestCase):
@@ -214,6 +223,31 @@ class TransactionTests(unittest.TestCase):
             clock=lambda: 1234,
             enforce_root_paths=False,
         )
+
+    def _enable_pr302_site_plan(self):
+        original = self.planner.build_plan
+        self.planner.repo.files[(MERGE, PAGE_SOURCE)] = PAGE_NEW
+        self.hooks.files[PAGE_RUNTIME] = PAGE_OLD
+        self.hooks.modes[PAGE_RUNTIME] = 0o644
+
+        def plan(target, evidence):
+            value = original(target, evidence)
+            value["files"].append({
+                "repository_path": PAGE_SOURCE,
+                "runtime_path": PAGE_RUNTIME,
+                "change": "write",
+                "before": {"state": "file", "sha256": digest(PAGE_OLD)},
+                "after": {"state": "file", "sha256": digest(PAGE_NEW)},
+                "services": [],
+                "before_metadata": {"mode": 0o644, "owner": "tester", "group": "tester"},
+                "mode": 0o644,
+                "owner": "tester",
+                "group": "tester",
+                "daemon_reload": False,
+            })
+            return value
+
+        self.planner.build_plan = plan
 
     def test_success_backs_up_writes_restarts_health_then_commits_ledger(self):
         result = self.executor.apply(MERGE, EVIDENCE)
@@ -303,8 +337,8 @@ class TransactionTests(unittest.TestCase):
     def test_pre_health_failure_occurs_before_backup_or_write(self):
         original = self.hooks.health
 
-        def fail_pre(probe, phase):
-            original(probe, phase)
+        def fail_pre(probe, phase, expected_response=None):
+            original(probe, phase, expected_response)
             if phase == "pre":
                 raise OSError("pre failed")
 
@@ -383,6 +417,7 @@ class TransactionTests(unittest.TestCase):
         ).read_text("utf-8"))
         self.assertEqual(3, len(impact["runtime_changes"]))
         self.assertEqual(["content-health", "site-loopback"], impact["pre_health_checks"])
+        self._enable_pr302_site_plan()
         original = self.planner.build_plan
 
         def plan(target, evidence):
@@ -401,6 +436,7 @@ class TransactionTests(unittest.TestCase):
         impact = json.loads((
             ROOT / "deploy/test-release/impacts/pr-private-domain-skill-ui-v2-20260825.json"
         ).read_text("utf-8"))
+        self._enable_pr302_site_plan()
         original = self.planner.build_plan
 
         def plan(target, evidence):
@@ -416,12 +452,38 @@ class TransactionTests(unittest.TestCase):
         self.assertIn("health:rollback:content-health", self.hooks.events)
         self.assertIn("health:rollback:site-loopback", self.hooks.events)
 
+    def test_site_loopback_old_page_post_health_rolls_back_and_requires_old_preimage(self):
+        self._enable_pr302_site_plan()
+        original = self.planner.build_plan
+
+        def plan(target, evidence):
+            value = original(target, evidence)
+            value["pre_health_probes"] = ["site-loopback"]
+            value["post_health_probes"] = ["site-loopback"]
+            return value
+
+        self.planner.build_plan = plan
+        self.hooks.site_response_by_phase["post"] = PAGE_OLD
+        with self.assertRaisesRegex(transaction.TransactionError, "rolled back"):
+            self.executor.apply(MERGE, EVIDENCE)
+        self.assertEqual(PAGE_OLD, self.hooks.files[PAGE_RUNTIME])
+        self.assertIn("health:rollback:site-loopback", self.hooks.events)
+
+        self.hooks.site_response_by_phase["rollback"] = PAGE_NEW
+        with self.assertRaisesRegex(transaction.TransactionError, "rollback failed"):
+            self.executor.apply(MERGE, EVIDENCE)
+
     def test_site_loopback_uses_fixed_address_host_path_and_response_bounds(self):
         sent = []
+        closed = []
+        body = b"<!doctype html><title>private domain</title>"
 
         class Wrapped:
             def sendall(self, raw):
                 sent.append(raw)
+
+            def close(self):
+                closed.append(True)
 
         class Context:
             def wrap_socket(self, raw, server_hostname):
@@ -441,19 +503,22 @@ class TransactionTests(unittest.TestCase):
                 return {"Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff"}.get(name, default)
 
             def read(self, _limit):
-                return b"<!doctype html><title>private domain</title>"
+                return body
 
         context = Context()
         raw_socket = mock.Mock()
         with mock.patch.object(transaction.ssl, "create_default_context", return_value=context), \
                 mock.patch.object(transaction.socket, "create_connection", return_value=raw_socket) as connect, \
                 mock.patch.object(transaction.http.client, "HTTPResponse", Response):
-            transaction.HostHooks().health("site-loopback", "pre")
+            transaction.HostHooks().health(
+                "site-loopback", "pre", {"sha256": digest(body), "length": len(body)},
+            )
         connect.assert_called_once_with(("127.0.0.1", 443), timeout=10)
-        self.assertEqual("huangquechuanmei.com", context.server_hostname)
+        self.assertEqual("yuelei.huangquechuanmei.com", context.server_hostname)
         request = sent[0].decode("ascii")
         self.assertIn("GET /workbench/private-domain-video.html HTTP/1.1", request)
-        self.assertIn("Host: huangquechuanmei.com", request)
+        self.assertIn("Host: yuelei.huangquechuanmei.com", request)
+        self.assertEqual([True], closed)
 
     def test_site_loopback_rejects_redirect_or_non_html_response(self):
         class Context:
@@ -479,7 +544,9 @@ class TransactionTests(unittest.TestCase):
                 mock.patch.object(transaction.socket, "create_connection", return_value=mock.Mock()), \
                 mock.patch.object(transaction.http.client, "HTTPResponse", BadResponse):
             with self.assertRaisesRegex(transaction.TransactionError, "response contract"):
-                transaction.HostHooks().health("site-loopback", "post")
+                transaction.HostHooks().health(
+                    "site-loopback", "post", {"sha256": digest(b"redirect"), "length": 8},
+                )
 
     def test_launcher_requires_empty_environment_and_all_python_isolation_flags(self):
         launcher = (ROOT / "tools/test_release_transaction_launcher.sh").read_text("utf-8")
