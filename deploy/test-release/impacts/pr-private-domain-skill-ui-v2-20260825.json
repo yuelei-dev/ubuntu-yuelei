@@ -1,0 +1,23 @@
+{
+  "external_checks": [],
+  "health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "release_id": "pr-private-domain-skill-ui-v2-20260825",
+  "required_env": {},
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "runtime_changes": [
+    "server/content_domains/core.py",
+    "server/content_domains/private_domain_media.py",
+    "site/workbench/private-domain-video.html"
+  ],
+  "schema_version": 1
+}
