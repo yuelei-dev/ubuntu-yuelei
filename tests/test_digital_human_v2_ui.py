@@ -51,12 +51,20 @@ class DigitalHumanV2UiTests(unittest.TestCase):
 
     def test_material_priority_and_no_visible_source_label(self):
         self.assertIn(
-            "客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺",
+            "顾客上传素材（必须全部使用） → 飞书素材库 → AI 生成图片",
             self.page,
         )
-        self.assertIn("有参考图的镜头将优先按参考图生成，不再查询飞书或全网素材", self.page)
-        self.assertIn("if(customerUploads[index])return aiFallback(item,index)", self.page)
-        self.assertIn("body.reference_upload_ids=[customerUploads[index].upload_id]", self.page)
+        self.assertIn("上传的每一张图片都会按顺序直接进入成片", self.page)
+        self.assertIn('id="allowAiMaterials" type="checkbox"', self.page)
+        self.assertNotIn('id="allowAiMaterials" type="checkbox" checked', self.page)
+        self.assertIn("body.allow_ai_materials=allowAi", self.page)
+        self.assertIn("body.customer_upload_ids=uploadIds", self.page)
+        self.assertIn("fields.digital_human_allow_ai_materials=plan.allow_ai_materials===true", self.page)
+        self.assertIn("fields.digital_human_customer_upload_ids=plan.customer_upload_ids||[]", self.page)
+        self.assertIn("body.allow_ai_materials=plan.allow_ai_materials===true", self.page)
+        self.assertNotIn("if(customerUploads[index])return aiFallback(item,index)", self.page)
+        self.assertNotIn("body.reference_upload_ids=[customerUploads[index].upload_id]", self.page)
+        self.assertNotIn("全网公开可用素材", self.page)
         self.assertIn("最终视频不显示素材来源标签", self.page)
         self.assertNotIn("CONCEPT / AI FILL", self.page)
 
@@ -70,6 +78,7 @@ class DigitalHumanV2UiTests(unittest.TestCase):
             "count:1", "ratio:'9:16'",
         ):
             self.assertIn(marker, materials)
+        self.assertIn("if(plan.allow_ai_materials!==true)throw new Error", materials)
         self.assertNotIn("provider:'banana'", materials)
         self.assertNotIn("model:'nb2'", materials)
 
@@ -90,6 +99,23 @@ class DigitalHumanV2UiTests(unittest.TestCase):
             "$('analyze').disabled=false;$('start').disabled=true",
             "state.voiceMode='existing';state.voiceKey=previousVoiceKey",
             "成片已完成；重新上传或修改资料后可继续分析下一条",
+        ):
+            self.assertIn(marker, self.page)
+
+    def test_private_history_is_visible_and_refreshes_after_compose(self):
+        for marker in (
+            'id="historyTitle">历史成片',
+            'id="historyRefresh"',
+            'id="historyStatus"',
+            'id="historyList"',
+            "/api/gen/digital-human-v2/history?limit=20",
+            "function loadDigitalHumanHistory()",
+            "$('historyRefresh').onclick=loadDigitalHumanHistory",
+            "restore();loadVoiceSources();loadDigitalHumanHistory()",
+            "syncSetupControls('complete');return loadDigitalHumanHistory()",
+            "showResultVideo(item.video_url,true)",
+            "downloadHistoryVideo(item)",
+            "仅显示当前账号最近",
         ):
             self.assertIn(marker, self.page)
 if __name__ == "__main__":

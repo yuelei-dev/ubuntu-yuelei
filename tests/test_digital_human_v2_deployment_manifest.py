@@ -8,27 +8,22 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = (
+    ROOT / "docs" / "release-manifests" /
+    "digital-human-material-feishu-priority-20260823.json"
+)
+CATALOG_PATH = ROOT / "deploy" / "test-release" / "runtime-catalog.json"
+HISTORICAL_MANIFEST_PATH = (
     ROOT / "deploy" / "test-runtime" /
     "digital-human-material-seedream-v3-20260821.json"
 )
-HISTORICAL_MANIFEST_PATH = (
-    ROOT / "deploy" / "test-runtime" / "digital-human-material-v2-20260818.json"
-)
-HISTORICAL_MANIFEST_BLOB = "e7d139001c065f6a3e8ec7137057abdc86bf5d06"
+HISTORICAL_MANIFEST_BLOB = "1a1bef4ec64323208fe0212961e72e38206a69bf"
 HISTORICAL_MANIFEST_SHA256 = (
-    "44006751e15f56c946d8dfadeb4ad74f497dab44ceda66512bdb9603b919e453"
+    "1cb48ad76a69d05ea39d96f3bc0607ee18d2566354d7317e5bdb0dd6308d8578"
 )
 CI_PATH = ROOT / ".github" / "workflows" / "ci.yml"
 EXPECTED_SCOPE = {
     "server/content_domains/script_to_video.py",
-    "server/content_domains/core.py",
-    "server/content_domains/digital_human_oneclick.py",
-    "server/content_domains/points.py",
-    "server/content_domains/digital_human_timeline.py",
     "server/content_domains/digital_human_v2.py",
-    "server/content_domains/audio.py",
-    "server/content_domains/cosyvoice.py",
-    "server/content_domains/video.py",
     "site/workbench/digital-human-oneclick.html",
 }
 LOCKED_PREIMAGES = {
@@ -36,41 +31,13 @@ LOCKED_PREIMAGES = {
         "file", "6b3f8b8c9068705debbd7959406362f19e821ba0",
         "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
     ),
-    "server/content_domains/core.py": (
-        "file", "db05b6d0c122186798d8ef80bff77648eeb12711",
-        "f8634b3fe5d601587448a4ddd4e27f1ebca99f97618241920afb46065b48a425",
-    ),
-    "server/content_domains/digital_human_oneclick.py": (
-        "file", "351d278b5c3bd243974fc0f235b076e8723f0b85",
-        "55c03a5e774d8fc83da6496decdbea604df8ca6880736153be4c5df888cc45fc",
-    ),
-    "server/content_domains/points.py": (
-        "file", "9e4e52f7d1a21ce9e85af2a9c9b74055e5724dff",
-        "7080c054b25a0b17dd6b1d1ec194dc3e1db211a011e4448e3208dbb553d3a414",
-    ),
-    "server/content_domains/digital_human_timeline.py": (
-        "file", "7a2d26eb72af41624e45c5daa273d8b67acb3f23",
-        "ed07bbdb1be7e5281dfab9541e414a5a4b5c02a9e39bb26c3dd262c1d071b19e",
-    ),
     "server/content_domains/digital_human_v2.py": (
-        "file", "383626daf4403ff54ffa18b7c3a5e55bc0094d81",
-        "bb0b1ff6909ec7f1785b8bf3b7a81e248919733d4eb4ae0efa061d996b1c3c68",
-    ),
-    "server/content_domains/audio.py": (
-        "file", "32f948f451d0f527d992425ae1eaa8bc28583c6f",
-        "1482e90c5cba03778a5c00b53eea21a9018fb4683c6b31eb329c54d12b012651",
-    ),
-    "server/content_domains/cosyvoice.py": (
-        "file", "a23eb651c1ea0d0ec6cab7ae44bd561ed00436fd",
-        "ad29df5e53990880941f57d32fe3355393c870ba62bb3485086febb4065358b8",
-    ),
-    "server/content_domains/video.py": (
-        "file", "ed6ad03b72fedd4f7e4e388cfdab9ad6c2392ddf",
-        "ce3153d484729b8b7dc226f8fa82ca6a8ee8afa50ebf5b6646c458d92303cfeb",
+        "file", "c12813c12d36ca93f9083dba4767fa759f81ab32",
+        "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
     ),
     "site/workbench/digital-human-oneclick.html": (
-        "file", "cdb4b99cc44302602c92c9c26b906ffe766438cc",
-        "625aa315e33ea599a5dbfb4f1e5e7f8b55e0d3665a32d2a6f348e762d079d5cf",
+        "file", "289e095bb6869337b185a8ab3ee7eff153543f08",
+        "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae",
     ),
 }
 
@@ -87,6 +54,52 @@ def _read_locked_git_blob(blob_id):
         stderr=subprocess.PIPE,
     )
     return result.stdout
+
+
+def _git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _verify_manifest_relock(repository, manifest_path, head="HEAD"):
+    relative_path = manifest_path.relative_to(repository).as_posix()
+    manifest_bytes = manifest_path.read_bytes()
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+    expected_parent = manifest["source"]["code_source_commit"]
+    expected_blob = _git_blob(manifest_bytes)
+    history = subprocess.run(
+        ["git", "rev-list", head, "--", relative_path], cwd=repository,
+        check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+    candidates = []
+    for commit in history:
+        blob = subprocess.run(
+            ["git", "rev-parse", "%s:%s" % (commit, relative_path)],
+            cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        if blob == expected_blob:
+            candidates.append(commit)
+    if not candidates:
+        raise AssertionError("current manifest bytes have no reachable locked commit")
+    locked_commit = candidates[0]
+    parents = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.split()
+    if len(parents) != 2 or parents[1] != expected_parent:
+        raise AssertionError("locked manifest parent does not match code source")
+    changed = set(filter(None, subprocess.run(
+        ["git", "diff", "--name-only", parents[1], locked_commit],
+        cwd=repository, check=True, text=True, stdout=subprocess.PIPE,
+    ).stdout.splitlines()))
+    if changed != {relative_path}:
+        raise AssertionError("locked manifest commit is not manifest-only")
+    locked_bytes = subprocess.run(
+        ["git", "cat-file", "blob", "%s:%s" % (locked_commit, relative_path)],
+        cwd=repository, check=True, stdout=subprocess.PIPE,
+    ).stdout
+    if locked_bytes != manifest_bytes or _git_blob(locked_bytes) != expected_blob:
+        raise AssertionError("current manifest bytes do not match locked blob")
+    return locked_commit
 
 
 class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
@@ -118,15 +131,76 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(HISTORICAL_MANIFEST_BLOB, actual_blob)
         self.assertEqual(HISTORICAL_MANIFEST_SHA256, hashlib.sha256(data).hexdigest())
 
+    def test_successor_docs_manifest_is_not_runtime_candidate(self):
+        catalog = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+
+        def is_candidate(path):
+            return (
+                path in catalog["runtime_candidate_paths"]
+                or any(
+                    path.startswith(prefix.rstrip("/") + "/")
+                    for prefix in catalog["runtime_candidate_prefixes"]
+                )
+            )
+
+        def is_ignored(path):
+            return (
+                path in catalog["ignored_repository_paths"]
+                or any(
+                    path.startswith(prefix.rstrip("/") + "/")
+                    for prefix in catalog["ignored_repository_prefixes"]
+                )
+            )
+
+        successor = MANIFEST_PATH.relative_to(ROOT).as_posix()
+        future_runtime_manifest = (
+            "deploy/test-runtime/"
+            "digital-human-material-feishu-priority-v2-future.json"
+        )
+        self.assertFalse(is_candidate(successor))
+        self.assertTrue(is_candidate(future_runtime_manifest))
+        self.assertFalse(is_ignored(future_runtime_manifest))
+        self.assertEqual(".json", MANIFEST_PATH.suffix)
+        self.assertTrue(
+            self.manifest["executor"]["repository_path"].startswith("scripts/")
+        )
+
     def test_scope_and_historical_source_locks_are_exact(self):
         files = self.manifest["files"]
         self.assertEqual({entry["repository_path"] for entry in files}, EXPECTED_SCOPE)
-        self.assertEqual(len(files), 10)
-        self.assertEqual(len({entry["runtime_path"] for entry in files}), 10)
+        self.assertEqual(len(files), 3)
+        self.assertEqual(len({entry["runtime_path"] for entry in files}), 3)
         for entry in files:
             self._assert_historical_content_lock(entry)
             self.assertEqual(entry["source_sha256"], entry["expected_postimage_sha256"])
             self.assertEqual(entry["source_blob"], entry["expected_postimage_blob"])
+
+    def test_successor_manifest_is_manifest_only_child_of_locked_code_source(self):
+        locked_commit = _verify_manifest_relock(ROOT, MANIFEST_PATH)
+        self.assertEqual(
+            self.manifest["source"]["code_source_commit"],
+            subprocess.run(
+                ["git", "rev-parse", locked_commit + "^"], cwd=ROOT,
+                check=True, text=True, stdout=subprocess.PIPE,
+            ).stdout.strip(),
+        )
+        code_source = self.manifest["source"]["code_source_commit"]
+        locks = (
+            self.manifest["files"]
+            + [self.manifest["executor"]]
+            + [self.manifest["executor"]["verifier"]]
+            + [self.manifest["executor"]["requirements_verifier"]]
+            + self.manifest["release_contract_sources"]
+        )
+        for lock in locks:
+            with self.subTest(repository_path=lock["repository_path"]):
+                actual_blob = subprocess.run(
+                    ["git", "rev-parse", "%s:%s" % (
+                        code_source, lock["repository_path"],
+                    )],
+                    cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+                self.assertEqual(lock["source_blob"], actual_blob)
 
     def test_read_only_test_preimages_are_exact(self):
         actual = {
@@ -143,33 +217,36 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             self._assert_blob_and_sha256(blob_id, sha256)
         observation = self.manifest["preimage_observation"]
         self.assertEqual(observation["target"], "test@8.148.158.106")
-        self.assertIn("user-supplied read-only", observation["capture_method"])
+        self.assertIn("read-only", observation["capture_method"])
         self.assertEqual(
             observation["captured_at"],
-            "2026-08-21 (user-supplied current evidence; exact timestamp not provided)",
+            "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
         )
-        self.assertIsNone(observation["repository_main_commit"])
-        self.assertEqual(observation["repository_git_metadata"], "absent")
+        self.assertEqual(
+            observation["repository_main_commit"],
+            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+        )
+        self.assertIn("no server access", observation["repository_git_metadata"])
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "bec6f49c05107b46df358d99207e5f89bea1804d",
+            "a858dec9d1d49a2432d40f2341512bd66291c6de",
         )
         self.assertEqual(observation["service_state"], "active")
         self.assertEqual(observation["health_status"], 200)
-        self.assertEqual(observation["files"], 10)
+        self.assertEqual(observation["files"], 3)
 
     def test_tampered_successor_preimage_lock_is_rejected(self):
         entry = next(
             item for item in self.manifest["files"]
             if item["repository_path"]
-            == "server/content_domains/digital_human_oneclick.py"
+            == "server/content_domains/digital_human_v2.py"
         )
         with self.assertRaises(AssertionError):
             self._assert_blob_and_sha256(
                 entry["target_preimage_blob"], "0" * 64,
             )
 
-    def test_successor_changes_only_seedream_business_files(self):
+    def test_successor_changes_only_material_history_runtime_files(self):
         changed_paths = {
             entry["repository_path"]
             for entry in self.manifest["files"]
@@ -178,7 +255,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertEqual(
             changed_paths,
             {
-                "server/content_domains/digital_human_oneclick.py",
+                "server/content_domains/script_to_video.py",
                 "server/content_domains/digital_human_v2.py",
                 "site/workbench/digital-human-oneclick.html",
             },
@@ -200,7 +277,7 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertFalse(policy["copy_environment_database_or_user_data"])
         self.assertFalse(policy["production_server_write_allowed"])
         self.assertTrue(self.manifest["rollback"]["new_files_removed_only_if_preimage_was_absent"])
-        self.assertEqual(self.manifest["rollback"]["scope"], "all ten manifest targets as one unit")
+        self.assertEqual(self.manifest["rollback"]["scope"], "all three manifest targets as one unit")
         absent = [entry["repository_path"] for entry in self.manifest["files"]
                   if entry["target_preimage_state"] == "absent"]
         self.assertEqual(absent, [])
@@ -214,7 +291,31 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         )
         self.assertEqual(
             feishu["app_token_environment_name"],
-            "DIGITAL_HUMAN_FEISHU_APP_TOKEN",
+            "DIGITAL_HUMAN_MATERIAL_LIBRARY_APP_TOKEN",
+        )
+        self.assertEqual(feishu["app_token_default"], "TYqUb6KaQaLPQ2sLrLFcdsWanPZ")
+        self.assertEqual(feishu["table_environment_name"],
+                         "DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_1")
+        self.assertEqual(feishu["table_default"], "tbl58c0UkQ5ZaR2z")
+        self.assertEqual(feishu["view_environment_name"],
+                         "DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1")
+        self.assertEqual(feishu["view_default"], "vewa9ZW0Og")
+        self.assertTrue(feishu["operational_probe_required"])
+        self.assertTrue(feishu["probe_all_pages"])
+        self.assertTrue(feishu["probe_attachment_download_and_mime"])
+        runtime = self.manifest["configuration_requirements"]["service_runtime"]
+        self.assertEqual(runtime["user"], "ubuntu")
+        self.assertEqual(
+            runtime["environment_file"],
+            "/home/ubuntu/content-api/content.env",
+        )
+        self.assertTrue(runtime["inspect_active_process_environment"])
+        self.assertEqual(
+            self.manifest["configuration_requirements"]["material_priority"],
+            ["customer_upload_required", "feishu", "ai_optional"],
+        )
+        self.assertFalse(
+            self.manifest["configuration_requirements"]["public_web_materials_enabled"]
         )
         self.assertTrue(feishu["credentials_must_not_be_committed"])
         serialized = json.dumps(feishu, ensure_ascii=False)
@@ -242,9 +343,8 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("result.get('no_charge') is True", font_command)
         self.assertNotIn("get('font')", font_command)
         dependencies = json.dumps(commands["dependencies"], ensure_ascii=False)
-        self.assertIn("content_domains/audio.py", dependencies)
-        self.assertIn("content_domains/cosyvoice.py", dependencies)
-        self.assertIn("content_domains/video.py", dependencies)
+        self.assertIn("content_domains/script_to_video.py", dependencies)
+        self.assertIn("content_domains/digital_human_v2.py", dependencies)
         self.assertEqual(len(commands["restart"]), 1)
         self.assertEqual(len(commands["rollback_restart"]), 1)
         rendered = json.dumps(commands["no_charge"], ensure_ascii=False)
@@ -254,14 +354,20 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("tests.test_digital_human_v2_ui", rendered)
         self.assertIn("tests.test_digital_human_v2_compose", rendered)
         self.assertIn("tests.test_seedream_v3_release_executor", rendered)
+        self.assertIn("tests.test_unified_voice_v6_release", rendered)
         self.assertNotIn("/usr/bin/node", rendered)
         self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
-        self.assertIn("tests.test_cosyvoice", rendered)
-        self.assertIn("tests.test_heygen_mcp_oauth", rendered)
+        self.assertNotIn("tests.test_cosyvoice", rendered)
+        self.assertNotIn("tests.test_heygen_mcp_oauth", rendered)
         self.assertEqual(
             {200, 401},
             {int(item["expected_status"]) for item in self.manifest["health_checks"]},
         )
+        history = next(
+            item for item in self.manifest["health_checks"]
+            if item["url"].endswith("/api/gen/digital-human-v2/history")
+        )
+        self.assertEqual(401, history["expected_status"])
 
     def test_voice_state_node_test_is_ci_only_and_content_locked(self):
         ci = CI_PATH.read_text(encoding="utf-8")

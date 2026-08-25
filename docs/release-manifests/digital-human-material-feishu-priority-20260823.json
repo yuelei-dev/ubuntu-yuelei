@@ -1,0 +1,203 @@
+{
+  "schema_version": 1,
+  "purpose": "Deploy the reviewed customer-upload-required, Feishu-first and optional-AI material chain together with private recoverable digital-human history on the Yuelei test server, preserving exact backup and rollback semantics.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "service": "huangque-content.service"
+  },
+  "configuration_requirements": {
+    "material_priority": ["customer_upload_required", "feishu", "ai_optional"],
+    "public_web_materials_enabled": false,
+    "feishu": {
+      "required_for_real_priority_validation": true,
+      "credential_source": "Feishu Open Platform > self-built app > Credentials and Basic Info",
+      "secret_environment_names": ["FEISHU_APP_ID", "FEISHU_APP_SECRET"],
+      "app_token_environment_name": "DIGITAL_HUMAN_MATERIAL_LIBRARY_APP_TOKEN",
+      "app_token_default": "TYqUb6KaQaLPQ2sLrLFcdsWanPZ",
+      "table_environment_name": "DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_1",
+      "table_default": "tbl58c0UkQ5ZaR2z",
+      "view_environment_name": "DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1",
+      "view_default": "vewa9ZW0Og",
+      "operational_probe_required": true,
+      "probe_all_pages": true,
+      "probe_attachment_download_and_mime": true,
+      "credentials_must_not_be_committed": true
+    },
+    "service_runtime": {
+      "user": "ubuntu",
+      "environment_file": "/home/ubuntu/content-api/content.env",
+      "inspect_active_process_environment": true
+    }
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "base_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
+    "code_source_commit": "9d1151d13cc62f0808082b194eca49d6cc274f25",
+    "review_lock": "exact independently reviewed PR head must be contained in live main before release"
+  },
+  "preimage_observation": {
+    "captured_at": "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
+    "target": "test@8.148.158.106",
+    "capture_method": "read-only Git main preimage lock after the last evidenced successful test deployment; deployment fails closed if live runtime differs",
+    "repository_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
+    "repository_git_metadata": "available in the reviewed source checkout; no server access in this relock task",
+    "service_state": "active",
+    "health_status": 200,
+    "files": 3
+  },
+  "deployment_policy": {
+    "fail_closed_on_source_mismatch": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "allow_exact_postimage_as_existing": true,
+    "backup_all_targets_before_first_write": true,
+    "record_missing_targets_in_backup_manifest": true,
+    "atomic_replace": true,
+    "restart_service_at_most_once": true,
+    "skip_restart_when_no_files_change": true,
+    "rollback_all_targets_as_one_unit": true,
+    "remove_only_targets_recorded_missing_during_rollback": true,
+    "copy_environment_database_or_user_data": false,
+    "production_server_write_allowed": false
+  },
+  "executor": {
+    "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
+    "source_blob": "5d64d4513cb961c6778b6476859d03fcb38776e9",
+    "source_sha256": "658342aad43286881245894b3ff18e067f17037a98da99f6f10ed9e354f2d180",
+    "verifier": {
+      "repository_path": "scripts/verify_content_whisper_deployment.py",
+      "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
+      "source_sha256": "37376c1f6fdca007d06ddfeb2820d87a51df6db8471533d0b2a77aadeee509bc"
+    },
+    "requirements_verifier": {
+      "repository_path": "scripts/verify_content_python_requirements.py",
+      "source_blob": "372a71c2fe6b8b0152307860b47e6415260a8267",
+      "source_sha256": "e1010b5e498ad05914ac0f48d986eb233abfebd866b6937b0b4f89beb7cb1bc5"
+    },
+    "confirm_target": "test@8.148.158.106",
+    "remote_connection_capability": false
+  },
+  "absent_target_digest": {
+    "canonical_bytes": "ABSENT\n",
+    "sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001"
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/script_to_video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/script_to_video.py",
+      "classification": "runtime_code",
+      "source_blob": "134855a45c33ad8c0c2aa22ca3d5ccf6809070d4",
+      "source_sha256": "8d43e87dff52ec9dec88e2d1213df8da63147a7d2a8ce917fd90857876ee5b56",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "target_preimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
+      "expected_postimage_blob": "134855a45c33ad8c0c2aa22ca3d5ccf6809070d4",
+      "expected_postimage_sha256": "8d43e87dff52ec9dec88e2d1213df8da63147a7d2a8ce917fd90857876ee5b56"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_v2.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "classification": "runtime_code",
+      "source_blob": "5fb1f7bc45d3d5fc0df940084882782540f36960",
+      "source_sha256": "571603070ef9ccc8d8528489d77a1ca7b62182ba84fcc1b4e664bc10d571dd60",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "target_preimage_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
+      "expected_postimage_blob": "5fb1f7bc45d3d5fc0df940084882782540f36960",
+      "expected_postimage_sha256": "571603070ef9ccc8d8528489d77a1ca7b62182ba84fcc1b4e664bc10d571dd60"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+      "classification": "static_runtime",
+      "source_blob": "397d3becc700e23391392dc1badb248e85b63bbc",
+      "source_sha256": "e877da893b5645dbe2e1b1329d9df546688147973af1d6d4431f3afb545b21d6",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "289e095bb6869337b185a8ab3ee7eff153543f08",
+      "target_preimage_sha256": "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae",
+      "expected_postimage_blob": "397d3becc700e23391392dc1badb248e85b63bbc",
+      "expected_postimage_sha256": "e877da893b5645dbe2e1b1329d9df546688147973af1d6d4431f3afb545b21d6"
+    }
+  ],
+  "release_contract_sources": [
+    {
+      "repository_path": "tests/test_digital_human_timeline.py",
+      "source_blob": "807d5325b6e022024d17a73cf30c13bfb7875f5f",
+      "source_sha256": "9711ace93ee7ca41938ef12bffda448dc370a9d42d5bdedfda66857a32b0fa2f"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2.py",
+      "source_blob": "3c45c006c5f0130c6263aba1d0b9a4182a916e8e",
+      "source_sha256": "1a46d51e220cfcec9c8329668ee9771e37de64b95d9a1154154a4bca14049e1d"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_ui.py",
+      "source_blob": "41fed498ce5c75413cdfdb026d6376f64e3ffadd",
+      "source_sha256": "3ed5d3c1e1d8ae2d8f5edae4280f0006f6a3798f15ec268713c9bf96658ca60b"
+    },
+    {
+      "repository_path": "tests/test_digital_human_voice_state.js",
+      "source_blob": "d886c09adb3095c84f8364e5063487525506c98d",
+      "source_sha256": "da6cb23c0aca11ed1ffca109fe9ca776691e79079f21f480704614f26a9a648c"
+    },
+    {
+      "repository_path": "tests/test_digital_human_oneclick.py",
+      "source_blob": "fe66fb9d1db3d0a657a36aa9fa1153cf9b8bc130",
+      "source_sha256": "29c5c7409c6717a9b4e968e18e34d497957ae5522b4025ef49c6e354150d473f"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
+      "source_blob": "4659a9e704238fb9f523a0893489c344180e0f17",
+      "source_sha256": "68cff145dfa8ba4630352415066766a3bfe77140c78bc3487e26cf8f145dd293"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_compose.py",
+      "source_blob": "66385a804210c3c7df42ffcfe76594c7c94cb536",
+      "source_sha256": "93de1c0feb21e4d934dd244897f1b91aec9a0f414d5b3dd5c7de62f098561cc5"
+    },
+    {
+      "repository_path": "tests/test_seedream_v3_release_executor.py",
+      "source_blob": "ac2eaa372769c9c3adbf3a20733dc919544724b7",
+      "source_sha256": "d68f19b2ddbb2f8d2a8e6a0ed44f010dd6626421fe5600e125f3bc5769ac17e4"
+    },
+    {
+      "repository_path": "tests/test_unified_voice_v6_release.py",
+      "source_blob": "ec7c08781bd558f4e6b3ed66128f7875f7d0b7ca",
+      "source_sha256": "d6a93216cf16a697b437fcf2f0eae79d44abc83b2d8ccead35573671233163ae"
+    }
+  ],
+  "release_commands": {
+    "pre_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
+    "dependencies": [{"argv": ["/usr/bin/python3", "-m", "py_compile", "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}", "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}"], "timeout_seconds": 120}],
+    "cache": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "offline": [{"argv": ["/usr/bin/env", "HF_HUB_OFFLINE=1", "/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "font": [{"argv": ["/usr/bin/python3", "-c", "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"], "cwd": "{runtime:/home/ubuntu/content-api}", "timeout_seconds": 600}],
+    "no_charge": [
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_timeline", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_oneclick", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_ui", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_deployment_manifest", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_digital_human_v2_compose", "-v"], "cwd": "{source:.}", "timeout_seconds": 900},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_seedream_v3_release_executor", "-v"], "cwd": "{source:.}", "timeout_seconds": 300},
+      {"argv": ["/usr/bin/python3", "-m", "unittest", "tests.test_unified_voice_v6_release", "-v"], "cwd": "{source:.}", "timeout_seconds": 300}
+    ],
+    "daemon_reload": [{"argv": ["/usr/bin/systemctl", "daemon-reload"], "timeout_seconds": 30}],
+    "restart": [{"argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"], "timeout_seconds": 180}],
+    "service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}],
+    "rollback_daemon_reload": [{"argv": ["/usr/bin/systemctl", "daemon-reload"], "timeout_seconds": 30}],
+    "rollback_restart": [{"argv": ["/usr/bin/systemctl", "restart", "huangque-content.service"], "timeout_seconds": 180}],
+    "rollback_service_active": [{"argv": ["/usr/bin/systemctl", "is-active", "--quiet", "huangque-content.service"], "timeout_seconds": 30}]
+  },
+  "health_probe_policy": {"startup_timeout_seconds": 60, "interval_seconds": 1},
+  "health_checks": [
+    {"url": "http://127.0.0.1:8096/api/gen/health", "expected_status": 200},
+    {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401},
+    {"url": "http://127.0.0.1:8096/api/gen/digital-human-v2/history", "expected_status": 401}
+  ],
+  "rollback": {
+    "scope": "all three manifest targets as one unit",
+    "new_files_removed_only_if_preimage_was_absent": true,
+    "production_untouched": true
+  }
+}

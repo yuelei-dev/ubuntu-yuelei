@@ -168,9 +168,18 @@ class PrivateDomainReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
+        self.source = self.root / "locked-source"
         self.runtime = self.root / "runtime"
         self.backups = self.root / "backups"
         self.manifest = copy.deepcopy(self.base_manifest)
+        executor = self.manifest["release_executor"]
+        for item, blob_field in (
+                *((item, "postimage_blob") for item in self.manifest["files"]),
+                (executor, "git_blob"),
+                (executor["locked_base_executor"], "git_blob")):
+            source = self.source / item["repository_path"]
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(git_bytes(item[blob_field]))
         machine_id = "0123456789abcdef0123456789abcdef"
         hostname = "huangque-test-fixture"
         etc = self.runtime / "etc"
@@ -241,7 +250,7 @@ class PrivateDomainReleaseTests(unittest.TestCase):
 
     def _execute(self, hooks=None, checkpoint=None):
         return self.module._execute_manifest(
-            self.manifest, ROOT, self.runtime, self.backups,
+            self.manifest, self.source, self.runtime, self.backups,
             hooks=hooks or FakeHooks(), verify_repository=False,
             checkpoint=checkpoint, reviewed_head="1" * 40,
             merged_main="2" * 40,
@@ -254,12 +263,28 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         })
         self.assertEqual(6, len(self.manifest["release_executor"]["external_assets"]))
         for item in self.manifest["files"]:
-            data = (ROOT / item["repository_path"]).read_bytes()
+            data = git_bytes(item["postimage_blob"])
             self.assertEqual(item["postimage_blob"], git_blob(data))
             self.assertEqual(item["postimage_sha256"], sha256(data))
-        executor = EXECUTOR.read_bytes()
-        self.assertEqual(self.manifest["release_executor"]["git_blob"], git_blob(executor))
-        self.assertEqual(self.manifest["release_executor"]["sha256"], sha256(executor))
+            self.assertEqual(
+                data, (self.source / item["repository_path"]).read_bytes(),
+            )
+        executor_lock = self.manifest["release_executor"]
+        executor = git_bytes(executor_lock["git_blob"])
+        self.assertEqual(executor_lock["git_blob"], git_blob(executor))
+        self.assertEqual(executor_lock["sha256"], sha256(executor))
+        self.assertEqual(
+            executor,
+            (self.source / executor_lock["repository_path"]).read_bytes(),
+        )
+        base_lock = executor_lock["locked_base_executor"]
+        base = git_bytes(base_lock["git_blob"])
+        self.assertEqual(base_lock["git_blob"], git_blob(base))
+        self.assertEqual(base_lock["sha256"], sha256(base))
+        self.assertEqual(
+            base,
+            (self.source / base_lock["repository_path"]).read_bytes(),
+        )
 
     def test_manifest_provides_two_exact_side_effect_free_sentinel_copies(self):
         acceptance = self.manifest["release_executor"]["authenticated_acceptance"]
@@ -396,7 +421,7 @@ class PrivateDomainReleaseTests(unittest.TestCase):
 
     def test_bgm_manifest_requires_stable_utf8_titles(self):
         catalog = json.loads(
-            (ROOT / "site/assets/bgm/private-domain-v1/manifest.json").read_text(
+            (self.source / "site/assets/bgm/private-domain-v1/manifest.json").read_text(
                 encoding="utf-8",
             )
         )
@@ -423,9 +448,25 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         self.assertEqual(1, hooks.calls.count("restart"))
         for item in self.manifest["files"]:
             self.assertEqual(
-                (ROOT / item["repository_path"]).read_bytes(),
+                (self.source / item["repository_path"]).read_bytes(),
                 self._target(item["runtime_path"]).read_bytes(),
             )
+
+    def test_later_page_change_does_not_replace_historical_candidate(self):
+        future_source = self.root / "future-source"
+        shutil.copytree(self.source, future_source)
+        page = future_source / "site/workbench/digital-human-oneclick.html"
+        page.write_bytes(page.read_bytes() + b"\n<!-- future change -->\n")
+        with self.assertRaisesRegex(
+                self.module.ReleaseError, "candidate lock does not match source"):
+            self.module._execute_manifest(
+                self.manifest, future_source, self.runtime, self.backups,
+                hooks=FakeHooks(), verify_repository=False,
+                reviewed_head="1" * 40, merged_main="2" * 40,
+                confirm_target="test@8.148.158.106",
+            )
+        self.assertFalse(self.backups.exists())
+        self.assertEqual("deployed", self._execute()["status"])
 
     def test_external_asset_failure_happens_before_backup_or_install(self):
         before = self._snapshot()
@@ -442,7 +483,7 @@ class PrivateDomainReleaseTests(unittest.TestCase):
         hooks = FakeHooks()
         with self.assertRaisesRegex(self.module.ReleaseError, "confirm-target"):
             self.module._execute_manifest(
-                self.manifest, ROOT, self.runtime, self.backups,
+                self.manifest, self.source, self.runtime, self.backups,
                 hooks=hooks, verify_repository=False,
                 confirm_target="test@129.204.166.13",
             )

@@ -134,6 +134,21 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         cls.executor = load_executor()
         cls.executor_blob = git_blob(EXECUTOR.read_bytes())
         cls.executor_sha = sha256(EXECUTOR.read_bytes())
+        cls.locked_source_workspace = tempfile.TemporaryDirectory(
+            prefix="unified-v6-locked-source-",
+        )
+        cls.addClassCleanup(cls.locked_source_workspace.cleanup)
+        cls.locked_source_root = pathlib.Path(cls.locked_source_workspace.name)
+        locked_sources = {
+            repository_path: locks[2]
+            for repository_path, locks in LOCKS.items()
+        }
+        locked_sources[EXECUTOR.relative_to(ROOT).as_posix()] = cls.executor_blob
+        locked_sources[cls.executor.BASE_EXECUTOR_PATH] = cls.executor.BASE_EXECUTOR_BLOB
+        for repository_path, blob_id in locked_sources.items():
+            target = cls.locked_source_root / repository_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(git_bytes(blob_id))
 
     def _manifest(self):
         files = []
