@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "purpose": "Deploy the reviewed customer-upload-required, Feishu-first and optional-AI material chain together with private recoverable digital-human history on the Yuelei test server, preserving exact backup and rollback semantics.",
+  "purpose": "Deploy the reviewed customer-upload-required, Feishu-first and optional-AI material chain together with private recoverable digital-human history on the Yuelei test server, preserving exact phase-aware health, backup and rollback semantics.",
   "target": {
     "role": "test",
     "host": "8.148.158.106",
@@ -32,18 +32,25 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "base_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
-    "code_source_commit": "9d1151d13cc62f0808082b194eca49d6cc274f25",
+    "base_main_commit": "864f557f6003f92083a8e2d366800d63d041b7ce",
+    "code_source_commit": "8330e71c0094d1c50727afe8d5ad3446b0db4b41",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
-    "captured_at": "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
+    "captured_at": "2026-08-25 (user-provided read-only pre-deployment evidence; no server access in this task)",
     "target": "test@8.148.158.106",
-    "capture_method": "read-only Git main preimage lock after the last evidenced successful test deployment; deployment fails closed if live runtime differs",
-    "repository_main_commit": "a858dec9d1d49a2432d40f2341512bd66291c6de",
+    "capture_method": "user-provided read-only server pre-deployment observation, cross-checked against exact target hashes; the modification task made no server access",
+    "repository_main_commit": "864f557f6003f92083a8e2d366800d63d041b7ce",
     "repository_git_metadata": "available in the reviewed source checkout; no server access in this relock task",
     "service_state": "active",
-    "health_status": 200,
+    "health_statuses": {
+      "http://127.0.0.1:8096/api/gen/health": 200,
+      "http://127.0.0.1:8096/api/gen/history": 401,
+      "http://127.0.0.1:8096/api/gen/digital-human-v2/history": 404
+    },
+    "backup_started": false,
+    "write_started": false,
+    "restart_started": false,
     "files": 3
   },
   "deployment_policy": {
@@ -62,8 +69,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
-    "source_blob": "5d64d4513cb961c6778b6476859d03fcb38776e9",
-    "source_sha256": "658342aad43286881245894b3ff18e067f17037a98da99f6f10ed9e354f2d180",
+    "source_blob": "81ca345a5bc1446a6a900b4b3fd8e602d525a013",
+    "source_sha256": "ea823f3fd2f2c9e3c625fa5d69c3e1130afdc138ae9945e0868a1112ae74ae9b",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
@@ -147,8 +154,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "4659a9e704238fb9f523a0893489c344180e0f17",
-      "source_sha256": "68cff145dfa8ba4630352415066766a3bfe77140c78bc3487e26cf8f145dd293"
+      "source_blob": "ef705875ecf8d4e67d0f18daccbf23a213ba4997",
+      "source_sha256": "e947f8c7f5d635d6d46dda4b015feef1b9c8063825d71046d1e7329e2a7184ac"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -157,8 +164,8 @@
     },
     {
       "repository_path": "tests/test_seedream_v3_release_executor.py",
-      "source_blob": "ac2eaa372769c9c3adbf3a20733dc919544724b7",
-      "source_sha256": "d68f19b2ddbb2f8d2a8e6a0ed44f010dd6626421fe5600e125f3bc5769ac17e4"
+      "source_blob": "aff06fa7bda6808c81912e71f754bd0b3186fb02",
+      "source_sha256": "4e4ef4537e639c01a4fd97584cc7cc87e22a8c92a1b54ae9912d33d29472fb60"
     },
     {
       "repository_path": "tests/test_unified_voice_v6_release.py",
@@ -191,9 +198,9 @@
   },
   "health_probe_policy": {"startup_timeout_seconds": 60, "interval_seconds": 1},
   "health_checks": [
-    {"url": "http://127.0.0.1:8096/api/gen/health", "expected_status": 200},
-    {"url": "http://127.0.0.1:8096/api/gen/history", "expected_status": 401},
-    {"url": "http://127.0.0.1:8096/api/gen/digital-human-v2/history", "expected_status": 401}
+    {"url": "http://127.0.0.1:8096/api/gen/health", "target_repository_path": "server/content_domains/digital_human_v2.py", "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py", "pre_status_by_disposition": {"needs_install": 200, "already_installed": 200, "unchanged": 200}, "post_expected_status": 200, "rollback_status_by_disposition": {"needs_install": 200, "already_installed": 200, "unchanged": 200}},
+    {"url": "http://127.0.0.1:8096/api/gen/history", "target_repository_path": "server/content_domains/digital_human_v2.py", "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py", "pre_status_by_disposition": {"needs_install": 401, "already_installed": 401, "unchanged": 401}, "post_expected_status": 401, "rollback_status_by_disposition": {"needs_install": 401, "already_installed": 401, "unchanged": 401}},
+    {"url": "http://127.0.0.1:8096/api/gen/digital-human-v2/history", "target_repository_path": "server/content_domains/digital_human_v2.py", "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py", "pre_status_by_disposition": {"needs_install": 404, "already_installed": 401, "unchanged": 401}, "post_expected_status": 401, "rollback_status_by_disposition": {"needs_install": 404, "already_installed": 401, "unchanged": 401}}
   ],
   "rollback": {
     "scope": "all three manifest targets as one unit",

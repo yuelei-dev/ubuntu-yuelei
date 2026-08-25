@@ -36,6 +36,66 @@ MANIFEST_REPOSITORY_PATHS = {
     "deploy/test-runtime/digital-human-material-seedream-v3-20260821.json",
     "docs/release-manifests/digital-human-material-feishu-priority-20260823.json",
 }
+HEALTH_PHASE_STATUS_FIELDS = {
+    "pre-deployment": "pre_status_by_disposition",
+    "post-deployment": "post_expected_status",
+    "rollback": "rollback_status_by_disposition",
+}
+DIGITAL_HUMAN_REPOSITORY_PATH = "server/content_domains/digital_human_v2.py"
+DIGITAL_HUMAN_RUNTIME_PATH = (
+    "/home/ubuntu/content-api/content_domains/digital_human_v2.py"
+)
+START_DISPOSITIONS = frozenset({
+    "needs_install", "already_installed", "unchanged",
+})
+APPROVED_HEALTH_CONTRACT = {
+    "http://127.0.0.1:8096/api/gen/health": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 200,
+            "already_installed": 200,
+            "unchanged": 200,
+        },
+        "post_expected_status": 200,
+        "rollback_status_by_disposition": {
+            "needs_install": 200,
+            "already_installed": 200,
+            "unchanged": 200,
+        },
+    },
+    "http://127.0.0.1:8096/api/gen/history": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 401,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+        "post_expected_status": 401,
+        "rollback_status_by_disposition": {
+            "needs_install": 401,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+    },
+    "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 404,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+        "post_expected_status": 401,
+        "rollback_status_by_disposition": {
+            "needs_install": 404,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+    },
+}
+APPROVED_HEALTH_URLS = frozenset(APPROVED_HEALTH_CONTRACT)
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 ALLOWED_DEPLOYMENT_TOOLS = frozenset({
@@ -670,11 +730,129 @@ class ContentWhisperRelease:
             raise ReleaseError("health retry interval must be between 0.1 and 5 seconds")
         return timeout, interval
 
-    def _verify_health(self, prefix=""):
+    @staticmethod
+    def _status_value(value, label):
+        if type(value) is not int or not 100 <= value <= 599:
+            raise ReleaseError("%s must be an HTTP status integer" % label)
+        return value
+
+    def _validated_start_disposition(self, check, start_states):
+        if not isinstance(start_states, list):
+            raise ReleaseError("health start states must be an explicit list")
+        manifest_targets = {
+            (entry["repository_path"], entry["runtime_path"]): entry
+            for entry in self.manifest.get("files", [])
+        }
+        if len(manifest_targets) != len(self.manifest.get("files", [])):
+            raise ReleaseError("manifest runtime target mapping is duplicated")
+        actual_targets = {}
+        for record in start_states:
+            if not isinstance(record, dict):
+                raise ReleaseError("health start state record must be an object")
+            key = (record.get("repository_path"), record.get("runtime_path"))
+            if key not in manifest_targets:
+                raise ReleaseError("health start state has an unknown runtime mapping")
+            if key in actual_targets:
+                raise ReleaseError("health start state runtime mapping is duplicated")
+            disposition = record.get("disposition")
+            if disposition not in START_DISPOSITIONS:
+                raise ReleaseError("health start state disposition is unknown")
+            entry = manifest_targets[key]
+            if disposition == "needs_install":
+                expected = (
+                    entry["target_preimage_state"],
+                    entry["target_preimage_sha256"],
+                    entry.get("target_preimage_blob"),
+                )
+            elif disposition == "already_installed":
+                expected = (
+                    "file", entry["expected_postimage_sha256"],
+                    entry["expected_postimage_blob"],
+                )
+            else:
+                preimage = (
+                    entry["target_preimage_state"],
+                    entry["target_preimage_sha256"],
+                    entry.get("target_preimage_blob"),
+                )
+                postimage = (
+                    "file", entry["expected_postimage_sha256"],
+                    entry["expected_postimage_blob"],
+                )
+                if preimage != postimage:
+                    raise ReleaseError(
+                        "unchanged disposition conflicts with manifest file locks"
+                    )
+                expected = preimage
+            actual = (
+                record.get("state"), record.get("sha256"), record.get("blob"),
+            )
+            if actual != expected:
+                raise ReleaseError(
+                    "health start state does not match manifest file lock"
+                )
+            actual_targets[key] = record
+        if set(actual_targets) != set(manifest_targets):
+            raise ReleaseError("health start state runtime mapping is incomplete")
+        target_key = (
+            check["target_repository_path"], check["target_runtime_path"],
+        )
+        if target_key not in actual_targets:
+            raise ReleaseError("health check target runtime mapping is missing")
+        return actual_targets[target_key]["disposition"]
+
+    def _health_expected_status(self, check, phase, status_field, start_states):
+        if HEALTH_PHASE_STATUS_FIELDS.get(phase) != status_field:
+            raise ReleaseError("health phase and status field do not match")
+        if status_field == "post_expected_status":
+            if start_states is not None:
+                raise ReleaseError("post-deployment health must not use start states")
+            return self._status_value(
+                check.get(status_field), status_field,
+            )
+        disposition = self._validated_start_disposition(check, start_states)
+        statuses = check.get(status_field)
+        if not isinstance(statuses, dict) or set(statuses) != START_DISPOSITIONS:
+            raise ReleaseError(
+                "%s must lock every start disposition" % status_field
+            )
+        return self._status_value(statuses[disposition], status_field)
+
+    def _validate_health_contract(self):
+        checks = self.manifest.get("health_checks")
+        expected_fields = {
+            "url", "target_repository_path", "target_runtime_path",
+            "pre_status_by_disposition", "post_expected_status",
+            "rollback_status_by_disposition",
+        }
+        if (not isinstance(checks, list) or len(checks) != 3
+                or any(not isinstance(check, dict)
+                       or set(check) != expected_fields for check in checks)):
+            raise ReleaseError("health checks must use the exact phase-aware contract")
+        urls = [str(check["url"]) for check in checks]
+        if len(set(urls)) != len(urls) or set(urls) != APPROVED_HEALTH_URLS:
+            raise ReleaseError("health checks must lock the three approved local URLs")
+        actual_contract = {
+            check["url"]: {
+                key: value for key, value in check.items() if key != "url"
+            }
+            for check in checks
+        }
+        if actual_contract != APPROVED_HEALTH_CONTRACT:
+            raise ReleaseError("health phase statuses do not match the locked contract")
+        for check in checks:
+            self._health_expected_status(
+                check, "post-deployment", "post_expected_status", None,
+            )
+
+    def _verify_health(self, *, phase, status_field, start_states):
+        self._validate_health_contract()
         timeout, interval = self._health_probe_policy()
         deadline = self.monotonic() + timeout
         for check in self.manifest["health_checks"]:
-            expected = int(check["expected_status"])
+            expected = self._health_expected_status(
+                check, phase, status_field, start_states,
+            )
             last_status = None
             last_error = None
             while True:
@@ -693,17 +871,13 @@ class ContentWhisperRelease:
                         else "status %s" % last_status
                     )
                     raise ReleaseError(
-                        "%shealth readiness timeout for %s: expected %s, last %s" %
-                        (prefix, check["url"], expected, detail)
+                        "%s health readiness timeout for %s: expected %s, last %s" %
+                        (phase, check["url"], expected, detail)
                     )
                 self.sleeper(min(interval, remaining))
 
     def _http_status(self, url):
-        locked_urls = {
-            str(check.get("url") or "")
-            for check in self.manifest.get("health_checks", [])
-            if isinstance(check, dict)
-        }
+        locked_urls = APPROVED_HEALTH_URLS
         parsed = urllib.parse.urlsplit(url)
         if (url not in locked_urls
                 or parsed.scheme != "http"
@@ -1018,7 +1192,11 @@ class ContentWhisperRelease:
             try:
                 self._run_stage("rollback_restart")
                 self._run_stage("rollback_service_active")
-                self._verify_health("rollback ")
+                self._verify_health(
+                    phase="rollback",
+                    status_field="rollback_status_by_disposition",
+                    start_states=self.start_states,
+                )
             except Exception as exc:
                 failures.append("rollback service: %s" % exc)
         if failures:
@@ -1036,12 +1214,17 @@ class ContentWhisperRelease:
         self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
+        self._validate_health_contract()
         self.start_states = manifest_verify.classify_start_states(
             self.manifest, self.runtime.root,
         )
         self.checkpoint("start_state_complete")
         self._run_stage("pre_service_active")
-        self._verify_health("pre-deployment ")
+        self._verify_health(
+            phase="pre-deployment",
+            status_field="pre_status_by_disposition",
+            start_states=self.start_states,
+        )
         self._verify_feishu_operational("pre-deployment")
         self.checkpoint("pre_health")
         self._backup_all(self.start_states)
@@ -1059,7 +1242,11 @@ class ContentWhisperRelease:
                 self.restart_attempted = True
                 self._run_stage("restart")
                 self._run_stage("service_active")
-            self._verify_health()
+            self._verify_health(
+                phase="post-deployment",
+                status_field="post_expected_status",
+                start_states=None,
+            )
             self._verify_feishu_operational("post-restart")
             self.checkpoint("health")
         except Exception as release_error:

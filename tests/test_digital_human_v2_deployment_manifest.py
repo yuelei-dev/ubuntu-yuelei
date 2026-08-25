@@ -217,22 +217,35 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             self._assert_blob_and_sha256(blob_id, sha256)
         observation = self.manifest["preimage_observation"]
         self.assertEqual(observation["target"], "test@8.148.158.106")
-        self.assertIn("read-only", observation["capture_method"])
+        self.assertEqual(
+            observation["capture_method"],
+            "user-provided read-only server pre-deployment observation, "
+            "cross-checked against exact target hashes; the modification task "
+            "made no server access",
+        )
+        self.assertNotIn("Git main", observation["capture_method"])
         self.assertEqual(
             observation["captured_at"],
-            "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
+            "2026-08-25 (user-provided read-only pre-deployment evidence; no server access in this task)",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+            "864f557f6003f92083a8e2d366800d63d041b7ce",
         )
         self.assertIn("no server access", observation["repository_git_metadata"])
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+            "864f557f6003f92083a8e2d366800d63d041b7ce",
         )
         self.assertEqual(observation["service_state"], "active")
-        self.assertEqual(observation["health_status"], 200)
+        self.assertEqual(observation["health_statuses"], {
+            "http://127.0.0.1:8096/api/gen/health": 200,
+            "http://127.0.0.1:8096/api/gen/history": 401,
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history": 404,
+        })
+        self.assertFalse(observation["backup_started"])
+        self.assertFalse(observation["write_started"])
+        self.assertFalse(observation["restart_started"])
         self.assertEqual(observation["files"], 3)
 
     def test_tampered_successor_preimage_lock_is_rejected(self):
@@ -359,15 +372,76 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertNotIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("tests.test_heygen_mcp_oauth", rendered)
-        self.assertEqual(
-            {200, 401},
-            {int(item["expected_status"]) for item in self.manifest["health_checks"]},
-        )
+        target = {
+            "target_repository_path": "server/content_domains/digital_human_v2.py",
+            "target_runtime_path": (
+                "/home/ubuntu/content-api/content_domains/digital_human_v2.py"
+            ),
+        }
+        expected_health = {
+            "http://127.0.0.1:8096/api/gen/health": {
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 200,
+                    "already_installed": 200,
+                    "unchanged": 200,
+                },
+                "post_expected_status": 200,
+                "rollback_status_by_disposition": {
+                    "needs_install": 200,
+                    "already_installed": 200,
+                    "unchanged": 200,
+                },
+            },
+            "http://127.0.0.1:8096/api/gen/history": {
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 401,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
+                "post_expected_status": 401,
+                "rollback_status_by_disposition": {
+                    "needs_install": 401,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
+            },
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 404,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
+                "post_expected_status": 401,
+                "rollback_status_by_disposition": {
+                    "needs_install": 404,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
+            },
+        }
+        actual_health = {
+            item["url"]: {
+                key: value for key, value in item.items() if key != "url"
+            }
+            for item in self.manifest["health_checks"]
+        }
+        self.assertEqual(expected_health, actual_health)
         history = next(
             item for item in self.manifest["health_checks"]
             if item["url"].endswith("/api/gen/digital-human-v2/history")
         )
-        self.assertEqual(401, history["expected_status"])
+        self.assertEqual(401, history["post_expected_status"])
+        self.assertEqual(
+            {"needs_install": 404, "already_installed": 401, "unchanged": 401},
+            history["pre_status_by_disposition"],
+        )
+        self.assertEqual(
+            history["pre_status_by_disposition"],
+            history["rollback_status_by_disposition"],
+        )
 
     def test_voice_state_node_test_is_ci_only_and_content_locked(self):
         ci = CI_PATH.read_text(encoding="utf-8")
