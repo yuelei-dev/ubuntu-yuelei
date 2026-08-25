@@ -933,9 +933,9 @@ class TrustedPlannerAdapter:
             for item in plan["files"]:
                 metadata = state["runtime_metadata"].get(item["runtime_path"])
                 expected = {"mode": item["mode"], "owner": item["owner"], "group": item["group"]}
-                if metadata != expected:
+                if item["before"]["state"] == "file" and metadata != expected:
                     raise TransactionError("preimage metadata differs from immutable catalog mapping")
-                item["before_metadata"] = dict(metadata)
+                item["before_metadata"] = dict(expected if metadata is None else metadata)
         return plan
 
     def verify_identity(self):

@@ -339,6 +339,21 @@ class TransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(transaction.TransactionError, "non-allowlisted"):
             self.executor.apply(MERGE, EVIDENCE)
 
+    def test_absent_preimage_uses_catalog_metadata_without_fabricating_a_file(self):
+        original = self.planner.build_plan
+        self.hooks.files.pop(RUNTIME)
+        self.hooks.modes.pop(RUNTIME)
+
+        def added_plan(target, evidence):
+            plan = original(target, evidence)
+            plan["files"][0]["before"] = {"state": "absent", "sha256": None}
+            return plan
+
+        self.planner.build_plan = added_plan
+        result = self.executor.apply(MERGE, EVIDENCE)
+        self.assertEqual("deployed", result["status"])
+        self.assertEqual(NEW, self.hooks.files[RUNTIME])
+
     def test_crash_after_ledger_commit_recovers_as_committed_without_rollback(self):
         def crash(point):
             if point == "after-ledger":
