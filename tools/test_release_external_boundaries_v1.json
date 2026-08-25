@@ -21,7 +21,7 @@
       "parent_contracts": [
         {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
         {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]},
-        {"path": "/home/ubuntu/hermes-ip12-releases", "owner": "ubuntu", "group": "ubuntu", "modes": ["0755"]}
+        {"path": "/home/ubuntu/hermes-ip12-releases", "owner": "root", "group": "root", "modes": ["0755"]}
       ],
       "write_policy": "never_follow_never_write"
     }

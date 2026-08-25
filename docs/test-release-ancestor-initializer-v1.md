@@ -34,7 +34,7 @@ administrator must install:
   "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
   "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
   "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
-  "boundary_contract_sha256": "c16bef8ebd8463958e2e0cd2194b8f1eb8e78fe789030b2cf61d1bfa2b485e5a",
+  "boundary_contract_sha256": "98889991d7b2db6f151ff1671b17670e3e62a1b1bc5deee25d921f58aba79e19",
   "launcher": "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1",
   "launcher_sha256": "a194d305a95548766c2310e74a42e49ff023bc1081ba3450806dbf3acf3459f4"
 }
@@ -77,6 +77,9 @@ shared runtime data. Both classes are explicit catalog extensions with
 target metadata but never follows or hashes their mutable target contents.
 The reviewed contract binds the observed `/home/ubuntu` parent to exact mode
 `0751`; broader `0755`, `0775`, or `0777` modes are not accepted.
+The Hermes releases parent `/home/ubuntu/hermes-ip12-releases` is bound to
+root:root `0755`, while the selected release directory remains ubuntu:ubuntu
+`0775` and the `/home/ubuntu/hermes-web` link remains root:root `0777`.
 
 Upgrade order is boundary module, boundary JSON, initializer, launcher, then the
 private bootstrap in one root-controlled maintenance operation. Verify every
