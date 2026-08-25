@@ -1,8 +1,8 @@
 # Unified test release transaction executor v1
 
 `tools/test_release_transaction.py` is the write-capable second phase of the
-test-release platform. It does not change the runtime catalog or GitHub
-workflows. It consumes the exact read-only plan
+test-release platform. It does not change the immutable phase-one verifier,
+runtime catalog, or GitHub workflows. It consumes the exact read-only plan
 returned by the installed `scripts/release_test.py` and adds only transactional
 `apply` and `recover` behavior.
 
@@ -21,7 +21,7 @@ must be root-owned, mode `0600`, and contain exactly:
   "transaction_entrypoint": "/usr/local/libexec/huangque-release/test_release_transaction.py",
   "transaction_sha256": "REPLACE_WITH_REVIEWED_EXECUTOR_SHA256",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
-  "phase_one_sha256": "056318930098881f45c5dd8cab7dbe1ee33d3f2b21b32e4fb0b1e72eb312143b",
+  "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
   "launcher_sha256": "REPLACE_WITH_REVIEWED_LAUNCHER_SHA256",
   "state_root": "/var/lib/huangque-release"

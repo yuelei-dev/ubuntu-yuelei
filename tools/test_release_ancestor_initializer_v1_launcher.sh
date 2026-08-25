@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-LAUNCHER=/usr/local/sbin/huangque-release-test
-ENTRYPOINT=/usr/local/libexec/huangque-release/release_test.py
-EXPECTED_ENTRYPOINT_SHA256=d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb
+LAUNCHER=/usr/local/sbin/huangque-release-test-initialize-ancestor-v1
+ENTRYPOINT=/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py
+EXPECTED_ENTRYPOINT_SHA256=5ab5a71b60e070906f3987f88f8fad95b045a99bb86abcdca1ae755ba638f445
 
 fail() {
-    /usr/bin/printf '%s\n' "huangque release launcher: $1" >&2
+    /usr/bin/printf '%s\n' "huangque ancestor initializer launcher: $1" >&2
     exit 126
 }
 
@@ -21,12 +21,11 @@ done
 [ "$(/usr/bin/stat -c '%u:%g:%a:%F' -- "$LAUNCHER")" = "0:0:755:regular file" ] \
     || fail "untrusted launcher"
 [ "$(/usr/bin/stat -c '%u:%g:%a:%F' -- "$ENTRYPOINT")" = "0:0:755:regular file" ] \
-    || fail "untrusted entrypoint"
+    || fail "untrusted initializer"
 
 actual_sha256=$(/usr/bin/sha256sum -- "$ENTRYPOINT")
 actual_sha256=${actual_sha256%% *}
-[ "$actual_sha256" = "$EXPECTED_ENTRYPOINT_SHA256" ] \
-    || fail "entrypoint hash mismatch"
+[ "$actual_sha256" = "$EXPECTED_ENTRYPOINT_SHA256" ] || fail "initializer hash mismatch"
 
 exec /usr/bin/env -i \
     HOME=/root \

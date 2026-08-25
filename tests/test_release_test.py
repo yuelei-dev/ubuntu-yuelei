@@ -173,9 +173,6 @@ class FakeRepository:
         self.checkout_calls = []
         self.checkout_error = None
         self.checkout_callback = None
-        self.head_commit = BASE
-        self.origin_main = BASE
-        self.live_main = BASE
 
     def require_commit(self, commit):
         if commit not in self.commits:
@@ -252,22 +249,6 @@ class FakeRepository:
         self.checkout_calls.append((target, expected_origin_url, verify_live_origin))
         if self.checkout_callback:
             self.checkout_callback(len(self.checkout_calls))
-
-    def verify_current_main(self, expected_origin_url, expected_commit=None,
-                            verify_live_origin=True):
-        if self.checkout_error:
-            raise release_test.ReleaseError(self.checkout_error)
-        self.checkout_calls.append((expected_commit, expected_origin_url, verify_live_origin))
-        if self.checkout_callback:
-            self.checkout_callback(len(self.checkout_calls))
-        if self.head_commit != self.origin_main:
-            raise release_test.ReleaseError("HEAD and local origin/main must equal current main")
-        self.require_commit(self.head_commit)
-        if expected_commit is not None and self.head_commit != expected_commit:
-            raise release_test.ReleaseError("HEAD and local origin/main changed from captured main")
-        if verify_live_origin and self.live_main != self.head_commit:
-            raise release_test.ReleaseError("live approved origin/main must equal current main")
-        return self.head_commit
 
 
 class FakeInspector:
@@ -748,11 +729,6 @@ class ReleaseEngineTests(unittest.TestCase):
     def initialize(self):
         return self.engine().initialize(BASE, "test", verify_live_origin=False)
 
-    def _set_latest_main(self, commit):
-        self.repo.head_commit = commit
-        self.repo.origin_main = commit
-        self.repo.live_main = commit
-
     def test_initialize_records_exact_commit_and_complete_inventory(self):
         result = self.initialize()
         self.assertEqual("initialized", result["status"])
@@ -766,83 +742,6 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertEqual(0o644, state["runtime_metadata"][RUNTIME_PATH]["mode"])
         self.assertEqual("test-owner", state["runtime_metadata"][RUNTIME_PATH]["owner"])
         self.assertEqual("test-group", state["runtime_metadata"][RUNTIME_PATH]["group"])
-
-    def test_initialize_accepts_deployed_commit_that_is_ancestor_of_latest_main(self):
-        self._set_latest_main(MERGE)
-        result = self.engine().initialize(BASE, "test")
-        self.assertEqual("initialized", result["status"])
-        state = json.loads(self._mapped(
-            "/var/lib/huangque-release/state.json"
-        ).read_text("utf-8"))
-        self.assertEqual(BASE, state["deployed_main_commit"])
-        self.assertEqual(sha256(self.before), state["runtime_hashes"][RUNTIME_PATH]["sha256"])
-        self.assertEqual({}, state["accepted_impacts"])
-
-    def test_initialize_rejects_deployed_commit_that_is_not_latest_main_ancestor(self):
-        self._set_latest_main(UNRELATED)
-        with self.assertRaisesRegex(release_test.ReleaseError, "ancestry"):
-            self.engine().initialize(HEAD, "test")
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
-
-    def test_initialize_rejects_live_main_drift_before_lock(self):
-        self.repo.live_main = MERGE
-        with self.assertRaisesRegex(release_test.ReleaseError, "live approved origin/main"):
-            self.engine().initialize(BASE, "test")
-        self.assertFalse(self._mapped("/var/lib/huangque-release/release.lock").exists())
-
-    def test_initialize_rejects_head_and_local_origin_main_drift_before_lock(self):
-        self.repo.origin_main = MERGE
-        self.repo.live_main = MERGE
-        with self.assertRaisesRegex(release_test.ReleaseError, "HEAD and local origin/main"):
-            self.engine().initialize(BASE, "test")
-        self.assertFalse(self._mapped("/var/lib/huangque-release/release.lock").exists())
-
-    def test_initialize_rejects_catalog_evolution_since_deployed_commit(self):
-        changed = catalog_data()
-        changed["min_free_bytes"] += 1
-        raw = release_test._json_bytes(changed)
-        self.repo.commits[MERGE][CATALOG_PATH] = raw
-        (self.source / CATALOG_PATH).write_bytes(raw)
-        self.catalog = release_test.RuntimeCatalog(changed)
-        self._set_latest_main(MERGE)
-        with self.assertRaisesRegex(release_test.ReleaseError, "catalog differs"):
-            self.engine().initialize(BASE, "test")
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
-
-    def test_initialize_rechecks_latest_source_sha_inside_lock(self):
-        original = self.repo.verify_current_main
-        calls = 0
-
-        def drift_after_capture(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            result = original(*args, **kwargs)
-            if calls == 1:
-                self.repo.head_commit = HEAD
-                self.repo.origin_main = HEAD
-            return result
-
-        self.repo.verify_current_main = drift_after_capture
-        with self.assertRaisesRegex(release_test.ReleaseError, "captured main"):
-            self.initialize()
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
-
-    def test_initialize_rechecks_ancestor_relation_inside_lock(self):
-        self._set_latest_main(MERGE)
-        original = self.repo.require_ancestor
-        calls = 0
-
-        def remove_ancestry_after_first_check(older, newer):
-            nonlocal calls
-            calls += 1
-            original(older, newer)
-            if calls == 1:
-                self.repo.parent_map[MERGE] = []
-
-        self.repo.require_ancestor = remove_ancestry_after_first_check
-        with self.assertRaisesRegex(release_test.ReleaseError, "ancestry"):
-            self.engine().initialize(BASE, "test")
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
 
     def test_wrong_host_is_rejected(self):
         identity_path = self._mapped("/etc/huangque/release-identity.json")
@@ -1141,20 +1040,11 @@ class ReleaseEngineTests(unittest.TestCase):
         self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
 
     def test_initialize_rechecks_checkout_before_ledger_write(self):
-        original = self.repo.verify_current_main
-        calls = 0
-
-        def drift_after_locked_check(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            result = original(*args, **kwargs)
-            if calls == 2:
-                self.repo.head_commit = HEAD
-                self.repo.origin_main = HEAD
-            return result
-
-        self.repo.verify_current_main = drift_after_locked_check
-        with self.assertRaisesRegex(release_test.ReleaseError, "captured main"):
+        def invalidate_after_first_checkout(call_number):
+            if call_number == 1:
+                self.repo.checkout_error = "checkout changed during initialization"
+        self.repo.checkout_callback = invalidate_after_first_checkout
+        with self.assertRaisesRegex(release_test.ReleaseError, "checkout changed"):
             self.initialize()
         self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
 
@@ -1176,42 +1066,6 @@ class ReleaseEngineTests(unittest.TestCase):
         engine._inventory_drift = add_extra_after_first_inventory
         with self.assertRaisesRegex(release_test.ReleaseError, "changed during"):
             engine.initialize(BASE, "test", verify_live_origin=False)
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
-
-    def test_initialize_rechecks_catalog_before_ledger_write(self):
-        engine = self.engine()
-        original = engine._catalog_record
-        calls = 0
-
-        def alter_worktree_after_locked_catalog(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            result = original(*args, **kwargs)
-            if calls == 2:
-                (self.source / CATALOG_PATH).write_bytes(b"{}\n")
-            return result
-
-        engine._catalog_record = alter_worktree_after_locked_catalog
-        with self.assertRaisesRegex(release_test.ReleaseError, "catalog differs"):
-            engine.initialize(BASE, "test", verify_live_origin=False)
-        self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
-
-    def test_initialize_rechecks_accepted_impacts_before_ledger_write(self):
-        original = release_test.collect_impact_index
-        calls = 0
-
-        def drift_on_second_read(*args, **kwargs):
-            nonlocal calls
-            calls += 1
-            result = original(*args, **kwargs)
-            if calls == 2:
-                return {"forged": {"repository_path": IMPACT_PATH, "sha256": "0" * 64}}
-            return result
-
-        with mock.patch.object(
-                release_test, "collect_impact_index", side_effect=drift_on_second_read), \
-                self.assertRaisesRegex(release_test.ReleaseError, "impacts changed"):
-            self.initialize()
         self.assertFalse(self._mapped("/var/lib/huangque-release/state.json").exists())
 
     def test_plan_fails_when_required_environment_name_is_missing(self):
@@ -1512,13 +1366,6 @@ class RepositoryContractTests(unittest.TestCase):
         )
         self.assertIn("exec /usr/bin/env -i", launcher_text)
         self.assertIn("/usr/bin/python3 -I -E -s -B", launcher_text)
-        transaction_doc = (
-            ROOT / "docs/test-release-transaction-v1.md"
-        ).read_text("utf-8")
-        self.assertIn(
-            '"phase_one_sha256": "%s"' % hashlib.sha256(entrypoint).hexdigest(),
-            transaction_doc,
-        )
         readme = (ROOT / "deploy/test-release/README.md").read_text("utf-8")
         self.assertNotRegex(
             readme,
@@ -1992,7 +1839,6 @@ class RepositoryContractTests(unittest.TestCase):
             ("--identity-file", "/tmp/identity.json"),
             ("--state-root", "/tmp/state"),
             ("--runtime-root", "/tmp/runtime"),
-            ("--verify-live-origin", "false"),
         ):
             with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):

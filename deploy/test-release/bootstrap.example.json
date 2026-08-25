@@ -1,8 +1,8 @@
 {
   "entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
-  "entrypoint_sha256": "056318930098881f45c5dd8cab7dbe1ee33d3f2b21b32e4fb0b1e72eb312143b",
+  "entrypoint_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test",
-  "launcher_sha256": "82975cc703d9071c820cae576d2fe3e573a11b525a538f89a17be4c3b71edc38",
+  "launcher_sha256": "f226ebab22b3054e83a6ec42d97564d0627647ee2de1ac642de9b401c4f289fe",
   "schema_version": 1,
   "source_root": "/opt/huangque-test-release"
 }

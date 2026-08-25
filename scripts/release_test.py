@@ -619,8 +619,9 @@ class GitRepository:
             for item in raw.split(b"\0") if item
         ]
 
-    def verify_current_main(self, expected_origin_url, *, expected_commit=None,
-                            verify_live_origin=True):
+    def verify_checkout(self, target_commit, expected_origin_url,
+                        *, verify_live_origin=True):
+        self.require_commit(target_commit)
         if self.output(["status", "--porcelain", "--untracked-files=normal"]):
             raise ReleaseError("release source checkout must be clean")
         if self.output(["symbolic-ref", "--short", "HEAD"]) != "main":
@@ -629,24 +630,12 @@ class GitRepository:
             raise ReleaseError("origin repository identity is not approved")
         head = self.output(["rev-parse", "HEAD"])
         origin_main = self.output(["rev-parse", "refs/remotes/origin/main"])
-        if not COMMIT_RE.fullmatch(head) or head != origin_main:
-            raise ReleaseError("HEAD and local origin/main must equal current main")
-        self.require_commit(head)
-        if expected_commit is not None and head != expected_commit:
-            raise ReleaseError("HEAD and local origin/main changed from captured main")
+        if head != target_commit or origin_main != target_commit:
+            raise ReleaseError("HEAD and local origin/main must equal target commit")
         if verify_live_origin:
             remote_main = self.remote_main_resolver(expected_origin_url)
-            if remote_main != head:
-                raise ReleaseError("live approved origin/main must equal current main")
-        return head
-
-    def verify_checkout(self, target_commit, expected_origin_url,
-                        *, verify_live_origin=True):
-        self.require_commit(target_commit)
-        return self.verify_current_main(
-            expected_origin_url, expected_commit=target_commit,
-            verify_live_origin=verify_live_origin,
-        )
+            if remote_main != target_commit:
+                raise ReleaseError("live approved origin/main must equal target commit")
 
 
 class RuntimeCatalog:
@@ -1991,22 +1980,20 @@ class ReleaseEngine:
         # Read-only trust checks run before the lock path is touched, then are
         # repeated under the lock to close the time-of-check/time-of-use gap.
         self.verify_identity()
-        latest_main = self.repo.verify_current_main(
-            self.catalog.target["origin_url"],
+        self.repo.verify_checkout(
+            deployed_commit, self.catalog.target["origin_url"],
             verify_live_origin=verify_live_origin,
         )
-        self.repo.require_ancestor(deployed_commit, latest_main)
         self._catalog_record(deployed_commit)
         validate_catalog_coverage(self.repo, self.catalog, deployed_commit)
         with self._release_lock():
             if _read_regular(self.runtime_root, self._state_runtime_path("state.json")) is not None:
                 raise ReleaseError("deployment ledger was initialized concurrently")
             identity = self.verify_identity()
-            self.repo.verify_current_main(
-                self.catalog.target["origin_url"], expected_commit=latest_main,
+            self.repo.verify_checkout(
+                deployed_commit, self.catalog.target["origin_url"],
                 verify_live_origin=False,
             )
-            self.repo.require_ancestor(deployed_commit, latest_main)
             catalog_record = self._catalog_record(deployed_commit)
             validate_catalog_coverage(self.repo, self.catalog, deployed_commit)
             runtime_hashes, repository_paths, runtime_metadata = (
@@ -2039,11 +2026,10 @@ class ReleaseEngine:
             # Repeat every mutable observation immediately before the ledger write.
             if self.verify_identity() != identity:
                 raise ReleaseError("release identity changed during initialization")
-            self.repo.verify_current_main(
-                self.catalog.target["origin_url"], expected_commit=latest_main,
+            self.repo.verify_checkout(
+                deployed_commit, self.catalog.target["origin_url"],
                 verify_live_origin=False,
             )
-            self.repo.require_ancestor(deployed_commit, latest_main)
             self._catalog_record(deployed_commit, expected=catalog_record)
             if collect_impact_index(
                     self.repo, self.catalog, deployed_commit
