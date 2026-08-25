@@ -16,6 +16,10 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXECUTOR = ROOT / "scripts" / "deploy_director_locked_manifest.py"
+CLI_EXECUTOR = (
+    ROOT / "release-manifests" / "tools" /
+    "deploy_director_cli_locked_manifest.py"
+)
 MANIFEST = (
     ROOT / "deploy" / "test-runtime" / "director-agent-v2-20260821.json"
 )
@@ -26,6 +30,15 @@ HISTORICAL_MANIFEST = (
 
 def _load_executor():
     spec = importlib.util.spec_from_file_location("director_release", EXECUTOR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_cli_executor():
+    spec = importlib.util.spec_from_file_location(
+        "director_cli_release", CLI_EXECUTOR,
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -542,7 +555,7 @@ class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.module = _load_executor()
+        cls.module = _load_cli_executor()
         cls.base_manifest = json.loads(cls.MANIFEST.read_text(encoding="utf-8"))
 
     def setUp(self):
@@ -651,7 +664,7 @@ class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
         )
         dependency = loaded["release_executor"]["cli_dependency"]
         self.assertEqual(5, len(dependency["files"]))
-        executor_data = EXECUTOR.read_bytes()
+        executor_data = CLI_EXECUTOR.read_bytes()
         self.assertEqual(
             hashlib.sha256(executor_data).hexdigest(),
             loaded["release_executor"]["sha256"],
@@ -659,6 +672,15 @@ class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
         self.assertEqual(
             DirectorAgentReleaseExecutorTests._blob(executor_data),
             loaded["release_executor"]["git_blob"],
+        )
+        supporting = loaded["release_executor"]["supporting_executor"]
+        supporting_data = EXECUTOR.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(supporting_data).hexdigest(), supporting["sha256"],
+        )
+        self.assertEqual(
+            DirectorAgentReleaseExecutorTests._blob(supporting_data),
+            supporting["git_blob"],
         )
         for entry in loaded["files"]:
             source = (ROOT / entry["repository_path"]).read_bytes()
