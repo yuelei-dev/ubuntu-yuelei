@@ -217,7 +217,13 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             self._assert_blob_and_sha256(blob_id, sha256)
         observation = self.manifest["preimage_observation"]
         self.assertEqual(observation["target"], "test@8.148.158.106")
-        self.assertIn("read-only", observation["capture_method"])
+        self.assertEqual(
+            observation["capture_method"],
+            "user-provided read-only server pre-deployment observation, "
+            "cross-checked against exact target hashes; the modification task "
+            "made no server access",
+        )
+        self.assertNotIn("Git main", observation["capture_method"])
         self.assertEqual(
             observation["captured_at"],
             "2026-08-25 (user-provided read-only pre-deployment evidence; no server access in this task)",
@@ -366,21 +372,54 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertNotIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("tests.test_heygen_mcp_oauth", rendered)
+        target = {
+            "target_repository_path": "server/content_domains/digital_human_v2.py",
+            "target_runtime_path": (
+                "/home/ubuntu/content-api/content_domains/digital_human_v2.py"
+            ),
+        }
         expected_health = {
             "http://127.0.0.1:8096/api/gen/health": {
-                "pre_expected_statuses": [200],
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 200,
+                    "already_installed": 200,
+                    "unchanged": 200,
+                },
                 "post_expected_status": 200,
-                "rollback_expected_statuses": [200],
+                "rollback_status_by_disposition": {
+                    "needs_install": 200,
+                    "already_installed": 200,
+                    "unchanged": 200,
+                },
             },
             "http://127.0.0.1:8096/api/gen/history": {
-                "pre_expected_statuses": [401],
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 401,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
                 "post_expected_status": 401,
-                "rollback_expected_statuses": [401],
+                "rollback_status_by_disposition": {
+                    "needs_install": 401,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
             },
             "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
-                "pre_expected_statuses": [404, 401],
+                **target,
+                "pre_status_by_disposition": {
+                    "needs_install": 404,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
                 "post_expected_status": 401,
-                "rollback_expected_statuses": [404, 401],
+                "rollback_status_by_disposition": {
+                    "needs_install": 404,
+                    "already_installed": 401,
+                    "unchanged": 401,
+                },
             },
         }
         actual_health = {
@@ -395,8 +434,14 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
             if item["url"].endswith("/api/gen/digital-human-v2/history")
         )
         self.assertEqual(401, history["post_expected_status"])
-        self.assertNotIn(200, history["pre_expected_statuses"])
-        self.assertNotIn(200, history["rollback_expected_statuses"])
+        self.assertEqual(
+            {"needs_install": 404, "already_installed": 401, "unchanged": 401},
+            history["pre_status_by_disposition"],
+        )
+        self.assertEqual(
+            history["pre_status_by_disposition"],
+            history["rollback_status_by_disposition"],
+        )
 
     def test_voice_state_node_test_is_ci_only_and_content_locked(self):
         ci = CI_PATH.read_text(encoding="utf-8")

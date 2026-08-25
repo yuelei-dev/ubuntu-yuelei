@@ -177,6 +177,35 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         release._install_all = mock.Mock(return_value=installed)
         return release, health_calls
 
+    def _start_states(self, digital_disposition, *, other_disposition=None):
+        records = []
+        for entry in self.manifest["files"]:
+            disposition = (
+                digital_disposition
+                if entry["repository_path"] ==
+                "server/content_domains/digital_human_v2.py"
+                else (other_disposition or digital_disposition)
+            )
+            if disposition == "needs_install":
+                state = entry["target_preimage_state"]
+                sha256 = entry["target_preimage_sha256"]
+                blob = entry.get("target_preimage_blob")
+            elif disposition == "already_installed":
+                state = "file"
+                sha256 = entry["expected_postimage_sha256"]
+                blob = entry["expected_postimage_blob"]
+            else:
+                self.fail("test helper only creates reachable start states")
+            records.append({
+                "repository_path": entry["repository_path"],
+                "runtime_path": entry["runtime_path"],
+                "state": state,
+                "sha256": sha256,
+                "blob": blob,
+                "disposition": disposition,
+            })
+        return records
+
     def test_versioned_executor_accepts_locked_successor(self):
         release = self._release(self.versioned)
         release._verify_release_tools()
@@ -284,9 +313,21 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         unapproved_url = "http://127.0.0.1:8096/api/gen/arbitrary"
         self.manifest["health_checks"].append({
             "url": unapproved_url,
-            "pre_expected_statuses": [401],
+            "target_repository_path": "server/content_domains/digital_human_v2.py",
+            "target_runtime_path": (
+                "/home/ubuntu/content-api/content_domains/digital_human_v2.py"
+            ),
+            "pre_status_by_disposition": {
+                "needs_install": 401,
+                "already_installed": 401,
+                "unchanged": 401,
+            },
             "post_expected_status": 401,
-            "rollback_expected_statuses": [401],
+            "rollback_status_by_disposition": {
+                "needs_install": 401,
+                "already_installed": 401,
+                "unchanged": 401,
+            },
         })
         release = self._release(self.versioned)
         with mock.patch.object(
@@ -327,17 +368,91 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             history: [401, 401],
             digital_history: [404, 401],
         })
+        start_states = self._start_states("needs_install")
         with mock.patch.object(
                 self.versioned.manifest_verify, "classify_start_states",
-                return_value=[]):
+                return_value=start_states):
             result = release.execute("test@8.148.158.106")
         self.assertEqual("deployed", result["status"])
-        release._backup_all.assert_called_once_with([])
+        release._backup_all.assert_called_once_with(start_states)
         release._install_all.assert_called_once()
         self.assertEqual(
             calls,
             [health, history, digital_history, health, history, digital_history],
         )
+
+    def test_needs_install_rejects_401_before_backup(self):
+        health = "http://127.0.0.1:8096/api/gen/health"
+        history = "http://127.0.0.1:8096/api/gen/history"
+        digital_history = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        release, _calls = self._prepare_execute_release({
+            health: [200],
+            history: [401],
+            digital_history: [401, 401, 401],
+        })
+        release.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
+        start_states = self._start_states("needs_install")
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=start_states):
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "pre-deployment health readiness timeout.*expected 404.*last status 401"):
+                release.execute("test@8.148.158.106")
+        release._backup_all.assert_not_called()
+        release._install_all.assert_not_called()
+
+    def test_already_installed_rejects_404_before_backup(self):
+        health = "http://127.0.0.1:8096/api/gen/health"
+        history = "http://127.0.0.1:8096/api/gen/history"
+        digital_history = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        release, _calls = self._prepare_execute_release({
+            health: [200],
+            history: [401],
+            digital_history: [404, 404, 404],
+        }, installed=0)
+        release.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
+        start_states = self._start_states("already_installed")
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=start_states):
+            with self.assertRaisesRegex(
+                    self.versioned.ReleaseError,
+                    "pre-deployment health readiness timeout.*expected 401.*last status 404"):
+                release.execute("test@8.148.158.106")
+        release._backup_all.assert_not_called()
+        release._install_all.assert_not_called()
+
+    def test_mixed_start_state_selects_digital_human_disposition(self):
+        health = "http://127.0.0.1:8096/api/gen/health"
+        history = "http://127.0.0.1:8096/api/gen/history"
+        digital_history = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        release, _calls = self._prepare_execute_release({
+            health: [200, 200],
+            history: [401, 401],
+            digital_history: [404, 401],
+        })
+        start_states = self._start_states(
+            "needs_install", other_disposition="already_installed",
+        )
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=start_states):
+            result = release.execute("test@8.148.158.106")
+        self.assertEqual("deployed", result["status"])
+        release._backup_all.assert_called_once_with(start_states)
 
     def test_post_health_failure_rolls_back_and_accepts_restored_404(self):
         health = "http://127.0.0.1:8096/api/gen/health"
@@ -354,9 +469,10 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             "startup_timeout_seconds": 2,
             "interval_seconds": 1,
         }
+        start_states = self._start_states("needs_install")
         with mock.patch.object(
                 self.versioned.manifest_verify, "classify_start_states",
-                return_value=[]), mock.patch.object(
+                return_value=start_states), mock.patch.object(
                     release, "_restore_all", wraps=release._restore_all,
                 ) as restore:
             with self.assertRaisesRegex(
@@ -368,6 +484,63 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
         self.assertIn(
             mock.call("rollback_restart"), release._run_stage.call_args_list,
         )
+
+    def test_rollback_rejects_401_when_needs_install_was_restored(self):
+        health = "http://127.0.0.1:8096/api/gen/health"
+        history = "http://127.0.0.1:8096/api/gen/history"
+        digital_history = (
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history"
+        )
+        release, _calls = self._prepare_execute_release({
+            health: [200, 200, 200],
+            history: [401, 401, 401],
+            digital_history: [404, 500, 500, 500, 401, 401, 401],
+        })
+        release.manifest["health_probe_policy"] = {
+            "startup_timeout_seconds": 2,
+            "interval_seconds": 1,
+        }
+        start_states = self._start_states("needs_install")
+        with mock.patch.object(
+                self.versioned.manifest_verify, "classify_start_states",
+                return_value=start_states):
+            with self.assertRaisesRegex(
+                    self.versioned.RollbackError,
+                    "release failed.*post-deployment.*rollback failed.*rollback service"):
+                release.execute("test@8.148.158.106")
+        self.assertIn(
+            mock.call("rollback_restart"), release._run_stage.call_args_list,
+        )
+
+    def test_health_start_state_mapping_is_fail_closed(self):
+        base = self._start_states("needs_install")
+        cases = {}
+        cases["incomplete"] = base[:-1]
+        cases["duplicate"] = base + [dict(base[0])]
+        unknown = [dict(item) for item in base]
+        unknown[0]["runtime_path"] += ".unknown"
+        cases["unknown runtime"] = unknown
+        disposition = [dict(item) for item in base]
+        disposition[0]["disposition"] = "maybe_installed"
+        cases["disposition is unknown"] = disposition
+        mismatch = [dict(item) for item in base]
+        mismatch[0]["sha256"] = "0" * 64
+        cases["does not match manifest file lock"] = mismatch
+        for expected, start_states in cases.items():
+            with self.subTest(expected=expected):
+                release = self._release(
+                    self.versioned,
+                    health_getter=lambda _url: self.fail(
+                        "health network must not run for invalid mapping"
+                    ),
+                )
+                with self.assertRaisesRegex(
+                        self.versioned.ReleaseError, expected):
+                    release._verify_health(
+                        phase="pre-deployment",
+                        status_field="pre_status_by_disposition",
+                        start_states=start_states,
+                    )
 
     def test_unapproved_pre_health_fails_before_backup_or_install(self):
         health = "http://127.0.0.1:8096/api/gen/health"
@@ -384,9 +557,10 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             "startup_timeout_seconds": 2,
             "interval_seconds": 1,
         }
+        start_states = self._start_states("needs_install")
         with mock.patch.object(
                 self.versioned.manifest_verify, "classify_start_states",
-                return_value=[]):
+                return_value=start_states):
             with self.assertRaisesRegex(
                     self.versioned.ReleaseError,
                     "pre-deployment health readiness timeout.*last status 200"):
@@ -413,9 +587,10 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             "startup_timeout_seconds": 2,
             "interval_seconds": 1,
         }
+        start_states = self._start_states("needs_install")
         with mock.patch.object(
                 self.versioned.manifest_verify, "classify_start_states",
-                return_value=[]):
+                return_value=start_states):
             with self.assertRaisesRegex(
                     self.versioned.ReleaseError,
                     "pre-deployment health readiness timeout.*connection unavailable"):
@@ -434,9 +609,10 @@ class SeedreamV3ReleaseExecutorTests(unittest.TestCase):
             history: [401, 401],
             digital_history: [401, 401],
         }, installed=0)
+        start_states = self._start_states("already_installed")
         with mock.patch.object(
                 self.versioned.manifest_verify, "classify_start_states",
-                return_value=[]):
+                return_value=start_states):
             result = release.execute("test@8.148.158.106")
         self.assertEqual("already_deployed", result["status"])
         self.assertEqual(0, result["restart_count"])
