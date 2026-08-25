@@ -11,15 +11,18 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
-import importlib.util
 import json
+import http.client
 import os
 import re
+import socket
+import ssl
 import shutil
 import stat
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 import urllib.request
 import uuid
@@ -41,6 +44,7 @@ DEFAULT_SOURCE_ROOT = "/opt/huangque-test-release"
 PHASE_ONE_ENTRYPOINT = "/usr/local/libexec/huangque-release/release_test.py"
 TRANSACTION_ENTRYPOINT = "/usr/local/libexec/huangque-release/test_release_transaction.py"
 TRANSACTION_BOOTSTRAP = "/etc/huangque/release-transaction-v1.json"
+TRANSACTION_LAUNCHER = "/usr/local/sbin/huangque-release-test-transaction"
 SYSTEMCTL = "/usr/bin/systemctl"
 JOURNAL_SCHEMA = 1
 HTTP_HEALTH_PROBES = {
@@ -60,6 +64,14 @@ SERVICE_HEALTH_PROBES = {
     "leadgen-b-active": "leadgen-B.service",
     "xiaotan-active": "xiaotan.service",
 }
+TRANSACTION_ID_RE = re.compile(r"^release-[0-9a-f]{12}-[0-9a-f]{12}$")
+BACKUP_NAME_RE = re.compile(r"^[0-9]{4}\.bin$")
+TYPE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
+OWNER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+SITE_LOOPBACK_ADDRESS = ("127.0.0.1", 443)
+SITE_LOOPBACK_HOST = "huangquechuanmei.com"
+SITE_LOOPBACK_PATH = "/workbench/private-domain-video.html"
+SITE_LOOPBACK_MAX_BYTES = 2 * 1024 * 1024
 
 
 class TransactionError(RuntimeError):
@@ -159,6 +171,12 @@ class HostHooks:
     def read(self, runtime_path):
         return _read_file(self.runtime_root, runtime_path)
 
+    @staticmethod
+    def owner_group(info):
+        if os.name != "posix":
+            raise TransactionError("runtime ownership is supported only on Linux")
+        return pwd.getpwuid(info.st_uid).pw_name, grp.getgrgid(info.st_gid).gr_name
+
     def atomic_write(self, runtime_path, data, mode, owner, group):
         target = _mapped(self.runtime_root, runtime_path)
         _real_parents(self.runtime_root, target, create=True)
@@ -219,6 +237,32 @@ class HostHooks:
             if result.returncode != 0:
                 raise TransactionError("named service health is not active")
             return
+        if probe_id == "site-loopback":
+            context = ssl.create_default_context(cafile="/etc/ssl/certs/ca-certificates.crt")
+            raw_socket = socket.create_connection(SITE_LOOPBACK_ADDRESS, timeout=10)
+            try:
+                connection = context.wrap_socket(raw_socket, server_hostname=SITE_LOOPBACK_HOST)
+                request = (
+                    "GET %s HTTP/1.1\r\nHost: %s\r\nAccept: text/html\r\n"
+                    "Connection: close\r\nUser-Agent: huangque-release-v1\r\n\r\n"
+                    % (SITE_LOOPBACK_PATH, SITE_LOOPBACK_HOST)
+                ).encode("ascii")
+                connection.sendall(request)
+                response = http.client.HTTPResponse(connection)
+                response.begin()
+                content_type = response.getheader("Content-Type", "").lower()
+                nosniff = response.getheader("X-Content-Type-Options", "").lower()
+                body = response.read(SITE_LOOPBACK_MAX_BYTES + 1)
+            except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+                raise TransactionError("site loopback health request failed") from exc
+            finally:
+                with contextlib.suppress(Exception):
+                    raw_socket.close()
+            if (response.status != 200 or not content_type.startswith("text/html")
+                    or nosniff != "nosniff" or len(body) > SITE_LOOPBACK_MAX_BYTES
+                    or b"<!doctype html" not in body[:4096].lower()):
+                raise TransactionError("site loopback response contract is invalid")
+            return
         url = HTTP_HEALTH_PROBES.get(probe_id)
         if url is None:
             raise TransactionError("named health probe has no v1 write-safe implementation")
@@ -243,13 +287,14 @@ class HostHooks:
 
 class TransactionExecutor:
     def __init__(self, planner, *, runtime_root="/", state_root=DEFAULT_STATE_ROOT,
-                 hooks=None, crash_hook=None, clock=time.time):
+                 hooks=None, crash_hook=None, clock=time.time, enforce_root_paths=True):
         self.planner = planner
         self.runtime_root = Path(runtime_root)
         self.state_root = Path(state_root)
         self.hooks = hooks or HostHooks(runtime_root)
         self.crash_hook = crash_hook or (lambda _point: None)
         self.clock = clock
+        self.enforce_root_paths = bool(enforce_root_paths)
         self.transactions = self.state_root / "transactions-v1"
         self.journal_path = self.transactions / "active.json"
         self.lock_path = self.state_root / "transaction-v1.lock"
@@ -280,7 +325,7 @@ class TransactionExecutor:
             os.close(descriptor)
 
     def _atomic_state_file(self, path, data):
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = path.parent / (".%s-%s" % (path.name, uuid.uuid4().hex))
         descriptor = os.open(
             temporary,
@@ -289,9 +334,16 @@ class TransactionExecutor:
         )
         try:
             raw = _json_bytes(data)
-            os.write(descriptor, raw)
+            offset = 0
+            while offset < len(raw):
+                offset += os.write(descriptor, raw[offset:])
             os.fsync(descriptor)
-        finally:
+        except BaseException:
+            os.close(descriptor)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
+        else:
             os.close(descriptor)
         os.replace(temporary, path)
         _fsync_directory(path.parent)
@@ -301,28 +353,144 @@ class TransactionExecutor:
             info = os.lstat(self.journal_path)
         except FileNotFoundError:
             return None
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or self.enforce_root_paths and os.name == "posix"
+                and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600)):
             raise TransactionError("transaction journal is unsafe")
         try:
-            data = json.loads(self.journal_path.read_text("utf-8"))
+            data = json.loads(self._read_backup(self.journal_path).decode("utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise TransactionError("transaction journal is invalid") from exc
         required = {"schema_version", "transaction_id", "status", "from_commit", "target_commit",
-                    "identity", "files", "restart_services", "pre_health_probes",
-                    "post_health_probes", "written", "restarted", "original_error"}
+                    "identity", "reviewed_evidence", "files", "restart_services",
+                    "pre_health_probes", "post_health_probes", "written", "restarted",
+                    "original_error"}
         if not isinstance(data, dict) or set(data) != required or data.get("schema_version") != JOURNAL_SCHEMA:
             raise TransactionError("transaction journal fields are invalid")
         if not COMMIT_RE.fullmatch(str(data.get("from_commit"))) or not COMMIT_RE.fullmatch(str(data.get("target_commit"))):
             raise TransactionError("transaction journal commits are invalid")
+        if (not TRANSACTION_ID_RE.fullmatch(str(data.get("transaction_id") or ""))
+                or data.get("status") not in {
+                    "backing_up", "applying", "committed", "rollback_failed", "cleaning",
+                }):
+            raise TransactionError("transaction journal state is invalid")
         identity = data.get("identity")
         if (not isinstance(identity, dict)
-                or set(identity) not in (
-                    {"environment", "host_id"},
-                    {"schema_version", "environment", "host_id", "hostname", "machine_id_sha256"},
-                )
+                or set(identity) != {
+                    "schema_version", "environment", "host_id", "hostname", "machine_id_sha256",
+                }
+                or identity.get("schema_version") != 1
                 or identity.get("environment") != "test" or not identity.get("host_id")):
             raise TransactionError("transaction journal identity is invalid")
+        evidence = data.get("reviewed_evidence")
+        if (not isinstance(evidence, dict) or not evidence
+                or any(not isinstance(value, dict) or set(value) != {"base", "head"}
+                       or not COMMIT_RE.fullmatch(str(value.get("base") or ""))
+                       or not COMMIT_RE.fullmatch(str(value.get("head") or ""))
+                       for value in evidence.values())):
+            raise TransactionError("transaction review evidence is invalid")
+        if (not isinstance(data.get("files"), list) or not data["files"]
+                or not isinstance(data.get("restart_services"), list)
+                or not isinstance(data.get("pre_health_probes"), list)
+                or not isinstance(data.get("post_health_probes"), list)
+                or not isinstance(data.get("written"), list)
+                or not isinstance(data.get("restarted"), list)
+                or data.get("original_error") is not None
+                   and not TYPE_NAME_RE.fullmatch(str(data.get("original_error")))):
+            raise TransactionError("transaction journal collections are invalid")
         return data
+
+    def _bind_journal(self, journal):
+        contract = self.planner.trusted_transaction_contract(
+            journal["from_commit"], journal["target_commit"], journal["reviewed_evidence"],
+        )
+        if (journal["restart_services"] != contract["restart_services"]
+                or journal["pre_health_probes"] != contract["pre_health_probes"]
+                or journal["post_health_probes"] != contract["post_health_probes"]
+                or len(journal["files"]) != len(contract["files"])):
+            raise TransactionError("transaction journal differs from the trusted release contract")
+        runtime_paths = []
+        expected_backups = set()
+        for index, (record, expected) in enumerate(zip(journal["files"], contract["files"])):
+            if not isinstance(record, dict) or set(record) != {"plan", "backup", "metadata"}:
+                raise TransactionError("transaction file record is invalid")
+            if record["plan"] != expected:
+                raise TransactionError("transaction file plan differs from trusted Git/catalog data")
+            runtime_path = _safe_runtime_path(expected["runtime_path"])
+            runtime_paths.append(runtime_path)
+            metadata = record["metadata"]
+            if (not isinstance(metadata, dict) or set(metadata) != {"mode", "owner", "group"}
+                    or type(metadata["mode"]) is not int or not 0 <= metadata["mode"] <= 0o7777
+                    or not OWNER_RE.fullmatch(str(metadata["owner"]))
+                    or not OWNER_RE.fullmatch(str(metadata["group"]))):
+                raise TransactionError("transaction backup metadata is invalid")
+            if metadata != expected["before_metadata"]:
+                raise TransactionError("transaction backup metadata differs from trusted preimage")
+            expected_name = "%04d.bin" % index if expected["before"]["state"] == "file" else None
+            if record["backup"] != expected_name:
+                raise TransactionError("transaction backup name is invalid")
+            if expected_name is not None:
+                expected_backups.add(expected_name)
+        if len(set(runtime_paths)) != len(runtime_paths):
+            raise TransactionError("transaction runtime paths are duplicated")
+        if (len(set(journal["restart_services"])) != len(journal["restart_services"])
+                or any(unit not in self.planner.catalog.allowed_units
+                       or not UNIT_RE.fullmatch(unit) for unit in journal["restart_services"])
+                or len(set(journal["pre_health_probes"])) != len(journal["pre_health_probes"])
+                or len(set(journal["post_health_probes"])) != len(journal["post_health_probes"])
+                or any(probe not in self.planner.catalog.health_probes for probe in
+                       journal["pre_health_probes"] + journal["post_health_probes"])
+                or len(set(journal["written"])) != len(journal["written"])
+                or not set(journal["written"]).issubset(runtime_paths)
+                or len(set(journal["restarted"])) != len(journal["restarted"])
+                or not set(journal["restarted"]).issubset(journal["restart_services"])):
+            raise TransactionError("transaction journal contains an invalid operation set")
+        if (journal["status"] == "backing_up"
+                and (journal["written"] or journal["restarted"] or journal["original_error"])
+                or journal["status"] == "committed"
+                and (journal["written"] != runtime_paths
+                     or journal["restarted"] != journal["restart_services"]
+                     or journal["original_error"] is not None)
+                or journal["status"] == "rollback_failed"
+                and journal["original_error"] is None):
+            raise TransactionError("transaction journal status contradicts its operations")
+        transaction_dir = self.transactions / journal["transaction_id"]
+        if transaction_dir.parent != self.transactions:
+            raise TransactionError("transaction directory escaped its root")
+        backup_root = transaction_dir / "backups"
+        if transaction_dir.exists():
+            info = os.lstat(transaction_dir)
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or self.enforce_root_paths and os.name == "posix"
+                    and (info.st_uid != 0 or info.st_mode & 0o077)):
+                raise TransactionError("transaction backup path is unsafe")
+            if not backup_root.exists():
+                if journal["status"] not in {"backing_up", "cleaning"}:
+                    raise TransactionError("transaction backup directory is missing")
+                return contract
+            info = os.lstat(backup_root)
+            if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode)
+                    or self.enforce_root_paths and os.name == "posix"
+                    and (info.st_uid != 0 or info.st_mode & 0o077)):
+                raise TransactionError("transaction backup path is unsafe")
+            actual = set()
+            for entry in os.scandir(backup_root):
+                if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                    raise TransactionError("transaction backup directory contains an unsafe entry")
+                entry_info = entry.stat(follow_symlinks=False)
+                if (self.enforce_root_paths and os.name == "posix"
+                        and (entry_info.st_uid != 0 or stat.S_IMODE(entry_info.st_mode) != 0o600)):
+                    raise TransactionError("transaction backup file is not root-private")
+                if not BACKUP_NAME_RE.fullmatch(entry.name):
+                    raise TransactionError("transaction backup basename is invalid")
+                actual.add(entry.name)
+            if not actual.issubset(expected_backups):
+                raise TransactionError("transaction backup set is invalid")
+            if journal["status"] not in {"backing_up", "cleaning"} and actual != expected_backups:
+                raise TransactionError("transaction backup set is incomplete")
+        elif journal["status"] not in {"backing_up", "cleaning"}:
+            raise TransactionError("transaction backup directory is missing")
+        return contract
 
     def _validate_plan(self, plan, target_commit, reviewed_evidence):
         if not isinstance(plan, dict) or plan.get("status") not in {"planned_read_only", "already_deployed"}:
@@ -339,13 +507,18 @@ class TransactionExecutor:
                        or not COMMIT_RE.fullmatch(str(planned_evidence[key].get("merge_commit") or ""))
                        for key, value in reviewed_evidence.items())):
             raise TransactionError("reviewed-head topology evidence is not exact")
-        required = {"files", "restart_services", "pre_health_probes", "post_health_probes"}
+        required = {
+            "files", "restart_services", "pre_health_probes", "post_health_probes",
+            "required_free_bytes",
+        }
         if any(key not in plan for key in required):
             raise TransactionError("trusted release plan is incomplete")
+        if type(plan["required_free_bytes"]) is not int or plan["required_free_bytes"] < 0:
+            raise TransactionError("trusted release disk-space contract is invalid")
         seen = set()
         for item in plan["files"]:
             keys = {"repository_path", "runtime_path", "change", "before", "after", "services",
-                    "mode", "owner", "group", "daemon_reload"}
+                    "before_metadata", "mode", "owner", "group", "daemon_reload"}
             if not isinstance(item, dict) or set(item) != keys:
                 raise TransactionError("release inventory entry is invalid")
             path = _safe_runtime_path(item["runtime_path"])
@@ -359,6 +532,14 @@ class TransactionExecutor:
                     raise TransactionError("release image lock is invalid")
             if type(item["mode"]) is not int or not 0 <= item["mode"] <= 0o7777:
                 raise TransactionError("release mode lock is invalid")
+            before_metadata = item["before_metadata"]
+            if (not isinstance(before_metadata, dict)
+                    or set(before_metadata) != {"mode", "owner", "group"}
+                    or type(before_metadata["mode"]) is not int
+                    or not 0 <= before_metadata["mode"] <= 0o7777
+                    or not OWNER_RE.fullmatch(str(before_metadata["owner"]))
+                    or not OWNER_RE.fullmatch(str(before_metadata["group"]))):
+                raise TransactionError("release preimage metadata lock is invalid")
             if not item["owner"] or not item["group"]:
                 raise TransactionError("release ownership lock is invalid")
         allowed = set(self.planner.catalog.allowed_units)
@@ -378,10 +559,30 @@ class TransactionExecutor:
         else:
             raw, info = record
             actual = {"state": "file", "sha256": _sha256(raw)}
-            metadata = {"mode": stat.S_IMODE(info.st_mode), "uid": info.st_uid, "gid": info.st_gid}
+            owner, group = self.hooks.owner_group(info)
+            metadata = {"mode": stat.S_IMODE(info.st_mode), "owner": owner, "group": group}
         if actual != locked:
             raise TransactionError("runtime image differs from locked %s" % which)
+        expected_metadata = item["before_metadata"] if which == "before" else {
+            "mode": item["mode"], "owner": item["owner"], "group": item["group"],
+        }
+        if metadata is not None and metadata != expected_metadata:
+            raise TransactionError("runtime metadata differs from locked %s" % which)
         return record, metadata
+
+    def _actual_image(self, item):
+        record = self.hooks.read(item["runtime_path"])
+        if record is None:
+            return {"state": "absent", "sha256": None}, None
+        raw, info = record
+        owner, group = self.hooks.owner_group(info)
+        return {"state": "file", "sha256": _sha256(raw)}, {
+            "mode": stat.S_IMODE(info.st_mode), "owner": owner, "group": group,
+        }
+
+    def _verify_all(self, records, which):
+        for record in records:
+            self._observe(record["plan"], which)
 
     def _run_health(self, probes, phase):
         for probe in probes:
@@ -397,16 +598,28 @@ class TransactionExecutor:
             raise TransactionError("trusted planner returned an incomplete host identity")
         return identity
 
-    def _backup(self, plan, transaction_id):
-        backup_root = self.transactions / transaction_id / "backups"
-        backup_root.mkdir(parents=True, exist_ok=False)
-        files = []
+    def _prepare_backup_records(self, plan):
+        records = []
         for index, item in enumerate(plan["files"]):
-            record, metadata = self._observe(item, "before")
-            backup_name = None
+            _record, metadata = self._observe(item, "before")
+            records.append({
+                "plan": item,
+                "backup": "%04d.bin" % index if item["before"]["state"] == "file" else None,
+                "metadata": metadata or item["before_metadata"],
+            })
+        return records
+
+    def _write_backups(self, journal):
+        transaction_id = journal["transaction_id"]
+        backup_root = self.transactions / transaction_id / "backups"
+        backup_root.parent.mkdir(mode=0o700)
+        backup_root.mkdir(mode=0o700)
+        for item_record in journal["files"]:
+            item = item_record["plan"]
+            record, _metadata = self._observe(item, "before")
             if record is not None:
                 raw, _info = record
-                backup_name = "%04d.bin" % index
+                backup_name = item_record["backup"]
                 backup_path = backup_root / backup_name
                 descriptor = os.open(
                     backup_path,
@@ -420,12 +633,32 @@ class TransactionExecutor:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-                backup_hash = _sha256(backup_path.read_bytes())
+                backup_hash = _sha256(self._read_backup(backup_path))
                 if backup_hash != item["before"]["sha256"]:
                     raise TransactionError("backup integrity verification failed")
-            files.append({"plan": item, "backup": backup_name, "metadata": metadata})
+            self.crash_hook("during-backup")
         _fsync_directory(backup_root)
-        return files
+
+    @staticmethod
+    def _read_backup(path):
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                raise TransactionError("backup is not a regular file")
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+        current = os.lstat(path)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise TransactionError("backup changed while it was read")
+        return b"".join(chunks)
 
     def _install(self, journal):
         target = journal["target_commit"]
@@ -439,6 +672,7 @@ class TransactionExecutor:
                     raise TransactionError("target Git blob differs from locked postimage")
                 self.hooks.atomic_write(item["runtime_path"], raw, item["mode"], item["owner"], item["group"])
             self._observe(item, "after")
+            self.crash_hook("after-write-before-journal")
             journal["written"].append(item["runtime_path"])
             self._atomic_state_file(self.journal_path, journal)
             self.crash_hook("after-write")
@@ -455,8 +689,33 @@ class TransactionExecutor:
     def _restore(self, journal):
         errors = []
         backup_root = self.transactions / journal["transaction_id"] / "backups"
-        for record in reversed(journal["files"]):
+        classifications = []
+        for record in journal["files"]:
             item = record["plan"]
+            try:
+                actual, metadata = self._actual_image(item)
+                before_metadata = record["metadata"] if item["before"]["state"] == "file" else None
+                after_metadata = {
+                    "mode": item["mode"], "owner": item["owner"], "group": item["group"],
+                } if item["after"]["state"] == "file" else None
+                if actual == item["before"] and metadata == before_metadata:
+                    classifications.append("before")
+                elif actual == item["after"] and metadata == after_metadata:
+                    classifications.append("after")
+                else:
+                    classifications.append("third_party")
+            except Exception:
+                classifications.append("third_party")
+        if "third_party" in classifications:
+            journal["status"] = "rollback_failed"
+            journal["original_error"] = journal["original_error"] or "ThirdPartyState"
+            self._atomic_state_file(self.journal_path, journal)
+            raise TransactionError("rollback refused to overwrite a neither-before-nor-after state")
+        for index in reversed(range(len(journal["files"]))):
+            record = journal["files"][index]
+            item = record["plan"]
+            if classifications[index] == "before":
+                continue
             try:
                 if item["before"]["state"] == "absent":
                     current = self.hooks.read(item["runtime_path"])
@@ -464,13 +723,13 @@ class TransactionExecutor:
                         self.hooks.delete(item["runtime_path"])
                 else:
                     backup = backup_root / str(record["backup"])
-                    raw = backup.read_bytes()
+                    raw = self._read_backup(backup)
                     if _sha256(raw) != item["before"]["sha256"]:
                         raise TransactionError("backup post-read integrity failed")
                     metadata = record["metadata"]
-                    owner = pwd.getpwuid(metadata["uid"]).pw_name if os.name == "posix" else item["owner"]
-                    group = grp.getgrgid(metadata["gid"]).gr_name if os.name == "posix" else item["group"]
-                    self.hooks.atomic_write(item["runtime_path"], raw, metadata["mode"], owner, group)
+                    self.hooks.atomic_write(
+                        item["runtime_path"], raw, metadata["mode"], metadata["owner"], metadata["group"],
+                    )
                 self._observe(item, "before")
             except Exception as exc:
                 errors.append("file:%s:%s" % (item["runtime_path"], type(exc).__name__))
@@ -490,6 +749,7 @@ class TransactionExecutor:
             errors.append("health:%s" % type(exc).__name__)
         if errors:
             journal["status"] = "rollback_failed"
+            journal["original_error"] = journal["original_error"] or "RollbackError"
             self._atomic_state_file(self.journal_path, journal)
             raise TransactionError("rollback failed: " + ", ".join(errors))
 
@@ -520,34 +780,66 @@ class TransactionExecutor:
         return state
 
     def _finish(self, journal):
+        journal["status"] = "cleaning"
+        self._atomic_state_file(self.journal_path, journal)
+        transaction_dir = self.transactions / journal["transaction_id"]
+        if transaction_dir.exists():
+            shutil.rmtree(transaction_dir)
+        _fsync_directory(self.transactions)
+        self.crash_hook("after-backup-cleanup")
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.journal_path)
-        transaction_dir = self.transactions / journal["transaction_id"]
-        shutil.rmtree(transaction_dir)
+        _fsync_directory(self.transactions)
+
+    def _clean_orphans(self, active_transaction_id=None):
+        self.transactions.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for entry in list(os.scandir(self.transactions)):
+            if entry.name == "active.json" or entry.name == active_transaction_id:
+                continue
+            if entry.name.startswith(".active.json-") and entry.is_file(follow_symlinks=False):
+                info = entry.stat(follow_symlinks=False)
+                if (self.enforce_root_paths and os.name == "posix"
+                        and (info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o600)):
+                    raise TransactionError("transaction temporary file is not root-private")
+                os.unlink(entry.path)
+                continue
+            if (not TRANSACTION_ID_RE.fullmatch(entry.name) or entry.is_symlink()
+                    or not entry.is_dir(follow_symlinks=False)):
+                raise TransactionError("transaction root contains an untrusted orphan")
+            info = entry.stat(follow_symlinks=False)
+            if (self.enforce_root_paths and os.name == "posix"
+                    and (info.st_uid != 0 or info.st_mode & 0o077)):
+                raise TransactionError("transaction orphan is not root-private")
+            shutil.rmtree(entry.path)
         _fsync_directory(self.transactions)
 
     def apply(self, target_commit, reviewed_evidence):
         with self._lock():
-            if self._load_journal() is not None:
+            existing = self._load_journal()
+            if existing is not None:
                 raise TransactionError("unfinished transaction requires recover")
+            self._clean_orphans()
             plan = self.planner.build_plan(target_commit, reviewed_evidence)
             self._validate_plan(plan, target_commit, reviewed_evidence)
             if plan["status"] == "already_deployed":
                 return {"ok": True, "status": "already_deployed", "target_commit": target_commit}
+            if shutil.disk_usage(self.state_root).free < plan["required_free_bytes"]:
+                raise TransactionError("transaction storage does not satisfy the complete plan reserve")
             identity = self._identity()
             if (identity["environment"] != plan["environment"]
                     or identity["host_id"] != plan["host_id"]):
                 raise TransactionError("release plan identity differs from the host")
             self._run_health(plan["pre_health_probes"], "pre")
             transaction_id = "release-%s-%s" % (target_commit[:12], uuid.uuid4().hex[:12])
-            files = self._backup(plan, transaction_id)
+            files = self._prepare_backup_records(plan)
             journal = {
                 "schema_version": JOURNAL_SCHEMA,
                 "transaction_id": transaction_id,
-                "status": "applying",
+                "status": "backing_up",
                 "from_commit": plan["from_commit"],
                 "target_commit": target_commit,
                 "identity": identity,
+                "reviewed_evidence": reviewed_evidence,
                 "files": files,
                 "restart_services": list(plan["restart_services"]),
                 "pre_health_probes": list(plan["pre_health_probes"]),
@@ -555,8 +847,13 @@ class TransactionExecutor:
                 "written": [], "restarted": [], "original_error": None,
             }
             self._atomic_state_file(self.journal_path, journal)
+            self._write_backups(journal)
+            self._bind_journal(journal)
             if self._identity() != identity:
                 raise TransactionError("release identity changed before installation")
+            self._verify_all(journal["files"], "before")
+            journal["status"] = "applying"
+            self._atomic_state_file(self.journal_path, journal)
             self.crash_hook("after-backup")
             try:
                 self._install(journal)
@@ -590,17 +887,30 @@ class TransactionExecutor:
         with self._lock():
             journal = self._load_journal()
             if journal is None:
+                self._clean_orphans()
                 return {"ok": True, "status": "nothing_to_recover"}
+            self._bind_journal(journal)
+            self._clean_orphans(journal["transaction_id"])
             state = self.planner.load_state()
             if self._identity() != journal["identity"]:
                 raise TransactionError("release identity differs from the active transaction")
             if state["deployed_main_commit"] == journal["target_commit"]:
+                self._verify_all(journal["files"], "after")
+                if not self.planner.verify_target_inventory(journal["target_commit"]):
+                    raise TransactionError("committed recovery target inventory has drifted")
+                self.planner.verify_services(journal["restart_services"])
                 self._run_health(journal["post_health_probes"], "post")
                 self._finish(journal)
                 return {"ok": True, "status": "committed_recovered",
                         "transaction_id": journal["transaction_id"]}
             if state["deployed_main_commit"] != journal["from_commit"]:
                 raise TransactionError("ledger commit matches neither side of active transaction")
+            if journal["status"] in {"backing_up", "cleaning"}:
+                self._verify_all(journal["files"], "before")
+                self._run_health(journal["pre_health_probes"], "rollback")
+                self._finish(journal)
+                return {"ok": True, "status": "prewrite_recovered",
+                        "transaction_id": journal["transaction_id"]}
             self._restore(journal)
             self._finish(journal)
             return {"ok": True, "status": "rolled_back_recovered",
@@ -617,7 +927,16 @@ class TrustedPlannerAdapter:
         self.catalog = engine.catalog
 
     def build_plan(self, target, evidence):
-        return self.engine.build_plan(target, evidence)
+        plan = self.engine.build_plan(target, evidence)
+        if plan.get("status") == "planned_read_only":
+            state = self.engine.load_state()
+            for item in plan["files"]:
+                metadata = state["runtime_metadata"].get(item["runtime_path"])
+                expected = {"mode": item["mode"], "owner": item["owner"], "group": item["group"]}
+                if metadata != expected:
+                    raise TransactionError("preimage metadata differs from immutable catalog mapping")
+                item["before_metadata"] = dict(metadata)
+        return plan
 
     def verify_identity(self):
         return self.engine.verify_identity()
@@ -643,45 +962,188 @@ class TrustedPlannerAdapter:
         unexpected = self.engine._inventory_drift(set(hashes))
         return not mismatches and not unexpected
 
+    def verify_services(self, services):
+        self.engine._verify_service_preconditions(list(services))
 
-def _locked_regular(path, expected_sha256, label):
+    def trusted_transaction_contract(self, older, target, evidence):
+        self.repo.require_commit(older)
+        self.repo.require_commit(target)
+        self.repo.require_ancestor(older, target)
+        self.module.validate_catalog_coverage(self.repo, self.catalog, target)
+        collected = self.module.collect_release_impact(self.repo, self.catalog, older, target)
+        impacts = collected["impacts"]
+        self.module.verify_review_evidence(
+            self.repo, self.catalog, older, target, impacts, evidence,
+        )
+        services = sorted({unit for impact in impacts for unit in impact["restart_services"]})
+        pre_health = sorted({probe for impact in impacts for probe in impact["pre_health_checks"]})
+        post_health = sorted({probe for impact in impacts for probe in impact["health_checks"]})
+        files = []
+        seen = set()
+        for status_value, repository_path in collected["changed_paths"]:
+            before = self.repo.file_at(older, repository_path)
+            after = self.repo.file_at(target, repository_path)
+            for mapping in self.catalog.mappings(repository_path):
+                runtime_path = mapping["runtime_path"]
+                if runtime_path in seen:
+                    raise TransactionError("trusted transaction has duplicate runtime paths")
+                seen.add(runtime_path)
+                if mapping["planning_blocker"]:
+                    raise TransactionError("trusted transaction contains a planning blocker")
+                if status_value == "D" and not mapping["delete_allowed"]:
+                    raise TransactionError("trusted transaction contains a forbidden deletion")
+                files.append({
+                    "repository_path": repository_path,
+                    "runtime_path": runtime_path,
+                    "change": "delete" if after is None else "write",
+                    "before": self.engine._state_hash(before),
+                    "after": self.engine._state_hash(after),
+                    "services": mapping.get("services", []),
+                    "before_metadata": {
+                        "mode": mapping["mode"], "owner": mapping["owner"], "group": mapping["group"],
+                    },
+                    "mode": mapping["mode"],
+                    "owner": mapping["owner"],
+                    "group": mapping["group"],
+                    "daemon_reload": mapping["daemon_reload"],
+                })
+        return {
+            "files": files,
+            "restart_services": services,
+            "pre_health_probes": pre_health,
+            "post_health_probes": post_health,
+        }
+
+
+def _locked_regular(path, expected_sha256, label, *, final_mode=None):
     path = Path(path)
+    _validate_root_chain(path, final_kind="file", private=False, final_mode=final_mode)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        info = os.lstat(path)
+        descriptor = os.open(path, flags)
     except FileNotFoundError as exc:
         raise TransactionError("%s is missing" % label) from exc
-    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
-            or os.name == "posix" and (info.st_uid != 0 or info.st_mode & 0o022)):
-        raise TransactionError("%s is not a root-owned immutable regular file" % label)
-    raw = path.read_bytes()
+    try:
+        info = os.fstat(descriptor)
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+        raise TransactionError("%s changed while it was read" % label)
     if _sha256(raw) != expected_sha256:
         raise TransactionError("%s SHA-256 differs from bootstrap" % label)
     return raw
 
 
-def _load_production_planner():
+def _validate_root_chain(path, *, final_kind, private, final_mode=None):
+    path = Path(os.path.abspath(path))
+    current = Path(path.anchor)
+    root_info = os.lstat(current)
+    if (stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode)
+            or os.name == "posix" and (root_info.st_uid != 0 or root_info.st_mode & 0o022)):
+        raise TransactionError("trusted root path is not immutable")
+    parts = path.parts[1:]
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError as exc:
+            raise TransactionError("trusted path chain is incomplete: %s" % current) from exc
+        final = index == len(parts) - 1
+        expected_regular = final and final_kind == "file"
+        if (stat.S_ISLNK(info.st_mode)
+                or expected_regular and not stat.S_ISREG(info.st_mode)
+                or not expected_regular and not stat.S_ISDIR(info.st_mode)
+                or os.name == "posix" and info.st_uid != 0
+                or os.name == "posix" and info.st_mode & 0o022
+                or final and private and info.st_mode & 0o077
+                or final and final_mode is not None
+                and stat.S_IMODE(info.st_mode) != final_mode):
+            raise TransactionError("trusted path chain is not root-owned and immutable: %s" % current)
+
+
+def _runtime_environment_is_isolated():
+    flags = sys.flags
+    return (
+        os.name == "posix"
+        and os.geteuid() == 0
+        and os.path.realpath(sys.executable) == "/usr/bin/python3"
+        and os.path.realpath(__file__) == TRANSACTION_ENTRYPOINT
+        and flags.isolated == 1
+        and flags.ignore_environment == 1
+        and flags.no_user_site == 1
+        and flags.dont_write_bytecode == 1
+        and dict(os.environ) == {
+            "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
+    )
+
+
+def _load_private_json(path, label):
+    _validate_root_chain(path, final_kind="file", private=True, final_mode=0o600)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
     try:
-        bootstrap = json.loads(Path(TRANSACTION_BOOTSTRAP).read_text("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise TransactionError("transaction bootstrap is unavailable or invalid") from exc
+        raw = b""
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            raw += chunk
+            if len(raw) > 64 * 1024:
+                raise TransactionError("%s is too large" % label)
+    finally:
+        os.close(descriptor)
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise TransactionError("%s is unavailable or invalid" % label) from exc
+    return value
+
+
+def _load_production_planner():
+    bootstrap = _load_private_json(TRANSACTION_BOOTSTRAP, "transaction bootstrap")
     required = {"schema_version", "source_root", "transaction_entrypoint", "transaction_sha256",
-                "phase_one_entrypoint", "phase_one_sha256", "state_root"}
+                "phase_one_entrypoint", "phase_one_sha256", "launcher", "launcher_sha256",
+                "state_root"}
     if (not isinstance(bootstrap, dict) or set(bootstrap) != required
             or bootstrap.get("schema_version") != 1
             or bootstrap.get("source_root") != DEFAULT_SOURCE_ROOT
             or bootstrap.get("state_root") != DEFAULT_STATE_ROOT
             or bootstrap.get("transaction_entrypoint") != TRANSACTION_ENTRYPOINT
             or bootstrap.get("phase_one_entrypoint") != PHASE_ONE_ENTRYPOINT
+            or bootstrap.get("launcher") != TRANSACTION_LAUNCHER
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(bootstrap.get(key) or ""))
-                   for key in ("transaction_sha256", "phase_one_sha256"))):
+                   for key in ("transaction_sha256", "phase_one_sha256", "launcher_sha256"))):
         raise TransactionError("transaction bootstrap fields are invalid")
-    _locked_regular(TRANSACTION_ENTRYPOINT, bootstrap["transaction_sha256"], "transaction entrypoint")
-    _locked_regular(PHASE_ONE_ENTRYPOINT, bootstrap["phase_one_sha256"], "phase-one entrypoint")
-    spec = importlib.util.spec_from_file_location("huangque_release_phase_one", PHASE_ONE_ENTRYPOINT)
-    if spec is None or spec.loader is None:
-        raise TransactionError("phase-one planner cannot be loaded")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    _validate_root_chain(DEFAULT_SOURCE_ROOT, final_kind="directory", private=False)
+    _validate_root_chain(DEFAULT_STATE_ROOT, final_kind="directory", private=True, final_mode=0o700)
+    _validate_root_chain("/usr/bin/python3", final_kind="file", private=False)
+    _locked_regular(
+        TRANSACTION_ENTRYPOINT, bootstrap["transaction_sha256"], "transaction entrypoint",
+        final_mode=0o755,
+    )
+    phase_one_raw = _locked_regular(
+        PHASE_ONE_ENTRYPOINT, bootstrap["phase_one_sha256"], "phase-one entrypoint",
+        final_mode=0o755,
+    )
+    _locked_regular(
+        TRANSACTION_LAUNCHER, bootstrap["launcher_sha256"], "transaction launcher",
+        final_mode=0o755,
+    )
+    module = types.ModuleType("huangque_release_phase_one")
+    module.__file__ = PHASE_ONE_ENTRYPOINT
+    sys.modules[module.__name__] = module
+    exec(compile(phase_one_raw, PHASE_ONE_ENTRYPOINT, "exec"), module.__dict__)
+    module._verify_runtime_entrypoint(DEFAULT_SOURCE_ROOT)
     catalog = module.RuntimeCatalog.load(Path(DEFAULT_SOURCE_ROOT), module.DEFAULT_CATALOG)
     engine = module.ReleaseEngine(
         DEFAULT_SOURCE_ROOT, "/", catalog,
@@ -699,8 +1161,8 @@ def main(argv=None):
     apply_parser.add_argument("--reviewed-head", action="append", required=True)
     sub.add_parser("recover")
     args = parser.parse_args(argv)
-    if os.name != "posix" or os.geteuid() != 0 or os.path.realpath(sys.executable) != "/usr/bin/python3":
-        raise TransactionError("transaction executor requires the fixed root Python runtime")
+    if not _runtime_environment_is_isolated():
+        raise TransactionError("transaction executor requires its fixed isolated root launcher")
     module, planner = _load_production_planner()
     executor = TransactionExecutor(planner)
     if args.command == "apply":
