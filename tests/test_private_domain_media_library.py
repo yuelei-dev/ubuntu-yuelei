@@ -1,4 +1,6 @@
+import concurrent.futures
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -18,6 +20,7 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
+        self.snapshot_root = self.root / "snapshots"
         private_domain_media._CACHE_KEY = None
         private_domain_media._CACHE_ITEMS = ()
         private_domain_media._CACHE_WATCHED = ()
@@ -54,7 +57,10 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
     def _catalog(self):
         return mock.patch.dict(
             os.environ,
-            {"PRIVATE_DOMAIN_MATERIAL_ROOT": str(self.root)},
+            {
+                "PRIVATE_DOMAIN_MATERIAL_ROOT": str(self.root),
+                "PRIVATE_DOMAIN_SNAPSHOT_CACHE_ROOT": str(self.snapshot_root),
+            },
         )
 
     def test_catalog_returns_only_safe_fields_and_three_media_types(self):
@@ -121,7 +127,7 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
             path.write_bytes(b"replacement bytes")
             self.assertIsNone(private_domain_media.resolve_material(relative_path))
 
-    def test_verified_stream_uses_immutable_snapshot_after_resolution(self):
+    def test_source_replaced_after_resolution_fails_closed(self):
         relative_path = "files/视频/snapshot.mp4"
         reviewed = b"reviewed bytes"
         self._write_record(relative_path, "视频", content=reviewed)
@@ -130,8 +136,110 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
             resolved = private_domain_media.resolve_material(relative_path)
             self.assertIsNotNone(resolved)
             path.write_bytes(b"in-place replacement")
-            with resolved.open("rb") as source:
-                self.assertEqual(reviewed, source.read())
+            with self.assertRaisesRegex(OSError, "not readable"):
+                resolved.open("rb")
+            resolved.close()
+
+    def test_one_byte_range_reuses_snapshot_without_copying_source(self):
+        from content_domains import core
+
+        class Handler:
+            def __init__(self):
+                self.headers = {"Range": "bytes=0-0"}
+                self.wfile = io.BytesIO()
+                self.status = None
+                self.response_headers = {}
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, name, value):
+                self.response_headers[name] = value
+
+            def end_headers(self):
+                pass
+
+        relative_path = "files/视频/large.mp4"
+        content = b"a" * (12 * 1024 * 1024)
+        self._write_record(relative_path, "视频", content=content)
+        with self._catalog():
+            self.assertEqual(1, len(private_domain_media.list_materials(300)))
+            with mock.patch.object(
+                    private_domain_media, "_materialize_snapshot",
+                    wraps=private_domain_media._materialize_snapshot) as materialize:
+                resolved = private_domain_media.resolve_material(relative_path)
+                handler = Handler()
+                core._send_out_file(handler, resolved, sensitive=True)
+        self.assertEqual(0, materialize.call_count)
+        self.assertEqual(206, handler.status)
+        self.assertEqual("1", handler.response_headers["Content-Length"])
+        self.assertEqual(b"a", handler.wfile.getvalue())
+        self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+
+    def test_concurrent_ranges_reuse_one_content_addressed_snapshot(self):
+        relative_path = "files/视频/concurrent.mp4"
+        self._write_record(relative_path, "视频", content=b"range-content")
+        with self._catalog():
+            private_domain_media.list_materials(300)
+            with mock.patch.object(
+                    private_domain_media, "_materialize_snapshot",
+                    wraps=private_domain_media._materialize_snapshot) as materialize:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                    resolved = list(pool.map(
+                        lambda _: private_domain_media.resolve_material(relative_path),
+                        range(16),
+                    ))
+        try:
+            self.assertTrue(all(item is not None for item in resolved))
+            identities = {
+                private_domain_media._snapshot_identity(item.stat())
+                for item in resolved
+            }
+            self.assertEqual(1, len(identities))
+            self.assertEqual(0, materialize.call_count)
+            self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+        finally:
+            for item in resolved:
+                if item is not None:
+                    item.close()
+
+    def test_snapshot_cache_capacity_is_strict_and_fail_closed(self):
+        self._write_record("files/视频/first.mp4", "视频", content=b"123456")
+        self._write_record("files/视频/second.mp4", "视频", content=b"abcdef")
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
+            items = private_domain_media.list_materials(300)
+        self.assertEqual(1, len(items))
+        self.assertLessEqual(
+            sum(path.stat().st_size for path in self.snapshot_root.glob("*.blob")),
+            10,
+        )
+
+    def test_expired_snapshot_is_rebuilt_and_old_object_removed(self):
+        relative_path = "files/视频/ttl.mp4"
+        self._write_record(relative_path, "视频", content=b"ttl-content")
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_TTL_SECONDS", 1):
+            private_domain_media.list_materials(300)
+            snapshot = next(self.snapshot_root.glob("*.blob"))
+            self.assertEqual(0, snapshot.stat().st_mode & 0o222)
+            os.utime(snapshot, (0, 0))
+            with mock.patch.object(
+                    private_domain_media, "_materialize_snapshot",
+                    wraps=private_domain_media._materialize_snapshot) as materialize:
+                items = private_domain_media.list_materials(300)
+        self.assertEqual(1, len(items))
+        self.assertEqual(1, materialize.call_count)
+        self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+
+    def test_snapshot_creation_failure_removes_partial_file(self):
+        self._write_record("files/视频/failure.mp4", "视频", content=b"failure")
+        with self._catalog(), mock.patch.object(
+                private_domain_media.os, "replace",
+                side_effect=OSError("injected replace failure")):
+            self.assertEqual([], private_domain_media.list_materials(300))
+        self.assertEqual([], list(self.snapshot_root.glob(".pending-*.part")))
+        self.assertEqual([], list(self.snapshot_root.glob("*.blob")))
 
     def test_core_routes_require_authentication_and_stream_sensitive_files(self):
         source = (ROOT / "server/content_domains/core.py").read_text(encoding="utf-8")

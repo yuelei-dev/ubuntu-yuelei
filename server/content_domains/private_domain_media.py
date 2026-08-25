@@ -13,8 +13,10 @@ import json
 import os
 import pathlib
 import re
+import stat as stat_module
 import tempfile
 import threading
+import time
 import urllib.parse
 
 
@@ -23,6 +25,9 @@ CATALOG_FILE = "index.jsonl"
 MAX_CATALOG_ITEMS = 1000
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
+SNAPSHOT_CACHE_MAX_BYTES = 1024 * 1024 * 1024
+SNAPSHOT_CACHE_TTL_SECONDS = 6 * 60 * 60
+SNAPSHOT_SUFFIX = ".blob"
 _CACHE_LOCK = threading.Lock()
 _CACHE_KEY = None
 _CACHE_ITEMS = ()
@@ -30,13 +35,15 @@ _CACHE_WATCHED = ()
 
 
 def _file_identity(stat):
-    return (
+    identity = (
         stat.st_dev,
         stat.st_ino,
         stat.st_size,
         stat.st_mtime_ns,
-        stat.st_ctime_ns,
     )
+    # Linux ctime catches same-size in-place rewrites even if mtime is restored.
+    # Windows reports unstable ctime values while a file is merely being read.
+    return identity + (() if os.name == "nt" else (stat.st_ctime_ns,))
 
 
 def _sha256_open_file(source):
@@ -51,42 +58,205 @@ def _sha256_open_file(source):
     return digest.hexdigest()
 
 
-def _snapshot_material(path):
-    snapshot = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
-    digest = hashlib.sha256()
+def _snapshot_identity(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _snapshot_cache_root():
+    value = os.environ.get("PRIVATE_DOMAIN_SNAPSHOT_CACHE_ROOT")
+    root = pathlib.Path(value) if value else (
+        pathlib.Path(tempfile.gettempdir()) / "huangque-private-domain-materials"
+    )
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise OSError("material snapshot cache root is not a directory")
+    root.chmod(0o700)
+    return root.resolve()
+
+
+def _snapshot_path(root, digest):
+    if not SHA256_RE.fullmatch(digest):
+        raise OSError("invalid material snapshot digest")
+    return root / (digest + SNAPSHOT_SUFFIX)
+
+
+def _snapshot_files(root):
+    result = []
     try:
-        with path.open("rb") as source:
-            before = _file_identity(os.fstat(source.fileno()))
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-                snapshot.write(chunk)
-            after = _file_identity(os.fstat(source.fileno()))
-        snapshot.seek(0)
-        return snapshot, before, after, digest.hexdigest()
+        candidates = root.glob("*" + SNAPSHOT_SUFFIX)
     except OSError:
-        snapshot.close()
-        raise
+        return result
+    for path in candidates:
+        try:
+            stat = path.lstat()
+        except OSError:
+            continue
+        digest = path.name[:-len(SNAPSHOT_SUFFIX)]
+        if (not SHA256_RE.fullmatch(digest)
+                or not stat_module.S_ISREG(stat.st_mode)):
+            continue
+        result.append((path, stat))
+    return result
+
+
+def _remove_snapshot(path):
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        path.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
+    if required_bytes < 0 or required_bytes > SNAPSHOT_CACHE_MAX_BYTES:
+        raise OSError("material snapshot exceeds cache capacity")
+    now = time.time()
+    entries = _snapshot_files(root)
+    retained = []
+    for path, stat in entries:
+        digest = path.name[:-len(SNAPSHOT_SUFFIX)]
+        expired = now - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS
+        if expired and digest not in protected_digests and _remove_snapshot(path):
+            continue
+        retained.append((path, stat))
+    total = sum(stat.st_size for _, stat in retained)
+    for path, stat in sorted(retained, key=lambda entry: entry[1].st_mtime):
+        if total + required_bytes <= SNAPSHOT_CACHE_MAX_BYTES:
+            break
+        digest = path.name[:-len(SNAPSHOT_SUFFIX)]
+        if digest in protected_digests:
+            continue
+        if _remove_snapshot(path):
+            total -= stat.st_size
+    if total + required_bytes > SNAPSHOT_CACHE_MAX_BYTES:
+        raise OSError("material snapshot cache capacity is exhausted")
+
+
+def _verified_existing_snapshot(path, digest):
+    try:
+        stat = path.lstat()
+        if (not stat_module.S_ISREG(stat.st_mode)
+                or time.time() - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
+            return None
+        with path.open("rb") as source:
+            before = _snapshot_identity(os.fstat(source.fileno()))
+            actual_digest = _sha256_open_file(source)
+            after = _snapshot_identity(os.fstat(source.fileno()))
+    except OSError:
+        return None
+    if before != after or actual_digest != digest:
+        _remove_snapshot(path)
+        return None
+    return after
+
+
+def _materialize_snapshot(path, digest, protected_digests):
+    cache_root = _snapshot_cache_root()
+    cache_path = _snapshot_path(cache_root, digest)
+    snapshot_identity = _verified_existing_snapshot(cache_path, digest)
+    if snapshot_identity is not None:
+        try:
+            with path.open("rb") as source:
+                before = _file_identity(os.fstat(source.fileno()))
+                actual_digest = _sha256_open_file(source)
+                after = _file_identity(os.fstat(source.fileno()))
+        except OSError:
+            return None
+        try:
+            current = _file_identity(path.stat())
+        except OSError:
+            return None
+        if before != after or current != after or actual_digest != digest:
+            return None
+        return after, cache_path, snapshot_identity
+
+    try:
+        source_size = path.stat().st_size
+        _prepare_snapshot_capacity(cache_root, source_size, protected_digests)
+    except OSError:
+        return None
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                mode="w+b", dir=cache_root, prefix=".pending-",
+                suffix=".part", delete=False) as snapshot:
+            temporary_path = pathlib.Path(snapshot.name)
+            digest_builder = hashlib.sha256()
+            with path.open("rb") as source:
+                before = _file_identity(os.fstat(source.fileno()))
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest_builder.update(chunk)
+                    snapshot.write(chunk)
+                after = _file_identity(os.fstat(source.fileno()))
+            snapshot.flush()
+            os.fsync(snapshot.fileno())
+        try:
+            current = _file_identity(path.stat())
+        except OSError:
+            return None
+        if (before != after or current != after
+                or digest_builder.hexdigest() != digest):
+            return None
+        temporary_path.chmod(0o400)
+        os.replace(temporary_path, cache_path)
+        temporary_path = None
+        snapshot_stat = cache_path.lstat()
+        if not stat_module.S_ISREG(snapshot_stat.st_mode):
+            _remove_snapshot(cache_path)
+            return None
+        return after, cache_path, _snapshot_identity(snapshot_stat)
+    except OSError:
+        return None
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.chmod(0o600)
+            except OSError:
+                pass
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
 
 
 class VerifiedMaterial:
-    """An already verified file handle; streaming reuses these exact bytes."""
+    """A stable content-addressed handle with a live source-identity guard."""
 
-    def __init__(self, path, source):
+    def __init__(self, path, source, source_identity, snapshot_identity):
         self.path = path
         self._source = source
+        self._source_identity = source_identity
+        self._snapshot_identity = snapshot_identity
+
+    def _identities_are_current(self):
+        try:
+            source_identity = _file_identity(self.path.stat())
+            snapshot_identity = _snapshot_identity(os.fstat(self._source.fileno()))
+        except OSError:
+            return False
+        return (source_identity == self._source_identity
+                and snapshot_identity == self._snapshot_identity)
 
     @property
     def name(self):
         return self.path.name
 
     def stat(self):
+        if not self._identities_are_current():
+            raise OSError("material identity changed")
         return os.fstat(self._source.fileno())
 
     def open(self, mode):
-        if mode != "rb" or self._source.closed:
+        if (mode != "rb" or self._source.closed
+                or not self._identities_are_current()):
             raise OSError("verified material is not readable")
         return self._source
 
@@ -130,7 +300,7 @@ def _string_list(value, limit=24):
     return result
 
 
-def _safe_record(root, record):
+def _safe_record(root, record, protected_digests):
     if not isinstance(record, dict) or record.get("状态") != "可使用":
         return None
     media_type = MEDIA_TYPES.get(record.get("素材类型"))
@@ -139,15 +309,10 @@ def _safe_record(root, record):
     path = _safe_material_path(root, relative_path)
     if not media_type or path is None or not SHA256_RE.fullmatch(digest):
         return None
-    try:
-        with path.open("rb") as source:
-            before = _file_identity(os.fstat(source.fileno()))
-            actual_digest = _sha256_open_file(source)
-            after = _file_identity(os.fstat(source.fileno()))
-    except OSError:
+    snapshot = _materialize_snapshot(path, digest, protected_digests)
+    if snapshot is None:
         return None
-    if before != after or actual_digest != digest:
-        return None
+    source_identity, snapshot_path, snapshot_identity = snapshot
     title = str(record.get("素材名称") or path.stem).strip()[:160]
     return {
         "id": digest,
@@ -165,7 +330,9 @@ def _safe_record(root, record):
         "tags": _string_list(record.get("标签")),
         "content_safety": str(record.get("内容安全") or "").strip()[:80],
         "license": str(record.get("许可类型") or "").strip()[:80],
-        "_identity": after,
+        "_identity": source_identity,
+        "_snapshot_path": snapshot_path,
+        "_snapshot_identity": snapshot_identity,
     }
 
 
@@ -200,6 +367,16 @@ def _cached_items_current(root):
                 identity = None
         if identity != expected_identity:
             return False
+    now = time.time()
+    for item in _CACHE_ITEMS:
+        try:
+            snapshot_stat = item["_snapshot_path"].lstat()
+        except OSError:
+            return False
+        if (not stat_module.S_ISREG(snapshot_stat.st_mode)
+                or _snapshot_identity(snapshot_stat) != item["_snapshot_identity"]
+                or now - snapshot_stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
+            return False
     return True
 
 
@@ -218,6 +395,7 @@ def _catalog_items():
             return list(_CACHE_ITEMS)
         items = []
         watched = {}
+        protected_digests = set()
         try:
             with catalog.open("r", encoding="utf-8") as source:
                 for line in source:
@@ -228,11 +406,12 @@ def _catalog_items():
                         watch = _record_watch(root, record)
                         if watch is not None:
                             watched[watch[0]] = watch[1]
-                        item = _safe_record(root, record)
+                        item = _safe_record(root, record, protected_digests)
                     except (UnicodeError, json.JSONDecodeError):
                         continue
                     if item is not None:
                         items.append(item)
+                        protected_digests.add(item["sha256"])
         except OSError:
             return []
         _CACHE_KEY = key
@@ -266,11 +445,16 @@ def resolve_material(relative_path):
     if path is None:
         return None
     try:
-        source, before, after, actual_digest = _snapshot_material(path)
+        source_identity = _file_identity(path.stat())
+        if source_identity != item["_identity"]:
+            return None
+        source = item["_snapshot_path"].open("rb")
+        snapshot_identity = _snapshot_identity(os.fstat(source.fileno()))
     except OSError:
         return None
-    if (before != after or after != item["_identity"]
-            or actual_digest != item["sha256"]):
+    if snapshot_identity != item["_snapshot_identity"]:
         source.close()
         return None
-    return VerifiedMaterial(path, source)
+    return VerifiedMaterial(
+        path, source, item["_identity"], item["_snapshot_identity"]
+    )
