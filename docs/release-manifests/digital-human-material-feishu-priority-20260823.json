@@ -27,7 +27,9 @@
         "max_attempts": 4,
         "max_retry_after_seconds": 15,
         "total_deadline_seconds": 60,
-        "fallback_backoff_seconds": [1, 2, 4]
+        "fallback_backoff_seconds": [1, 2, 4],
+        "json_request_timeout_seconds": 15,
+        "attachment_request_timeout_seconds": 30
       },
       "credentials_must_not_be_committed": true
     },
@@ -40,7 +42,7 @@
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
     "base_main_commit": "864f557f6003f92083a8e2d366800d63d041b7ce",
-    "code_source_commit": "833cceb1d2f33fed277c368102ffb94e5c7b2e17",
+    "code_source_commit": "27e3b657df873557eea5f4e0637562f874a2a547",
     "review_lock": "exact independently reviewed PR head must be contained in live main before release"
   },
   "preimage_observation": {
@@ -76,8 +78,8 @@
   },
   "executor": {
     "repository_path": "scripts/deploy_seedream_v3_locked_manifest.py",
-    "source_blob": "ccbbfab4b20bb35e176da9e1c8d87b474c3e9a24",
-    "source_sha256": "c7f90d39972b4cd6c55a37de9e171fbeb9b35ca7033a02e6f968b1f624bab8c3",
+    "source_blob": "696bf4e7d082135113dc0717855a8d601251c6b0",
+    "source_sha256": "acd80d1fafc9b0a6431424b22dbc438f3418caf8002aefd2d36214e77df2b57a",
     "verifier": {
       "repository_path": "scripts/verify_content_whisper_deployment.py",
       "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
@@ -161,8 +163,8 @@
     },
     {
       "repository_path": "tests/test_digital_human_v2_deployment_manifest.py",
-      "source_blob": "5badc85cfa2833e56a12153315b49eec65046720",
-      "source_sha256": "e2f60d2cfe35edb4d31ca54d54de1e47f7ec9d5423495d9e0a79b8947450073f"
+      "source_blob": "d4843cfc0549de91685f7e0417a2568ab50a5fab",
+      "source_sha256": "861b97a6794545cf86f220e6185808bac9ecc74ff25983c11cbfdefbd34e2c6c"
     },
     {
       "repository_path": "tests/test_digital_human_v2_compose.py",
@@ -171,8 +173,8 @@
     },
     {
       "repository_path": "tests/test_seedream_v3_release_executor.py",
-      "source_blob": "4234177fc9d4f4c1c172e18db919089d3de06221",
-      "source_sha256": "e391cc0430185e412c28954744d70f293caea181bdfc2cc613187e63778f5afe"
+      "source_blob": "3bf0af7b654202edf801519746a91ecec7c4ca15",
+      "source_sha256": "bf06109febeb0bf78468eca84aa4b5b76b64d97b5c89cec19a30b35c138696c3"
     },
     {
       "repository_path": "tests/test_unified_voice_v6_release.py",
