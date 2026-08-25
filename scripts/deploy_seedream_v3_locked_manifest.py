@@ -7,6 +7,7 @@ the first write, then treats file installation, preflight and service restart
 as one rollback unit.
 """
 import argparse
+import decimal
 import hashlib
 import json
 import os
@@ -96,6 +97,15 @@ APPROVED_HEALTH_CONTRACT = {
     },
 }
 APPROVED_HEALTH_URLS = frozenset(APPROVED_HEALTH_CONTRACT)
+FEISHU_RETRY_POLICY = {
+    "retryable_http_statuses": [429, 500, 502, 503, 504],
+    "max_attempts": 4,
+    "max_retry_after_seconds": 15,
+    "total_deadline_seconds": 60,
+    "fallback_backoff_seconds": [1, 2, 4],
+    "json_request_timeout_seconds": 15,
+    "attachment_request_timeout_seconds": 30,
+}
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 ALLOWED_DEPLOYMENT_TOOLS = frozenset({
@@ -980,17 +990,15 @@ class ContentWhisperRelease:
         return urllib.request.ProxyHandler(proxies)
 
     @staticmethod
-    def _read_feishu_json(request, environment):
+    def _read_feishu_json(request, environment, timeout):
         opener = urllib.request.build_opener(
             ContentWhisperRelease._feishu_proxy_handler(environment)
         )
         try:
-            with opener.open(request, timeout=15) as response:
+            with opener.open(request, timeout=timeout) as response:
                 raw = response.read(2 * 1024 * 1024 + 1)
-        except urllib.error.HTTPError as exc:
-            raise ReleaseError(
-                "Feishu operational preflight HTTP status %s" % exc.code
-            ) from exc
+        except urllib.error.HTTPError:
+            raise
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             raise ReleaseError(
                 "Feishu operational preflight connection failed: %s" %
@@ -1009,7 +1017,7 @@ class ContentWhisperRelease:
         return result
 
     @staticmethod
-    def _read_feishu_media(request, environment):
+    def _read_feishu_media(request, environment, timeout):
         allowed_mimes = {
             "image/jpeg", "image/png", "image/webp", "video/mp4",
             "video/webm", "video/quicktime",
@@ -1018,15 +1026,13 @@ class ContentWhisperRelease:
             ContentWhisperRelease._feishu_proxy_handler(environment)
         )
         try:
-            with opener.open(request, timeout=30) as response:
+            with opener.open(request, timeout=timeout) as response:
                 mime = str(response.headers.get("Content-Type") or "").split(
                     ";", 1
                 )[0].lower()
                 raw = response.read(20 * 1024 * 1024 + 1)
-        except urllib.error.HTTPError as exc:
-            raise ReleaseError(
-                "Feishu attachment preflight HTTP status %s" % exc.code
-            ) from exc
+        except urllib.error.HTTPError:
+            raise
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
             raise ReleaseError(
                 "Feishu attachment preflight connection failed: %s" %
@@ -1037,6 +1043,80 @@ class ContentWhisperRelease:
         if mime not in allowed_mimes:
             raise ReleaseError("Feishu attachment MIME is not an approved material type")
         return mime
+
+    def _validate_feishu_retry_policy(self):
+        policy = self.manifest.get("configuration_requirements", {}).get(
+            "feishu", {},
+        ).get("retry_policy")
+        if policy != FEISHU_RETRY_POLICY:
+            raise ReleaseError("Feishu retry policy does not match the locked contract")
+        return policy
+
+    @staticmethod
+    def _feishu_retry_delay(error, attempt, policy):
+        fallback = policy["fallback_backoff_seconds"][attempt - 1]
+        raw = None
+        if error.headers is not None:
+            raw = error.headers.get("Retry-After")
+        if raw is None:
+            return float(fallback)
+        try:
+            value = decimal.Decimal(str(raw).strip())
+        except (decimal.InvalidOperation, ValueError):
+            return float(fallback)
+        if not value.is_finite() or value < 0:
+            return float(fallback)
+        return min(float(value), float(policy["max_retry_after_seconds"]))
+
+    def _feishu_request_with_retry(
+            self, getter, request, environment, request_label,
+            request_timeout_cap, deadline=None):
+        policy = self._validate_feishu_retry_policy()
+        if deadline is None:
+            deadline = self.monotonic() + policy["total_deadline_seconds"]
+        retryable = set(policy["retryable_http_statuses"])
+        max_attempts = policy["max_attempts"]
+        for attempt in range(1, max_attempts + 1):
+            if self.monotonic() >= deadline:
+                raise ReleaseError(
+                    "Feishu %s retry deadline exhausted after %s attempts" %
+                    (request_label, attempt - 1)
+                )
+            try:
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt - 1)
+                    )
+                result = getter(
+                    request, environment,
+                    min(float(request_timeout_cap), remaining),
+                )
+                if self.monotonic() >= deadline:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt)
+                    )
+                return result
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                if status not in retryable or attempt == max_attempts:
+                    raise ReleaseError(
+                        "Feishu %s HTTP status %s after %s attempt%s" %
+                        (request_label, status, attempt,
+                         "" if attempt == 1 else "s")
+                    ) from None
+                delay = self._feishu_retry_delay(exc, attempt, policy)
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt)
+                    ) from None
+                self.sleeper(min(
+                    delay, float(policy["max_retry_after_seconds"]), remaining,
+                ))
 
     @staticmethod
     def _attachment_tokens(value, output):
@@ -1055,6 +1135,10 @@ class ContentWhisperRelease:
         config = requirements.get("feishu", {})
         if config.get("operational_probe_required") is not True:
             raise ReleaseError("Feishu operational probe must be required")
+        retry_policy = self._validate_feishu_retry_policy()
+        retry_deadline = (
+            self.monotonic() + retry_policy["total_deadline_seconds"]
+        )
         environment = self.service_environment_getter()
         credential_names = config.get("secret_environment_names")
         if credential_names != ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]:
@@ -1081,7 +1165,8 @@ class ContentWhisperRelease:
         ) or "").strip()
         if not app_token or not table_id or not view_id:
             raise ReleaseError("%s Feishu app, table or view is missing" % phase)
-        token_result = self.feishu_json_getter(urllib.request.Request(
+        token_result = self._feishu_request_with_retry(
+            self.feishu_json_getter, urllib.request.Request(
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
             data=json.dumps({
                 "app_id": credentials["FEISHU_APP_ID"],
@@ -1089,7 +1174,9 @@ class ContentWhisperRelease:
             }).encode("utf-8"),
             headers={"Content-Type": "application/json; charset=utf-8"},
             method="POST",
-        ), environment)
+            ), environment, "token request",
+            retry_policy["json_request_timeout_seconds"], retry_deadline,
+        )
         if int(token_result.get("code") or 0) != 0:
             raise ReleaseError("%s Feishu credential verification failed" % phase)
         tenant_token = str(token_result.get("tenant_access_token") or "").strip()
@@ -1107,9 +1194,12 @@ class ContentWhisperRelease:
                  urllib.parse.quote(table_id, safe=""),
                  urllib.parse.urlencode(query))
             )
-            result = self.feishu_json_getter(urllib.request.Request(
+            result = self._feishu_request_with_retry(
+                self.feishu_json_getter, urllib.request.Request(
                 url, headers={"Authorization": "Bearer " + tenant_token},
-            ), environment)
+                ), environment, "records request",
+                retry_policy["json_request_timeout_seconds"], retry_deadline,
+            )
             if int(result.get("code") or 0) != 0:
                 raise ReleaseError(
                     "%s Feishu table or view permission verification failed" % phase
@@ -1133,9 +1223,12 @@ class ContentWhisperRelease:
             "https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
             urllib.parse.quote(attachment_tokens[0], safe="")
         )
-        self.feishu_media_getter(urllib.request.Request(
-            media_url, headers={"Authorization": "Bearer " + tenant_token},
-        ), environment)
+        self._feishu_request_with_retry(
+            self.feishu_media_getter, urllib.request.Request(
+                media_url, headers={"Authorization": "Bearer " + tenant_token},
+            ), environment, "attachment request",
+            retry_policy["attachment_request_timeout_seconds"], retry_deadline,
+        )
         self.checkpoint("%s_feishu_operational" % phase)
 
     def _restore_all(self):
