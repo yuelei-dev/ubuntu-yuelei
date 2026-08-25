@@ -36,6 +36,29 @@ MANIFEST_REPOSITORY_PATHS = {
     "deploy/test-runtime/digital-human-material-seedream-v3-20260821.json",
     "docs/release-manifests/digital-human-material-feishu-priority-20260823.json",
 }
+HEALTH_PHASE_STATUS_FIELDS = {
+    "pre-deployment": "pre_expected_statuses",
+    "post-deployment": "post_expected_status",
+    "rollback": "rollback_expected_statuses",
+}
+APPROVED_HEALTH_CONTRACT = {
+    "http://127.0.0.1:8096/api/gen/health": {
+        "pre_expected_statuses": [200],
+        "post_expected_status": 200,
+        "rollback_expected_statuses": [200],
+    },
+    "http://127.0.0.1:8096/api/gen/history": {
+        "pre_expected_statuses": [401],
+        "post_expected_status": 401,
+        "rollback_expected_statuses": [401],
+    },
+    "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
+        "pre_expected_statuses": [404, 401],
+        "post_expected_status": 401,
+        "rollback_expected_statuses": [404, 401],
+    },
+}
+APPROVED_HEALTH_URLS = frozenset(APPROVED_HEALTH_CONTRACT)
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 ALLOWED_DEPLOYMENT_TOOLS = frozenset({
@@ -670,11 +693,60 @@ class ContentWhisperRelease:
             raise ReleaseError("health retry interval must be between 0.1 and 5 seconds")
         return timeout, interval
 
-    def _verify_health(self, prefix=""):
+    @staticmethod
+    def _status_value(value, label):
+        if type(value) is not int or not 100 <= value <= 599:
+            raise ReleaseError("%s must be an HTTP status integer" % label)
+        return value
+
+    def _health_expected_statuses(self, check, phase, status_field):
+        if HEALTH_PHASE_STATUS_FIELDS.get(phase) != status_field:
+            raise ReleaseError("health phase and status field do not match")
+        if status_field == "post_expected_status":
+            return {self._status_value(
+                check.get(status_field), status_field,
+            )}
+        values = check.get(status_field)
+        if (not isinstance(values, list) or not values
+                or len(values) != len(set(values))):
+            raise ReleaseError("%s must be a non-empty unique status list" % status_field)
+        return {
+            self._status_value(value, status_field) for value in values
+        }
+
+    def _validate_health_contract(self):
+        checks = self.manifest.get("health_checks")
+        expected_fields = {
+            "url", "pre_expected_statuses", "post_expected_status",
+            "rollback_expected_statuses",
+        }
+        if (not isinstance(checks, list) or len(checks) != 3
+                or any(not isinstance(check, dict)
+                       or set(check) != expected_fields for check in checks)):
+            raise ReleaseError("health checks must use the exact phase-aware contract")
+        urls = [str(check["url"]) for check in checks]
+        if len(set(urls)) != len(urls) or set(urls) != APPROVED_HEALTH_URLS:
+            raise ReleaseError("health checks must lock the three approved local URLs")
+        actual_contract = {
+            check["url"]: {
+                key: value for key, value in check.items() if key != "url"
+            }
+            for check in checks
+        }
+        if actual_contract != APPROVED_HEALTH_CONTRACT:
+            raise ReleaseError("health phase statuses do not match the locked contract")
+        for check in checks:
+            for phase, status_field in HEALTH_PHASE_STATUS_FIELDS.items():
+                self._health_expected_statuses(check, phase, status_field)
+
+    def _verify_health(self, *, phase, status_field):
+        self._validate_health_contract()
         timeout, interval = self._health_probe_policy()
         deadline = self.monotonic() + timeout
         for check in self.manifest["health_checks"]:
-            expected = int(check["expected_status"])
+            expected = self._health_expected_statuses(
+                check, phase, status_field,
+            )
             last_status = None
             last_error = None
             while True:
@@ -684,7 +756,7 @@ class ContentWhisperRelease:
                 except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
                     last_status = None
                     last_error = exc
-                if last_status == expected:
+                if last_status in expected:
                     break
                 remaining = deadline - self.monotonic()
                 if remaining <= 0:
@@ -693,17 +765,13 @@ class ContentWhisperRelease:
                         else "status %s" % last_status
                     )
                     raise ReleaseError(
-                        "%shealth readiness timeout for %s: expected %s, last %s" %
-                        (prefix, check["url"], expected, detail)
+                        "%s health readiness timeout for %s: expected one of %s, last %s" %
+                        (phase, check["url"], sorted(expected), detail)
                     )
                 self.sleeper(min(interval, remaining))
 
     def _http_status(self, url):
-        locked_urls = {
-            str(check.get("url") or "")
-            for check in self.manifest.get("health_checks", [])
-            if isinstance(check, dict)
-        }
+        locked_urls = APPROVED_HEALTH_URLS
         parsed = urllib.parse.urlsplit(url)
         if (url not in locked_urls
                 or parsed.scheme != "http"
@@ -1018,7 +1086,10 @@ class ContentWhisperRelease:
             try:
                 self._run_stage("rollback_restart")
                 self._run_stage("rollback_service_active")
-                self._verify_health("rollback ")
+                self._verify_health(
+                    phase="rollback",
+                    status_field="rollback_expected_statuses",
+                )
             except Exception as exc:
                 failures.append("rollback service: %s" % exc)
         if failures:
@@ -1036,12 +1107,16 @@ class ContentWhisperRelease:
         self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
+        self._validate_health_contract()
         self.start_states = manifest_verify.classify_start_states(
             self.manifest, self.runtime.root,
         )
         self.checkpoint("start_state_complete")
         self._run_stage("pre_service_active")
-        self._verify_health("pre-deployment ")
+        self._verify_health(
+            phase="pre-deployment",
+            status_field="pre_expected_statuses",
+        )
         self._verify_feishu_operational("pre-deployment")
         self.checkpoint("pre_health")
         self._backup_all(self.start_states)
@@ -1059,7 +1134,10 @@ class ContentWhisperRelease:
                 self.restart_attempted = True
                 self._run_stage("restart")
                 self._run_stage("service_active")
-            self._verify_health()
+            self._verify_health(
+                phase="post-deployment",
+                status_field="post_expected_status",
+            )
             self._verify_feishu_operational("post-restart")
             self.checkpoint("health")
         except Exception as release_error:

@@ -359,15 +359,37 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertNotIn("tests/test_digital_human_voice_state.js", rendered)
         self.assertNotIn("tests.test_cosyvoice", rendered)
         self.assertNotIn("tests.test_heygen_mcp_oauth", rendered)
-        self.assertEqual(
-            {200, 401},
-            {int(item["expected_status"]) for item in self.manifest["health_checks"]},
-        )
+        expected_health = {
+            "http://127.0.0.1:8096/api/gen/health": {
+                "pre_expected_statuses": [200],
+                "post_expected_status": 200,
+                "rollback_expected_statuses": [200],
+            },
+            "http://127.0.0.1:8096/api/gen/history": {
+                "pre_expected_statuses": [401],
+                "post_expected_status": 401,
+                "rollback_expected_statuses": [401],
+            },
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
+                "pre_expected_statuses": [404, 401],
+                "post_expected_status": 401,
+                "rollback_expected_statuses": [404, 401],
+            },
+        }
+        actual_health = {
+            item["url"]: {
+                key: value for key, value in item.items() if key != "url"
+            }
+            for item in self.manifest["health_checks"]
+        }
+        self.assertEqual(expected_health, actual_health)
         history = next(
             item for item in self.manifest["health_checks"]
             if item["url"].endswith("/api/gen/digital-human-v2/history")
         )
-        self.assertEqual(401, history["expected_status"])
+        self.assertEqual(401, history["post_expected_status"])
+        self.assertNotIn(200, history["pre_expected_statuses"])
+        self.assertNotIn(200, history["rollback_expected_statuses"])
 
     def test_voice_state_node_test_is_ci_only_and_content_locked(self):
         ci = CI_PATH.read_text(encoding="utf-8")
