@@ -41,6 +41,10 @@ class SnapshotTransientError(RuntimeError):
     """A retryable cache failure that must not commit a partial catalog."""
 
 
+class SnapshotCapacityError(RuntimeError):
+    """The bounded cache cannot admit another snapshot right now."""
+
+
 def _file_identity(stat):
     identity = (
         stat.st_dev,
@@ -175,7 +179,7 @@ def _remove_snapshot(path):
 
 def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
     if required_bytes < 0 or required_bytes > SNAPSHOT_CACHE_MAX_BYTES:
-        raise OSError("material snapshot exceeds cache capacity")
+        raise SnapshotCapacityError("material snapshot exceeds cache capacity")
     now = time.time()
     entries = _snapshot_files(root)
     retained = []
@@ -202,7 +206,9 @@ def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
         if _remove_snapshot(path):
             total -= stat.st_size
     if total + required_bytes > SNAPSHOT_CACHE_MAX_BYTES:
-        raise OSError("material snapshot cache capacity is exhausted")
+        raise SnapshotCapacityError(
+            "material snapshot cache capacity is exhausted"
+        )
 
 
 def _verified_existing_snapshot(path, digest):
@@ -215,8 +221,13 @@ def _verified_existing_snapshot(path, digest):
             "material snapshot metadata is temporarily unavailable"
         ) from error
     try:
-        if (not stat_module.S_ISREG(stat.st_mode)
-                or time.time() - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
+        if not stat_module.S_ISREG(stat.st_mode):
+            return None
+        if time.time() - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS:
+            if not _remove_snapshot(path):
+                raise SnapshotTransientError(
+                    "expired material snapshot could not be removed"
+                )
             return None
         with path.open("rb") as source:
             before = _snapshot_identity(os.fstat(source.fileno()))
@@ -253,14 +264,9 @@ def _materialize_snapshot(path, digest, protected_digests):
 def _materialize_snapshot_locked(
         cache_root, path, digest, protected_digests):
     cache_path = _snapshot_path(cache_root, digest)
-    try:
-        _prepare_snapshot_capacity(
-            cache_root, 0, set(protected_digests) | {digest}
-        )
-    except OSError as error:
-        raise SnapshotTransientError(
-            "material snapshot capacity check failed"
-        ) from error
+    _prepare_snapshot_capacity(
+        cache_root, 0, set(protected_digests) | {digest}
+    )
     snapshot_identity = _verified_existing_snapshot(cache_path, digest)
     if snapshot_identity is not None:
         try:
@@ -284,13 +290,13 @@ def _materialize_snapshot_locked(
 
     try:
         source_size = path.stat().st_size
-        if source_size > SNAPSHOT_CACHE_MAX_BYTES:
-            return None
-        _prepare_snapshot_capacity(cache_root, source_size, protected_digests)
     except OSError as error:
         raise SnapshotTransientError(
-            "material snapshot capacity reservation failed"
+            "material source identity is temporarily unavailable"
         ) from error
+    if source_size > SNAPSHOT_CACHE_MAX_BYTES:
+        return None
+    _prepare_snapshot_capacity(cache_root, source_size, protected_digests)
 
     temporary_path = None
     try:
@@ -418,6 +424,22 @@ def _string_list(value, limit=24):
     return result
 
 
+def _verified_source_identity(path, digest):
+    try:
+        with path.open("rb") as source:
+            before = _file_identity(os.fstat(source.fileno()))
+            actual_digest = _sha256_open_file(source)
+            after = _file_identity(os.fstat(source.fileno()))
+        current = _file_identity(path.stat())
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material source is temporarily unreadable"
+        ) from error
+    if before != after or current != after or actual_digest != digest:
+        return None
+    return after
+
+
 def _safe_record(root, record, protected_digests):
     if not isinstance(record, dict) or record.get("状态") != "可使用":
         return None
@@ -427,12 +449,19 @@ def _safe_record(root, record, protected_digests):
     path = _safe_material_path(root, relative_path)
     if not media_type or path is None or not SHA256_RE.fullmatch(digest):
         return None
-    snapshot = _materialize_snapshot(path, digest, protected_digests)
-    if snapshot is None:
-        return None
-    source_identity, snapshot_path, snapshot_identity = snapshot
+    try:
+        snapshot = _materialize_snapshot(path, digest, protected_digests)
+    except SnapshotCapacityError:
+        snapshot = None
+        source_identity = _verified_source_identity(path, digest)
+        if source_identity is None:
+            return None
+    else:
+        if snapshot is None:
+            return None
+        source_identity, snapshot_path, snapshot_identity = snapshot
     title = str(record.get("素材名称") or path.stem).strip()[:160]
-    return {
+    item = {
         "id": digest,
         "title": title or path.stem[:160],
         "media_type": media_type,
@@ -449,9 +478,11 @@ def _safe_record(root, record, protected_digests):
         "content_safety": str(record.get("内容安全") or "").strip()[:80],
         "license": str(record.get("许可类型") or "").strip()[:80],
         "_identity": source_identity,
-        "_snapshot_path": snapshot_path,
-        "_snapshot_identity": snapshot_identity,
     }
+    if snapshot is not None:
+        item["_snapshot_path"] = snapshot_path
+        item["_snapshot_identity"] = snapshot_identity
+    return item
 
 
 def _record_watch(root, record):
@@ -485,17 +516,13 @@ def _cached_items_current(root):
                 identity = None
         if identity != expected_identity:
             return False
-    now = time.time()
-    for item in _CACHE_ITEMS:
-        try:
-            snapshot_stat = item["_snapshot_path"].lstat()
-        except OSError:
-            return False
-        if (not stat_module.S_ISREG(snapshot_stat.st_mode)
-                or _snapshot_identity(snapshot_stat) != item["_snapshot_identity"]
-                or now - snapshot_stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
-            return False
     return True
+
+
+def _snapshot_cache_ready():
+    cache_root = _snapshot_cache_root()
+    with _snapshot_cache_lock(cache_root):
+        _prepare_snapshot_capacity(cache_root, 0, set())
 
 
 def _catalog_items():
@@ -515,6 +542,7 @@ def _catalog_items():
         watched = {}
         protected_digests = set()
         try:
+            _snapshot_cache_ready()
             with catalog.open("r", encoding="utf-8") as source:
                 for line in source:
                     if len(items) >= MAX_CATALOG_ITEMS:
@@ -529,8 +557,9 @@ def _catalog_items():
                         continue
                     if item is not None:
                         items.append(item)
-                        protected_digests.add(item["sha256"])
-        except (OSError, SnapshotTransientError):
+                        if "_snapshot_path" in item:
+                            protected_digests.add(item["sha256"])
+        except (OSError, SnapshotCapacityError, SnapshotTransientError):
             return []
         _CACHE_KEY = key
         _CACHE_ITEMS = tuple(items)
@@ -562,17 +591,62 @@ def resolve_material(relative_path):
     path = _safe_material_path(_material_root(), relative_path)
     if path is None:
         return None
-    try:
-        source_identity = _file_identity(path.stat())
+    with _CACHE_LOCK:
+        try:
+            source_identity = _file_identity(path.stat())
+        except OSError:
+            return None
         if source_identity != item["_identity"]:
             return None
-        source = item["_snapshot_path"].open("rb")
-        snapshot_identity = _snapshot_identity(os.fstat(source.fileno()))
-    except OSError:
-        return None
-    if snapshot_identity != item["_snapshot_identity"]:
-        source.close()
-        return None
-    return VerifiedMaterial(
-        path, source, item["_identity"], item["_snapshot_identity"]
-    )
+
+        snapshot_path = item.get("_snapshot_path")
+        expected_snapshot_identity = item.get("_snapshot_identity")
+        source = None
+        if snapshot_path is not None and expected_snapshot_identity is not None:
+            try:
+                snapshot_stat = snapshot_path.lstat()
+                if (not stat_module.S_ISREG(snapshot_stat.st_mode)
+                        or _snapshot_identity(snapshot_stat)
+                        != expected_snapshot_identity
+                        or time.time() - snapshot_stat.st_mtime
+                        > SNAPSHOT_CACHE_TTL_SECONDS):
+                    raise OSError("cached material snapshot is stale")
+                source = snapshot_path.open("rb")
+                snapshot_identity = _snapshot_identity(os.fstat(source.fileno()))
+            except OSError:
+                if source is not None:
+                    source.close()
+                source = None
+            if source is not None and snapshot_identity != expected_snapshot_identity:
+                source.close()
+                source = None
+
+        if source is None:
+            try:
+                snapshot = _materialize_snapshot(
+                    path, item["sha256"], {item["sha256"]}
+                )
+            except (SnapshotCapacityError, SnapshotTransientError):
+                return None
+            if snapshot is None:
+                return None
+            materialized_identity, snapshot_path, snapshot_identity = snapshot
+            if materialized_identity != item["_identity"]:
+                return None
+            try:
+                source = snapshot_path.open("rb")
+                opened_identity = _snapshot_identity(os.fstat(source.fileno()))
+            except OSError:
+                if source is not None:
+                    source.close()
+                return None
+            if opened_identity != snapshot_identity:
+                source.close()
+                return None
+            item["_snapshot_path"] = snapshot_path
+            item["_snapshot_identity"] = snapshot_identity
+
+        return VerifiedMaterial(
+            path, source, item["_identity"],
+            item["_snapshot_identity"],
+        )

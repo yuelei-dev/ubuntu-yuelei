@@ -213,15 +213,49 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
                 if item is not None:
                     item.close()
 
-    def test_snapshot_cache_capacity_is_strict_and_fail_closed(self):
+    def test_catalog_larger_than_capacity_keeps_a_bounded_working_set(self):
         self._write_record("files/视频/first.mp4", "视频", content=b"123456")
         self._write_record("files/视频/second.mp4", "视频", content=b"abcdef")
         with self._catalog(), mock.patch.object(
+                private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10), \
+                mock.patch.object(
+                    private_domain_media, "_materialize_snapshot",
+                    wraps=private_domain_media._materialize_snapshot) as materialize:
+            first = private_domain_media.list_materials(300)
+            first_call_count = materialize.call_count
+            second = private_domain_media.list_materials(300)
+        self.assertEqual(2, len(first))
+        self.assertEqual(first, second)
+        self.assertIsNotNone(private_domain_media._CACHE_KEY)
+        self.assertEqual(2, len(private_domain_media._CACHE_ITEMS))
+        self.assertEqual(2, first_call_count)
+        self.assertEqual(first_call_count, materialize.call_count)
+        self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+        self.assertLessEqual(sum(
+            path.stat().st_size for path in self.snapshot_root.iterdir()
+            if path.is_file()
+        ), 10)
+
+    def test_evicted_and_unresident_items_are_rematerialized_within_capacity(self):
+        first_path = "files/视频/first.mp4"
+        second_path = "files/视频/second.mp4"
+        self._write_record(first_path, "视频", content=b"123456")
+        self._write_record(second_path, "视频", content=b"abcdef")
+        with self._catalog(), mock.patch.object(
                 private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
-            items = private_domain_media.list_materials(300)
-        self.assertEqual([], items)
-        self.assertIsNone(private_domain_media._CACHE_KEY)
-        self.assertEqual((), private_domain_media._CACHE_ITEMS)
+            self.assertEqual(2, len(private_domain_media.list_materials(300)))
+            second = private_domain_media.resolve_material(second_path)
+            self.assertIsNotNone(second)
+            self.assertEqual(b"abcdef", second.open("rb").read())
+            second.close()
+            self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
+
+            first = private_domain_media.resolve_material(first_path)
+            self.assertIsNotNone(first)
+            self.assertEqual(b"123456", first.open("rb").read())
+            first.close()
+
+        self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
         self.assertLessEqual(sum(
             path.stat().st_size for path in self.snapshot_root.iterdir()
             if path.is_file()
@@ -385,8 +419,9 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
             with mock.patch.object(
                     private_domain_media, "_materialize_snapshot",
                     wraps=private_domain_media._materialize_snapshot) as materialize:
-                items = private_domain_media.list_materials(300)
-        self.assertEqual(1, len(items))
+                resolved = private_domain_media.resolve_material(relative_path)
+        self.assertIsNotNone(resolved)
+        resolved.close()
         self.assertEqual(1, materialize.call_count)
         self.assertEqual(1, len(list(self.snapshot_root.glob("*.blob"))))
 
