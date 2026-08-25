@@ -549,10 +549,19 @@ class TransactionTests(unittest.TestCase):
                 )
 
     def test_launcher_requires_empty_environment_and_all_python_isolation_flags(self):
-        launcher = (ROOT / "tools/test_release_transaction_launcher.sh").read_text("utf-8")
+        entrypoint_bytes = (ROOT / "tools/test_release_transaction.py").read_bytes()
+        launcher_path = ROOT / "tools/test_release_transaction_launcher.sh"
+        launcher_bytes = launcher_path.read_bytes()
+        launcher = launcher_bytes.decode("utf-8")
+        documentation = (ROOT / "docs/test-release-transaction-v1.md").read_text("utf-8")
         self.assertIn("/usr/bin/env -i", launcher)
         self.assertIn("/usr/bin/python3 -I -E -s -B", launcher)
         self.assertIn(transaction.TRANSACTION_ENTRYPOINT, launcher)
+        self.assertIn(
+            "EXPECTED_ENTRYPOINT_SHA256=" + digest(entrypoint_bytes), launcher,
+        )
+        self.assertIn(digest(entrypoint_bytes), documentation)
+        self.assertIn(digest(launcher_bytes), documentation)
         self.assertFalse(transaction._runtime_environment_is_isolated())
 
     def test_isolated_runtime_rejects_wrong_loaded_script_path(self):
@@ -570,6 +579,106 @@ class TransactionTests(unittest.TestCase):
                 mock.patch.object(transaction, "__file__", "/tmp/replaced.py"), \
                 mock.patch.dict(transaction.os.environ, environment, clear=True):
             self.assertFalse(transaction._runtime_environment_is_isolated())
+
+    def test_isolated_runtime_accepts_approved_python_symlink_target(self):
+        flags = types.SimpleNamespace(
+            isolated=1, ignore_environment=1, no_user_site=1, dont_write_bytecode=1,
+        )
+        environment = {
+            "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
+
+        def realpath(value):
+            value = str(value)
+            if value in {"/usr/bin/python3", "/usr/bin/python3.10"}:
+                return "/usr/bin/python3.10"
+            return value
+
+        with mock.patch.object(transaction.os, "name", "posix"), \
+                mock.patch.object(transaction.os, "geteuid", return_value=0, create=True), \
+                mock.patch.object(transaction.os.path, "realpath", side_effect=realpath), \
+                mock.patch.object(transaction.sys, "executable", "/usr/bin/python3"), \
+                mock.patch.object(transaction.sys, "flags", flags), \
+                mock.patch.object(transaction, "__file__", transaction.TRANSACTION_ENTRYPOINT), \
+                mock.patch.dict(transaction.os.environ, environment, clear=True):
+            self.assertTrue(transaction._runtime_environment_is_isolated())
+
+    def test_production_planner_validates_approved_python_symlink_target(self):
+        phase_one = b"""\
+DEFAULT_CATALOG = 'catalog.json'
+DEFAULT_IDENTITY_FILE = '/etc/identity.json'
+class RuntimeCatalog:
+    @staticmethod
+    def load(source_root, repository_path):
+        return (source_root, repository_path)
+class ReleaseEngine:
+    def __init__(self, *args, **kwargs):
+        self.repo = object()
+        self.catalog = object()
+def _verify_runtime_entrypoint(source_root):
+    return None
+"""
+        bootstrap = {
+            "schema_version": 1,
+            "source_root": transaction.DEFAULT_SOURCE_ROOT,
+            "transaction_entrypoint": transaction.TRANSACTION_ENTRYPOINT,
+            "transaction_sha256": digest(b"transaction"),
+            "phase_one_entrypoint": transaction.PHASE_ONE_ENTRYPOINT,
+            "phase_one_sha256": digest(phase_one),
+            "launcher": transaction.TRANSACTION_LAUNCHER,
+            "launcher_sha256": digest(b"launcher"),
+            "state_root": transaction.DEFAULT_STATE_ROOT,
+        }
+
+        def realpath(value):
+            return "/usr/bin/python3.10" if str(value) == "/usr/bin/python3" else str(value)
+
+        with mock.patch.object(transaction, "_load_private_json", return_value=bootstrap), \
+                mock.patch.object(transaction, "_validate_root_chain") as validate, \
+                mock.patch.object(
+                    transaction, "_locked_regular",
+                    side_effect=[b"transaction", phase_one, b"launcher"],
+                ), mock.patch.object(transaction.os.path, "realpath", side_effect=realpath):
+            transaction._load_production_planner()
+        validate.assert_any_call(
+            "/usr/bin/python3.10", final_kind="file", private=False,
+        )
+
+    def test_isolated_runtime_rejects_other_interpreter_flags_environment_and_path(self):
+        good_flags = types.SimpleNamespace(
+            isolated=1, ignore_environment=1, no_user_site=1, dont_write_bytecode=1,
+        )
+        good_environment = {
+            "HOME": "/root", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
+        cases = (
+            ("executable", "/opt/unapproved/python3", good_flags,
+             good_environment, transaction.TRANSACTION_ENTRYPOINT),
+            ("flags", "/usr/bin/python3", types.SimpleNamespace(
+                isolated=1, ignore_environment=0, no_user_site=1, dont_write_bytecode=1,
+            ), good_environment, transaction.TRANSACTION_ENTRYPOINT),
+            ("environment", "/usr/bin/python3", good_flags,
+             {**good_environment, "EXTRA": "1"}, transaction.TRANSACTION_ENTRYPOINT),
+            ("path", "/usr/bin/python3", good_flags,
+             good_environment, "/tmp/replaced.py"),
+        )
+
+        def realpath(value):
+            value = str(value)
+            return "/usr/bin/python3.10" if value == "/usr/bin/python3" else value
+
+        for label, executable, flags, environment, loaded_path in cases:
+            with self.subTest(label=label), \
+                    mock.patch.object(transaction.os, "name", "posix"), \
+                    mock.patch.object(transaction.os, "geteuid", return_value=0, create=True), \
+                    mock.patch.object(transaction.os.path, "realpath", side_effect=realpath), \
+                    mock.patch.object(transaction.sys, "executable", executable), \
+                    mock.patch.object(transaction.sys, "flags", flags), \
+                    mock.patch.object(transaction, "__file__", loaded_path), \
+                    mock.patch.dict(transaction.os.environ, environment, clear=True):
+                self.assertFalse(transaction._runtime_environment_is_isolated())
 
     def test_writable_trusted_parent_is_rejected(self):
         trusted_root = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
