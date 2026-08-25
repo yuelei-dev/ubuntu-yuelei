@@ -220,19 +220,26 @@ class DigitalHumanV2DeploymentManifestTests(unittest.TestCase):
         self.assertIn("read-only", observation["capture_method"])
         self.assertEqual(
             observation["captured_at"],
-            "2026-08-24 (relocked from latest main and prior successful test deployment evidence; no live read in this task)",
+            "2026-08-25 (user-provided read-only pre-deployment evidence; no server access in this task)",
         )
         self.assertEqual(
             observation["repository_main_commit"],
-            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+            "864f557f6003f92083a8e2d366800d63d041b7ce",
         )
         self.assertIn("no server access", observation["repository_git_metadata"])
         self.assertEqual(
             self.manifest["source"]["base_main_commit"],
-            "a858dec9d1d49a2432d40f2341512bd66291c6de",
+            "864f557f6003f92083a8e2d366800d63d041b7ce",
         )
         self.assertEqual(observation["service_state"], "active")
-        self.assertEqual(observation["health_status"], 200)
+        self.assertEqual(observation["health_statuses"], {
+            "http://127.0.0.1:8096/api/gen/health": 200,
+            "http://127.0.0.1:8096/api/gen/history": 401,
+            "http://127.0.0.1:8096/api/gen/digital-human-v2/history": 404,
+        })
+        self.assertFalse(observation["backup_started"])
+        self.assertFalse(observation["write_started"])
+        self.assertFalse(observation["restart_started"])
         self.assertEqual(observation["files"], 3)
 
     def test_tampered_successor_preimage_lock_is_rejected(self):
