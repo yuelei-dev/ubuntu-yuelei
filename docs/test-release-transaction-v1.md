@@ -21,12 +21,17 @@ must be root-owned, mode `0600`, and contain exactly:
   "transaction_entrypoint": "/usr/local/libexec/huangque-release/test_release_transaction.py",
   "transaction_sha256": "REPLACE_WITH_REVIEWED_EXECUTOR_SHA256",
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
-  "phase_one_sha256": "REPLACE_WITH_ALREADY_INSTALLED_PHASE_ONE_SHA256",
+  "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
   "launcher_sha256": "REPLACE_WITH_REVIEWED_LAUNCHER_SHA256",
   "state_root": "/var/lib/huangque-release"
 }
 ```
+
+Whenever the reviewed phase-one entrypoint changes, the administrator must
+replace both the installed phase-one file and this transaction bootstrap value
+with that same reviewed SHA-256 before running the transaction launcher. A
+mixed old/new pair remains fail-closed.
 
 The launcher starts exact `/usr/bin/python3` through `env -i` with
 `-I -E -s -B` and one exact minimal environment. The command checks its exact
