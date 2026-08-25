@@ -37,6 +37,10 @@ _CACHE_ITEMS = ()
 _CACHE_WATCHED = ()
 
 
+class SnapshotTransientError(RuntimeError):
+    """A retryable cache failure that must not commit a partial catalog."""
+
+
 def _file_identity(stat):
     identity = (
         stat.st_dev,
@@ -87,13 +91,15 @@ def _snapshot_files(root):
     result = []
     try:
         candidates = root.iterdir()
-    except OSError:
-        return result
+    except OSError as error:
+        raise SnapshotTransientError("material snapshot cache scan failed") from error
     for path in candidates:
         try:
             stat = path.lstat()
-        except OSError:
-            continue
+        except OSError as error:
+            raise SnapshotTransientError(
+                "material snapshot cache entry changed during scan"
+            ) from error
         if not stat_module.S_ISREG(stat.st_mode):
             continue
         if path.name == SNAPSHOT_LOCK_FILE:
@@ -145,7 +151,9 @@ def _snapshot_cache_lock(root):
                 break
             except (BlockingIOError, OSError):
                 if time.monotonic() >= deadline:
-                    raise OSError("material snapshot cache lock timed out")
+                    raise SnapshotTransientError(
+                        "material snapshot cache lock timed out"
+                    )
                 time.sleep(0.01)
         try:
             yield
@@ -200,6 +208,13 @@ def _prepare_snapshot_capacity(root, required_bytes, protected_digests):
 def _verified_existing_snapshot(path, digest):
     try:
         stat = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot metadata is temporarily unavailable"
+        ) from error
+    try:
         if (not stat_module.S_ISREG(stat.st_mode)
                 or time.time() - stat.st_mtime > SNAPSHOT_CACHE_TTL_SECONDS):
             return None
@@ -207,10 +222,15 @@ def _verified_existing_snapshot(path, digest):
             before = _snapshot_identity(os.fstat(source.fileno()))
             actual_digest = _sha256_open_file(source)
             after = _snapshot_identity(os.fstat(source.fileno()))
-    except OSError:
-        return None
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot is temporarily unreadable"
+        ) from error
     if before != after or actual_digest != digest:
-        _remove_snapshot(path)
+        if not _remove_snapshot(path):
+            raise SnapshotTransientError(
+                "invalid material snapshot could not be removed"
+            )
         return None
     return after
 
@@ -222,8 +242,12 @@ def _materialize_snapshot(path, digest, protected_digests):
             return _materialize_snapshot_locked(
                 cache_root, path, digest, protected_digests
             )
-    except OSError:
-        return None
+    except SnapshotTransientError:
+        raise
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot cache is temporarily unavailable"
+        ) from error
 
 
 def _materialize_snapshot_locked(
@@ -233,8 +257,10 @@ def _materialize_snapshot_locked(
         _prepare_snapshot_capacity(
             cache_root, 0, set(protected_digests) | {digest}
         )
-    except OSError:
-        return None
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot capacity check failed"
+        ) from error
     snapshot_identity = _verified_existing_snapshot(cache_path, digest)
     if snapshot_identity is not None:
         try:
@@ -242,21 +268,29 @@ def _materialize_snapshot_locked(
                 before = _file_identity(os.fstat(source.fileno()))
                 actual_digest = _sha256_open_file(source)
                 after = _file_identity(os.fstat(source.fileno()))
-        except OSError:
-            return None
+        except OSError as error:
+            raise SnapshotTransientError(
+                "material source is temporarily unreadable"
+            ) from error
         try:
             current = _file_identity(path.stat())
-        except OSError:
-            return None
+        except OSError as error:
+            raise SnapshotTransientError(
+                "material source identity is temporarily unavailable"
+            ) from error
         if before != after or current != after or actual_digest != digest:
             return None
         return after, cache_path, snapshot_identity
 
     try:
         source_size = path.stat().st_size
+        if source_size > SNAPSHOT_CACHE_MAX_BYTES:
+            return None
         _prepare_snapshot_capacity(cache_root, source_size, protected_digests)
-    except OSError:
-        return None
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot capacity reservation failed"
+        ) from error
 
     temporary_path = None
     try:
@@ -278,8 +312,10 @@ def _materialize_snapshot_locked(
             os.fsync(snapshot.fileno())
         try:
             current = _file_identity(path.stat())
-        except OSError:
-            return None
+        except OSError as error:
+            raise SnapshotTransientError(
+                "material source identity is temporarily unavailable"
+            ) from error
         if (before != after or current != after
                 or digest_builder.hexdigest() != digest):
             return None
@@ -291,8 +327,12 @@ def _materialize_snapshot_locked(
             _remove_snapshot(cache_path)
             return None
         return after, cache_path, _snapshot_identity(snapshot_stat)
-    except OSError:
-        return None
+    except SnapshotTransientError:
+        raise
+    except OSError as error:
+        raise SnapshotTransientError(
+            "material snapshot creation failed"
+        ) from error
     finally:
         if temporary_path is not None:
             try:
@@ -490,7 +530,7 @@ def _catalog_items():
                     if item is not None:
                         items.append(item)
                         protected_digests.add(item["sha256"])
-        except OSError:
+        except (OSError, SnapshotTransientError):
             return []
         _CACHE_KEY = key
         _CACHE_ITEMS = tuple(items)

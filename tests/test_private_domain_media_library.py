@@ -219,7 +219,9 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
         with self._catalog(), mock.patch.object(
                 private_domain_media, "SNAPSHOT_CACHE_MAX_BYTES", 10):
             items = private_domain_media.list_materials(300)
-        self.assertEqual(1, len(items))
+        self.assertEqual([], items)
+        self.assertIsNone(private_domain_media._CACHE_KEY)
+        self.assertEqual((), private_domain_media._CACHE_ITEMS)
         self.assertLessEqual(sum(
             path.stat().st_size for path in self.snapshot_root.iterdir()
             if path.is_file()
@@ -278,6 +280,71 @@ class PrivateDomainMediaLibraryTests(unittest.TestCase):
         self.assertEqual(0, holder.exitcode)
         self.assertEqual(1, len(items))
         self.assertFalse(part.exists())
+
+    def test_lock_timeout_does_not_commit_empty_cache_and_next_request_recovers(self):
+        relative_path = "files/视频/retry.mp4"
+        self._write_record(relative_path, "视频", content=b"retry")
+        context = multiprocessing.get_context("spawn")
+        active = context.Event()
+        release = context.Event()
+
+        with self._catalog():
+            cache_root = private_domain_media._snapshot_cache_root()
+            part = cache_root / ".pending-active.part"
+            holder = context.Process(
+                target=_hold_snapshot_cache_lock,
+                args=(str(cache_root), active, release),
+            )
+            holder.start()
+            try:
+                self.assertTrue(active.wait(timeout=3))
+                with mock.patch.object(
+                        private_domain_media,
+                        "SNAPSHOT_LOCK_TIMEOUT_SECONDS", 0.05):
+                    first = private_domain_media.list_materials(300)
+                self.assertEqual([], first)
+                self.assertIsNone(private_domain_media._CACHE_KEY)
+                self.assertEqual((), private_domain_media._CACHE_ITEMS)
+                self.assertTrue(part.exists())
+            finally:
+                release.set()
+                holder.join(timeout=3)
+                if holder.is_alive():
+                    holder.terminate()
+                    holder.join(timeout=2)
+
+            second = private_domain_media.list_materials(300)
+
+        self.assertEqual(0, holder.exitcode)
+        self.assertEqual([relative_path], [item["relative_path"] for item in second])
+        self.assertFalse(part.exists())
+
+    def test_transient_failure_mid_catalog_never_commits_partial_items(self):
+        self._write_record("files/视频/first.mp4", "视频", content=b"first")
+        self._write_record("files/视频/second.mp4", "视频", content=b"second")
+        original_materialize = private_domain_media._materialize_snapshot
+        calls = 0
+
+        def fail_second_record(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise private_domain_media.SnapshotTransientError(
+                    "injected transient failure"
+                )
+            return original_materialize(*args, **kwargs)
+
+        with self._catalog(), mock.patch.object(
+                private_domain_media, "_materialize_snapshot",
+                side_effect=fail_second_record):
+            first = private_domain_media.list_materials(300)
+
+        self.assertEqual([], first)
+        self.assertIsNone(private_domain_media._CACHE_KEY)
+        self.assertEqual((), private_domain_media._CACHE_ITEMS)
+        with self._catalog():
+            second = private_domain_media.list_materials(300)
+        self.assertEqual(2, len(second))
 
     def test_uncleanable_orphan_counts_toward_capacity_and_fails_closed(self):
         self.snapshot_root.mkdir(parents=True)
