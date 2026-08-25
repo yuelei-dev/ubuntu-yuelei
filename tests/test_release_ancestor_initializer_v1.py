@@ -123,6 +123,9 @@ class FakeEngine:
         self.snapshot_calls = 0
         self.on_inventory = None
         self.written_state = None
+        self.external_boundaries = [{"runtime_path": "/external", "token": "stable"}]
+        self.external_calls = 0
+        self.on_external = None
 
     def verify_identity(self):
         return dict(self.identity)
@@ -157,6 +160,13 @@ class FakeEngine:
         result = list(self.inventory_drift)
         if self.on_inventory:
             self.on_inventory(self.snapshot_calls)
+        return result
+
+    def external_boundary_snapshot(self):
+        self.external_calls += 1
+        result = list(self.external_boundaries)
+        if self.on_external:
+            self.on_external(self.external_calls)
         return result
 
     @contextlib.contextmanager
@@ -219,6 +229,11 @@ class CompatibleConsumerEngine(FakeEngine):
         return phase_one.ReleaseEngine._verify_planning_snapshot(
             self, identity, state, target_commit, services,
         )
+
+    def verify_external_boundary_snapshot(self, expected):
+        if expected != self.external_boundaries:
+            raise RuntimeError("external boundary drift")
+        return expected
 
 
 class AncestorInitializerTests(unittest.TestCase):
@@ -294,6 +309,10 @@ class AncestorInitializerTests(unittest.TestCase):
             _verify_runtime_entrypoint=lambda source_root: calls.append(
                 ("trust", source_root),
             ),
+        )
+        delegated._external_boundary_contract = {}
+        delegated._external_boundary_module = types.SimpleNamespace(
+            install=lambda _phase, catalog, _contract: (catalog, ReleaseEngine, object()),
         )
         with mock.patch.object(initializer, "_load_verified_phase_one", return_value=delegated), \
                 mock.patch.object(initializer, "AncestorInitializer") as subject, \
@@ -387,6 +406,19 @@ class AncestorInitializerTests(unittest.TestCase):
             initializer.AncestorInitializer(FakePhase, engine).initialize(OLD, "test")
         self.assertIsNone(engine.written_state)
 
+        engine = FakeEngine()
+
+        def drift_external(call_number):
+            if call_number == 1:
+                engine.external_boundaries = [
+                    {"runtime_path": "/external", "token": "replaced"},
+                ]
+
+        engine.on_external = drift_external
+        with self.assertRaisesRegex(initializer.InitializerError, "trust snapshot changed"):
+            initializer.AncestorInitializer(FakePhase, engine).initialize(OLD, "test")
+        self.assertIsNone(engine.written_state)
+
     def test_existing_state_is_rejected_without_replacement(self):
         self.engine.runtime_root.state = b"existing"
         with self.assertRaisesRegex(initializer.InitializerError, "already initialized"):
@@ -408,19 +440,25 @@ class AncestorInitializerTests(unittest.TestCase):
     def test_verified_phase_one_is_compiled_from_the_locked_bytes(self):
         own = b"initializer"
         phase = b"LOCKED_VALUE = 42\n"
+        boundary = b"def load_contract(raw):\n return {'locked': raw.decode()}\n"
+        boundary_contract = b"{}\n"
         launcher = b"launcher"
         bootstrap = {
             "initializer_sha256": hashlib.sha256(own).hexdigest(),
             "phase_one_sha256": hashlib.sha256(phase).hexdigest(),
+            "boundary_sha256": hashlib.sha256(boundary).hexdigest(),
+            "boundary_contract_sha256": hashlib.sha256(boundary_contract).hexdigest(),
             "launcher_sha256": hashlib.sha256(launcher).hexdigest(),
         }
         with mock.patch.object(initializer, "_runtime_is_isolated", return_value=True), \
                 mock.patch.object(initializer, "_load_bootstrap", return_value=bootstrap), \
                 mock.patch.object(
-                    initializer, "_locked_regular", side_effect=[own, phase, launcher],
+                    initializer, "_locked_regular",
+                    side_effect=[own, phase, boundary, boundary_contract, launcher],
                 ):
             module = initializer._load_verified_phase_one()
         self.assertEqual(42, module.LOCKED_VALUE)
+        self.assertEqual("{}\n", module._external_boundary_contract["locked"])
 
     def test_hash_mismatch_and_unisolated_runtime_fail_closed(self):
         with mock.patch.object(initializer, "_runtime_is_isolated", return_value=False), \
@@ -489,9 +527,13 @@ class AncestorInitializerTests(unittest.TestCase):
     def test_checked_in_hashes_launcher_isolation_and_old_trust_roots(self):
         entrypoint = (ROOT / "tools/test_release_ancestor_initializer_v1.py").read_bytes()
         launcher = (ROOT / "tools/test_release_ancestor_initializer_v1_launcher.sh").read_bytes()
+        boundary = (ROOT / "tools/test_release_external_boundaries_v1.py").read_bytes()
+        boundary_contract = (ROOT / "tools/test_release_external_boundaries_v1.json").read_bytes()
         doc = (ROOT / "docs/test-release-ancestor-initializer-v1.md").read_text("utf-8")
         self.assertIn(hashlib.sha256(entrypoint).hexdigest(), doc)
         self.assertIn(hashlib.sha256(launcher).hexdigest(), doc)
+        self.assertIn(hashlib.sha256(boundary).hexdigest(), doc)
+        self.assertIn(hashlib.sha256(boundary_contract).hexdigest(), doc)
         self.assertIn(
             "EXPECTED_ENTRYPOINT_SHA256=" + hashlib.sha256(entrypoint).hexdigest(),
             launcher.decode("utf-8"),

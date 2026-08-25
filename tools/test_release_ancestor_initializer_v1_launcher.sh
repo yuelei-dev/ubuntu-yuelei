@@ -3,7 +3,7 @@ set -eu
 
 LAUNCHER=/usr/local/sbin/huangque-release-test-initialize-ancestor-v1
 ENTRYPOINT=/usr/local/libexec/huangque-release/test_release_ancestor_initializer_v1.py
-EXPECTED_ENTRYPOINT_SHA256=fc28aadf3692c000fd683c7c59f0c52e87823534904f9846deeb4a3777c7d2a0
+EXPECTED_ENTRYPOINT_SHA256=4427899f2586dbf8c7195c72bc641bdc0afe3256fcc7a6811137166697e92014
 
 fail() {
     /usr/bin/printf '%s\n' "huangque ancestor initializer launcher: $1" >&2

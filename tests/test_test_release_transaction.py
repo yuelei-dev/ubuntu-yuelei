@@ -69,6 +69,8 @@ class FakePlanner:
         self.catalog = FakeCatalog()
         self.hooks = hooks
         self.written_states = []
+        self.external_snapshot = [{"runtime_path": "/external/managed-link", "token": "stable"}]
+        self.external_verifications = 0
         self.state = {
             "deployed_main_commit": BASE,
             "accepted_impacts": {},
@@ -106,7 +108,14 @@ class FakePlanner:
             "pre_health_probes": ["example-pre"],
             "post_health_probes": ["example-post"],
             "required_free_bytes": 1,
+            "external_boundaries": list(self.external_snapshot),
         }
+
+    def verify_external_boundaries(self, expected):
+        self.external_verifications += 1
+        if expected != self.external_snapshot:
+            raise transaction.TransactionError("external boundary snapshot changed")
+        return expected
 
     def verify_identity(self):
         return {
@@ -257,6 +266,34 @@ class TransactionTests(unittest.TestCase):
         self.assertLess(self.hooks.events.index("health:post:example-post"), self.hooks.events.index("ledger"))
         self.assertEqual(MERGE, self.planner.state["deployed_main_commit"])
         self.assertFalse(self.executor.journal_path.exists())
+        self.assertGreaterEqual(self.planner.external_verifications, 3)
+
+    def test_external_boundary_replacement_before_write_and_recover_fail_closed(self):
+        def drift(point):
+            if point == "after-backup":
+                self.planner.external_snapshot = [
+                    {"runtime_path": "/external/managed-link", "token": "replaced"},
+                ]
+
+        self.executor.crash_hook = drift
+        with self.assertRaisesRegex(transaction.TransactionError, "rolled back"):
+            self.executor.apply(MERGE, EVIDENCE)
+        self.assertEqual(OLD, self.hooks.files[RUNTIME])
+        self.planner.external_snapshot = [
+            {"runtime_path": "/external/managed-link", "token": "stable"},
+        ]
+        self.executor.crash_hook = lambda point: (
+            (_ for _ in ()).throw(transaction.CrashInjection(point))
+            if point == "after-backup" else None
+        )
+        with self.assertRaises(transaction.CrashInjection):
+            self.executor.apply(MERGE, EVIDENCE)
+        self.planner.external_snapshot = [
+            {"runtime_path": "/external/managed-link", "token": "recover-drift"},
+        ]
+        with self.assertRaisesRegex(transaction.TransactionError, "external boundary"):
+            self.executor.recover()
+        self.assertTrue(self.executor.journal_path.exists())
 
     def test_partial_write_process_crash_is_recovered_from_persistent_backup(self):
         original_plan = self.planner.build_plan
@@ -552,6 +589,8 @@ class TransactionTests(unittest.TestCase):
         entrypoint_bytes = (ROOT / "tools/test_release_transaction.py").read_bytes()
         launcher_path = ROOT / "tools/test_release_transaction_launcher.sh"
         launcher_bytes = launcher_path.read_bytes()
+        boundary_bytes = (ROOT / "tools/test_release_external_boundaries_v1.py").read_bytes()
+        boundary_contract_bytes = (ROOT / "tools/test_release_external_boundaries_v1.json").read_bytes()
         launcher = launcher_bytes.decode("utf-8")
         documentation = (ROOT / "docs/test-release-transaction-v1.md").read_text("utf-8")
         self.assertIn("/usr/bin/env -i", launcher)
@@ -562,6 +601,8 @@ class TransactionTests(unittest.TestCase):
         )
         self.assertIn(digest(entrypoint_bytes), documentation)
         self.assertIn(digest(launcher_bytes), documentation)
+        self.assertIn(digest(boundary_bytes), documentation)
+        self.assertIn(digest(boundary_contract_bytes), documentation)
         self.assertFalse(transaction._runtime_environment_is_isolated())
 
     def test_isolated_runtime_rejects_wrong_loaded_script_path(self):
@@ -619,6 +660,12 @@ class ReleaseEngine:
 def _verify_runtime_entrypoint(source_root):
     return None
 """
+        boundary = b"""\
+def load_contract(raw):
+    return {}
+def install(module, catalog, contract):
+    return catalog, module.ReleaseEngine, object()
+"""
         bootstrap = {
             "schema_version": 1,
             "source_root": transaction.DEFAULT_SOURCE_ROOT,
@@ -626,6 +673,10 @@ def _verify_runtime_entrypoint(source_root):
             "transaction_sha256": digest(b"transaction"),
             "phase_one_entrypoint": transaction.PHASE_ONE_ENTRYPOINT,
             "phase_one_sha256": digest(phase_one),
+            "boundary_entrypoint": transaction.BOUNDARY_ENTRYPOINT,
+            "boundary_sha256": digest(boundary),
+            "boundary_contract": transaction.BOUNDARY_CONTRACT,
+            "boundary_contract_sha256": digest(b"{}\n"),
             "launcher": transaction.TRANSACTION_LAUNCHER,
             "launcher_sha256": digest(b"launcher"),
             "state_root": transaction.DEFAULT_STATE_ROOT,
@@ -638,7 +689,7 @@ def _verify_runtime_entrypoint(source_root):
                 mock.patch.object(transaction, "_validate_root_chain") as validate, \
                 mock.patch.object(
                     transaction, "_locked_regular",
-                    side_effect=[b"transaction", phase_one, b"launcher"],
+                    side_effect=[b"transaction", phase_one, boundary, b"{}\n", b"launcher"],
                 ), mock.patch.object(transaction.os.path, "realpath", side_effect=realpath):
             transaction._load_production_planner()
         validate.assert_any_call(

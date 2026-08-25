@@ -42,6 +42,8 @@ UNIT_RE = re.compile(r"^[A-Za-z0-9@_.:-]+\.(?:service|timer)$")
 DEFAULT_STATE_ROOT = "/var/lib/huangque-release"
 DEFAULT_SOURCE_ROOT = "/opt/huangque-test-release"
 PHASE_ONE_ENTRYPOINT = "/usr/local/libexec/huangque-release/release_test.py"
+BOUNDARY_ENTRYPOINT = "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py"
+BOUNDARY_CONTRACT = "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json"
 TRANSACTION_ENTRYPOINT = "/usr/local/libexec/huangque-release/test_release_transaction.py"
 TRANSACTION_BOOTSTRAP = "/etc/huangque/release-transaction-v1.json"
 TRANSACTION_LAUNCHER = "/usr/local/sbin/huangque-release-test-transaction"
@@ -312,6 +314,12 @@ class TransactionExecutor:
         self.journal_path = self.transactions / "active.json"
         self.lock_path = self.state_root / "transaction-v1.lock"
 
+    def _verify_external_boundaries(self, expected):
+        verify = getattr(self.planner, "verify_external_boundaries", None)
+        if verify is None:
+            raise TransactionError("trusted planner lacks external boundary verification")
+        return verify(expected)
+
     @contextlib.contextmanager
     def _lock(self):
         self.state_root.mkdir(parents=True, exist_ok=True)
@@ -377,7 +385,7 @@ class TransactionExecutor:
         required = {"schema_version", "transaction_id", "status", "from_commit", "target_commit",
                     "identity", "reviewed_evidence", "files", "restart_services",
                     "pre_health_probes", "post_health_probes", "written", "restarted",
-                    "original_error"}
+                    "original_error", "external_boundaries"}
         if not isinstance(data, dict) or set(data) != required or data.get("schema_version") != JOURNAL_SCHEMA:
             raise TransactionError("transaction journal fields are invalid")
         if not COMMIT_RE.fullmatch(str(data.get("from_commit"))) or not COMMIT_RE.fullmatch(str(data.get("target_commit"))):
@@ -408,6 +416,7 @@ class TransactionExecutor:
                 or not isinstance(data.get("post_health_probes"), list)
                 or not isinstance(data.get("written"), list)
                 or not isinstance(data.get("restarted"), list)
+                or not isinstance(data.get("external_boundaries"), list)
                 or data.get("original_error") is not None
                    and not TYPE_NAME_RE.fullmatch(str(data.get("original_error")))):
             raise TransactionError("transaction journal collections are invalid")
@@ -417,6 +426,7 @@ class TransactionExecutor:
         contract = self.planner.trusted_transaction_contract(
             journal["from_commit"], journal["target_commit"], journal["reviewed_evidence"],
         )
+        self._verify_external_boundaries(journal["external_boundaries"])
         if (journal["restart_services"] != contract["restart_services"]
                 or journal["pre_health_probes"] != contract["pre_health_probes"]
                 or journal["post_health_probes"] != contract["post_health_probes"]
@@ -522,12 +532,14 @@ class TransactionExecutor:
             raise TransactionError("reviewed-head topology evidence is not exact")
         required = {
             "files", "restart_services", "pre_health_probes", "post_health_probes",
-            "required_free_bytes",
+            "required_free_bytes", "external_boundaries",
         }
         if any(key not in plan for key in required):
             raise TransactionError("trusted release plan is incomplete")
         if type(plan["required_free_bytes"]) is not int or plan["required_free_bytes"] < 0:
             raise TransactionError("trusted release disk-space contract is invalid")
+        if not isinstance(plan["external_boundaries"], list) or not plan["external_boundaries"]:
+            raise TransactionError("trusted release external boundary snapshot is invalid")
         seen = set()
         for item in plan["files"]:
             keys = {"repository_path", "runtime_path", "change", "before", "after", "services",
@@ -702,6 +714,7 @@ class TransactionExecutor:
     def _install(self, journal):
         target = journal["target_commit"]
         for item_record in journal["files"]:
+            self._verify_external_boundaries(journal["external_boundaries"])
             item = item_record["plan"]
             if item["change"] == "delete":
                 self.hooks.delete(item["runtime_path"])
@@ -756,6 +769,7 @@ class TransactionExecutor:
             if classifications[index] == "before":
                 continue
             try:
+                self._verify_external_boundaries(journal["external_boundaries"])
                 if item["before"]["state"] == "absent":
                     current = self.hooks.read(item["runtime_path"])
                     if current is not None:
@@ -884,12 +898,14 @@ class TransactionExecutor:
                 "pre_health_probes": list(plan["pre_health_probes"]),
                 "post_health_probes": list(plan["post_health_probes"]),
                 "written": [], "restarted": [], "original_error": None,
+                "external_boundaries": plan["external_boundaries"],
             }
             self._atomic_state_file(self.journal_path, journal)
             self._write_backups(journal)
             self._bind_journal(journal)
             if self._identity() != identity:
                 raise TransactionError("release identity changed before installation")
+            self._verify_external_boundaries(journal["external_boundaries"])
             self._verify_all(journal["files"], "before")
             journal["status"] = "applying"
             self._atomic_state_file(self.journal_path, journal)
@@ -967,6 +983,7 @@ class TrustedPlannerAdapter:
 
     def build_plan(self, target, evidence):
         plan = self.engine.build_plan(target, evidence)
+        plan["external_boundaries"] = self.engine.external_boundary_snapshot()
         if plan.get("status") == "planned_read_only":
             state = self.engine.load_state()
             for item in plan["files"]:
@@ -976,6 +993,9 @@ class TrustedPlannerAdapter:
                     raise TransactionError("preimage metadata differs from immutable catalog mapping")
                 item["before_metadata"] = dict(expected if metadata is None else metadata)
         return plan
+
+    def verify_external_boundaries(self, expected):
+        return self.engine.verify_external_boundary_snapshot(expected)
 
     def verify_identity(self):
         return self.engine.verify_identity()
@@ -1152,16 +1172,20 @@ def _load_production_planner():
     bootstrap = _load_private_json(TRANSACTION_BOOTSTRAP, "transaction bootstrap")
     required = {"schema_version", "source_root", "transaction_entrypoint", "transaction_sha256",
                 "phase_one_entrypoint", "phase_one_sha256", "launcher", "launcher_sha256",
-                "state_root"}
+                "boundary_entrypoint", "boundary_sha256", "boundary_contract",
+                "boundary_contract_sha256", "state_root"}
     if (not isinstance(bootstrap, dict) or set(bootstrap) != required
             or bootstrap.get("schema_version") != 1
             or bootstrap.get("source_root") != DEFAULT_SOURCE_ROOT
             or bootstrap.get("state_root") != DEFAULT_STATE_ROOT
             or bootstrap.get("transaction_entrypoint") != TRANSACTION_ENTRYPOINT
             or bootstrap.get("phase_one_entrypoint") != PHASE_ONE_ENTRYPOINT
+            or bootstrap.get("boundary_entrypoint") != BOUNDARY_ENTRYPOINT
+            or bootstrap.get("boundary_contract") != BOUNDARY_CONTRACT
             or bootstrap.get("launcher") != TRANSACTION_LAUNCHER
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(bootstrap.get(key) or ""))
-                   for key in ("transaction_sha256", "phase_one_sha256", "launcher_sha256"))):
+                   for key in ("transaction_sha256", "phase_one_sha256", "boundary_sha256",
+                               "boundary_contract_sha256", "launcher_sha256"))):
         raise TransactionError("transaction bootstrap fields are invalid")
     _validate_root_chain(DEFAULT_SOURCE_ROOT, final_kind="directory", private=False)
     _validate_root_chain(DEFAULT_STATE_ROOT, final_kind="directory", private=True, final_mode=0o700)
@@ -1176,6 +1200,14 @@ def _load_production_planner():
         PHASE_ONE_ENTRYPOINT, bootstrap["phase_one_sha256"], "phase-one entrypoint",
         final_mode=0o755,
     )
+    boundary_raw = _locked_regular(
+        BOUNDARY_ENTRYPOINT, bootstrap["boundary_sha256"], "external boundary entrypoint",
+        final_mode=0o755,
+    )
+    boundary_contract_raw = _locked_regular(
+        BOUNDARY_CONTRACT, bootstrap["boundary_contract_sha256"],
+        "external boundary contract", final_mode=0o644,
+    )
     _locked_regular(
         TRANSACTION_LAUNCHER, bootstrap["launcher_sha256"], "transaction launcher",
         final_mode=0o755,
@@ -1185,8 +1217,14 @@ def _load_production_planner():
     sys.modules[module.__name__] = module
     exec(compile(phase_one_raw, PHASE_ONE_ENTRYPOINT, "exec"), module.__dict__)
     module._verify_runtime_entrypoint(DEFAULT_SOURCE_ROOT)
+    boundary = types.ModuleType("huangque_release_external_boundaries")
+    boundary.__file__ = BOUNDARY_ENTRYPOINT
+    exec(compile(boundary_raw, BOUNDARY_ENTRYPOINT, "exec"), boundary.__dict__)
     catalog = module.RuntimeCatalog.load(Path(DEFAULT_SOURCE_ROOT), module.DEFAULT_CATALOG)
-    engine = module.ReleaseEngine(
+    catalog, engine_class, _policy = boundary.install(
+        module, catalog, boundary.load_contract(boundary_contract_raw),
+    )
+    engine = engine_class(
         DEFAULT_SOURCE_ROOT, "/", catalog,
         identity_path=module.DEFAULT_IDENTITY_FILE,
         state_root=DEFAULT_STATE_ROOT,
