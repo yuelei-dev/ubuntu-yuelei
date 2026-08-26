@@ -1,0 +1,396 @@
+{
+  "schema_version": 1,
+  "purpose": "Deploy the reviewed #292+#300 combined postimage from the exact observed pre-#292 test-server state, including expired narration audio reupload and the fixed read-only local material library, with operational probes before and after the transactional write.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "service": "huangque-content.service"
+  },
+  "configuration_requirements": {
+    "material_priority": [
+      "customer_upload_required",
+      "local_library",
+      "ai_optional"
+    ],
+    "public_web_materials_enabled": false,
+    "service_runtime": {
+      "user": "ubuntu",
+      "environment_file": "/home/ubuntu/content-api/content.env",
+      "inspect_active_process_environment": true
+    },
+    "local_library": {
+      "root_environment_name": "DIGITAL_HUMAN_LOCAL_MATERIAL_LIBRARY_ROOT",
+      "required_root": "/home/ubuntu/material-libraries/huangque-media",
+      "index_relative_path": "index.jsonl",
+      "files_relative_root": "files",
+      "expected_count": 204,
+      "expected_type_counts": {
+        "image": 88,
+        "video": 100,
+        "bgm": 16
+      },
+      "operational_probe_required": true,
+      "read_only": true
+    }
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "base_main_commit": "256b92d99f89833dd4c18e45024a0cc07f4f0734",
+    "code_source_commit": "af482bd902387e7e340752d09c6021fb997d9af4",
+    "review_lock": "exact independently reviewed PR head must be contained in live main before release"
+  },
+  "preimage_observation": {
+    "captured_at": "2026-08-26 (user-provided prior read-only test-server evidence; no server access in this task)",
+    "target": "test@8.148.158.106",
+    "capture_method": "exact pre-#292 test-server file locks inherited from the reviewed #292 successor manifest; local library structure, count, types, regular-file status and streaming hashes are user-provided read-only evidence; this modification task made no server access",
+    "repository_main_commit": "256b92d99f89833dd4c18e45024a0cc07f4f0734",
+    "repository_git_metadata": "available in the reviewed source checkout; no server access in this relock task",
+    "service_state": "active",
+    "health_statuses": {
+      "http://127.0.0.1:8096/api/gen/health": 200,
+      "http://127.0.0.1:8096/api/gen/history": 401,
+      "http://127.0.0.1:8096/api/gen/digital-human-v2/history": 404
+    },
+    "backup_started": false,
+    "write_started": false,
+    "restart_started": false,
+    "files": 3,
+    "local_library": {
+      "root": "/home/ubuntu/material-libraries/huangque-media",
+      "owner": "ubuntu",
+      "group": "ubuntu",
+      "mode": "0755",
+      "index_count": 204,
+      "type_counts": {
+        "image": 88,
+        "video": 100,
+        "bgm": 16
+      },
+      "indexed_bytes": 1537469445,
+      "all_status": "可使用",
+      "all_hashes_match": true,
+      "all_files_regular_no_symlinks": true,
+      "unregistered_allowed_media_count": 0
+    }
+  },
+  "deployment_policy": {
+    "fail_closed_on_source_mismatch": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "allow_exact_postimage_as_existing": true,
+    "backup_all_targets_before_first_write": true,
+    "record_missing_targets_in_backup_manifest": true,
+    "atomic_replace": true,
+    "restart_service_at_most_once": true,
+    "skip_restart_when_no_files_change": true,
+    "rollback_all_targets_as_one_unit": true,
+    "remove_only_targets_recorded_missing_during_rollback": true,
+    "copy_environment_database_or_user_data": false,
+    "production_server_write_allowed": false
+  },
+  "executor": {
+    "repository_path": "release-manifests/tools/deploy_expired_audio_reupload_locked_manifest.py",
+    "source_blob": "8480ffed0a41e8ee51f20b3827d569acaf135210",
+    "source_sha256": "65e63c8b9ff74e75b9ed3f54f7ed6b3c885e09596b0170a4f2bd7d3f235711af",
+    "verifier": {
+      "repository_path": "scripts/verify_content_whisper_deployment.py",
+      "source_blob": "bfefc93626dd23507ed34c2cd1043f5b8d5c613e",
+      "source_sha256": "37376c1f6fdca007d06ddfeb2820d87a51df6db8471533d0b2a77aadeee509bc"
+    },
+    "requirements_verifier": {
+      "repository_path": "scripts/verify_content_python_requirements.py",
+      "source_blob": "372a71c2fe6b8b0152307860b47e6415260a8267",
+      "source_sha256": "e1010b5e498ad05914ac0f48d986eb233abfebd866b6937b0b4f89beb7cb1bc5"
+    },
+    "confirm_target": "test@8.148.158.106",
+    "remote_connection_capability": false
+  },
+  "absent_target_digest": {
+    "canonical_bytes": "ABSENT\n",
+    "sha256": "ede4663fa9a5e8031704705268edde90aae07273f42b7b7274db7b317a40b001"
+  },
+  "files": [
+    {
+      "repository_path": "server/content_domains/script_to_video.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/script_to_video.py",
+      "classification": "runtime_code",
+      "source_blob": "134855a45c33ad8c0c2aa22ca3d5ccf6809070d4",
+      "source_sha256": "8d43e87dff52ec9dec88e2d1213df8da63147a7d2a8ce917fd90857876ee5b56",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "6b3f8b8c9068705debbd7959406362f19e821ba0",
+      "target_preimage_sha256": "a32785c2c8ead5d366c431f5c405a24da9e0e69c2296d6ccc7473028aba3389d",
+      "expected_postimage_blob": "134855a45c33ad8c0c2aa22ca3d5ccf6809070d4",
+      "expected_postimage_sha256": "8d43e87dff52ec9dec88e2d1213df8da63147a7d2a8ce917fd90857876ee5b56"
+    },
+    {
+      "repository_path": "server/content_domains/digital_human_v2.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "classification": "runtime_code",
+      "source_blob": "36ab175eaefe5dace6d4d35ac06e4218d5bf1cf9",
+      "source_sha256": "f0ba43dcfa7b94048213d147e0d15568ce02eba144f08e0b94f752cdbfac2e37",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "c12813c12d36ca93f9083dba4767fa759f81ab32",
+      "target_preimage_sha256": "e99c99f5ab8ba287b55f27a5e05c146f06b1dad9d5d7612df1c7b48611400214",
+      "expected_postimage_blob": "36ab175eaefe5dace6d4d35ac06e4218d5bf1cf9",
+      "expected_postimage_sha256": "f0ba43dcfa7b94048213d147e0d15568ce02eba144f08e0b94f752cdbfac2e37"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+      "classification": "static_runtime",
+      "source_blob": "84d825d0a587951e60e5160d1ab22508d5c22cb5",
+      "source_sha256": "8b4fb33032e563e3c91d774c38be1b788f7faca9a23669844fa25d5bbc00c73c",
+      "target_preimage_state": "file",
+      "target_preimage_blob": "289e095bb6869337b185a8ab3ee7eff153543f08",
+      "target_preimage_sha256": "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae",
+      "expected_postimage_blob": "84d825d0a587951e60e5160d1ab22508d5c22cb5",
+      "expected_postimage_sha256": "8b4fb33032e563e3c91d774c38be1b788f7faca9a23669844fa25d5bbc00c73c"
+    }
+  ],
+  "release_contract_sources": [
+    {
+      "repository_path": "tests/test_expired_audio_reupload_release.py",
+      "source_blob": "c6da7becae1d1d2c9cc3a4ba6c3797c413c5a39d",
+      "source_sha256": "136e83e36f9310fcfe4ecf2807e8189d42e6f41eda42b6c7c1aa51edfddb3551"
+    },
+    {
+      "repository_path": "tests/test_digital_human_local_material_library.py",
+      "source_blob": "46e50e62f96feaef6e1a373afaab26ab0467b7b7",
+      "source_sha256": "78055ece180edf0e951253618a2c74b8ddacc5e21e6c8609049c3b828e89aeab"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2.py",
+      "source_blob": "b3491db891524a42bc711f484fc9725123706389",
+      "source_sha256": "0cbc0bf2e59c635fb56dcc870ea9ef357c3166a39ca6e3a26d864a32a374e241"
+    },
+    {
+      "repository_path": "tests/test_digital_human_v2_ui.py",
+      "source_blob": "6356343a595256d08fc7341c855eb4f8c3b5b3a4",
+      "source_sha256": "c5f5c02c7d5fc7954d4ab36fb982baa87a5158b8590278b74f4eb3addcaae673"
+    }
+  ],
+  "release_commands": {
+    "pre_service_active": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "is-active",
+          "--quiet",
+          "huangque-content.service"
+        ],
+        "timeout_seconds": 30
+      }
+    ],
+    "dependencies": [
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-m",
+          "py_compile",
+          "{runtime:/home/ubuntu/content-api/content_domains/digital_human_v2.py}",
+          "{runtime:/home/ubuntu/content-api/content_domains/script_to_video.py}"
+        ],
+        "timeout_seconds": 120
+      }
+    ],
+    "cache": [
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"
+        ],
+        "cwd": "{runtime:/home/ubuntu/content-api}",
+        "timeout_seconds": 600
+      }
+    ],
+    "offline": [
+      {
+        "argv": [
+          "/usr/bin/env",
+          "HF_HUB_OFFLINE=1",
+          "/usr/bin/python3",
+          "-c",
+          "from content_domains.video import subtitle_runtime_preflight; assert subtitle_runtime_preflight().get('no_charge') is True"
+        ],
+        "cwd": "{runtime:/home/ubuntu/content-api}",
+        "timeout_seconds": 600
+      }
+    ],
+    "font": [
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-c",
+          "from content_domains.video import subtitle_runtime_preflight; result=subtitle_runtime_preflight(); assert result.get('no_charge') is True"
+        ],
+        "cwd": "{runtime:/home/ubuntu/content-api}",
+        "timeout_seconds": 600
+      }
+    ],
+    "no_charge": [
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "tests.test_expired_audio_reupload_release",
+          "-v"
+        ],
+        "cwd": "{source:.}",
+        "timeout_seconds": 300
+      },
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "tests.test_digital_human_local_material_library",
+          "-v"
+        ],
+        "cwd": "{source:.}",
+        "timeout_seconds": 300
+      },
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "tests.test_digital_human_v2",
+          "-v"
+        ],
+        "cwd": "{source:.}",
+        "timeout_seconds": 900
+      },
+      {
+        "argv": [
+          "/usr/bin/python3",
+          "-m",
+          "unittest",
+          "tests.test_digital_human_v2_ui",
+          "-v"
+        ],
+        "cwd": "{source:.}",
+        "timeout_seconds": 300
+      }
+    ],
+    "daemon_reload": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "daemon-reload"
+        ],
+        "timeout_seconds": 30
+      }
+    ],
+    "restart": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "restart",
+          "huangque-content.service"
+        ],
+        "timeout_seconds": 180
+      }
+    ],
+    "service_active": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "is-active",
+          "--quiet",
+          "huangque-content.service"
+        ],
+        "timeout_seconds": 30
+      }
+    ],
+    "rollback_daemon_reload": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "daemon-reload"
+        ],
+        "timeout_seconds": 30
+      }
+    ],
+    "rollback_restart": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "restart",
+          "huangque-content.service"
+        ],
+        "timeout_seconds": 180
+      }
+    ],
+    "rollback_service_active": [
+      {
+        "argv": [
+          "/usr/bin/systemctl",
+          "is-active",
+          "--quiet",
+          "huangque-content.service"
+        ],
+        "timeout_seconds": 30
+      }
+    ]
+  },
+  "health_probe_policy": {
+    "startup_timeout_seconds": 60,
+    "interval_seconds": 1
+  },
+  "health_checks": [
+    {
+      "url": "http://127.0.0.1:8096/api/gen/health",
+      "target_repository_path": "server/content_domains/digital_human_v2.py",
+      "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "pre_status_by_disposition": {
+        "needs_install": 200,
+        "already_installed": 200,
+        "unchanged": 200
+      },
+      "post_expected_status": 200,
+      "rollback_status_by_disposition": {
+        "needs_install": 200,
+        "already_installed": 200,
+        "unchanged": 200
+      }
+    },
+    {
+      "url": "http://127.0.0.1:8096/api/gen/history",
+      "target_repository_path": "server/content_domains/digital_human_v2.py",
+      "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "pre_status_by_disposition": {
+        "needs_install": 401,
+        "already_installed": 401,
+        "unchanged": 401
+      },
+      "post_expected_status": 401,
+      "rollback_status_by_disposition": {
+        "needs_install": 401,
+        "already_installed": 401,
+        "unchanged": 401
+      }
+    },
+    {
+      "url": "http://127.0.0.1:8096/api/gen/digital-human-v2/history",
+      "target_repository_path": "server/content_domains/digital_human_v2.py",
+      "target_runtime_path": "/home/ubuntu/content-api/content_domains/digital_human_v2.py",
+      "pre_status_by_disposition": {
+        "needs_install": 404,
+        "already_installed": 401,
+        "unchanged": 401
+      },
+      "post_expected_status": 401,
+      "rollback_status_by_disposition": {
+        "needs_install": 404,
+        "already_installed": 401,
+        "unchanged": 401
+      }
+    }
+  ],
+  "rollback": {
+    "scope": "all three combined #292+#300 manifest targets as one unit",
+    "new_files_removed_only_if_preimage_was_absent": true,
+    "production_untouched": true
+  }
+}

@@ -15,6 +15,15 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertIn("/api/gen/digital-human-v2/audio-upload", self.page)
         self.assertIn("不需要再输入文案或选择音色", self.page)
 
+    def test_expired_authorized_audio_points_to_explicit_restart(self):
+        self.assertIn("audio_upload_restart_required", self.page)
+        self.assertIn(
+            "录音已过期；请先点击“放弃上次任务并重新设置”，再上传录音",
+            self.page,
+        )
+        self.assertIn("new Error(publicErrorMessage(data)||'完整录音上传失败')", self.page)
+        self.assertIn('id="restartSetup"', self.page)
+
     def test_authorized_portrait_directly_drives_presenter_segments(self):
         self.assertIn("原图将直接用于全部真人出镜片段", self.page)
         self.assertIn("reference_images:photoData?[photoData]:[]", self.page)
@@ -28,7 +37,7 @@ class DigitalHumanV2UiTests(unittest.TestCase):
     def test_duration_driven_presenter_and_material_contract_is_visible(self):
         self.assertIn("每隔约 20–30 秒全屏真人出镜", self.page)
         self.assertIn("开头、结尾和每隔 20–30 秒真人全屏", self.page)
-        self.assertIn("digital_human_material_v2", self.page)
+        self.assertIn("consentPurpose='digital_human_material_v3'", self.page)
         self.assertIn("/api/gen/digital-human-v2/plan", self.page)
         self.assertIn("/api/gen/digital-human-v2/consent", self.page)
         self.assertIn("/api/gen/digital-human-v2/material-resolve", self.page)
@@ -51,7 +60,7 @@ class DigitalHumanV2UiTests(unittest.TestCase):
 
     def test_material_priority_and_no_visible_source_label(self):
         self.assertIn(
-            "顾客上传素材（必须全部使用） → 飞书素材库 → AI 生成图片",
+            "顾客上传素材（必须全部使用） → 测试服固定本地素材库 → AI 生成图片",
             self.page,
         )
         self.assertIn("上传的每一张图片都会按顺序直接进入成片", self.page)
@@ -67,6 +76,16 @@ class DigitalHumanV2UiTests(unittest.TestCase):
         self.assertNotIn("全网公开可用素材", self.page)
         self.assertIn("最终视频不显示素材来源标签", self.page)
         self.assertNotIn("CONCEPT / AI FILL", self.page)
+
+    def test_v2_recovery_state_is_not_reused_for_v3_material_consent(self):
+        self.assertIn("storageKey='hq-digital-human-material-v3'", self.page)
+        self.assertIn("consentVersion='digital-human-material-v3'", self.page)
+        self.assertIn("consentPurpose='digital_human_material_v3'", self.page)
+        self.assertIn("return {version:9,", self.page)
+        self.assertIn("value.version===9", self.page)
+        self.assertNotIn("storageKey='hq-digital-human-material-v2'", self.page)
+        self.assertNotIn("consentVersion='digital-human-material-v2'", self.page)
+        self.assertNotIn("consentPurpose='digital_human_material_v2'", self.page)
 
     def test_ai_material_fallback_uses_seedream_standard(self):
         materials = self.page[

@@ -11,14 +11,14 @@ import hmac
 import io
 import json
 import os
+import pathlib
 import re
 import secrets
 import sqlite3
+import stat
 import subprocess
-import threading
 import time
 import urllib.parse
-import urllib.request
 
 from .core import OUT_DIR, closing, jdb
 from . import digital_human_oneclick as legacy
@@ -31,11 +31,11 @@ CONSENT_PATH = "/api/gen/digital-human-v2/consent"
 AUDIO_UPLOAD_PATH = "/api/gen/digital-human-v2/audio-upload"
 MATERIAL_RESOLVE_PATH = "/api/gen/digital-human-v2/material-resolve"
 HISTORY_PATH = "/api/gen/digital-human-v2/history"
-CONSENT_VERSION = "digital-human-material-v2"
-CONSENT_PURPOSE = "digital_human_material_v2"
+CONSENT_VERSION = "digital-human-material-v3"
+CONSENT_PURPOSE = "digital_human_material_v3"
 CONSENT_TTL_SECONDS = legacy.CONSENT_TTL_SECONDS
 DigitalHumanRequestError = legacy.DigitalHumanRequestError
-MATERIAL_SOURCE_PRIORITY = ("customer_upload", "feishu", "ai_optional")
+MATERIAL_SOURCE_PRIORITY = ("customer_upload", "local_library", "ai_optional")
 
 _STAGE_KINDS = {
     "material": "image",
@@ -57,22 +57,25 @@ _MATERIAL_TTL_SECONDS = 24 * 60 * 60
 # decode and content-security checks under this approval purpose.  Reuse that
 # vetted temporary asset; do not upload the customer's bytes to an AI provider.
 _CUSTOMER_MATERIAL_UPLOAD_PURPOSE = "smart_montage"
-_FEISHU_APP_TOKEN = os.environ.get(
-    "DIGITAL_HUMAN_MATERIAL_LIBRARY_APP_TOKEN", "TYqUb6KaQaLPQ2sLrLFcdsWanPZ",
-).strip()
-_FEISHU_TABLES = (
-    (os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_1", "tbl58c0UkQ5ZaR2z").strip(),
-     os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_1", "vewa9ZW0Og").strip()),
-    (os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_TABLE_2", "").strip(),
-     os.environ.get("DIGITAL_HUMAN_MATERIAL_LIBRARY_VIEW_2", "").strip()),
-)
-_FEISHU_PAGE_SIZE = 100
-_FEISHU_MAX_PAGES_PER_TABLE = 20
-_FEISHU_CATALOG_TTL_SECONDS = 5 * 60
-_FEISHU_TOKEN_LOCK = threading.Lock()
-_FEISHU_CATALOG_LOCK = threading.Lock()
-_FEISHU_TOKEN_CACHE = {"identity": "", "token": "", "expires_at": 0.0}
-_FEISHU_CATALOG_CACHE = {"key": None, "loaded_at": 0.0, "items": []}
+_LOCAL_LIBRARY_DEFAULT_ROOT = "/home/ubuntu/material-libraries/huangque-media"
+_LOCAL_LIBRARY_ENV = "DIGITAL_HUMAN_LOCAL_MATERIAL_LIBRARY_ROOT"
+_LOCAL_INDEX_MAX_BYTES = 8 * 1024 * 1024
+_LOCAL_INDEX_MAX_LINES = 1000
+_LOCAL_INDEX_MAX_LINE_BYTES = 64 * 1024
+_LOCAL_MATERIAL_MAX_BYTES = 256 * 1024 * 1024
+_LOCAL_MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
+_LOCAL_EXTENSIONS = {
+    ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+    ".png": ("image", "image/png"), ".webp": ("image", "image/webp"),
+    ".mp4": ("video", "video/mp4"), ".webm": ("video", "video/webm"),
+    ".mov": ("video", "video/quicktime"), ".mp3": ("bgm", "audio/mpeg"),
+    ".m4a": ("bgm", "audio/mp4"), ".wav": ("bgm", "audio/wav"),
+    ".aac": ("bgm", "audio/aac"), ".flac": ("bgm", "audio/flac"),
+    ".ogg": ("bgm", "audio/ogg"),
+}
+_LOCAL_MIME_TYPES = {
+    mime: media_type for media_type, mime in _LOCAL_EXTENSIONS.values()
+}
 _MATERIAL_MIMES = {
     "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"),
     "image/webp": ("image", ".webp"), "video/mp4": ("video", ".mp4"),
@@ -135,6 +138,28 @@ def _safe_audio_upload_id(value):
     if not _AUDIO_UPLOAD_ID_RE.fullmatch(value):
         raise DigitalHumanRequestError("录音上传记录无效，请重新上传", "audio_upload_invalid", 409)
     return value
+
+
+def _audio_run_has_consent(connection, username, run_id):
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='digital_human_consents'"
+    ).fetchone()
+    if not table:
+        return False
+    return connection.execute(
+        "SELECT 1 FROM digital_human_consents WHERE username=? AND run_id=? LIMIT 1",
+        (username, run_id),
+    ).fetchone() is not None
+
+
+def _remove_audio_asset_files(source_file):
+    import shutil
+
+    root = (OUT_DIR / "digital_human_audio").resolve()
+    source = (OUT_DIR / str(source_file or "")).resolve()
+    if source.parent == root or root not in source.parents:
+        return
+    shutil.rmtree(str(source.parent), ignore_errors=True)
 
 
 def _load_audio_asset(asset_id, username, now=None, db_factory=None):
@@ -233,7 +258,8 @@ def _slice_text(transcript_segments, start, end):
 
 def store_audio_upload(stream, length, username, run_id, content_type,
                        claimed_sha256, db_factory=None):
-    if not legacy._RUN_ID_RE.fullmatch(str(run_id or "").strip()):
+    run_id = str(run_id or "").strip()
+    if not legacy._RUN_ID_RE.fullmatch(run_id):
         raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
     if type(length) is not int or length <= 0 or length > _MAX_AUDIO_UPLOAD_BYTES:
         raise DigitalHumanRequestError("录音文件必须小于 30MB", "audio_upload_size_invalid")
@@ -242,12 +268,22 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         raise DigitalHumanRequestError("仅支持 MP3、WAV、M4A 或 AAC 录音", "audio_upload_type_invalid")
     claimed = legacy._required_sha256(claimed_sha256, "完整录音")
     username = str(username or "").strip()
+    now = int(time.time())
+    expired = None
     with closing(_audio_db(db_factory)) as connection:
         existing = connection.execute(
-            "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
-            "WHERE username=? AND run_id=?", (username, str(run_id).strip()),
+            "SELECT asset_id,source_sha256,source_file,expires_at "
+            "FROM digital_human_audio_uploads WHERE username=? AND run_id=?",
+            (username, run_id),
         ).fetchone()
-    if existing:
+        if existing and int(existing["expires_at"]) <= now:
+            if _audio_run_has_consent(connection, username, run_id):
+                raise DigitalHumanRequestError(
+                    "录音已过期，且本次流程已经授权；请先放弃上次任务并重新设置，再上传录音",
+                    "audio_upload_restart_required", 409,
+                )
+            expired = dict(existing)
+    if existing and expired is None:
         if not hmac.compare_digest(str(existing["source_sha256"]), claimed):
             raise DigitalHumanRequestError(
                 "同一制作流程不能更换完整录音，请重新开始",
@@ -296,17 +332,33 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         now = int(time.time())
         try:
             with closing(_audio_db(db_factory)) as connection:
-                connection.execute(
-                    """INSERT INTO digital_human_audio_uploads(
-                        asset_id,username,run_id,source_sha256,source_file,duration,
-                        transcript,slices_json,created_at,expires_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (asset_id, username, str(run_id).strip(), claimed,
-                     source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
-                     transcript, json.dumps(slices, ensure_ascii=False), now,
-                     now + _AUDIO_UPLOAD_TTL_SECONDS),
+                values = (
+                    asset_id, claimed,
+                    source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
+                    transcript, json.dumps(slices, ensure_ascii=False), now,
+                    now + _AUDIO_UPLOAD_TTL_SECONDS,
                 )
+                if expired is not None:
+                    updated = connection.execute(
+                        """UPDATE digital_human_audio_uploads SET
+                            asset_id=?,source_sha256=?,source_file=?,duration=?,
+                            transcript=?,slices_json=?,created_at=?,expires_at=?
+                           WHERE asset_id=? AND username=? AND run_id=? AND expires_at<=?""",
+                        values + (expired["asset_id"], username, run_id, now),
+                    )
+                    if updated.rowcount != 1:
+                        raise sqlite3.IntegrityError("expired audio upload was replaced concurrently")
+                else:
+                    connection.execute(
+                        """INSERT INTO digital_human_audio_uploads(
+                            asset_id,username,run_id,source_sha256,source_file,duration,
+                            transcript,slices_json,created_at,expires_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (asset_id, username, run_id) + values[1:],
+                    )
                 connection.commit()
+            if expired is not None:
+                _remove_audio_asset_files(expired["source_file"])
         except sqlite3.IntegrityError:
             # A browser retry can race the first upload. Reuse the committed,
             # owner-bound asset instead of returning a transient server error.
@@ -314,7 +366,7 @@ def store_audio_upload(stream, length, username, run_id, content_type,
                 winner = connection.execute(
                     "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
                     "WHERE username=? AND run_id=?",
-                    (username, str(run_id).strip()),
+                    (username, run_id),
                 ).fetchone()
             if winner and hmac.compare_digest(str(winner["source_sha256"]), claimed):
                 import shutil
@@ -347,25 +399,6 @@ def audio_upload_response(stream, length, username, run_id, content_type,
     }
 
 
-def _read_http_json(request, timeout=12):
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read(2 * 1024 * 1024 + 1)
-    if len(raw) > 2 * 1024 * 1024:
-        raise ValueError("素材接口响应过大")
-    return json.loads(raw.decode("utf-8"))
-
-
-def _read_http_media(request, timeout=30):
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
-        raw = response.read(_MAX_MATERIAL_BYTES + 1)
-    if not raw or len(raw) > _MAX_MATERIAL_BYTES:
-        raise ValueError("素材文件为空或超过 20MB")
-    if content_type not in _MATERIAL_MIMES:
-        raise ValueError("素材文件格式不受支持")
-    return raw, content_type
-
-
 def _keywords(text):
     compact = re.sub(r"\s+", "", str(text or "").lower())
     latin = re.findall(r"[a-z0-9]{2,}", compact)
@@ -373,136 +406,216 @@ def _keywords(text):
     return set(latin + [cjk[index:index + 2] for index in range(max(0, len(cjk) - 1))])
 
 
-def _flatten_fields(value, texts, attachments):
-    if isinstance(value, dict):
-        if value.get("file_token") and (value.get("name") or value.get("type")):
-            attachments.append(value)
-        for child in value.values():
-            _flatten_fields(child, texts, attachments)
-    elif isinstance(value, list):
-        for child in value:
-            _flatten_fields(child, texts, attachments)
-    elif isinstance(value, (str, int, float)):
-        texts.append(str(value))
+def _local_library_root():
+    value = str(os.environ.get(
+        _LOCAL_LIBRARY_ENV, _LOCAL_LIBRARY_DEFAULT_ROOT,
+    ) or "").strip()
+    root = os.path.abspath(value)
+    if not value or not os.path.isabs(value) or root != value.rstrip(os.sep):
+        raise ValueError("本地素材库根目录配置无效")
+    return root
 
 
-def _feishu_token():
-    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
-    if not app_id or not app_secret or not _FEISHU_APP_TOKEN:
-        raise ValueError("飞书素材库尚未完成服务端配置")
-    identity = hashlib.sha256((app_id + "\0" + app_secret).encode("utf-8")).hexdigest()
-    with _FEISHU_TOKEN_LOCK:
-        now = time.monotonic()
-        if (_FEISHU_TOKEN_CACHE["identity"] == identity
-                and _FEISHU_TOKEN_CACHE["token"]
-                and float(_FEISHU_TOKEN_CACHE["expires_at"]) > now):
-            return str(_FEISHU_TOKEN_CACHE["token"])
-        request = urllib.request.Request(
-            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-            data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8"),
-            headers={"Content-Type": "application/json; charset=utf-8"}, method="POST",
-        )
-        result = _read_http_json(request)
-        if int(result.get("code") or 0) != 0:
-            raise ValueError("飞书素材库鉴权失败")
-        token = str(result.get("tenant_access_token") or "").strip()
-        if not token:
-            raise ValueError("飞书素材库鉴权未返回访问令牌")
-        try:
-            expires_in = int(result.get("expire") or result.get("expires_in") or 7200)
-        except (TypeError, ValueError):
-            expires_in = 7200
-        _FEISHU_TOKEN_CACHE.update({
-            "identity": identity, "token": token,
-            "expires_at": now + max(1, expires_in - 60),
-        })
-        return token
+def _lstat_real_chain(path):
+    absolute = os.path.abspath(path)
+    target = pathlib.Path(absolute)
+    chain = list(reversed(target.parents)) + [target]
+    for current in chain:
+        if str(current) == current.anchor:
+            continue
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError("本地素材库路径包含软链接")
+        if current != target and not stat.S_ISDIR(info.st_mode):
+            raise ValueError("本地素材库父路径不是目录")
+    return os.lstat(absolute)
 
 
-def _feishu_catalog(token):
-    cache_key = (_FEISHU_APP_TOKEN, _FEISHU_TABLES)
-    with _FEISHU_CATALOG_LOCK:
-        now = time.monotonic()
-        if (_FEISHU_CATALOG_CACHE["key"] == cache_key
-                and now - float(_FEISHU_CATALOG_CACHE["loaded_at"])
-                < _FEISHU_CATALOG_TTL_SECONDS):
-            return list(_FEISHU_CATALOG_CACHE["items"])
-        items = []
-        for table_id, view_id in _FEISHU_TABLES:
-            if not table_id:
-                continue
-            page_token = ""
-            for page_index in range(_FEISHU_MAX_PAGES_PER_TABLE):
-                query_params = {"page_size": _FEISHU_PAGE_SIZE}
-                if view_id:
-                    query_params["view_id"] = view_id
-                if page_token:
-                    query_params["page_token"] = page_token
-                params = urllib.parse.urlencode(query_params)
-                url = ("https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
-                       (urllib.parse.quote(_FEISHU_APP_TOKEN, safe=""),
-                        urllib.parse.quote(table_id, safe=""), params))
-                result = _read_http_json(urllib.request.Request(
-                    url, headers={"Authorization": "Bearer " + token},
-                ))
-                if int(result.get("code") or 0) != 0:
-                    raise ValueError("飞书素材库记录读取失败")
-                data = result.get("data") or {}
-                for record in (data.get("items") or []):
-                    texts, attachments = [], []
-                    _flatten_fields(record.get("fields") or {}, texts, attachments)
-                    if attachments:
-                        items.append((" ".join(texts), tuple(attachments)))
-                if not data.get("has_more"):
+def _library_relative(value):
+    text = str(value or "").replace("\\", "/")
+    parts = text.split("/")
+    if (not text or text.startswith("/") or parts[0] != "files"
+            or len(parts) < 2 or any(part in {"", ".", ".."} for part in parts)
+            or any(part.startswith(".") for part in parts[1:])):
+        raise ValueError("本地素材索引路径无效")
+    return "/".join(parts)
+
+
+def _open_local_regular(root, relative, maximum):
+    path = os.path.join(root, *relative.split("/"))
+    try:
+        path_info = _lstat_real_chain(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("本地素材文件路径不安全") from exc
+    if not stat.S_ISREG(path_info.st_mode):
+        raise ValueError("本地素材文件不是普通文件")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    opened = os.fstat(descriptor)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    listed = (path_info.st_dev, path_info.st_ino, path_info.st_size, path_info.st_mtime_ns)
+    if identity != listed or opened.st_size <= 0 or opened.st_size > maximum:
+        os.close(descriptor)
+        raise ValueError("本地素材文件身份或体积无效")
+    return descriptor, path, identity
+
+
+def _read_descriptor(descriptor, maximum):
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > maximum:
+            raise ValueError("本地素材文件超过体积上限")
+
+
+def _actual_media_mime(raw, extension):
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith(b"\x1aE\xdf\xa3"):
+        return "video/webm"
+    if len(raw) >= 12 and raw[4:8] == b"ftyp":
+        return "audio/mp4" if extension == ".m4a" else (
+            "video/quicktime" if extension == ".mov" else "video/mp4")
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WAVE":
+        return "audio/wav"
+    if raw.startswith(b"fLaC"):
+        return "audio/flac"
+    if raw.startswith(b"OggS"):
+        return "audio/ogg"
+    if raw.startswith(b"ID3") or (len(raw) >= 2 and raw[0] == 0xff and raw[1] & 0xe0 == 0xe0):
+        return "audio/aac" if extension == ".aac" else "audio/mpeg"
+    return ""
+
+
+def _load_local_catalog(expected_count=None):
+    root = _local_library_root()
+    root_info = _lstat_real_chain(root)
+    files_info = _lstat_real_chain(os.path.join(root, "files"))
+    if not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISDIR(files_info.st_mode):
+        raise ValueError("本地素材库目录不可用")
+    descriptor, _, identity = _open_local_regular(
+        root, "index.jsonl", _LOCAL_INDEX_MAX_BYTES,
+    )
+    records = []
+    ids = set()
+    paths = set()
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            for line_number in range(1, _LOCAL_INDEX_MAX_LINES + 2):
+                line = source.readline(_LOCAL_INDEX_MAX_LINE_BYTES + 1)
+                if not line:
                     break
-                next_page = str(data.get("page_token") or "").strip()
-                if not next_page or next_page == page_token:
-                    raise ValueError("飞书素材库分页游标无效")
-                page_token = next_page
-                if page_index + 1 == _FEISHU_MAX_PAGES_PER_TABLE:
-                    raise ValueError("飞书素材库记录超过安全分页上限")
-        _FEISHU_CATALOG_CACHE.update({
-            "key": cache_key, "loaded_at": time.monotonic(), "items": list(items),
-        })
-        return items
+                if len(line) > _LOCAL_INDEX_MAX_LINE_BYTES:
+                    raise ValueError("本地素材索引单行超过上限")
+                if line_number > _LOCAL_INDEX_MAX_LINES:
+                    raise ValueError("本地素材索引行数超过上限")
+                try:
+                    record = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("本地素材索引格式无效") from exc
+                if not isinstance(record, dict) or record.get("状态") != "可使用":
+                    raise ValueError("本地素材索引包含不可用记录")
+                relative = _library_relative(record.get("server_relative_path"))
+                digest = str(record.get("SHA256") or "").strip().lower()
+                media_type = _LOCAL_MEDIA_TYPES.get(record.get("素材类型"))
+                extension = os.path.splitext(relative)[1].lower()
+                expected = _LOCAL_EXTENSIONS.get(extension)
+                if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or expected is None or expected[0] != media_type):
+                    raise ValueError("本地素材索引类型、扩展名或哈希无效")
+                indexed_mime = str(
+                    record.get("MIME") or record.get("mime_type")
+                    or record.get("mime") or expected[1]
+                ).strip().lower()
+                if _LOCAL_MIME_TYPES.get(indexed_mime) != media_type:
+                    raise ValueError("本地素材索引 MIME 与素材大类不一致")
+                opaque_id = "local_" + hashlib.sha256(
+                    (relative + "\0" + digest).encode("utf-8")
+                ).hexdigest()[:32]
+                if opaque_id in ids or relative in paths:
+                    raise ValueError("本地素材索引包含重复 ID 或路径")
+                material_info = _lstat_real_chain(
+                    os.path.join(root, *relative.split("/"))
+                )
+                if not stat.S_ISREG(material_info.st_mode):
+                    raise ValueError("本地素材索引目标不是普通文件")
+                ids.add(opaque_id)
+                paths.add(relative)
+                records.append({
+                    "id": opaque_id, "relative": relative, "sha256": digest,
+                    "media_type": media_type, "mime": indexed_mime,
+                    "search": " ".join(str(record.get(key) or "") for key in (
+                        "素材名称", "一级场景", "二级场景", "标签", "使用环节",
+                    )),
+                })
+    finally:
+        after = os.fstat(descriptor)
+        os.close(descriptor)
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("本地素材索引读取期间发生变化")
+    if expected_count is not None and len(records) != int(expected_count):
+        raise ValueError("本地素材索引条目数与发布合同不一致")
+    return root, records
 
 
-def _feishu_attachment_mime(attachment):
-    mime = str(attachment.get("type") or attachment.get("mime_type") or "").lower()
-    if mime in _MATERIAL_MIMES:
-        return mime
-    extension = os.path.splitext(str(attachment.get("name") or "").lower())[1]
-    return {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-        ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm",
-        ".mov": "video/quicktime",
-    }.get(extension, "")
+def _read_local_record(root, record):
+    descriptor, path, identity = _open_local_regular(
+        root, record["relative"], _LOCAL_MATERIAL_MAX_BYTES,
+    )
+    try:
+        raw = _read_descriptor(descriptor, _LOCAL_MATERIAL_MAX_BYTES)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    final_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    path_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+    if identity != final_identity or final_identity != path_identity:
+        raise ValueError("本地素材文件读取期间发生变化")
+    if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), record["sha256"]):
+        raise ValueError("本地素材文件 SHA-256 与索引不一致")
+    extension = os.path.splitext(record["relative"])[1].lower()
+    actual_mime = _actual_media_mime(raw[:64], extension)
+    if _LOCAL_MIME_TYPES.get(actual_mime) != record["media_type"]:
+        raise ValueError("本地素材文件真实 MIME 与索引素材大类不一致")
+    return raw, actual_mime
 
 
-def _feishu_material(query, preferred_type):
-    token = _feishu_token()
+def _local_library_material(query, preferred_type):
+    root, records = _load_local_catalog()
+    candidates = [item for item in records if item["media_type"] in {"image", "video"}]
     query_words = _keywords(query)
-    best = None
-    for searchable_text, attachments in _feishu_catalog(token):
-        score = len(query_words & _keywords(searchable_text))
-        for attachment in attachments:
-            mime = _feishu_attachment_mime(attachment)
-            media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
-            if not media_type or score <= 0:
-                continue
-            type_bonus = 3 if media_type == preferred_type else 0
-            candidate = (score + type_bonus, attachment, mime)
-            if best is None or candidate[0] > best[0]:
-                best = candidate
-    if not best or not best[1].get("file_token"):
+    candidates.sort(key=lambda item: (
+        item["media_type"] == preferred_type,
+        len(query_words & _keywords(item["search"])), item["id"],
+    ), reverse=True)
+    if not candidates:
         return None
-    url = ("https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
-           urllib.parse.quote(str(best[1]["file_token"]), safe=""))
-    raw, mime = _read_http_media(urllib.request.Request(
-        url, headers={"Authorization": "Bearer " + token},
-    ))
-    return raw, mime, "feishu"
+    raw, mime = _read_local_record(root, candidates[0])
+    return raw, mime, "local_library"
+
+
+def local_material_library_operational_probe(expected_count=204):
+    root, records = _load_local_catalog(expected_count=expected_count)
+    counts = {"image": 0, "video": 0, "bgm": 0}
+    samples = {}
+    for record in records:
+        counts[record["media_type"]] += 1
+        samples.setdefault(record["media_type"], record)
+    if any(counts[kind] <= 0 for kind in counts):
+        raise ValueError("本地素材库缺少图片、视频或 BGM")
+    for record in samples.values():
+        _read_local_record(root, record)
+    return {"ok": True, "count": len(records), "types": counts}
 
 
 def _customer_material(upload_id, username):
@@ -638,7 +751,7 @@ def resolve_material_response(payload, username, db_factory=None):
         raise DigitalHumanRequestError("素材检索流程标识无效")
     if str(payload.get("digital_human_stage") or "") != "material_resolve":
         raise DigitalHumanRequestError("素材检索步骤无效")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if (str(payload.get("digital_human_run_id") or "") != record["run_id"]
             or str(payload.get("digital_human_plan_digest") or "") != record["plan_digest"]):
         raise DigitalHumanRequestError("素材检索与授权方案不一致", "consent_binding_mismatch", 403)
@@ -680,18 +793,18 @@ def resolve_material_response(payload, username, db_factory=None):
                 "material_asset_id": asset["asset_id"], "media_type": asset["media_type"]}
     preferred = "video" if material["scene_type"] == "video" else "image"
     try:
-        fetched = _feishu_material(material["material_query"], preferred)
+        fetched = _local_library_material(material["material_query"], preferred)
     except DigitalHumanRequestError:
         raise
     except Exception as exc:
         raise DigitalHumanRequestError(
-            "飞书素材库暂时不可用，已暂停生成且不会创建付费生图任务",
-            "feishu_material_unavailable", 503,
+            "本地素材库暂时不可用，已暂停生成且不会创建付费生图任务",
+            "local_material_library_unavailable", 503,
         ) from exc
     if not fetched:
         if frozen.get("allow_ai_materials") is not True:
             raise DigitalHumanRequestError(
-                "顾客素材和飞书素材库均未找到匹配画面；当前方案未允许 AI 补图",
+                "顾客素材和本地素材库均未找到匹配画面；当前方案未允许 AI 补图",
                 "material_unavailable_without_ai", 409,
             )
         return {"ok": True, "source": "ai", "ai_fallback": True,
@@ -705,7 +818,7 @@ def resolve_material_response(payload, username, db_factory=None):
     except Exception:
         if frozen.get("allow_ai_materials") is not True:
             raise DigitalHumanRequestError(
-                "飞书素材无法安全读取；当前方案未允许 AI 补图",
+                "本地素材无法安全读取；当前方案未允许 AI 补图",
                 "material_unavailable_without_ai", 409,
             )
         return {"ok": True, "source": "ai", "ai_fallback": True,
@@ -1020,7 +1133,7 @@ def consent_response(payload, username, signing_secret, db_factory=None):
     )}
 
 
-def _load_v2_consent(username, token):
+def _load_current_consent(username, token):
     record = legacy._load_consent(username, token)
     if (record.get("purpose") != CONSENT_PURPOSE
             or record.get("consent_version") != CONSENT_VERSION):
@@ -1038,7 +1151,7 @@ def verify_clone_submission(payload, username):
         raise DigitalHumanRequestError("数字人成片流程标识无效")
     if str(payload.get("digital_human_stage") or "").strip().lower() != "voice_clone":
         raise DigitalHumanRequestError("声音复刻步骤标识无效")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if str(payload.get("digital_human_run_id") or "") != record["run_id"]:
         raise DigitalHumanRequestError(
             "授权与本次制作流程不匹配", "consent_binding_mismatch", 403,
@@ -1159,7 +1272,7 @@ def verify_child_submission_with_record(payload, username, kind):
     stage = str(payload.get("digital_human_stage") or "").strip().lower()
     if _STAGE_KINDS.get(stage) != str(kind or ""):
         raise DigitalHumanRequestError("数字人成片步骤与任务类型不匹配")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if str(payload.get("digital_human_run_id") or "") != record["run_id"]:
         raise DigitalHumanRequestError("授权与本次制作流程不匹配", "consent_binding_mismatch", 403)
     if str(payload.get("digital_human_plan_digest") or "").lower() != record["plan_digest"]:
@@ -1416,7 +1529,9 @@ def prepare_compose_payload(payload, username, consent_record=None):
     frozen = _authoritative_plan(payload, username)
     if str(payload.get("plan_digest") or "").lower() != frozen["plan_digest"]:
         raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
-    if not isinstance(consent_record, dict) or consent_record.get("purpose") != CONSENT_PURPOSE:
+    if (not isinstance(consent_record, dict)
+            or consent_record.get("purpose") != CONSENT_PURPOSE
+            or consent_record.get("consent_version") != CONSENT_VERSION):
         raise DigitalHumanRequestError("缺少服务端已验证的授权记录，请重新确认授权", "consent_required", 403)
     authoritative = {
         "digital_human_pipeline": CONSENT_PURPOSE,
