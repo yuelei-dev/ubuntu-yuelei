@@ -109,6 +109,7 @@ function digitalHumanFixture(mode, narrationMode) {
     '.precision-template': templates,
   };
   const doc = {
+    body: node('', {attributes: {'data-director-guide-contract': 'digital-human-oneclick-guide-v1'}}),
     defaultView: {Event: function Event() {}},
     getElementById(id) { const value = nodes[id] || null; if(value) value.ownerDocument = doc; return value; },
     querySelector(selector) { return options[selector] || null; },
@@ -324,6 +325,7 @@ assert.ok(source.indexOf('state.pending_request=record; persist();') <
   source.indexOf('runPending(record,false);'));
 assert.ok(source.includes('if(state.pending_request) runPending(state.pending_request,true);'));
 assert.ok(digitalHumanPage.includes('src="script-agent.js?'));
+assert.ok(digitalHumanPage.includes('data-director-guide-contract="digital-human-oneclick-guide-v1"'));
 for(const id of ['photoDrop','voiceUploadDrop','customerMaterialsPicker','driveAudioDrop']) {
   assert.ok(digitalHumanPage.includes('id="'+id+'"'));
 }

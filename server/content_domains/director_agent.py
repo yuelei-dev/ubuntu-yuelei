@@ -62,6 +62,7 @@ DAILY_LIMIT = _env_positive_int("DIRECTOR_AGENT_DAILY_LIMIT", 120)
 
 SCRIPT_MODES = {"write", "script_to_video", "breakdown"}
 DIGITAL_HUMAN_MODES = {"photo", "video"}
+DIGITAL_HUMAN_GUIDE_CONTRACT = "digital-human-oneclick-guide-v1"
 MODES = SCRIPT_MODES | DIGITAL_HUMAN_MODES
 BREAKDOWN_TOOLS = {"scenes", "reverse_prompt"}
 STAGES = {
@@ -488,7 +489,8 @@ def _digital_human_page_context(value):
     if template and template not in OPTION_VALUES["precision_template"]:
         raise ValueError("Precision 模板无效")
     return {
-        "page": "digital_human_oneclick", "path": value["path"], "mode": mode,
+        "page": "digital_human_oneclick", "path": value["path"],
+        "guide_contract": DIGITAL_HUMAN_GUIDE_CONTRACT, "mode": mode,
         "narration_mode": narration_mode, "script_text": script_text,
         "script_length": len(script_text), "has_portrait": value["has_portrait"],
         "has_video_source": value["has_video_source"],

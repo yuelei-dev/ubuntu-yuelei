@@ -1,0 +1,254 @@
+{
+  "schema_version": 1,
+  "purpose": "Fail-closed v4 successor release for the versioned Director customer-guide contract on the digital-human one-click photo and Precision video modes, forward-ported over #300/#303/#310.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service",
+    "backend_root": "/home/ubuntu/content-api",
+    "static_root": "/var/www/huangquechuanmei"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "d14ac970ee081d96182b6bb3c1d2536d1d2def88",
+    "review_lock": "deploy only a merged main commit containing the exact independently reviewed PR Head; the reviewed Head parent must equal code_source_commit"
+  },
+  "expected_preimage": {
+    "online_main_commit": "1f1dffc050c218b3f9e150b37d542b77263f0290",
+    "feature_flag": {
+      "state": "row",
+      "enabled": true
+    },
+    "remote_capture_required_before_first_write": true,
+    "note": "The live director_agent.py and digital-human-oneclick.html hashes are the user-provided successful #303 and #300 postimages. The live script-agent.js and script.html hashes are the exact successful private-domain v1 postimages recorded in the merged release manifest. The modification task made no server connection and guessed no preimage. Each target may be at its exact preimage or exact v4 postimage so interrupted mixed starts are recoverable; every other byte state fails closed before backup."
+  },
+  "deployment_policy": {
+    "production_server_write_allowed": false,
+    "require_merged_main": true,
+    "fail_closed_on_preimage_mismatch": true,
+    "fail_closed_on_missing_source": true,
+    "backup_all_targets_before_first_write": true,
+    "atomic_replace_each_file": true,
+    "install_all_files_before_restart": true,
+    "restart_backend_once": true,
+    "activate_feature_only_after_hash_health_and_static_checks": true,
+    "rollback_all_files_and_feature_state_as_one_unit": true,
+    "copy_environment_or_database": false
+  },
+  "release_executor": {
+    "contract": "director_digital_human_agent_four_file_v4",
+    "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
+    "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
+    "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7",
+    "locked_base_executor": {
+      "repository_path": "scripts/deploy_director_locked_manifest.py",
+      "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
+      "sha256": "a319b3edf1ac66d44e1c3e1b10defc753eeb7a7b8e172f1f12cd89ebf17e0aa4"
+    },
+    "required_repository_paths": [
+      "server/content_domains/director_agent.py",
+      "site/workbench/digital-human-oneclick.html",
+      "site/workbench/script-agent.js",
+      "site/workbench/script.html"
+    ],
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": [
+      "content_domains.director_agent"
+    ],
+    "html_required_markers": {
+      "site/workbench/digital-human-oneclick.html": [
+        "data-director-guide-contract=\"digital-human-oneclick-guide-v1\"",
+        "script-agent.js?v=b1c3f8c3"
+      ],
+      "site/workbench/script.html": [
+        "script-agent.js?v=b1c3f8c3"
+      ]
+    },
+    "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
+    "health_feature_field": "director_agent_enabled",
+    "rollback_health_policy": {
+      "timeout_seconds": 20,
+      "interval_seconds": 1
+    },
+    "static_probes": [
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-oneclick.html",
+        "expected_status": 200,
+        "expected_sha256": "35b11ef09ce0f178585b8d5762acebc479f7f54c7c4fdb1a266089afbbd71311"
+      },
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
+        "expected_status": 200,
+        "expected_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"
+      },
+      {
+        "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
+        "expected_status": 200,
+        "expected_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
+      }
+    ],
+    "authenticated_acceptance": {
+      "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "job_timeout_seconds": 120,
+      "submit_url": "https://yuelei.huangquechuanmei.com/api/gen/director_agent",
+      "job_url_template": "https://yuelei.huangquechuanmei.com/api/gen/job/{job_id}",
+      "expected_action": {
+        "type": "fill_field",
+        "field": "digital_human_script",
+        "value": "发布验收数字人口播"
+      },
+      "request": {
+        "prompt": "把下面这段顾客文案原样填入当前照片数字人的口播文案字段：发布验收数字人口播。可以定位人物照片上传，但不要上传、不要勾选授权、不要分析或生成。",
+        "session_id": "release_digital_human_agent_v4_acceptance",
+        "page_revision": "d14ac970ee081d96",
+        "page_context": {
+          "page": "digital_human_oneclick",
+          "path": "/workbench/digital-human-oneclick.html",
+          "mode": "photo",
+          "narration_mode": "text",
+          "script_text": "",
+          "script_length": 0,
+          "has_portrait": false,
+          "has_video_source": false,
+          "has_voice_source": true,
+          "has_drive_audio": false,
+          "customer_material_count": 0,
+          "consent_confirmed": false,
+          "precision_template": "",
+          "has_result": false,
+          "active_job_status": "idle"
+        },
+        "history": [],
+        "source_page": "digital_human_oneclick",
+        "provider": "openai_responses",
+        "quoted_cost": 0
+      }
+    },
+    "deployment_preflight": {
+      "required_process_environment": [
+        "DIRECTOR_AGENT_RELEASE_TOKEN"
+      ],
+      "persist_to_service_environment": false
+    }
+  },
+  "release_contract_sources": [
+    {
+      "repository_path": "deploy/test-release/impacts/pr-293-digital-human-guide-v1.json",
+      "git_blob": "ec5ed8bdae9fd0554c5bc72aacb02665e0f99e2b",
+      "sha256": "c87c2053da66842beae347ebffc38a4021f7097dbdbba1cc6b49aae189707cd4"
+    },
+    {
+      "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
+      "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
+      "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7"
+    },
+    {
+      "repository_path": "tests/test_director_digital_human_agent_v4_release.py",
+      "git_blob": "a075358f9fa006c9327b1e8607a6b9df7ea223ae",
+      "sha256": "005a5616a7d1fb468f604b0623f6677b545624d34f3b77b18e5d030005171043"
+    }
+  ],
+  "files": [
+    {
+      "repository_path": "server/content_domains/director_agent.py",
+      "runtime_path": "/home/ubuntu/content-api/content_domains/director_agent.py",
+      "classification": "backend_runtime",
+      "target_preimage_state": "file",
+      "preimage_blob": "879fb1ba333eacce9d300203523841d5219d90bd",
+      "preimage_sha256": "eac81bc03e586f7636f2c12a490aee6ea93015106f3c0ddf3edd82ae3e76991e",
+      "postimage_blob": "316962414bdb896657a38ba291eae3d7bf22a25d",
+      "postimage_sha256": "86a7e5e76590b69520d8ba551fe3a00f42bb2206f53b1a18d17349617257d122"
+    },
+    {
+      "repository_path": "site/workbench/digital-human-oneclick.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+      "classification": "static_runtime",
+      "target_preimage_state": "file",
+      "preimage_blob": "84d825d0a587951e60e5160d1ab22508d5c22cb5",
+      "preimage_sha256": "8b4fb33032e563e3c91d774c38be1b788f7faca9a23669844fa25d5bbc00c73c",
+      "postimage_blob": "17851a81ae9efa5914e6ec969a18053ed64680f5",
+      "postimage_sha256": "35b11ef09ce0f178585b8d5762acebc479f7f54c7c4fdb1a266089afbbd71311"
+    },
+    {
+      "repository_path": "site/workbench/script-agent.js",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/script-agent.js",
+      "classification": "static_runtime",
+      "target_preimage_state": "file",
+      "preimage_blob": "ddad0e3c664c2808f79b6f8823d3b4fb153bdabd",
+      "preimage_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e",
+      "postimage_blob": "ddad0e3c664c2808f79b6f8823d3b4fb153bdabd",
+      "postimage_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"
+    },
+    {
+      "repository_path": "site/workbench/script.html",
+      "runtime_path": "/var/www/huangquechuanmei/workbench/script.html",
+      "classification": "static_runtime",
+      "target_preimage_state": "file",
+      "preimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
+      "preimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507",
+      "postimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
+      "postimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
+    }
+  ],
+  "unified_backup": {
+    "root": "/opt/huangque-deploy-backups",
+    "directory_pattern": "director-dh-agent-v4-{merged_main_commit}-{utc_timestamp}",
+    "before_first_write": [
+      "capture and verify all four live file hashes, modes, owners, and groups",
+      "copy and verify all four files into one mode-0700 backup directory",
+      "capture the exact director_agent feature row, including actor and timestamp",
+      "lock the reviewed Head, merged main, successor executor, historical base executor, and four-file inventory in audit.json"
+    ],
+    "abort_if_any_capture_or_backup_fails": true
+  },
+  "release_sequence": [
+    "verify clean live origin/main checkout, reviewed Head ancestry, exact code parent, and manifest/test-only lock commit",
+    "verify the successor executor, historical base executor, four source postimages, four live preimages, and enabled feature state",
+    "compile Python, run node --check, verify both HTML cache markers, and import the candidate backend in an isolated copy before backup",
+    "create and verify the unified four-file and feature-row backup before the first write",
+    "temporarily disable director_agent and require health to report false",
+    "atomically install all four postimages and verify their SHA-256 values",
+    "validate the installed Python import and restart huangque-content.service exactly once",
+    "require health false, restore director_agent=true, then require health true",
+    "verify served hashes for digital-human-oneclick.html, script-agent.js, and script.html",
+    "submit an authenticated zero-cost digital-human Agent request twice with one idempotency key and poll the original job",
+    "require a same-revision digital_human_script fill action, then write final hashes and feature state to audit.json"
+  ],
+  "feature_activation": {
+    "feature": "director_agent",
+    "database_path": "/home/ubuntu/content-api/feature_flags.db",
+    "actor": "release:director-dh-agent-v4",
+    "target_enabled": true,
+    "no_paid_generation_button_click": true
+  },
+  "browser_evidence": {
+    "desktop": {
+      "path": "docs/pr-evidence/digital-human-agent-20260823/desktop-agent-open.png",
+      "sha256": "0c98ba69c171f4696c9cf1a10732c1476eb3d7d0e79beb2b7b973c9019535730"
+    },
+    "mobile": {
+      "path": "docs/pr-evidence/digital-human-agent-20260823/mobile-agent-open.png",
+      "sha256": "dbcc6284140e2c61c6c8644308f9d1584e2448a16b46c483bbd285d00fd3027f"
+    },
+    "assertions": [
+      "feature off hides the Agent",
+      "feature on shows the launcher and panel",
+      "photo and Precision modes accept direct customer-script fill",
+      "authorization remains unchecked and generation remains unclicked",
+      "390x844 layout has no horizontal overflow or overlap with original action buttons"
+    ]
+  },
+  "rollback": {
+    "trigger": "any disable, install, compile, import, restart, health, activation, static, authenticated acceptance, or final-audit failure",
+    "sequence": [
+      "disable director_agent before restoring files",
+      "restore all four files from the unified backup with their original mode, owner, and group",
+      "restore the exact prior director_agent feature row",
+      "restart huangque-content.service exactly once",
+      "require service health and the original feature enabled state within the bounded rollback policy",
+      "record the forward error, rollback outcome, final feature row, and all four final hashes in audit.json"
+    ],
+    "production_untouched": true
+  }
+}
