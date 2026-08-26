@@ -1,0 +1,17 @@
+{
+  "external_checks": [],
+  "health_checks": [
+    "site-loopback"
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    "site-loopback"
+  ],
+  "release_id": "remove-script-action-blocks-20260826-v1",
+  "required_env": {},
+  "restart_services": [],
+  "runtime_changes": [
+    "site/workbench/script.html"
+  ],
+  "schema_version": 1
+}

@@ -55,13 +55,22 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("new Blob(['﻿'+txt]", self.html)
         self.assertIn("a.download=filename", self.html)
 
-    def test_one_click_video_calls_script_to_video_api(self):
-        self.assertIn('id="scGenVideo"', self.html)
-        self.assertIn('id="scGenAudio"', self.html)
+    def test_primary_bulk_generation_action_blocks_are_removed(self):
+        self.assertNotIn('id="scToImageAll"', self.html)
+        self.assertNotIn('id="scGenVideo"', self.html)
+        self.assertNotIn('id="scGenAudio"', self.html)
+        self.assertNotIn('scToImageAllBtn.onclick', self.html)
+        self.assertNotIn('genVideoBtn.onclick', self.html)
+        self.assertNotIn('genAudioBtn.onclick', self.html)
+        self.assertNotIn('全部转作图', self.html)
+        self.assertNotIn('一键生成视频', self.html)
+        self.assertNotIn('一键生成口播', self.html)
+
+    def test_breakdown_remake_keeps_shared_video_generator(self):
         self.assertIn("options.endpoint||'/api/gen/script_to_video'", self.html)
         self.assertIn("function _confirmDramaVideo(list)", self.html)
         self.assertIn("预计消耗 '+cost+' 点", self.html)
-        self.assertIn("if(!_confirmDramaVideo(list)) return;", self.html)
+        self.assertIn("if(!_confirmDramaVideo(scenes)) return;", self.html)
 
     def test_reverse_video_estimate_uses_server_quote(self):
         self.assertIn("noAvatarOffer.duration_costs[String(selectedDuration)]", self.html)
@@ -71,12 +80,11 @@ class ScriptActionsUiTests(unittest.TestCase):
         self.assertIn("10 秒 · 300 点", self.html)
         self.assertIn("15 秒 · 450 点", self.html)
         self.assertIn("_setGenerateBusy", self.html)
-        self.assertIn("_doGenerate({scenes:list,style:'剧情',duration:_dramaDuration(list)},genVideoBtn)", self.html)
+        self.assertIn("_doGenerate({scenes:scenes,style:'剧情',duration:_dramaDuration(scenes)},bdRemakeBtn)", self.html)
 
-    def test_one_click_video_passes_style_and_selected_avatar(self):
-        self.assertIn("lastStyle=style||'口播'", self.html)
-        self.assertIn("var talkingStyle=lastStyle==='剧情'?'口播':(lastStyle||'口播');", self.html)
-        self.assertIn("_doGenerate({scenes:list,style:talkingStyle,avatar_id:avatarId,voice:voice},genAudioBtn)", self.html)
+    def test_breakdown_remake_passes_style_and_selected_avatar(self):
+        self.assertIn("_pickRemakeStyle(function(style)", self.html)
+        self.assertIn("_doGenerate({scenes:scenes,style:style,avatar_id:avatarId,voice:voice},bdRemakeBtn)", self.html)
 
     def test_one_click_video_loads_avatar_picker_for_talking_styles(self):
         self.assertIn("fetch('/api/gen/video/avatars?limit=60'", self.html)
@@ -381,7 +389,7 @@ var localStorage = {
   setItem: (key,value) => { storage[key]=String(value); },
   removeItem: key => { delete storage[key]; }
 };
-var genVideoBtn={}, bdRemakeBtn=null, scenes={innerHTML:''};
+var bdRemakeBtn={}, scenes={innerHTML:''};
 var window={HQ:null}, HQ=null;
 var cleared=[];
 function clearInterval(id){ cleared.push(id); }
@@ -412,7 +420,7 @@ setImmediate(function(){
     aStillStored:!!localStorage.getItem(aKey),
     bCleared:!localStorage.getItem(bKey),
     timerStopped:activeVideoResumeTimer===null&&cleared.indexOf(77)>=0,
-    buttonRestored:genVideoBtn.busy===false
+    buttonRestored:bdRemakeBtn.busy===false
   }));
 });
 """ % json.dumps(recovery)
@@ -442,7 +450,7 @@ var localStorage = {
   setItem: (key,value) => { storage[key]=String(value); },
   removeItem: key => { delete storage[key]; }
 };
-var genVideoBtn={}, bdRemakeBtn=null, scenes={innerHTML:''};
+var bdRemakeBtn={}, scenes={innerHTML:''};
 var window={HQ:null}, HQ=null;
 function clearInterval(){}
 function setInterval(){ return 88; }
@@ -695,13 +703,8 @@ setImmediate(function(){
         self.assertIn("handoffUrl('banana.html',img.getAttribute('data-to-image')", self.html)
         self.assertIn("'?prompt='+encodeURIComponent(prompt||'')", self.html)
 
-    def test_to_image_all_button_flow(self):
-        """「全部转作图」：带第 1 个分镜并提示，无分镜拒绝，占位卡禁用"""
-        self.assertIn('id="scToImageAll"', self.html)
-        self.assertIn("scToImageAllBtn.onclick=function()", self.html)
-        self.assertIn("请先生成分镜脚本", self.html)
-        self.assertIn("handoffUrl('banana.html',(list[0]&&list[0].scene)||'')", self.html)
-        self.assertIn("已带入第 1 个分镜，其余请逐条转", self.html)
+    def test_placeholder_scene_to_image_buttons_remain_disabled(self):
+        """三张静态占位分镜的逐条「转作图」在生成前禁用。"""
         # 三张静态占位分镜的「转作图」在生成前禁用
         self.assertEqual(
             3,
