@@ -129,8 +129,8 @@
   "release_contract_sources": [
     {
       "repository_path": "deploy/test-release/impacts/pr-293-digital-human-guide-v1.json",
-      "git_blob": "3ce13a31109f36b3606bd794127b4b4888a2cfe2",
-      "sha256": "904d0a1c78e59a1e46955ec270104520a7dbca94852450e6704e8dd8b0141452"
+      "git_blob": "0347e39beeaf729d8d9568394797718a1d23be1c",
+      "sha256": "1f484deef08ea5e0f5d5b45719a855c40b9d019632dfbbf1a1b82acf49a4a847"
     },
     {
       "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",

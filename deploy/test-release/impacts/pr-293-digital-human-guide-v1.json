@@ -18,7 +18,9 @@
     "director-agent-authenticated-zero-cost"
   ],
   "required_env": {
-    "DIRECTOR_AGENT_RELEASE_TOKEN": "deployment-only bearer token; never committed"
+    "huangque-content.service": [
+      "DIRECTOR_AGENT_RELEASE_TOKEN"
+    ]
   },
   "migrations": [],
   "external_checks": []
