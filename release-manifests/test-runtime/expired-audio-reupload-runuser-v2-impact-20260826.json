@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "release_id": "expired-audio-reupload-runuser-v2-20260826",
+  "kind": "deployment_executor_successor",
+  "business_payload_changed": false,
+  "supersedes_manifest": "release-manifests/test-runtime/expired-audio-reupload-v1-20260826.json",
+  "runtime_targets": [
+    "server/content_domains/script_to_video.py",
+    "server/content_domains/digital_human_v2.py",
+    "site/workbench/digital-human-oneclick.html"
+  ],
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "preflight_change": {
+    "test_module": "tests.test_digital_human_local_material_library",
+    "required_user": "ubuntu",
+    "launcher": "/usr/sbin/runuser",
+    "nested_tool": "/usr/bin/python3"
+  },
+  "transaction_semantics": {
+    "preimage_and_postimage_equal_to_superseded_manifest": true,
+    "backup_before_write": true,
+    "post_failure_rolls_back_all_targets": true,
+    "historical_manifest_and_executor_immutable": true
+  }
+}
