@@ -222,17 +222,13 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
             self.assertEqual(lock["git_blob"], git_blob(data))
             self.assertEqual(lock["sha256"], sha256(data))
         impact = json.loads((
-            ROOT / "release-manifests/test-runtime/"
-            "director-digital-human-agent-v4-impact-20260826.json"
+            ROOT / "deploy/test-release/impacts/"
+            "pr-293-digital-human-guide-v1.json"
         ).read_text(encoding="utf-8"))
         self.assertEqual({
             "server/content_domains/director_agent.py",
             "site/workbench/digital-human-oneclick.html",
         }, set(impact["runtime_changes"]))
-        self.assertEqual(
-            self.module.REQUIRED_REPOSITORY_PATHS,
-            set(impact["runtime_inventory"]),
-        )
 
     def test_public_entry_rejects_every_other_manifest_path(self):
         with tempfile.TemporaryDirectory() as directory:

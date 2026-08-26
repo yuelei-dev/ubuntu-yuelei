@@ -39,8 +39,8 @@
   "release_executor": {
     "contract": "director_digital_human_agent_four_file_v4",
     "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-    "git_blob": "8bc31ddb01cf6f5b77350e9a25f7827160961b24",
-    "sha256": "8d1ff65a24651963ef1d08a8c64f95a0e051642e1d6d9f9f17192ab2a92debda",
+    "git_blob": "2a1b06a6d90f5ef631303be4faab59cde98dcd99",
+    "sha256": "60afedf57bb9ae551a3e144c9bfdd82f78cd87f9876c5c7fc912d53d8960bb87",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -128,19 +128,19 @@
   },
   "release_contract_sources": [
     {
-      "repository_path": "release-manifests/test-runtime/director-digital-human-agent-v4-impact-20260826.json",
-      "git_blob": "c12f2247870fbef63df2e5a2ddd1b4c5611c21dc",
-      "sha256": "b47062371e69d2403d66d450a938f6aa81e58be580701c2b6fcd559d20ccbebb"
+      "repository_path": "deploy/test-release/impacts/pr-293-digital-human-guide-v1.json",
+      "git_blob": "3ce13a31109f36b3606bd794127b4b4888a2cfe2",
+      "sha256": "904d0a1c78e59a1e46955ec270104520a7dbca94852450e6704e8dd8b0141452"
     },
     {
       "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-      "git_blob": "8bc31ddb01cf6f5b77350e9a25f7827160961b24",
-      "sha256": "8d1ff65a24651963ef1d08a8c64f95a0e051642e1d6d9f9f17192ab2a92debda"
+      "git_blob": "2a1b06a6d90f5ef631303be4faab59cde98dcd99",
+      "sha256": "60afedf57bb9ae551a3e144c9bfdd82f78cd87f9876c5c7fc912d53d8960bb87"
     },
     {
       "repository_path": "tests/test_director_digital_human_agent_v4_release.py",
-      "git_blob": "d9ffd89264f6a99b719a06fc12408e417029facd",
-      "sha256": "3fd1da2cf95cb637b2c24a35dffdcf7d5cdbd6758faee50185bd2660e267ce37"
+      "git_blob": "431172e579c3fde7b6059f782ea02f05c72b3d98",
+      "sha256": "980c3846609e0587ba4fa7104d08ee6bb878d180f4bc1c432596d9c9be77f407"
     }
   ],
   "files": [

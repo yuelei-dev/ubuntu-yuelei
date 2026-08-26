@@ -147,7 +147,7 @@ def _validate_manifest(manifest):
     if not isinstance(contract_sources, list) or len(contract_sources) != 3:
         raise ReleaseError("release contract sources are incomplete")
     expected_contract_paths = {
-        "release-manifests/test-runtime/director-digital-human-agent-v4-impact-20260826.json",
+        "deploy/test-release/impacts/pr-293-digital-human-guide-v1.json",
         "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
         "tests/test_director_digital_human_agent_v4_release.py",
     }

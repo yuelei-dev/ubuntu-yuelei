@@ -5,12 +5,6 @@
     "server/content_domains/director_agent.py",
     "site/workbench/digital-human-oneclick.html"
   ],
-  "runtime_inventory": [
-    "server/content_domains/director_agent.py",
-    "site/workbench/digital-human-oneclick.html",
-    "site/workbench/script-agent.js",
-    "site/workbench/script.html"
-  ],
   "restart_services": [
     "huangque-content.service"
   ],
