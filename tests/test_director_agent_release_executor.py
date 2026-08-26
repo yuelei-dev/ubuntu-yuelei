@@ -8,6 +8,7 @@ import os
 import pathlib
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
@@ -683,7 +684,10 @@ class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
             supporting["git_blob"],
         )
         for entry in loaded["files"]:
-            source = (ROOT / entry["repository_path"]).read_bytes()
+            source = subprocess.run(
+                ["git", "cat-file", "blob", entry["source_blob"]],
+                cwd=ROOT, check=True, stdout=subprocess.PIPE,
+            ).stdout
             self.assertEqual(
                 hashlib.sha256(source).hexdigest(), entry["source_sha256"],
             )
@@ -692,10 +696,10 @@ class DirectorAgentCLIReleaseExecutorTests(unittest.TestCase):
                 entry["source_blob"],
             )
         for item in dependency["files"]:
-            source = (
-                ROOT / dependency["repository_root"] /
-                pathlib.PurePosixPath(item["path"])
-            ).read_bytes()
+            source = subprocess.run(
+                ["git", "cat-file", "blob", item["git_blob"]],
+                cwd=ROOT, check=True, stdout=subprocess.PIPE,
+            ).stdout
             self.assertEqual(hashlib.sha256(source).hexdigest(), item["sha256"])
             self.assertEqual(
                 DirectorAgentReleaseExecutorTests._blob(source),

@@ -135,6 +135,10 @@ class DirectorAgentTests(unittest.TestCase):
     def test_digital_human_payload_is_strict_and_tracks_both_modes(self):
         cleaned = director_agent.validate_payload(digital_human_payload())
         self.assertEqual(cleaned["source_page"], "digital_human_oneclick")
+        self.assertEqual(
+            cleaned["page_context"]["guide_contract"],
+            "digital-human-oneclick-guide-v1",
+        )
         self.assertEqual(cleaned["page_context"]["mode"], "photo")
         self.assertEqual(cleaned["page_context"]["script_text"], "产品讲解口播")
         video = digital_human_payload()
@@ -162,6 +166,11 @@ class DirectorAgentTests(unittest.TestCase):
             bad_path["page_context"], path="/workbench/assets.html")
         with self.assertRaisesRegex(ValueError, "不属于数字人"):
             director_agent.validate_payload(bad_path)
+        forged_contract = digital_human_payload()
+        forged_contract["page_context"] = dict(
+            forged_contract["page_context"], guide_contract="digital-human-oneclick-guide-v0")
+        with self.assertRaisesRegex(ValueError, "页面上下文格式"):
+            director_agent.validate_payload(forged_contract)
 
     def test_private_domain_context_is_strict_and_bgm_is_page_bound(self):
         cleaned = director_agent.validate_payload(private_domain_payload())
