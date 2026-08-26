@@ -452,7 +452,7 @@ def _script_page_context(value):
 
 def _digital_human_page_context(value):
     allowed = {
-        "page", "path", "guide_contract", "mode", "narration_mode", "script_text",
+        "page", "path", "mode", "narration_mode", "script_text",
         "script_length", "has_portrait", "has_video_source", "has_voice_source",
         "has_drive_audio", "customer_material_count", "consent_confirmed",
         "precision_template", "has_result", "active_job_status",
@@ -464,8 +464,6 @@ def _digital_human_page_context(value):
         "/workbench/digital-human-oneclick.html",
     }:
         raise ValueError("页面上下文不属于数字人一键生成")
-    if value.get("guide_contract") != DIGITAL_HUMAN_GUIDE_CONTRACT:
-        raise ValueError("数字人顾客引导合同版本无效")
     mode = _text(value.get("mode"), 16, "数字人模式")
     if mode not in DIGITAL_HUMAN_MODES:
         raise ValueError("数字人模式无效")

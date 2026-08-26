@@ -178,7 +178,14 @@ def _validate_manifest(manifest):
         raise ReleaseError("acceptance page revision is invalid")
 
     markers = executor.get("html_required_markers")
-    if not isinstance(markers, list) or len(markers) != 1:
+    expected_markers = {
+        "site/workbench/digital-human-oneclick.html": [
+            'data-director-guide-contract="digital-human-oneclick-guide-v1"',
+            "script-agent.js?v=b1c3f8c3",
+        ],
+        "site/workbench/script.html": ["script-agent.js?v=b1c3f8c3"],
+    }
+    if markers != expected_markers:
         raise ReleaseError("locked HTML cache marker is missing")
     probes = executor.get("static_probes")
     if not isinstance(probes, list) or len(probes) != 3:
@@ -253,7 +260,8 @@ def _validate_sources(source_root, target_root, manifest, hooks):
             hooks.validate_node(source)
         elif source.suffix == ".html":
             content = data.decode("utf-8")
-            for marker in executor["html_required_markers"]:
+            for marker in executor["html_required_markers"].get(
+                    item["repository_path"], []):
                 if marker not in content:
                     raise ReleaseError("candidate HTML cache marker is missing")
 
@@ -388,7 +396,13 @@ def _execute_manifest(
         if not target.is_file() or target.is_symlink():
             raise ReleaseError("expected regular runtime preimage")
         old = target.read_bytes()
-        if (_sha256(old) == item["preimage_sha256"]
+        if (item["preimage_sha256"] == item["postimage_sha256"]
+                and item["preimage_blob"] == item["postimage_blob"]
+                and _sha256(old) == item["preimage_sha256"]
+                and _git_blob(old) == item["preimage_blob"]):
+            start_state = "unchanged"
+            start_prefix = "preimage"
+        elif (_sha256(old) == item["preimage_sha256"]
                 and _git_blob(old) == item["preimage_blob"]):
             start_state = "needs_install"
             start_prefix = "preimage"
@@ -468,8 +482,9 @@ def _execute_manifest(
             executor["health_url"], executor["health_feature_field"], False,
         )
         checkpoint("after_health_disabled_before_install")
-        for index, (item, source, target, mode, uid, gid, _, _) in enumerate(entries):
-            BASE._atomic_install(source, target, mode, replace, uid, gid)
+        for index, (item, source, target, mode, uid, gid, start_state, _) in enumerate(entries):
+            if start_state == "needs_install":
+                BASE._atomic_install(source, target, mode, replace, uid, gid)
             checkpoint("after_replace_%d" % index)
         for item, _, target, _, _, _, _, _ in entries:
             if _sha256(target.read_bytes()) != item["postimage_sha256"]:

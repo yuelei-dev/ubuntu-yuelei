@@ -176,6 +176,14 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
             {item["repository_path"] for item in self.base_manifest["files"]},
         )
         self.assertEqual(4, len(self.base_manifest["files"]))
+        self.assertEqual(
+            [
+                'data-director-guide-contract="digital-human-oneclick-guide-v1"',
+                "script-agent.js?v=b1c3f8c3",
+            ],
+            self.base_manifest["release_executor"]["html_required_markers"]
+            ["site/workbench/digital-human-oneclick.html"],
+        )
         development_base = self.base_manifest["expected_preimage"]["online_main_commit"]
         for item in self.base_manifest["files"]:
             data = (ROOT / item["repository_path"]).read_bytes()
@@ -213,6 +221,18 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
             data = (ROOT / lock["repository_path"]).read_bytes()
             self.assertEqual(lock["git_blob"], git_blob(data))
             self.assertEqual(lock["sha256"], sha256(data))
+        impact = json.loads((
+            ROOT / "release-manifests/test-runtime/"
+            "director-digital-human-agent-v4-impact-20260826.json"
+        ).read_text(encoding="utf-8"))
+        self.assertEqual({
+            "server/content_domains/director_agent.py",
+            "site/workbench/digital-human-oneclick.html",
+        }, set(impact["runtime_changes"]))
+        self.assertEqual(
+            self.module.REQUIRED_REPOSITORY_PATHS,
+            set(impact["runtime_inventory"]),
+        )
 
     def test_public_entry_rejects_every_other_manifest_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -290,7 +310,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
         audit_path = next(self.backups.glob("*/audit.json"))
         audit = json.loads(audit_path.read_text("utf-8"))
         self.assertEqual(
-            ["already_installed", "needs_install", "already_installed", "needs_install"],
+            ["already_installed", "needs_install", "unchanged", "unchanged"],
             [item["start_state"] for item in audit["files"]],
         )
 

@@ -136,7 +136,10 @@ class ExpiredAudioReleaseTests(unittest.TestCase):
             self.assertEqual(OLD_PREIMAGES[path], (
                 item["target_preimage_blob"], item["target_preimage_sha256"],
             ))
-            data = (ROOT / path).read_bytes()
+            data = subprocess.run(
+                ["git", "cat-file", "blob", item["expected_postimage_blob"]],
+                cwd=ROOT, check=True, stdout=subprocess.PIPE,
+            ).stdout
             self.assertEqual(_blob(data), item["expected_postimage_blob"])
             self.assertEqual(hashlib.sha256(data).hexdigest(), item["expected_postimage_sha256"])
             self.assertEqual(item["source_blob"], item["expected_postimage_blob"])

@@ -39,8 +39,8 @@
   "release_executor": {
     "contract": "director_digital_human_agent_four_file_v4",
     "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-    "git_blob": "5a7d267cdaaa123f179a8de493917de73a3c3e59",
-    "sha256": "f628d2bcd7e4ca09db6554b9fe094ebd9c9b268046f41876ae069e0c74a2b3bf",
+    "git_blob": "8bc31ddb01cf6f5b77350e9a25f7827160961b24",
+    "sha256": "8d1ff65a24651963ef1d08a8c64f95a0e051642e1d6d9f9f17192ab2a92debda",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -56,9 +56,15 @@
     "import_modules": [
       "content_domains.director_agent"
     ],
-    "html_required_markers": [
-      "script-agent.js?v=0995438a"
-    ],
+    "html_required_markers": {
+      "site/workbench/digital-human-oneclick.html": [
+        "data-director-guide-contract=\"digital-human-oneclick-guide-v1\"",
+        "script-agent.js?v=b1c3f8c3"
+      ],
+      "site/workbench/script.html": [
+        "script-agent.js?v=b1c3f8c3"
+      ]
+    },
     "health_url": "https://yuelei.huangquechuanmei.com/api/gen/health",
     "health_feature_field": "director_agent_enabled",
     "rollback_health_policy": {
@@ -69,17 +75,17 @@
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/digital-human-oneclick.html",
         "expected_status": 200,
-        "expected_sha256": "aee4fe619a67debd5a1199ff4b7ab7dc4a760e7bd9691f7cfc0bfd649f228711"
+        "expected_sha256": "35b11ef09ce0f178585b8d5762acebc479f7f54c7c4fdb1a266089afbbd71311"
       },
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script-agent.js",
         "expected_status": 200,
-        "expected_sha256": "0995438acdea1e8d9b0d865c4fdeed4cb6460978a490c2ea61fa5438bff6937c"
+        "expected_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"
       },
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
         "expected_status": 200,
-        "expected_sha256": "3d9a82a9ea74ba1007219731a1ccde6c2159299c146c97f16ef6951217fa89c7"
+        "expected_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
       }
     ],
     "authenticated_acceptance": {
@@ -99,7 +105,6 @@
         "page_context": {
           "page": "digital_human_oneclick",
           "path": "/workbench/digital-human-oneclick.html",
-          "guide_contract": "digital-human-oneclick-guide-v1",
           "mode": "photo",
           "narration_mode": "text",
           "script_text": "",
@@ -124,18 +129,18 @@
   "release_contract_sources": [
     {
       "repository_path": "release-manifests/test-runtime/director-digital-human-agent-v4-impact-20260826.json",
-      "git_blob": "10ddcc394101d239091eff839e66f50a36c8d2bd",
-      "sha256": "b12df7b831303dcb77e16f2dd82184d98910a00777a31598990c97adfb77cadc"
+      "git_blob": "c12f2247870fbef63df2e5a2ddd1b4c5611c21dc",
+      "sha256": "b47062371e69d2403d66d450a938f6aa81e58be580701c2b6fcd559d20ccbebb"
     },
     {
       "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-      "git_blob": "5a7d267cdaaa123f179a8de493917de73a3c3e59",
-      "sha256": "f628d2bcd7e4ca09db6554b9fe094ebd9c9b268046f41876ae069e0c74a2b3bf"
+      "git_blob": "8bc31ddb01cf6f5b77350e9a25f7827160961b24",
+      "sha256": "8d1ff65a24651963ef1d08a8c64f95a0e051642e1d6d9f9f17192ab2a92debda"
     },
     {
       "repository_path": "tests/test_director_digital_human_agent_v4_release.py",
-      "git_blob": "a697d3319fe4cecf96820df93d2497a14dceb8b2",
-      "sha256": "98ba177045027664cc757ad22aebf1aee6e1e140e6f434b16e00a1141846b0fb"
+      "git_blob": "d9ffd89264f6a99b719a06fc12408e417029facd",
+      "sha256": "3fd1da2cf95cb637b2c24a35dffdcf7d5cdbd6758faee50185bd2660e267ce37"
     }
   ],
   "files": [
@@ -146,8 +151,8 @@
       "target_preimage_state": "file",
       "preimage_blob": "879fb1ba333eacce9d300203523841d5219d90bd",
       "preimage_sha256": "eac81bc03e586f7636f2c12a490aee6ea93015106f3c0ddf3edd82ae3e76991e",
-      "postimage_blob": "861ea3c805513140f64cba5513407ca5775b06d1",
-      "postimage_sha256": "ef02a372e97431ba86967e74fd35890d285330746daef5f38958e82b9f8c0b3e"
+      "postimage_blob": "316962414bdb896657a38ba291eae3d7bf22a25d",
+      "postimage_sha256": "86a7e5e76590b69520d8ba551fe3a00f42bb2206f53b1a18d17349617257d122"
     },
     {
       "repository_path": "site/workbench/digital-human-oneclick.html",
@@ -156,8 +161,8 @@
       "target_preimage_state": "file",
       "preimage_blob": "84d825d0a587951e60e5160d1ab22508d5c22cb5",
       "preimage_sha256": "8b4fb33032e563e3c91d774c38be1b788f7faca9a23669844fa25d5bbc00c73c",
-      "postimage_blob": "82f33d7172ee6613a38a3ba6a2bf241472c19e5f",
-      "postimage_sha256": "aee4fe619a67debd5a1199ff4b7ab7dc4a760e7bd9691f7cfc0bfd649f228711"
+      "postimage_blob": "17851a81ae9efa5914e6ec969a18053ed64680f5",
+      "postimage_sha256": "35b11ef09ce0f178585b8d5762acebc479f7f54c7c4fdb1a266089afbbd71311"
     },
     {
       "repository_path": "site/workbench/script-agent.js",
@@ -166,8 +171,8 @@
       "target_preimage_state": "file",
       "preimage_blob": "ddad0e3c664c2808f79b6f8823d3b4fb153bdabd",
       "preimage_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e",
-      "postimage_blob": "45acfc2ef0e6a96d64df7230bb7555063bde76b2",
-      "postimage_sha256": "0995438acdea1e8d9b0d865c4fdeed4cb6460978a490c2ea61fa5438bff6937c"
+      "postimage_blob": "ddad0e3c664c2808f79b6f8823d3b4fb153bdabd",
+      "postimage_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"
     },
     {
       "repository_path": "site/workbench/script.html",
@@ -176,8 +181,8 @@
       "target_preimage_state": "file",
       "preimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
       "preimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507",
-      "postimage_blob": "cc4257af95bd9df6cdd5c42ef92a221a6b9628f8",
-      "postimage_sha256": "3d9a82a9ea74ba1007219731a1ccde6c2159299c146c97f16ef6951217fa89c7"
+      "postimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
+      "postimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
     }
   ],
   "unified_backup": {
