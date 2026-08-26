@@ -150,6 +150,56 @@ class DigitalHumanV2Tests(unittest.TestCase):
             }, "yuelei", "test-signing-secret", db_factory=self._consent_connection)
         self.assertEqual(caught.exception.code, "consent_plan_mismatch")
 
+    def test_legacy_v2_consent_cannot_enter_v3_resolve_or_compose(self):
+        old_record = {
+            "id": "dhc_" + "1" * 32, "username": "yuelei",
+            "run_id": "dh-v2-legacy-consent-001",
+            "consent_version": "digital-human-material-v2",
+            "purpose": "digital_human_material_v2",
+            "plan_digest": "a" * 64,
+        }
+        with mock.patch.object(
+                self.legacy, "_load_consent", return_value=old_record):
+            with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+                self.domain.resolve_material_response({
+                    "digital_human_pipeline": self.domain.CONSENT_PURPOSE,
+                    "digital_human_stage": "material_resolve",
+                    "digital_human_run_id": old_record["run_id"],
+                    "digital_human_plan_digest": old_record["plan_digest"],
+                    "digital_human_consent_token": "legacy-token",
+                    "digital_human_script": "旧授权不能静默切换素材来源。" * 8,
+                    "digital_human_item_index": 0,
+                }, "yuelei")
+        self.assertEqual("consent_binding_mismatch", caught.exception.code)
+
+        current_plan = self.domain._bind_material_policy(
+            self.domain.timeline.plan_text("新素材来源必须重新分析并确认授权。" * 8),
+            False, [], True,
+        )
+        with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
+            self.domain.prepare_compose_payload({
+                "pipeline": self.domain.PIPELINE, "mode": self.domain.PIPELINE,
+                "script": current_plan["copy"],
+                "plan_digest": current_plan["plan_digest"],
+                "video_job_ids": [], "material_job_ids": [],
+                "material_asset_ids": [],
+            }, "yuelei", old_record)
+        self.assertEqual("consent_required", caught.exception.code)
+
+    def test_v3_plan_and_consent_lock_local_library_priority(self):
+        self.assertEqual("digital-human-material-v3", self.domain.CONSENT_VERSION)
+        self.assertEqual("digital_human_material_v3", self.domain.CONSENT_PURPOSE)
+        plan, consent = self._consent(
+            "新版本必须把固定本地素材库绑定进方案摘要和授权记录。" * 8,
+            allow_ai=False, upload_ids=[], run_id="dh-v3-local-consent-001",
+        )
+        self.assertEqual(
+            ["customer_upload", "local_library", "ai_optional"],
+            plan["source_priority"],
+        )
+        self.assertEqual(self.domain.CONSENT_VERSION, consent["consent_version"])
+        self.assertEqual(self.domain.CONSENT_PURPOSE, consent["purpose"])
+
     def test_v2_voice_clone_routes_through_legacy_entrypoint_and_keeps_bindings(self):
         sample = b"authorized-v2-voice-sample"
         script = "这是用于验证新版数字人声音复刻授权绑定的完整口播文案。"
@@ -591,7 +641,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
 
     def test_material_policy_binds_customer_uploads_and_optional_ai(self):
         upload_id = "img_" + "a" * 32
-        script = "顾客上传素材必须全部使用，缺少的镜头先查飞书，最后才按用户选择使用人工智能补图。" * 3
+        script = "顾客上传素材必须全部使用，缺少的镜头先查本地库，最后才按用户选择使用人工智能补图。" * 3
         with mock.patch.object(self.domain, "_validate_customer_uploads") as validate:
             result = self.domain.plan_response({
                 "narration_mode": "text", "script": script,
@@ -602,7 +652,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
         self.assertFalse(plan["allow_ai_materials"])
         self.assertEqual(plan["customer_upload_ids"], [upload_id])
         self.assertEqual(plan["source_priority"], [
-            "customer_upload", "feishu", "ai_optional",
+            "customer_upload", "local_library", "ai_optional",
         ])
         self.assertNotEqual(plan["plan_digest"], self.domain.timeline.plan_text(script)["plan_digest"])
 
@@ -622,7 +672,7 @@ class DigitalHumanV2Tests(unittest.TestCase):
             script, run_id="dh-v2-run-missing-ai-policy-001",
         )
         resolver = self._metadata(plan, consent, "material_resolve", 0)
-        with mock.patch.object(self.domain, "_feishu_material", return_value=None):
+        with mock.patch.object(self.domain, "_local_library_material", return_value=None):
             with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
                 self.domain.resolve_material_response(resolver, "yuelei")
         self.assertEqual(caught.exception.code, "material_unavailable_without_ai")
@@ -632,16 +682,20 @@ class DigitalHumanV2Tests(unittest.TestCase):
             self.domain.verify_child_submission_with_record(paid, "yuelei", "image")
         self.assertEqual(caught.exception.code, "ai_material_not_allowed")
 
-    def test_feishu_defaults_use_only_the_selected_material_library(self):
-        self.assertEqual(self.domain._FEISHU_APP_TOKEN, "TYqUb6KaQaLPQ2sLrLFcdsWanPZ")
-        self.assertEqual(self.domain._FEISHU_TABLES, (
-            ("tbl58c0UkQ5ZaR2z", "vewa9ZW0Og"),
-            ("", ""),
-        ))
+    def test_local_library_default_is_fixed_and_not_request_controlled(self):
+        self.assertEqual(
+            self.domain._LOCAL_LIBRARY_DEFAULT_ROOT,
+            "/home/ubuntu/material-libraries/huangque-media",
+        )
+        self.assertEqual(
+            self.domain._LOCAL_LIBRARY_ENV,
+            "DIGITAL_HUMAN_LOCAL_MATERIAL_LIBRARY_ROOT",
+        )
+        self.assertNotIn("material_root", self.domain.resolve_material_response.__code__.co_consts)
 
-    def test_material_resolver_uses_customer_then_feishu_then_optional_ai(self):
+    def test_material_resolver_uses_customer_then_local_library_then_optional_ai(self):
         upload_id = "img_" + "b" * 32
-        script = "顾客上传素材必须先使用，剩余镜头查飞书，最后才允许人工智能补图。" * 4
+        script = "顾客上传素材必须先使用，剩余镜头查本地库，最后才允许人工智能补图。" * 4
         customer_plan, customer_consent = self._consent(
             script, allow_ai=True, upload_ids=[upload_id],
             run_id="dh-v2-run-customer-001",
@@ -651,32 +705,32 @@ class DigitalHumanV2Tests(unittest.TestCase):
         with mock.patch.object(
                 self.domain, "_customer_material",
                 return_value=(PNG_2X2, "image/png", "customer_upload")) as customer, \
-                mock.patch.object(self.domain, "_feishu_material") as feishu, \
+                mock.patch.object(self.domain, "_local_library_material") as local_library, \
                 mock.patch.object(self.domain, "_store_material_asset", return_value=stored):
             result = self.domain.resolve_material_response(customer_payload, "yuelei")
         customer.assert_called_once_with(upload_id, "yuelei")
-        feishu.assert_not_called()
+        local_library.assert_not_called()
         self.assertEqual(result["source"], "customer_upload")
 
         plan, consent = self._consent(
-            script, allow_ai=True, upload_ids=[], run_id="dh-v2-run-feishu-001",
+            script, allow_ai=True, upload_ids=[], run_id="dh-v2-run-local-001",
         )
         payload = self._metadata(plan, consent, "material_resolve", 0)
         with mock.patch.object(
-                self.domain, "_feishu_material",
-                return_value=(PNG_2X2, "image/png", "feishu")) as feishu, \
+                self.domain, "_local_library_material",
+                return_value=(PNG_2X2, "image/png", "local_library")) as local_library, \
                 mock.patch.object(self.domain, "_store_material_asset", return_value=stored):
             result = self.domain.resolve_material_response(payload, "yuelei")
-        feishu.assert_called_once()
-        self.assertEqual(result["source"], "feishu")
+        local_library.assert_called_once()
+        self.assertEqual(result["source"], "local_library")
 
-        with mock.patch.object(self.domain, "_feishu_material", return_value=None):
+        with mock.patch.object(self.domain, "_local_library_material", return_value=None):
             result = self.domain.resolve_material_response(payload, "yuelei")
         self.assertTrue(result["ai_fallback"])
         self.assertEqual(result["source"], "ai")
         self.assertFalse(hasattr(self.domain, "_wikimedia_material"))
 
-    def test_customer_material_failure_never_falls_through_to_feishu_or_ai(self):
+    def test_customer_material_failure_never_falls_through_to_local_library_or_ai(self):
         upload_id = "img_" + "d" * 32
         plan, consent = self._consent(
             "顾客已经上传的素材必须直接进入成片，读取失败时也不能悄悄换用其他来源。" * 4,
@@ -690,66 +744,25 @@ class DigitalHumanV2Tests(unittest.TestCase):
                 mock.patch.object(
                     self.domain, "_store_material_asset",
                     side_effect=ValueError("decode failed")), \
-                mock.patch.object(self.domain, "_feishu_material") as feishu:
+                mock.patch.object(self.domain, "_local_library_material") as local_library:
             with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
                 self.domain.resolve_material_response(payload, "yuelei")
-        feishu.assert_not_called()
+        local_library.assert_not_called()
         self.assertEqual(caught.exception.code, "customer_material_unavailable")
         self.assertEqual(caught.exception.status, 409)
 
-    def test_feishu_outage_stops_before_optional_paid_ai(self):
+    def test_local_library_outage_stops_before_optional_paid_ai(self):
         plan, consent = self._consent(
-            "飞书素材库必须真正完成检索，接口故障不能被误判成没有匹配素材。" * 5,
-            allow_ai=True, upload_ids=[], run_id="dh-v2-run-feishu-down-001",
+            "本地素材库必须真正完成检索，接口故障不能被误判成没有匹配素材。" * 5,
+            allow_ai=True, upload_ids=[], run_id="dh-v2-run-local-down-001",
         )
         payload = self._metadata(plan, consent, "material_resolve", 0)
         with mock.patch.object(
-                self.domain, "_feishu_material", side_effect=TimeoutError("timeout")):
+                self.domain, "_local_library_material", side_effect=OSError("unreadable")):
             with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
                 self.domain.resolve_material_response(payload, "yuelei")
-        self.assertEqual(caught.exception.code, "feishu_material_unavailable")
+        self.assertEqual(caught.exception.code, "local_material_library_unavailable")
         self.assertEqual(caught.exception.status, 503)
-
-    def test_feishu_catalog_reads_all_1510_record_pages_then_uses_cache(self):
-        calls = []
-
-        def page(_request):
-            calls.append(_request.full_url)
-            index = len(calls)
-            return {
-                "code": 0,
-                "data": {
-                    "items": [{
-                        "fields": {
-                            "素材名称": "直销团队培训素材 %s" % index,
-                            "素材文件": [{
-                                "file_token": "file-%s" % index,
-                                "name": "material-%s.png" % index,
-                            }],
-                        },
-                    }],
-                    "has_more": index < 16,
-                    "page_token": "page-%s" % index,
-                },
-            }
-
-        self.domain._FEISHU_CATALOG_CACHE.update({
-            "key": None, "loaded_at": 0.0, "items": [],
-        })
-        with mock.patch.object(
-                self.domain, "_FEISHU_TABLES", (("table-one", "view-one"),)), \
-                mock.patch.object(self.domain, "_read_http_json", side_effect=page), \
-                mock.patch.object(self.domain.time, "monotonic", return_value=100.0):
-            first = self.domain._feishu_catalog("tenant-token")
-            second = self.domain._feishu_catalog("tenant-token")
-        self.assertEqual(len(first), 16)
-        self.assertEqual(first, second)
-        self.assertEqual(len(calls), 16)
-        self.assertIn("page_size=100", calls[0])
-        self.assertIn("page_token=page-15", calls[-1])
-        self.domain._FEISHU_CATALOG_CACHE.update({
-            "key": None, "loaded_at": 0.0, "items": [],
-        })
 
     def test_consent_rejects_material_policy_changed_after_plan(self):
         script = "用户是否允许人工智能补图以及顾客上传素材清单都必须绑定同一个方案摘要。" * 5
@@ -798,20 +811,20 @@ class DigitalHumanV2Tests(unittest.TestCase):
             self.domain.verify_child_submission_with_record(material, "yuelei", "image")
         self.assertEqual(caught.exception.code, "customer_material_required")
 
-    def test_ai_opt_out_stops_after_feishu_miss_or_invalid_asset(self):
+    def test_ai_opt_out_stops_after_local_library_miss_or_invalid_asset(self):
         plan, consent = self._consent(
-            "飞书素材找不到时，未授权的人工智能补图不能执行。" * 6,
+            "本地素材找不到时，未授权的人工智能补图不能执行。" * 6,
             allow_ai=False, upload_ids=[], run_id="dh-v2-run-no-ai-resolve-001",
         )
         payload = self._metadata(plan, consent, "material_resolve", 0)
-        with mock.patch.object(self.domain, "_feishu_material", return_value=None):
+        with mock.patch.object(self.domain, "_local_library_material", return_value=None):
             with self.assertRaises(self.domain.DigitalHumanRequestError) as caught:
                 self.domain.resolve_material_response(payload, "yuelei")
         self.assertEqual(caught.exception.code, "material_unavailable_without_ai")
 
         with mock.patch.object(
-                self.domain, "_feishu_material",
-                return_value=(PNG_2X2, "image/png", "feishu")), \
+                self.domain, "_local_library_material",
+                return_value=(PNG_2X2, "image/png", "local_library")), \
                 mock.patch.object(
                     self.domain, "_store_material_asset",
                     side_effect=ValueError("decode failed")):
