@@ -11,13 +11,14 @@ import hmac
 import io
 import json
 import os
+import pathlib
 import re
 import secrets
 import sqlite3
+import stat
 import subprocess
 import time
 import urllib.parse
-import urllib.request
 
 from .core import OUT_DIR, closing, jdb
 from . import digital_human_oneclick as legacy
@@ -29,10 +30,12 @@ PLAN_PATH = "/api/gen/digital-human-v2/plan"
 CONSENT_PATH = "/api/gen/digital-human-v2/consent"
 AUDIO_UPLOAD_PATH = "/api/gen/digital-human-v2/audio-upload"
 MATERIAL_RESOLVE_PATH = "/api/gen/digital-human-v2/material-resolve"
-CONSENT_VERSION = "digital-human-material-v2"
-CONSENT_PURPOSE = "digital_human_material_v2"
+HISTORY_PATH = "/api/gen/digital-human-v2/history"
+CONSENT_VERSION = "digital-human-material-v3"
+CONSENT_PURPOSE = "digital_human_material_v3"
 CONSENT_TTL_SECONDS = legacy.CONSENT_TTL_SECONDS
 DigitalHumanRequestError = legacy.DigitalHumanRequestError
+MATERIAL_SOURCE_PRIORITY = ("customer_upload", "local_library", "ai_optional")
 
 _STAGE_KINDS = {
     "material": "image",
@@ -50,13 +53,29 @@ _AUDIO_UPLOAD_TTL_SECONDS = 24 * 60 * 60
 _MATERIAL_ASSET_ID_RE = re.compile(r"^dhm_[0-9a-f]{32}$")
 _MAX_MATERIAL_BYTES = 20 * 1024 * 1024
 _MATERIAL_TTL_SECONDS = 24 * 60 * 60
-_FEISHU_APP_TOKEN = os.environ.get("DIGITAL_HUMAN_FEISHU_APP_TOKEN", "RRiFbxY9CaJLV2saos2cyyhLnhe").strip()
-_FEISHU_TABLES = (
-    (os.environ.get("DIGITAL_HUMAN_FEISHU_TABLE_1", "tbliH1WHvDwhvFMi").strip(),
-     os.environ.get("DIGITAL_HUMAN_FEISHU_VIEW_1", "vewPfJzNVq").strip()),
-    (os.environ.get("DIGITAL_HUMAN_FEISHU_TABLE_2", "tblVAOaI3CTAkTaL").strip(),
-     os.environ.get("DIGITAL_HUMAN_FEISHU_VIEW_2", "vewAu1VvKG").strip()),
-)
+# The authenticated material-upload route already performs ownership, hash,
+# decode and content-security checks under this approval purpose.  Reuse that
+# vetted temporary asset; do not upload the customer's bytes to an AI provider.
+_CUSTOMER_MATERIAL_UPLOAD_PURPOSE = "smart_montage"
+_LOCAL_LIBRARY_DEFAULT_ROOT = "/home/ubuntu/material-libraries/huangque-media"
+_LOCAL_LIBRARY_ENV = "DIGITAL_HUMAN_LOCAL_MATERIAL_LIBRARY_ROOT"
+_LOCAL_INDEX_MAX_BYTES = 8 * 1024 * 1024
+_LOCAL_INDEX_MAX_LINES = 1000
+_LOCAL_INDEX_MAX_LINE_BYTES = 64 * 1024
+_LOCAL_MATERIAL_MAX_BYTES = 256 * 1024 * 1024
+_LOCAL_MEDIA_TYPES = {"图片": "image", "视频": "video", "BGM": "bgm"}
+_LOCAL_EXTENSIONS = {
+    ".jpg": ("image", "image/jpeg"), ".jpeg": ("image", "image/jpeg"),
+    ".png": ("image", "image/png"), ".webp": ("image", "image/webp"),
+    ".mp4": ("video", "video/mp4"), ".webm": ("video", "video/webm"),
+    ".mov": ("video", "video/quicktime"), ".mp3": ("bgm", "audio/mpeg"),
+    ".m4a": ("bgm", "audio/mp4"), ".wav": ("bgm", "audio/wav"),
+    ".aac": ("bgm", "audio/aac"), ".flac": ("bgm", "audio/flac"),
+    ".ogg": ("bgm", "audio/ogg"),
+}
+_LOCAL_MIME_TYPES = {
+    mime: media_type for media_type, mime in _LOCAL_EXTENSIONS.values()
+}
 _MATERIAL_MIMES = {
     "image/jpeg": ("image", ".jpg"), "image/png": ("image", ".png"),
     "image/webp": ("image", ".webp"), "video/mp4": ("video", ".mp4"),
@@ -119,6 +138,28 @@ def _safe_audio_upload_id(value):
     if not _AUDIO_UPLOAD_ID_RE.fullmatch(value):
         raise DigitalHumanRequestError("录音上传记录无效，请重新上传", "audio_upload_invalid", 409)
     return value
+
+
+def _audio_run_has_consent(connection, username, run_id):
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='digital_human_consents'"
+    ).fetchone()
+    if not table:
+        return False
+    return connection.execute(
+        "SELECT 1 FROM digital_human_consents WHERE username=? AND run_id=? LIMIT 1",
+        (username, run_id),
+    ).fetchone() is not None
+
+
+def _remove_audio_asset_files(source_file):
+    import shutil
+
+    root = (OUT_DIR / "digital_human_audio").resolve()
+    source = (OUT_DIR / str(source_file or "")).resolve()
+    if source.parent == root or root not in source.parents:
+        return
+    shutil.rmtree(str(source.parent), ignore_errors=True)
 
 
 def _load_audio_asset(asset_id, username, now=None, db_factory=None):
@@ -217,7 +258,8 @@ def _slice_text(transcript_segments, start, end):
 
 def store_audio_upload(stream, length, username, run_id, content_type,
                        claimed_sha256, db_factory=None):
-    if not legacy._RUN_ID_RE.fullmatch(str(run_id or "").strip()):
+    run_id = str(run_id or "").strip()
+    if not legacy._RUN_ID_RE.fullmatch(run_id):
         raise DigitalHumanRequestError("本次制作流程编号无效，请重新开始")
     if type(length) is not int or length <= 0 or length > _MAX_AUDIO_UPLOAD_BYTES:
         raise DigitalHumanRequestError("录音文件必须小于 30MB", "audio_upload_size_invalid")
@@ -226,12 +268,22 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         raise DigitalHumanRequestError("仅支持 MP3、WAV、M4A 或 AAC 录音", "audio_upload_type_invalid")
     claimed = legacy._required_sha256(claimed_sha256, "完整录音")
     username = str(username or "").strip()
+    now = int(time.time())
+    expired = None
     with closing(_audio_db(db_factory)) as connection:
         existing = connection.execute(
-            "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
-            "WHERE username=? AND run_id=?", (username, str(run_id).strip()),
+            "SELECT asset_id,source_sha256,source_file,expires_at "
+            "FROM digital_human_audio_uploads WHERE username=? AND run_id=?",
+            (username, run_id),
         ).fetchone()
-    if existing:
+        if existing and int(existing["expires_at"]) <= now:
+            if _audio_run_has_consent(connection, username, run_id):
+                raise DigitalHumanRequestError(
+                    "录音已过期，且本次流程已经授权；请先放弃上次任务并重新设置，再上传录音",
+                    "audio_upload_restart_required", 409,
+                )
+            expired = dict(existing)
+    if existing and expired is None:
         if not hmac.compare_digest(str(existing["source_sha256"]), claimed):
             raise DigitalHumanRequestError(
                 "同一制作流程不能更换完整录音，请重新开始",
@@ -280,17 +332,33 @@ def store_audio_upload(stream, length, username, run_id, content_type,
         now = int(time.time())
         try:
             with closing(_audio_db(db_factory)) as connection:
-                connection.execute(
-                    """INSERT INTO digital_human_audio_uploads(
-                        asset_id,username,run_id,source_sha256,source_file,duration,
-                        transcript,slices_json,created_at,expires_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                    (asset_id, username, str(run_id).strip(), claimed,
-                     source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
-                     transcript, json.dumps(slices, ensure_ascii=False), now,
-                     now + _AUDIO_UPLOAD_TTL_SECONDS),
+                values = (
+                    asset_id, claimed,
+                    source.resolve().relative_to(OUT_DIR.resolve()).as_posix(), duration,
+                    transcript, json.dumps(slices, ensure_ascii=False), now,
+                    now + _AUDIO_UPLOAD_TTL_SECONDS,
                 )
+                if expired is not None:
+                    updated = connection.execute(
+                        """UPDATE digital_human_audio_uploads SET
+                            asset_id=?,source_sha256=?,source_file=?,duration=?,
+                            transcript=?,slices_json=?,created_at=?,expires_at=?
+                           WHERE asset_id=? AND username=? AND run_id=? AND expires_at<=?""",
+                        values + (expired["asset_id"], username, run_id, now),
+                    )
+                    if updated.rowcount != 1:
+                        raise sqlite3.IntegrityError("expired audio upload was replaced concurrently")
+                else:
+                    connection.execute(
+                        """INSERT INTO digital_human_audio_uploads(
+                            asset_id,username,run_id,source_sha256,source_file,duration,
+                            transcript,slices_json,created_at,expires_at
+                        ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (asset_id, username, run_id) + values[1:],
+                    )
                 connection.commit()
+            if expired is not None:
+                _remove_audio_asset_files(expired["source_file"])
         except sqlite3.IntegrityError:
             # A browser retry can race the first upload. Reuse the committed,
             # owner-bound asset instead of returning a transient server error.
@@ -298,7 +366,7 @@ def store_audio_upload(stream, length, username, run_id, content_type,
                 winner = connection.execute(
                     "SELECT asset_id,source_sha256 FROM digital_human_audio_uploads "
                     "WHERE username=? AND run_id=?",
-                    (username, str(run_id).strip()),
+                    (username, run_id),
                 ).fetchone()
             if winner and hmac.compare_digest(str(winner["source_sha256"]), claimed):
                 import shutil
@@ -331,25 +399,6 @@ def audio_upload_response(stream, length, username, run_id, content_type,
     }
 
 
-def _read_http_json(request, timeout=12):
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read(2 * 1024 * 1024 + 1)
-    if len(raw) > 2 * 1024 * 1024:
-        raise ValueError("素材接口响应过大")
-    return json.loads(raw.decode("utf-8"))
-
-
-def _read_http_media(request, timeout=30):
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        content_type = str(response.headers.get("Content-Type") or "").split(";", 1)[0].lower()
-        raw = response.read(_MAX_MATERIAL_BYTES + 1)
-    if not raw or len(raw) > _MAX_MATERIAL_BYTES:
-        raise ValueError("素材文件为空或超过 20MB")
-    if content_type not in _MATERIAL_MIMES:
-        raise ValueError("素材文件格式不受支持")
-    return raw, content_type
-
-
 def _keywords(text):
     compact = re.sub(r"\s+", "", str(text or "").lower())
     latin = re.findall(r"[a-z0-9]{2,}", compact)
@@ -357,128 +406,239 @@ def _keywords(text):
     return set(latin + [cjk[index:index + 2] for index in range(max(0, len(cjk) - 1))])
 
 
-def _flatten_fields(value, texts, attachments):
-    if isinstance(value, dict):
-        if value.get("file_token") and (value.get("name") or value.get("type")):
-            attachments.append(value)
-        for child in value.values():
-            _flatten_fields(child, texts, attachments)
-    elif isinstance(value, list):
-        for child in value:
-            _flatten_fields(child, texts, attachments)
-    elif isinstance(value, (str, int, float)):
-        texts.append(str(value))
+def _local_library_root():
+    value = str(os.environ.get(
+        _LOCAL_LIBRARY_ENV, _LOCAL_LIBRARY_DEFAULT_ROOT,
+    ) or "").strip()
+    root = os.path.abspath(value)
+    if not value or not os.path.isabs(value) or root != value.rstrip(os.sep):
+        raise ValueError("本地素材库根目录配置无效")
+    return root
 
 
-def _feishu_token():
-    app_id = os.environ.get("FEISHU_APP_ID", "").strip()
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "").strip()
-    if not app_id or not app_secret or not _FEISHU_APP_TOKEN:
-        return ""
-    request = urllib.request.Request(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        data=json.dumps({"app_id": app_id, "app_secret": app_secret}).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"}, method="POST",
+def _lstat_real_chain(path):
+    absolute = os.path.abspath(path)
+    target = pathlib.Path(absolute)
+    chain = list(reversed(target.parents)) + [target]
+    for current in chain:
+        if str(current) == current.anchor:
+            continue
+        info = os.lstat(current)
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError("本地素材库路径包含软链接")
+        if current != target and not stat.S_ISDIR(info.st_mode):
+            raise ValueError("本地素材库父路径不是目录")
+    return os.lstat(absolute)
+
+
+def _library_relative(value):
+    text = str(value or "").replace("\\", "/")
+    parts = text.split("/")
+    if (not text or text.startswith("/") or parts[0] != "files"
+            or len(parts) < 2 or any(part in {"", ".", ".."} for part in parts)
+            or any(part.startswith(".") for part in parts[1:])):
+        raise ValueError("本地素材索引路径无效")
+    return "/".join(parts)
+
+
+def _open_local_regular(root, relative, maximum):
+    path = os.path.join(root, *relative.split("/"))
+    try:
+        path_info = _lstat_real_chain(path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("本地素材文件路径不安全") from exc
+    if not stat.S_ISREG(path_info.st_mode):
+        raise ValueError("本地素材文件不是普通文件")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    opened = os.fstat(descriptor)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    listed = (path_info.st_dev, path_info.st_ino, path_info.st_size, path_info.st_mtime_ns)
+    if identity != listed or opened.st_size <= 0 or opened.st_size > maximum:
+        os.close(descriptor)
+        raise ValueError("本地素材文件身份或体积无效")
+    return descriptor, path, identity
+
+
+def _read_descriptor(descriptor, maximum):
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - total))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > maximum:
+            raise ValueError("本地素材文件超过体积上限")
+
+
+def _actual_media_mime(raw, extension):
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image/webp"
+    if raw.startswith(b"\x1aE\xdf\xa3"):
+        return "video/webm"
+    if len(raw) >= 12 and raw[4:8] == b"ftyp":
+        return "audio/mp4" if extension == ".m4a" else (
+            "video/quicktime" if extension == ".mov" else "video/mp4")
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WAVE":
+        return "audio/wav"
+    if raw.startswith(b"fLaC"):
+        return "audio/flac"
+    if raw.startswith(b"OggS"):
+        return "audio/ogg"
+    if raw.startswith(b"ID3") or (len(raw) >= 2 and raw[0] == 0xff and raw[1] & 0xe0 == 0xe0):
+        return "audio/aac" if extension == ".aac" else "audio/mpeg"
+    return ""
+
+
+def _load_local_catalog(expected_count=None):
+    root = _local_library_root()
+    root_info = _lstat_real_chain(root)
+    files_info = _lstat_real_chain(os.path.join(root, "files"))
+    if not stat.S_ISDIR(root_info.st_mode) or not stat.S_ISDIR(files_info.st_mode):
+        raise ValueError("本地素材库目录不可用")
+    descriptor, _, identity = _open_local_regular(
+        root, "index.jsonl", _LOCAL_INDEX_MAX_BYTES,
     )
-    result = _read_http_json(request)
-    return str(result.get("tenant_access_token") or "").strip()
+    records = []
+    ids = set()
+    paths = set()
+    try:
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            for line_number in range(1, _LOCAL_INDEX_MAX_LINES + 2):
+                line = source.readline(_LOCAL_INDEX_MAX_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > _LOCAL_INDEX_MAX_LINE_BYTES:
+                    raise ValueError("本地素材索引单行超过上限")
+                if line_number > _LOCAL_INDEX_MAX_LINES:
+                    raise ValueError("本地素材索引行数超过上限")
+                try:
+                    record = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("本地素材索引格式无效") from exc
+                if not isinstance(record, dict) or record.get("状态") != "可使用":
+                    raise ValueError("本地素材索引包含不可用记录")
+                relative = _library_relative(record.get("server_relative_path"))
+                digest = str(record.get("SHA256") or "").strip().lower()
+                media_type = _LOCAL_MEDIA_TYPES.get(record.get("素材类型"))
+                extension = os.path.splitext(relative)[1].lower()
+                expected = _LOCAL_EXTENSIONS.get(extension)
+                if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or expected is None or expected[0] != media_type):
+                    raise ValueError("本地素材索引类型、扩展名或哈希无效")
+                indexed_mime = str(
+                    record.get("MIME") or record.get("mime_type")
+                    or record.get("mime") or expected[1]
+                ).strip().lower()
+                if _LOCAL_MIME_TYPES.get(indexed_mime) != media_type:
+                    raise ValueError("本地素材索引 MIME 与素材大类不一致")
+                opaque_id = "local_" + hashlib.sha256(
+                    (relative + "\0" + digest).encode("utf-8")
+                ).hexdigest()[:32]
+                if opaque_id in ids or relative in paths:
+                    raise ValueError("本地素材索引包含重复 ID 或路径")
+                material_info = _lstat_real_chain(
+                    os.path.join(root, *relative.split("/"))
+                )
+                if not stat.S_ISREG(material_info.st_mode):
+                    raise ValueError("本地素材索引目标不是普通文件")
+                ids.add(opaque_id)
+                paths.add(relative)
+                records.append({
+                    "id": opaque_id, "relative": relative, "sha256": digest,
+                    "media_type": media_type, "mime": indexed_mime,
+                    "search": " ".join(str(record.get(key) or "") for key in (
+                        "素材名称", "一级场景", "二级场景", "标签", "使用环节",
+                    )),
+                })
+    finally:
+        after = os.fstat(descriptor)
+        os.close(descriptor)
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise ValueError("本地素材索引读取期间发生变化")
+    if expected_count is not None and len(records) != int(expected_count):
+        raise ValueError("本地素材索引条目数与发布合同不一致")
+    return root, records
 
 
-def _feishu_material(query, preferred_type):
-    token = _feishu_token()
-    if not token:
-        return None
+def _read_local_record(root, record):
+    descriptor, path, identity = _open_local_regular(
+        root, record["relative"], _LOCAL_MATERIAL_MAX_BYTES,
+    )
+    try:
+        raw = _read_descriptor(descriptor, _LOCAL_MATERIAL_MAX_BYTES)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    final_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    path_identity = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+    if identity != final_identity or final_identity != path_identity:
+        raise ValueError("本地素材文件读取期间发生变化")
+    if not hmac.compare_digest(hashlib.sha256(raw).hexdigest(), record["sha256"]):
+        raise ValueError("本地素材文件 SHA-256 与索引不一致")
+    extension = os.path.splitext(record["relative"])[1].lower()
+    actual_mime = _actual_media_mime(raw[:64], extension)
+    if _LOCAL_MIME_TYPES.get(actual_mime) != record["media_type"]:
+        raise ValueError("本地素材文件真实 MIME 与索引素材大类不一致")
+    return raw, actual_mime
+
+
+def _local_library_material(query, preferred_type):
+    root, records = _load_local_catalog()
+    candidates = [item for item in records if item["media_type"] in {"image", "video"}]
     query_words = _keywords(query)
-    best = None
-    for table_id, view_id in _FEISHU_TABLES:
-        if not table_id:
-            continue
-        page_token = ""
-        for _page in range(5):
-            query_params = {"page_size": 100}
-            if view_id:
-                query_params["view_id"] = view_id
-            if page_token:
-                query_params["page_token"] = page_token
-            params = urllib.parse.urlencode(query_params)
-            url = ("https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
-                   (urllib.parse.quote(_FEISHU_APP_TOKEN, safe=""),
-                    urllib.parse.quote(table_id, safe=""), params))
-            result = _read_http_json(urllib.request.Request(
-                url, headers={"Authorization": "Bearer " + token},
-            ))
-            data = result.get("data") or {}
-            for record in (data.get("items") or []):
-                texts, attachments = [], []
-                _flatten_fields(record.get("fields") or {}, texts, attachments)
-                score = len(query_words & _keywords(" ".join(texts)))
-                for attachment in attachments:
-                    mime = str(attachment.get("type") or attachment.get("mime_type") or "").lower()
-                    media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
-                    if not media_type or score <= 0:
-                        continue
-                    type_bonus = 3 if media_type == preferred_type else 0
-                    candidate = (score + type_bonus, attachment, mime)
-                    if best is None or candidate[0] > best[0]:
-                        best = candidate
-            if not data.get("has_more"):
-                break
-            next_page = str(data.get("page_token") or "").strip()
-            if not next_page or next_page == page_token:
-                break
-            page_token = next_page
-    if not best or not best[1].get("file_token"):
-        return None
-    url = ("https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
-           urllib.parse.quote(str(best[1]["file_token"]), safe=""))
-    raw, mime = _read_http_media(urllib.request.Request(
-        url, headers={"Authorization": "Bearer " + token},
-    ))
-    return raw, mime, "feishu"
-
-
-def _wikimedia_material(query, preferred_type):
-    search = str(query or "").strip()[:120]
-    if not search:
-        return None
-    if preferred_type == "video":
-        search += " filetype:video"
-    params = urllib.parse.urlencode({
-        "action": "query", "generator": "search", "gsrsearch": search,
-        "gsrnamespace": 6, "gsrlimit": 12, "prop": "imageinfo",
-        "iiprop": "url|mime|extmetadata", "iiurlwidth": 1080,
-        "format": "json", "formatversion": 2,
-    })
-    result = _read_http_json(urllib.request.Request(
-        "https://commons.wikimedia.org/w/api.php?" + params,
-        headers={"User-Agent": "HuangqueDigitalHuman/2.0"},
-    ))
-    candidates = []
-    for page in ((result.get("query") or {}).get("pages") or []):
-        info = ((page.get("imageinfo") or [{}])[0])
-        metadata = info.get("extmetadata") or {}
-        license_name = str((metadata.get("LicenseShortName") or {}).get("value") or "").lower()
-        if not ("public domain" in license_name or "cc0" in license_name):
-            continue
-        mime = str(info.get("mime") or "").lower()
-        media_type = _MATERIAL_MIMES.get(mime, ("", ""))[0]
-        if not media_type:
-            continue
-        url = str((info.get("url") if media_type == "video" else info.get("thumburl"))
-                  or info.get("url") or "")
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname != "upload.wikimedia.org":
-            continue
-        candidates.append((3 if media_type == preferred_type else 0, url, mime))
+    candidates.sort(key=lambda item: (
+        item["media_type"] == preferred_type,
+        len(query_words & _keywords(item["search"])), item["id"],
+    ), reverse=True)
     if not candidates:
         return None
-    _score, url, expected_mime = max(candidates, key=lambda item: item[0])
-    raw, mime = _read_http_media(urllib.request.Request(
-        url, headers={"User-Agent": "HuangqueDigitalHuman/2.0"},
-    ))
-    if mime != expected_mime and _MATERIAL_MIMES[mime][0] != _MATERIAL_MIMES[expected_mime][0]:
-        raise ValueError("公开素材响应格式发生变化")
-    return raw, mime, "public_web"
+    raw, mime = _read_local_record(root, candidates[0])
+    return raw, mime, "local_library"
+
+
+def local_material_library_operational_probe(expected_count=204):
+    root, records = _load_local_catalog(expected_count=expected_count)
+    counts = {"image": 0, "video": 0, "bgm": 0}
+    samples = {}
+    for record in records:
+        counts[record["media_type"]] += 1
+        samples.setdefault(record["media_type"], record)
+    if any(counts[kind] <= 0 for kind in counts):
+        raise ValueError("本地素材库缺少图片、视频或 BGM")
+    for record in samples.values():
+        _read_local_record(root, record)
+    return {"ok": True, "count": len(records), "types": counts}
+
+
+def _customer_material(upload_id, username):
+    from . import cli_uploads
+
+    try:
+        raw, metadata = cli_uploads.read_image_bytes(upload_id, username)
+    except ValueError as exc:
+        raise DigitalHumanRequestError(
+            str(exc), "customer_material_unavailable", 409,
+        ) from exc
+    if str(metadata.get("approved_for") or "") != _CUSTOMER_MATERIAL_UPLOAD_PURPOSE:
+        raise DigitalHumanRequestError(
+            "顾客上传素材未通过当前素材入口校验，请重新上传",
+            "customer_material_unapproved", 409,
+        )
+    mime = str(metadata.get("mime") or "").lower()
+    if mime not in _MATERIAL_MIMES or _MATERIAL_MIMES[mime][0] != "image":
+        raise DigitalHumanRequestError(
+            "顾客上传素材格式不受支持，请重新上传 PNG、JPEG 或 WebP",
+            "customer_material_invalid", 409,
+        )
+    return raw, mime, "customer_upload"
 
 
 def _store_material_asset(raw, mime, provider, username, run_id, plan_digest,
@@ -581,6 +741,7 @@ def resolve_material_response(payload, username, db_factory=None):
         "digital_human_plan_digest", "digital_human_consent_token",
         "digital_human_script",
         "digital_human_narration_mode", "digital_human_audio_upload_id",
+        "digital_human_allow_ai_materials", "digital_human_customer_upload_ids",
         "digital_human_item_index",
     }
     unknown = sorted(set(payload) - allowed)
@@ -590,7 +751,7 @@ def resolve_material_response(payload, username, db_factory=None):
         raise DigitalHumanRequestError("素材检索流程标识无效")
     if str(payload.get("digital_human_stage") or "") != "material_resolve":
         raise DigitalHumanRequestError("素材检索步骤无效")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if (str(payload.get("digital_human_run_id") or "") != record["run_id"]
             or str(payload.get("digital_human_plan_digest") or "") != record["plan_digest"]):
         raise DigitalHumanRequestError("素材检索与授权方案不一致", "consent_binding_mismatch", 403)
@@ -614,22 +775,40 @@ def resolve_material_response(payload, username, db_factory=None):
         )
         return {"ok": True, "source": asset["provider"],
                 "material_asset_id": asset["asset_id"], "media_type": asset["media_type"]}
-    preferred = "video" if material["scene_type"] == "video" else "image"
-    fetched = None
-    failures = []
-    for provider in ("feishu", "public_web"):
+    customer_upload_ids = frozen.get("customer_upload_ids") or []
+    if item_index < len(customer_upload_ids):
+        fetched = _customer_material(customer_upload_ids[item_index], username)
+        raw, mime, provider = fetched
         try:
-            fetched = (_feishu_material(material["material_query"], preferred)
-                       if provider == "feishu" else
-                       _wikimedia_material(material["material_query"], preferred))
+            asset = _store_material_asset(
+                raw, mime, provider, username, record["run_id"], record["plan_digest"],
+                item_index, db_factory=db_factory,
+            )
         except Exception as exc:
-            failures.append(provider + ":" + str(exc)[:80])
-            fetched = None
-        if fetched:
-            break
+            raise DigitalHumanRequestError(
+                "顾客上传素材无法安全读取；因该素材必须进入成片，任务已暂停",
+                "customer_material_unavailable", 409,
+            ) from exc
+        return {"ok": True, "source": provider,
+                "material_asset_id": asset["asset_id"], "media_type": asset["media_type"]}
+    preferred = "video" if material["scene_type"] == "video" else "image"
+    try:
+        fetched = _local_library_material(material["material_query"], preferred)
+    except DigitalHumanRequestError:
+        raise
+    except Exception as exc:
+        raise DigitalHumanRequestError(
+            "本地素材库暂时不可用，已暂停生成且不会创建付费生图任务",
+            "local_material_library_unavailable", 503,
+        ) from exc
     if not fetched:
+        if frozen.get("allow_ai_materials") is not True:
+            raise DigitalHumanRequestError(
+                "顾客素材和本地素材库均未找到匹配画面；当前方案未允许 AI 补图",
+                "material_unavailable_without_ai", 409,
+            )
         return {"ok": True, "source": "ai", "ai_fallback": True,
-                "retryable_sources": bool(failures)}
+                "retryable_sources": False}
     raw, mime, provider = fetched
     try:
         asset = _store_material_asset(
@@ -637,9 +816,11 @@ def resolve_material_response(payload, username, db_factory=None):
             item_index, db_factory=db_factory,
         )
     except Exception:
-        # A remote result that cannot be decoded or committed is not safe to
-        # use. Continue with the existing paid AI fallback instead of leaving
-        # the whole customer run in a half-finished material state.
+        if frozen.get("allow_ai_materials") is not True:
+            raise DigitalHumanRequestError(
+                "本地素材无法安全读取；当前方案未允许 AI 补图",
+                "material_unavailable_without_ai", 409,
+            )
         return {"ok": True, "source": "ai", "ai_fallback": True,
                 "retryable_sources": True}
     return {"ok": True, "source": provider,
@@ -705,33 +886,120 @@ def _audio_plan(asset):
                 plan_digest=timeline._digest(core))
 
 
+def _material_policy_values(payload):
+    allow_key = ("digital_human_allow_ai_materials"
+                 if "digital_human_allow_ai_materials" in payload else
+                 "allow_ai_materials")
+    ids_key = ("digital_human_customer_upload_ids"
+               if "digital_human_customer_upload_ids" in payload else
+               "customer_upload_ids")
+    allow_ai = payload.get(allow_key, False)
+    if not isinstance(allow_ai, bool):
+        raise DigitalHumanRequestError(
+            "AI 补图选项必须为布尔值", "invalid_material_policy",
+        )
+    raw_ids = payload.get(ids_key, [])
+    if not isinstance(raw_ids, list):
+        raise DigitalHumanRequestError(
+            "顾客上传素材列表格式无效", "invalid_customer_materials",
+        )
+    upload_ids = []
+    for raw_id in raw_ids:
+        upload_id = str(raw_id or "").strip().lower()
+        if not re.fullmatch(r"img_[0-9a-f]{32}", upload_id):
+            raise DigitalHumanRequestError(
+                "顾客上传素材编号无效", "invalid_customer_materials",
+            )
+        if upload_id in upload_ids:
+            raise DigitalHumanRequestError(
+                "同一张顾客素材不能重复用于多个镜头", "duplicate_customer_material",
+            )
+        upload_ids.append(upload_id)
+    return allow_ai, upload_ids
+
+
+def _bind_material_policy(base_plan, allow_ai, upload_ids, explicit=True):
+    if len(upload_ids) > int(base_plan.get("material_count") or 0):
+        raise DigitalHumanRequestError(
+            "顾客上传素材超过当前方案的内容镜头数量",
+            "customer_material_count_exceeded", 409,
+        )
+    core = dict(base_plan)
+    segment_count = int(core.pop("segment_count"))
+    material_count = int(core.pop("material_count"))
+    core.pop("plan_digest", None)
+    core["materials"] = [
+        dict(item, source_priority=list(MATERIAL_SOURCE_PRIORITY))
+        for item in core.get("materials") or []
+    ]
+    core["source_priority"] = list(MATERIAL_SOURCE_PRIORITY)
+    core["allow_ai_materials"] = bool(allow_ai)
+    core["customer_upload_ids"] = list(upload_ids)
+    return dict(
+        core, segment_count=segment_count, material_count=material_count,
+        plan_digest=timeline._digest(core),
+    )
+
+
+def _validate_customer_uploads(upload_ids, username):
+    if not upload_ids:
+        return
+    from . import cli_uploads
+
+    for upload_id in upload_ids:
+        try:
+            metadata = cli_uploads.inspect_image(upload_id, username)
+        except ValueError as exc:
+            raise DigitalHumanRequestError(
+                str(exc), "customer_material_unavailable", 409,
+            ) from exc
+        if str(metadata.get("approved_for") or "") != _CUSTOMER_MATERIAL_UPLOAD_PURPOSE:
+            raise DigitalHumanRequestError(
+                "顾客上传素材未通过当前素材入口校验，请重新上传",
+                "customer_material_unapproved", 409,
+            )
+
+
 def plan_response(payload, username=None):
     if not isinstance(payload, dict):
         raise DigitalHumanRequestError("请求体必须是 JSON 对象")
     mode = str(payload.get("narration_mode") or "text").strip().lower()
     try:
+        allow_ai, upload_ids = _material_policy_values(payload)
+        request_payload = dict(payload)
+        request_payload.pop("allow_ai_materials", None)
+        request_payload.pop("customer_upload_ids", None)
         if mode == "audio":
             allowed = {"narration_mode", "audio_upload_id"}
-            unknown = sorted(set(payload) - allowed)
+            unknown = sorted(set(request_payload) - allowed)
             if unknown:
                 raise DigitalHumanRequestError("方案提交包含不支持字段：" + ", ".join(unknown))
-            asset = _load_audio_asset(payload.get("audio_upload_id"), username)
-            return {"ok": True, "plan": _audio_plan(asset)}
-        return timeline.plan_response(payload)
+            asset = _load_audio_asset(request_payload.get("audio_upload_id"), username)
+            base_plan = _audio_plan(asset)
+        else:
+            base_plan = timeline.plan_response(request_payload)["plan"]
+        plan = _bind_material_policy(base_plan, allow_ai, upload_ids)
+        _validate_customer_uploads(upload_ids, username)
+        return {"ok": True, "plan": plan}
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
 
 def _authoritative_plan(payload, username=None):
     try:
+        allow_ai, upload_ids = _material_policy_values(payload)
         if str(payload.get("digital_human_narration_mode") or
                payload.get("narration_mode") or "text").strip().lower() == "audio":
             asset = _load_audio_asset(
                 payload.get("digital_human_audio_upload_id") or payload.get("audio_upload_id"),
                 username,
             )
-            return _audio_plan(asset)
-        return timeline.plan_text(payload.get("digital_human_script") or payload.get("script"))
+            base_plan = _audio_plan(asset)
+        else:
+            base_plan = timeline.plan_text(
+                payload.get("digital_human_script") or payload.get("script"),
+            )
+        return _bind_material_policy(base_plan, allow_ai, upload_ids)
     except Exception as exc:
         raise _as_request_error(exc) from exc
 
@@ -743,6 +1011,7 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
         "confirmed", "consent_version", "purpose", "run_id", "plan_digest",
         "script", "photo_sha256", "voice_mode", "voice_ref",
         "voice_sha256", "narration_mode", "audio_upload_id",
+        "allow_ai_materials", "customer_upload_ids",
     }
     unknown = sorted(set(payload) - allowed)
     if unknown:
@@ -765,9 +1034,8 @@ def create_consent(payload, username, signing_secret, now=None, db_factory=None)
     try:
         audio_asset = (_load_audio_asset(payload.get("audio_upload_id"), username)
                        if narration_mode == "audio" else None)
-        frozen = (_audio_plan(audio_asset)
-                  if audio_asset else
-                  timeline.plan_text(payload.get("script")))
+        frozen = _authoritative_plan(payload, username)
+        _validate_customer_uploads(frozen.get("customer_upload_ids") or [], username)
     except Exception as exc:
         raise _as_request_error(exc) from exc
     plan_digest = legacy._required_sha256(payload.get("plan_digest"), "制作方案")
@@ -865,7 +1133,7 @@ def consent_response(payload, username, signing_secret, db_factory=None):
     )}
 
 
-def _load_v2_consent(username, token):
+def _load_current_consent(username, token):
     record = legacy._load_consent(username, token)
     if (record.get("purpose") != CONSENT_PURPOSE
             or record.get("consent_version") != CONSENT_VERSION):
@@ -883,7 +1151,7 @@ def verify_clone_submission(payload, username):
         raise DigitalHumanRequestError("数字人成片流程标识无效")
     if str(payload.get("digital_human_stage") or "").strip().lower() != "voice_clone":
         raise DigitalHumanRequestError("声音复刻步骤标识无效")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if str(payload.get("digital_human_run_id") or "") != record["run_id"]:
         raise DigitalHumanRequestError(
             "授权与本次制作流程不匹配", "consent_binding_mismatch", 403,
@@ -916,6 +1184,8 @@ def verify_clone_submission(payload, username):
         )
     cleaned = dict(payload)
     cleaned.pop("digital_human_consent_token", None)
+    cleaned.pop("allow_ai_materials", None)
+    cleaned.pop("customer_upload_ids", None)
     cleaned["digital_human_consent_id"] = record["id"]
     return cleaned
 
@@ -1002,7 +1272,7 @@ def verify_child_submission_with_record(payload, username, kind):
     stage = str(payload.get("digital_human_stage") or "").strip().lower()
     if _STAGE_KINDS.get(stage) != str(kind or ""):
         raise DigitalHumanRequestError("数字人成片步骤与任务类型不匹配")
-    record = _load_v2_consent(username, payload.get("digital_human_consent_token"))
+    record = _load_current_consent(username, payload.get("digital_human_consent_token"))
     if str(payload.get("digital_human_run_id") or "") != record["run_id"]:
         raise DigitalHumanRequestError("授权与本次制作流程不匹配", "consent_binding_mismatch", 403)
     if str(payload.get("digital_human_plan_digest") or "").lower() != record["plan_digest"]:
@@ -1026,6 +1296,17 @@ def verify_child_submission_with_record(payload, username, kind):
     if stage == "material":
         if not 0 <= item_index < frozen["material_count"]:
             raise DigitalHumanRequestError("正文素材步骤编号无效", "consent_plan_mismatch", 409)
+        customer_upload_ids = frozen.get("customer_upload_ids") or []
+        if item_index < len(customer_upload_ids):
+            raise DigitalHumanRequestError(
+                "这个镜头已绑定顾客上传素材，禁止改用 AI 重新生成",
+                "customer_material_required", 409,
+            )
+        if frozen.get("allow_ai_materials") is not True:
+            raise DigitalHumanRequestError(
+                "当前方案未允许 AI 补图，未创建付费生图任务",
+                "ai_material_not_allowed", 409,
+            )
         material = frozen["materials"][item_index]
         references = cleaned.get("reference_images")
         cleaned.pop("images", None)
@@ -1248,7 +1529,9 @@ def prepare_compose_payload(payload, username, consent_record=None):
     frozen = _authoritative_plan(payload, username)
     if str(payload.get("plan_digest") or "").lower() != frozen["plan_digest"]:
         raise DigitalHumanRequestError("制作方案已变化，请重新开始生成", "plan_digest_mismatch", 409)
-    if not isinstance(consent_record, dict) or consent_record.get("purpose") != CONSENT_PURPOSE:
+    if (not isinstance(consent_record, dict)
+            or consent_record.get("purpose") != CONSENT_PURPOSE
+            or consent_record.get("consent_version") != CONSENT_VERSION):
         raise DigitalHumanRequestError("缺少服务端已验证的授权记录，请重新确认授权", "consent_required", 403)
     authoritative = {
         "digital_human_pipeline": CONSENT_PURPOSE,
@@ -1290,6 +1573,108 @@ def _visual_items(windows, slots):
               for start, end in windows] +
              [dict(slot, kind="material") for slot in slots])
     return sorted(items, key=lambda item: (float(item["start"]), 0 if item["kind"] == "presenter" else 1))
+
+
+def _history_video_url(result):
+    """Return only a playable URL from a completed private compose result."""
+    for key in ("video_url", "url"):
+        value = str(result.get(key) or "").strip()
+        if value.startswith("/api/gen/file/") or value.startswith("https://"):
+            return value
+    rel = str(result.get("video_file") or "").strip().replace("\\", "/")
+    if not rel:
+        return ""
+    try:
+        path = (OUT_DIR / rel).resolve()
+        path.relative_to(OUT_DIR.resolve())
+    except Exception:
+        return ""
+    if not path.is_file() or path.stat().st_size <= 0:
+        return ""
+    return "/api/gen/file/" + urllib.parse.quote(rel, safe="/")
+
+
+def _history_number(value, integer=False):
+    try:
+        parsed = float(value or 0)
+    except (TypeError, ValueError):
+        parsed = 0.0
+    return int(parsed) if integer else round(parsed, 3)
+
+
+def history_response(username, limit=20, offset=0, db_factory=None):
+    """List the authenticated user's completed v2 videos, including old rows.
+
+    Pagination is applied after the exact pipeline filter so another pipeline's
+    jobs cannot create gaps or leak through this dedicated endpoint.
+    """
+    username = str(username or "").strip()
+    if not username:
+        raise DigitalHumanRequestError("未登录或登录已过期", "authentication_required", 401)
+    try:
+        limit = int(limit)
+        offset = int(offset)
+    except (TypeError, ValueError) as exc:
+        raise DigitalHumanRequestError("历史记录分页参数无效") from exc
+    limit = max(1, min(limit, 50))
+    offset = max(0, min(offset, 2000))
+    target = offset + limit + 1
+    scanned = 0
+    matched = []
+    factory = db_factory or jdb
+    while len(matched) < target and scanned < 2000:
+        batch_size = min(120, 2000 - scanned)
+        with closing(factory()) as connection:
+            rows = connection.execute(
+                "SELECT id,status,payload,result,created_at FROM jobs "
+                "WHERE username=? AND kind='script_to_video' AND status='done' "
+                "AND COALESCE(deleted,0)=0 ORDER BY id DESC LIMIT ? OFFSET ?",
+                (username, batch_size, scanned),
+            ).fetchall()
+        if not rows:
+            break
+        scanned += len(rows)
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+                result = json.loads(row["result"] or "{}")
+            except Exception:
+                continue
+            if not isinstance(payload, dict) or not isinstance(result, dict):
+                continue
+            if str(payload.get("pipeline") or "").strip().lower() != PIPELINE:
+                continue
+            video_url = _history_video_url(result)
+            if not video_url:
+                continue
+            verification = result.get("verification")
+            if not isinstance(verification, dict):
+                verification = {}
+            text = str(payload.get("copy") or payload.get("script")
+                       or payload.get("digital_human_script") or "").strip()
+            matched.append({
+                "job_id": int(row["id"]),
+                "status": "done",
+                "video_url": video_url,
+                "text": text[:160],
+                "duration": _history_number(result.get("duration")),
+                "width": _history_number(result.get("width"), integer=True),
+                "height": _history_number(result.get("height"), integer=True),
+                "created_at": _history_number(row["created_at"], integer=True),
+                "subtitle": str(verification.get("subtitle") or ""),
+                "mode": PIPELINE,
+            })
+            if len(matched) >= target:
+                break
+        if len(rows) < batch_size:
+            break
+    visible = matched[offset:offset + limit]
+    return {
+        "items": visible,
+        "limit": limit,
+        "offset": offset,
+        "has_more": len(matched) > offset + len(visible),
+    }
 
 
 def compose(payload, persist_state=None):
@@ -1406,8 +1791,12 @@ def compose(payload, persist_state=None):
         video_domain, final_rel, duration,
     )
     result = {
-        "pipeline": PIPELINE, "video_file": final_rel,
-        "url": "/api/gen/file/" + final_rel, "duration": round(final_duration, 3),
+        "pipeline": PIPELINE, "mode": PIPELINE, "video_file": final_rel,
+        "url": "/api/gen/file/" + final_rel,
+        "video_url": "/api/gen/file/" + final_rel,
+        "text": str(payload.get("copy") or ""),
+        "resolution": "1080p", "ratio": "9:16",
+        "duration": round(final_duration, 3),
         "width": width, "height": height,
         "video_count": len(videos), "material_count": len(materials),
         "presenter_windows": windows,

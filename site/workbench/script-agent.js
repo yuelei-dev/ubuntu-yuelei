@@ -6,8 +6,10 @@
   'use strict';
   var STORAGE_KEY='hq_director_agent_v1';
   var DIGITAL_HUMAN_STORAGE_KEY='hq_director_agent_digital_human_v1';
+  var PRIVATE_DOMAIN_STORAGE_KEY='hq_director_agent_private_domain_v1';
   var ROUTES={
     script:'/workbench/script.html',digital_human:'/workbench/digital-human-oneclick.html',
+    private_domain_video:'/workbench/private-domain-video.html',
     ip12:'/workbench/ip12.html',assets:'/workbench/assets.html',audio:'/workbench/audio.html',
     video:'/workbench/video.html',canvas:'/workbench/canvas.html'
   };
@@ -18,7 +20,8 @@
     customer_materials:'customerMaterialsPicker',full_audio_upload:'driveAudioDrop',
     photo_authorization:'consent',analyze_plan:'analyze',generate_photo_video:'start',
     video_upload:'dhDrop',precision_authorization:'dhConsent',analyze_voice:'dhAnalyze',
-    generate_precision_video:'dhStart'
+    generate_precision_video:'dhStart',private_domain_copy:'copy',
+    private_domain_randomize:'randomize',private_domain_plan:'plan'
   };
 
   function digest(value){
@@ -117,7 +120,27 @@
       has_result:hasResult,active_job_status:digitalHumanJobStatus(doc,hasResult)
     };
   }
+  function createPrivateDomainPageContext(doc){
+    var copyText=text(doc.getElementById('copy')).slice(0,3000);
+    var bgm=doc.getElementById('bgm'),bgmValues=[];
+    if(bgm) Array.prototype.forEach.call(bgm.options||[],function(option){
+      if(option.value&&option.value!=='random') bgmValues.push(String(option.value).slice(0,160));
+    });
+    var stateText=text(doc.getElementById('serverState'));
+    var catalogStatus=/失败/.test(stateText)?'failed':(/预览/.test(stateText)?'preview':(/已连接/.test(stateText)?'ready':'loading'));
+    return {
+      page:'private_domain_video',path:'/workbench/private-domain-video.html',mode:'plan',
+      copy_text:copyText,copy_count:copyText?copyText.split(/\n\s*\n/).filter(function(item){return item.trim();}).length:0,
+      template:String((doc.getElementById('template')||{}).value||'data'),
+      duration:String((doc.getElementById('duration')||{}).value||'8'),
+      bgm:String((bgm||{}).value||'random'),bgm_values:bgmValues,
+      asset_count:Number((doc.getElementById('materials')||{}).getAttribute&&doc.getElementById('materials').getAttribute('data-asset-count'))||0,
+      selected_asset_count:Number((doc.getElementById('materials')||{}).getAttribute&&doc.getElementById('materials').getAttribute('data-selected-count'))||0,
+      catalog_status:catalogStatus,active_job_status:'idle'
+    };
+  }
   function createPageContext(doc){
+    if(doc&&doc.body&&doc.body.getAttribute('data-page')==='private_domain_video') return createPrivateDomainPageContext(doc);
     if(doc&&doc.getElementById('dhPhotoMode')) return createDigitalHumanPageContext(doc);
     return createScriptPageContext(doc);
   }
@@ -140,7 +163,7 @@
       page_revision:snapshot.page_revision,page_context:snapshot.page_context,
       history:(state.messages||[]).filter(function(item){return item.role==='user'||item.role==='assistant';})
         .slice(-10).map(function(item){return {role:item.role,content:String(item.content||'').slice(0,2000)};}),
-      source_page:snapshot.page_context.page==='digital_human_oneclick'?'digital_human_oneclick':'script',
+      source_page:snapshot.page_context.page,
       provider:'openai_responses',quoted_cost:0
     };
   }
@@ -185,7 +208,7 @@
     if(action.type==='fill_field'){
       var mode=doc.getElementById('dhPhotoMode')?digitalHumanMode(doc):'';
       var fields={topic:'scTopic',selling_points:'scSell',breakdown_url:'bdUrl',
-        digital_human_script:mode==='video'?'dhScript':'script'};
+        digital_human_script:mode==='video'?'dhScript':'script',private_domain_copy:'copy'};
       var field=doc.getElementById(fields[action.field]);
       if(!field) throw new Error('页面字段不存在');
       dispatchValue(field,action.value); return '已填入'+(action.label||'页面字段');
@@ -194,6 +217,14 @@
       var selectors={style:'#segStyle .sc-opt',duration:'#segDur .sc-opt',platform:'#platRow .sc-chip',
         breakdown_tool:'#bdToolTabs [data-bd-tool]',narration_mode:'input[name="narrationMode"]',
         precision_template:'.precision-template'};
+      var privateSelect={private_domain_template:'template',private_domain_duration:'duration',private_domain_bgm:'bgm'}[action.field];
+      if(privateSelect){
+        var select=doc.getElementById(privateSelect),exists=false;
+        if(!select) throw new Error('页面选项不存在');
+        Array.prototype.forEach.call(select.options||[],function(option){if(String(option.value)===String(action.value))exists=true;});
+        if(!exists) throw new Error('页面上没有找到“'+action.value+'”选项');
+        dispatchValue(select,action.value); return '已选择 '+action.value;
+      }
       if(!selectors[action.field]) throw new Error('页面选项无效');
       choose(doc,selectors[action.field],action.value); return '已选择 '+action.value;
     }
@@ -276,7 +307,7 @@
     });
   }
   function bootstrap(doc,win,mounter){
-    if(!doc||(!doc.getElementById('scTopic')&&!doc.getElementById('dhPhotoMode'))||!win||typeof win.fetch!=='function') return Promise.resolve(null);
+    if(!doc||(!doc.getElementById('scTopic')&&!doc.getElementById('dhPhotoMode')&&!(doc.body&&doc.body.getAttribute('data-page')==='private_domain_video'))||!win||typeof win.fetch!=='function') return Promise.resolve(null);
     return jsonFetch(win,'/api/gen/health').then(function(health){
       if(!health||health.director_agent_enabled!==true) return null;
       return (mounter||mount)(doc,win);
@@ -357,13 +388,13 @@
     doc.head.appendChild(style);
   }
   function mount(doc,win){
-    if((!doc.getElementById('scTopic')&&!doc.getElementById('dhPhotoMode'))||doc.getElementById('hqDirectorAgent')) return null;
-    var page=createPageContext(doc).page,isDigitalHuman=page==='digital_human_oneclick';
+    if((!doc.getElementById('scTopic')&&!doc.getElementById('dhPhotoMode')&&!(doc.body&&doc.body.getAttribute('data-page')==='private_domain_video'))||doc.getElementById('hqDirectorAgent')) return null;
+    var page=createPageContext(doc).page,isDigitalHuman=page==='digital_human_oneclick',isPrivateDomain=page==='private_domain_video';
     addStyles(doc); var storage=win.sessionStorage;
-    var storageKey=isDigitalHuman?DIGITAL_HUMAN_STORAGE_KEY:STORAGE_KEY;
+    var storageKey=isPrivateDomain?PRIVATE_DOMAIN_STORAGE_KEY:(isDigitalHuman?DIGITAL_HUMAN_STORAGE_KEY:STORAGE_KEY);
     var state=readState(storage,storageKey),pending=false,currentPlan=null;
     function persist(){saveState(storage,state,storageKey);}
-    var assistantName=isDigitalHuman?'数字人制作助手':'编导助手';
+    var assistantName=isPrivateDomain?'私域成片助手':(isDigitalHuman?'数字人制作助手':'编导助手');
     var launch=doc.createElement('button'); launch.type='button'; launch.className='hq-da-launch'+(isDigitalHuman?' digital-human':''); launch.id='hqDirectorAgent'; launch.textContent='✦ '+assistantName; launch.setAttribute('aria-expanded',state.open?'true':'false');
     var panel=doc.createElement('section'); panel.className='hq-da-panel'+(state.open?' on':''); panel.setAttribute('aria-label',assistantName);
     var head=doc.createElement('div'); head.className='hq-da-head';
@@ -372,7 +403,7 @@
     var messages=doc.createElement('div'); messages.className='hq-da-messages';
     var status=doc.createElement('div'); status.className='hq-da-status';
     var compose=doc.createElement('div'); compose.className='hq-da-compose';
-    var input=doc.createElement('textarea'); input.className='hq-da-input'; input.rows=2; input.maxLength=6000; input.placeholder=isDigitalHuman?'把文案发给我，或问我下一步怎么做':'例如：我第一次用，下一步该做什么？';
+    var input=doc.createElement('textarea'); input.className='hq-da-input'; input.rows=2; input.maxLength=6000; input.placeholder=isPrivateDomain?'把批量文案发给我，或告诉我想用的模板和音乐':(isDigitalHuman?'把文案发给我，或问我下一步怎么做':'例如：我第一次用，下一步该做什么？');
     var send=doc.createElement('button'); send.type='button'; send.className='hq-da-send'; send.textContent='发送'; compose.appendChild(input); compose.appendChild(send);
     panel.appendChild(head); panel.appendChild(messages); panel.appendChild(status); panel.appendChild(compose); doc.body.appendChild(launch); doc.body.appendChild(panel);
     function setOpen(open){state.open=!!open; panel.classList.toggle('on',state.open); launch.setAttribute('aria-expanded',state.open?'true':'false'); persist(); if(state.open) input.focus();}
@@ -387,14 +418,17 @@
     function render(){
       messages.textContent='';
       if(!state.messages.length){
-        var welcome=doc.createElement('div'); welcome.className='hq-da-msg assistant'; welcome.textContent=isDigitalHuman
-          ?'你好，把口播文案发给我，我可以直接填入当前数字人模式，也能根据页面状态告诉你还缺什么。上传、授权和生成仍由你点击确认。'
-          :'你好，我能根据你现在填写的内容，告诉你怎么生成脚本、拆解视频，或下一步该去哪里。'; messages.appendChild(welcome);
+        var welcome=doc.createElement('div'); welcome.className='hq-da-msg assistant'; welcome.textContent=isPrivateDomain
+          ?'你好，把批量文案发给我，我可以直接填入，也能帮你切换模板、时长和音乐。随机素材和生成方案仍由你点击确认。'
+          :(isDigitalHuman?'你好，把口播文案发给我，我可以直接填入当前数字人模式，也能根据页面状态告诉你还缺什么。上传、授权和生成仍由你点击确认。'
+          :'你好，我能根据你现在填写的内容，告诉你怎么生成脚本、拆解视频，或下一步该去哪里。'); messages.appendChild(welcome);
         var quick=doc.createElement('div'); quick.className='hq-da-actions';
-        (isDigitalHuman
+        (isPrivateDomain
+          ?['帮我填入这批文案','帮我选择排版和时长','帮我看看还缺什么']
+          :(isDigitalHuman
           ?['我第一次用，带我走一遍','帮我看看还缺什么','照片模式和真人视频模式怎么选']
           :['我第一次用，带我走一遍','帮我看看还缺什么','生成脚本后怎么做视频']
-        ).forEach(function(label){var b=doc.createElement('button');b.type='button';b.className='hq-da-quick';b.textContent=label;b.onclick=function(){submit(label);};quick.appendChild(b);});
+        )).forEach(function(label){var b=doc.createElement('button');b.type='button';b.className='hq-da-quick';b.textContent=label;b.onclick=function(){submit(label);};quick.appendChild(b);});
         messages.appendChild(quick);
       }
       state.messages.forEach(function(message,index){

@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
 
 import content_domains
-from content_domains import core, director_agent, submission_idempotency
+from content_domains import core, director_agent, director_cli, submission_idempotency
 
 
 def payload(**overrides):
@@ -65,6 +65,35 @@ def digital_human_payload(**overrides):
         },
         "history": [],
         "source_page": "digital_human_oneclick",
+        "provider": "openai_responses",
+        "quoted_cost": 0,
+    }
+    value.update(overrides)
+    return value
+
+
+def private_domain_payload(**overrides):
+    value = {
+        "prompt": "帮我填入文案并选择温暖模板",
+        "session_id": "private_domain_session_123",
+        "page_revision": "c1d2e3f4",
+        "page_context": {
+            "page": "private_domain_video",
+            "path": "/workbench/private-domain-video.html",
+            "mode": "plan",
+            "copy_text": "第一条文案\n\n第二条文案",
+            "copy_count": 2,
+            "template": "data",
+            "duration": "8",
+            "bgm": "random",
+            "bgm_values": ["growth.mp3", "steady.mp3"],
+            "asset_count": 18,
+            "selected_asset_count": 4,
+            "catalog_status": "ready",
+            "active_job_status": "idle",
+        },
+        "history": [],
+        "source_page": "private_domain_video",
         "provider": "openai_responses",
         "quoted_cost": 0,
     }
@@ -133,6 +162,43 @@ class DirectorAgentTests(unittest.TestCase):
             bad_path["page_context"], path="/workbench/assets.html")
         with self.assertRaisesRegex(ValueError, "不属于数字人"):
             director_agent.validate_payload(bad_path)
+
+    def test_private_domain_context_is_strict_and_bgm_is_page_bound(self):
+        cleaned = director_agent.validate_payload(private_domain_payload())
+        self.assertEqual(cleaned["source_page"], "private_domain_video")
+        self.assertEqual(cleaned["page_context"]["copy_count"], 2)
+        self.assertEqual(cleaned["page_context"]["bgm_values"], ["growth.mp3", "steady.mp3"])
+        bad_path = private_domain_payload()
+        bad_path["page_context"] = dict(bad_path["page_context"], path="/workbench/script.html")
+        with self.assertRaisesRegex(ValueError, "不属于私域批量成片"):
+            director_agent.validate_payload(bad_path)
+        duplicate = private_domain_payload()
+        duplicate["page_context"] = dict(duplicate["page_context"], bgm_values=["growth.mp3", "growth.mp3"])
+        with self.assertRaisesRegex(ValueError, "选项重复"):
+            director_agent.validate_payload(duplicate)
+        with self.assertRaisesRegex(ValueError, "页面来源"):
+            director_agent.validate_payload(private_domain_payload(source_page="script"))
+
+    def test_private_domain_actions_reject_cross_page_and_forged_bgm(self):
+        request = director_agent.validate_payload(private_domain_payload())
+        allowed = json.dumps({
+            "content": "已经按要求准备好页面设置。", "stage": "setup",
+            "actions": [
+                {"type": "fill_field", "field": "private_domain_copy", "value": "新文案", "label": "填入文案"},
+                {"type": "choose_option", "field": "private_domain_template", "value": "warm", "label": "温暖模板"},
+                {"type": "choose_option", "field": "private_domain_bgm", "value": "growth.mp3", "label": "成长音乐"},
+            ], "warnings": [],
+        }, ensure_ascii=False)
+        result = director_agent.normalize_model_result(allowed, request)
+        self.assertEqual(len(result["plan"]["actions"]), 3)
+        forged = json.loads(allowed)
+        forged["actions"][-1]["value"] = "../../secret.mp3"
+        with self.assertRaisesRegex(ValueError, "选项值无效"):
+            director_agent.normalize_model_result(json.dumps(forged, ensure_ascii=False), request)
+        cross_page = json.loads(allowed)
+        cross_page["actions"] = [{"type": "fill_field", "field": "topic", "value": "越权", "label": "越权"}]
+        with self.assertRaisesRegex(ValueError, "不属于当前页面"):
+            director_agent.normalize_model_result(json.dumps(cross_page, ensure_ascii=False), request)
 
     def test_provider_routing_never_crosses_custom_and_global_credentials(self):
         with (
@@ -525,10 +591,22 @@ class DirectorAgentTests(unittest.TestCase):
         self.assertIn("不得勾选真人/声音授权", director_agent.SYSTEM_PROMPT)
 
     def test_responses_request_uses_schema_privacy_and_no_storage(self):
-        captured = {}
+        captured = {"calls": []}
 
         def fake_post(path, body, content_type, **kwargs):
-            captured.update(path=path, body=json.loads(body), kwargs=kwargs)
+            request_body = json.loads(body)
+            captured["calls"].append({
+                "path": path, "body": request_body, "kwargs": kwargs,
+            })
+            if len(captured["calls"]) % 2:
+                return {"status": "completed", "output": [{
+                    "type": "reasoning", "content": [{
+                        "type": "reasoning_text", "text": "先读取 CLI 契约",
+                    }],
+                }, {
+                    "type": "function_call", "call_id": "call_cli_1",
+                    "name": "hq_cli_page_guide", "arguments": "{}",
+                }]}
             output = json.dumps({
                 "content": "先填写选题。", "stage": "understand", "actions": [], "warnings": []
             }, ensure_ascii=False)
@@ -546,20 +624,42 @@ class DirectorAgentTests(unittest.TestCase):
             mock.patch.object(director_agent, "API_BASE", None),
             mock.patch.object(director_agent, "API_KEY", None),
             mock.patch.object(director_agent, "_post", side_effect=fake_post),
+            mock.patch.object(director_cli, "page_guide", return_value={
+                "schema": "hq.director-page-guide/v1",
+                "page": "script", "capability": {"id": "script"},
+            }) as guide,
         ):
             result = director_agent.gen_director_agent(request)
         self.assertEqual(result["content"], "先填写选题。")
-        self.assertEqual(captured["path"], "/v1/responses")
-        self.assertFalse(captured["body"]["store"])
+        self.assertEqual(len(captured["calls"]), 2)
+        first, second = captured["calls"]
+        self.assertEqual(first["path"], "/v1/responses")
+        self.assertFalse(first["body"]["store"])
         self.assertEqual(
-            captured["body"]["safety_identifier"],
+            first["body"]["safety_identifier"],
             hashlib.sha256(b"director-user:customer-a").hexdigest()[:32],
         )
-        self.assertTrue(captured["body"]["text"]["format"]["strict"])
-        self.assertEqual(captured["kwargs"]["base"], "https://global.example/v1")
-        self.assertEqual(captured["kwargs"]["key"], "global-key")
+        self.assertTrue(first["body"]["text"]["format"]["strict"])
+        self.assertEqual(first["body"]["tools"], [director_agent.HQ_CLI_TOOL])
+        self.assertEqual(first["body"]["tool_choice"], "auto")
+        self.assertEqual(
+            first["body"]["reasoning"]["effort"],
+            director_agent.REASONING_EFFORT,
+        )
+        self.assertEqual(second["body"]["tool_choice"], "none")
+        self.assertEqual(
+            second["body"]["reasoning"]["effort"],
+            director_agent.REASONING_EFFORT,
+        )
+        tool_outputs = [item for item in second["body"]["input"]
+                        if item.get("type") == "function_call_output"]
+        self.assertEqual(len(tool_outputs), 1)
+        self.assertEqual(json.loads(tool_outputs[0]["output"])["capability"]["id"], "script")
+        self.assertEqual(first["kwargs"]["base"], "https://global.example/v1")
+        self.assertEqual(first["kwargs"]["key"], "global-key")
+        guide.assert_called_once_with("script")
 
-        captured.clear()
+        captured["calls"].clear()
         with (
             mock.patch.object(
                 core, "OPENAI_BASE", "https://global.example/v1"),
@@ -568,10 +668,14 @@ class DirectorAgentTests(unittest.TestCase):
                 director_agent, "API_BASE", "https://custom.example/v1"),
             mock.patch.object(director_agent, "API_KEY", "dedicated-key"),
             mock.patch.object(director_agent, "_post", side_effect=fake_post),
+            mock.patch.object(director_cli, "page_guide", return_value={
+                "schema": "hq.director-page-guide/v1",
+                "page": "script", "capability": {"id": "script"},
+            }),
         ):
             director_agent.gen_director_agent(request)
-        self.assertEqual(captured["kwargs"]["base"], "https://custom.example/v1")
-        self.assertEqual(captured["kwargs"]["key"], "dedicated-key")
+        self.assertEqual(captured["calls"][0]["kwargs"]["base"], "https://custom.example/v1")
+        self.assertEqual(captured["calls"][0]["kwargs"]["key"], "dedicated-key")
 
         with (
             mock.patch.object(
@@ -587,7 +691,65 @@ class DirectorAgentTests(unittest.TestCase):
                 director_agent.gen_director_agent(request)
             post.assert_not_called()
 
-        self.assertNotIn("API Key", captured["body"]["safety_identifier"])
+        self.assertNotIn("API Key", captured["calls"][0]["body"]["safety_identifier"])
+
+    def test_model_tool_call_must_be_single_empty_and_well_formed(self):
+        request = dict(
+            director_agent.validate_payload(payload()), _username="customer-a",
+        )
+        invalid_outputs = [
+            [],
+            [{"type": "function_call", "call_id": "bad id",
+              "name": "hq_cli_page_guide", "arguments": "{}"}],
+            [{"type": "function_call", "call_id": "call_1",
+              "name": "shell", "arguments": "{}"}],
+            [{"type": "function_call", "call_id": "call_1",
+              "name": "hq_cli_page_guide", "arguments": '{"command":"run"}'}],
+            [{"type": "function_call", "call_id": "call_1",
+              "name": "hq_cli_page_guide", "arguments": "{}"},
+             {"type": "function_call", "call_id": "call_2",
+              "name": "hq_cli_page_guide", "arguments": "{}"}],
+        ]
+        for output in invalid_outputs:
+            with self.subTest(output=output):
+                with (
+                    mock.patch.object(
+                        core, "OPENAI_BASE", "https://global.example/v1"),
+                    mock.patch.object(core, "OPENAI_KEY", "global-key"),
+                    mock.patch.object(director_agent, "API_BASE", None),
+                    mock.patch.object(director_agent, "API_KEY", None),
+                    mock.patch.object(director_agent, "_post", return_value={
+                        "status": "completed", "output": output,
+                    }),
+                    mock.patch.object(director_cli, "page_guide") as guide,
+                ):
+                    with self.assertRaisesRegex(ValueError, "CLI"):
+                        director_agent.gen_director_agent(request)
+                    guide.assert_not_called()
+
+    def test_cli_failure_stops_before_final_model_response(self):
+        request = dict(
+            director_agent.validate_payload(payload()), _username="customer-a",
+        )
+        response = {"status": "completed", "output": [{
+            "type": "function_call", "call_id": "call_1",
+            "name": "hq_cli_page_guide", "arguments": "{}",
+        }]}
+        with (
+            mock.patch.object(core, "OPENAI_BASE", "https://global.example/v1"),
+            mock.patch.object(core, "OPENAI_KEY", "global-key"),
+            mock.patch.object(director_agent, "API_BASE", None),
+            mock.patch.object(director_agent, "API_KEY", None),
+            mock.patch.object(director_agent, "_post", return_value=response) as post,
+            mock.patch.object(
+                director_cli, "page_guide",
+                side_effect=director_cli.DirectorCLIError("private path"),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "暂时不可用") as caught:
+                director_agent.gen_director_agent(request)
+        self.assertEqual(post.call_count, 1)
+        self.assertNotIn("private path", str(caught.exception))
 
     def test_server_and_ci_wiring_are_fail_closed(self):
         core = (ROOT / "server" / "content_domains" / "core.py").read_text("utf-8")

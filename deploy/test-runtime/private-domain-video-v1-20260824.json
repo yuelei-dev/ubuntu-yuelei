@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "purpose": "Transactional test release for the private-domain batch-video page, strict Director Agent support, navigation, and locked BGM assets.",
+  "target": {
+    "role": "test",
+    "host": "8.148.158.106",
+    "host_id": "yuelei-test-01",
+    "identity_file": "/etc/huangque/release-identity.json",
+    "public_origin": "https://yuelei.huangquechuanmei.com",
+    "service": "huangque-content.service"
+  },
+  "source": {
+    "repository": "yuelei-dev/ubuntu-yuelei",
+    "code_source_commit": "37cc5d164f59e7f72c51eb7a5bf693d658114e99"
+  },
+  "expected_preimage": {
+    "development_base_commit": "c11ceb52e9e1c65b5bf6151c0515d9e68c4ecd97",
+    "feature_flag": {"state": "row", "enabled": true}
+  },
+  "deployment_policy": {
+    "production_server_write_allowed": false,
+    "copy_environment_or_database": false,
+    "backup_all_targets_before_first_write": true,
+    "rollback_all_files_and_feature_state_as_one_unit": true,
+    "require_merged_main": true
+  },
+  "release_executor": {
+    "contract": "private_domain_video_six_file_v2",
+    "repository_path": "scripts/deploy_private_domain_video_v1_locked_manifest.py",
+    "git_blob": "f19a21d4d5dbf3152edaf922bfd9f6f5458c4d2b",
+    "sha256": "f1f1308ebc5a84a662876d199b1cd7003764faad77e6acb22d98944e7e959544",
+    "locked_base_executor": {
+      "repository_path": "scripts/deploy_director_locked_manifest.py",
+      "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
+      "sha256": "a319b3edf1ac66d44e1c3e1b10defc753eeb7a7b8e172f1f12cd89ebf17e0aa4"
+    },
+    "required_repository_paths": [
+      "server/content_domains/director_agent.py",
+      "site/workbench/digital-human-oneclick.html",
+      "site/workbench/private-domain-video.html",
+      "site/workbench/script-agent.js",
+      "site/workbench/script.html",
+      "site/assets/bgm/private-domain-v1/manifest.json"
+    ],
+    "runtime_python_root": "/home/ubuntu/content-api",
+    "import_modules": ["content_domains.director_agent"],
+    "html_required_markers": ["script-agent.js?v=b1c3f8c3"],
+    "health_url": "http://127.0.0.1:8096/api/gen/health",
+    "health_feature_field": "director_agent_enabled",
+    "rollback_health_policy": {"timeout_seconds": 20, "interval_seconds": 1},
+    "installed_file_checks": [
+      {"repository_path": "server/content_domains/director_agent.py", "expected_sha256": "271fca23e2b148c845528c26b429eb0ac5184e40d990577c7bbdff17be8526df"},
+      {"repository_path": "site/workbench/digital-human-oneclick.html", "expected_sha256": "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae"},
+      {"repository_path": "site/workbench/private-domain-video.html", "expected_sha256": "7ff3baa2644a32547e4ba12410b590b686a5812ca8dec73c0cd905ae70654751"},
+      {"repository_path": "site/workbench/script-agent.js", "expected_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"},
+      {"repository_path": "site/workbench/script.html", "expected_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"},
+      {"repository_path": "site/assets/bgm/private-domain-v1/manifest.json", "expected_sha256": "fdf1e4bc8916ed1b545804192f311c137e410e847b7cd777c1f9aac6b071a03b"}
+    ],
+    "external_assets": [
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/01_wuxi_persistence.mp3", "sha256": "ddbccb9b2385e74bb28ff66108c2e18f38372bdae15ea1820cfbdbf0da4ca321"},
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/02_shenzhen_growth.mp3", "sha256": "fdcf6ff9e56ba34ccb09a0c4f490950d4f9dba61aa365045a058669a42c5ae9e"},
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/03_female_social.mp3", "sha256": "4fdf6690318531aeb97aa6fc192483b01ca6617dd65d050e231acbdd3c65ff02"},
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/04_steady_progress.mp3", "sha256": "192534992834941241c0940bbf38cb9d7fc72fedd91b4520151c17921b44b17c"},
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/05_changsha_resilience.mp3", "sha256": "907c1e64ec9bb86524fec0fca2bda00c87ffc926fa403f9eda3e94fda896a857"},
+      {"url": "https://yuelei.huangquechuanmei.com/assets/bgm/private-domain-v1/06_lucky_future.mp3", "sha256": "06069766bc2ddb6c5b7be1581d3a44d024702127180e2c0908d5c0df09ece44e"}
+    ],
+    "authenticated_acceptance": {
+      "token_environment": "DIRECTOR_AGENT_RELEASE_TOKEN",
+      "job_timeout_seconds": 120,
+      "submit_url": "http://127.0.0.1:8096/api/gen/director_agent",
+      "job_url_template": "http://127.0.0.1:8096/api/gen/job/{job_id}",
+      "expected_action": {"type": "fill_field", "field": "private_domain_copy", "value": "验收哨兵一：仅验证从用户请求预填空白批量文案框。\n验收哨兵二：不生成、不上传、不删除、不发布。"},
+      "request": {
+        "prompt": "请把下面两条固定验收哨兵文案原样填入空白批量文案框，保留中间换行。不要随机素材、不要生成、不要上传、不要删除或发布：\n验收哨兵一：仅验证从用户请求预填空白批量文案框。\n验收哨兵二：不生成、不上传、不删除、不发布。",
+        "session_id": "release_private_domain_video_v1_acceptance",
+        "page_revision": "b22c16f918572c03",
+        "page_context": {
+          "page": "private_domain_video",
+          "path": "/workbench/private-domain-video.html",
+          "mode": "plan",
+          "copy_text": "",
+          "copy_count": 0,
+          "template": "data",
+          "duration": "8",
+          "bgm": "random",
+          "bgm_values": ["/assets/bgm/private-domain-v1/01_wuxi_persistence.mp3"],
+          "asset_count": 4,
+          "selected_asset_count": 4,
+          "catalog_status": "ready",
+          "active_job_status": "idle"
+        },
+        "history": [],
+        "source_page": "private_domain_video",
+        "provider": "openai_responses",
+        "quoted_cost": 0
+      }
+    }
+  },
+  "files": [
+    {"repository_path": "server/content_domains/director_agent.py", "runtime_path": "/home/ubuntu/content-api/content_domains/director_agent.py", "target_preimage_state": "file", "preimage_blob": "488d3fd444d823bfd4c2dc8efbc16f14a2797531", "preimage_sha256": "255b287235a4e2500bebd29508416c7c758d70b471c1713e983cfccc6a9a4c11", "postimage_blob": "2f207eadc6305cd5e5edd5689941196b1b0e44a5", "postimage_sha256": "271fca23e2b148c845528c26b429eb0ac5184e40d990577c7bbdff17be8526df"},
+    {"repository_path": "site/workbench/digital-human-oneclick.html", "runtime_path": "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html", "target_preimage_state": "file", "preimage_blob": "68d00a3abf51bcf00d477a30936e03f00bcd2ff3", "preimage_sha256": "8ff3497d40282b81a67cdb69e51ac53bd0761e90fa567a5c8df08a6f88223c1d", "postimage_blob": "289e095bb6869337b185a8ab3ee7eff153543f08", "postimage_sha256": "e2571f4bd310b74da5d4bae60ba368c79b9abd881bc42e6fd2ad5c658140aaae"},
+    {"repository_path": "site/workbench/private-domain-video.html", "runtime_path": "/var/www/huangquechuanmei/workbench/private-domain-video.html", "target_preimage_state": "absent", "preimage_blob": null, "preimage_sha256": null, "install_mode": "0644", "postimage_blob": "c635f9aba3ffb1c192470d8dd2dac31bc9ce7f40", "postimage_sha256": "7ff3baa2644a32547e4ba12410b590b686a5812ca8dec73c0cd905ae70654751"},
+    {"repository_path": "site/workbench/script-agent.js", "runtime_path": "/var/www/huangquechuanmei/workbench/script-agent.js", "target_preimage_state": "file", "preimage_blob": "dc9e3d6fe4e30c3682b61461cff883001f78e723", "preimage_sha256": "a50ef194cd8c5f951f12b9fa04e8f753e2fda0fafe7fd35d6e8c9d2002ee7e64", "postimage_blob": "ddad0e3c664c2808f79b6f8823d3b4fb153bdabd", "postimage_sha256": "8d0c79d2ae346b5e5f59cf2c4daab09c76f56c6a45390d0afa75b44fc1a3185e"},
+    {"repository_path": "site/workbench/script.html", "runtime_path": "/var/www/huangquechuanmei/workbench/script.html", "target_preimage_state": "file", "preimage_blob": "26aaf0a4a8bc048534462cdc1cbe5af400c3fc23", "preimage_sha256": "8ce245e020501e16bb2ec91e1ead6ec602c1a9792a7a84f5da662191f46fc2b3", "postimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a", "postimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"},
+    {"repository_path": "site/assets/bgm/private-domain-v1/manifest.json", "runtime_path": "/var/www/huangquechuanmei/assets/bgm/private-domain-v1/manifest.json", "target_preimage_state": "file", "preimage_blob": "18e872df10e027cda2e232f6e426668da7e27a73", "preimage_sha256": "6f89f3b10c70702476af8b8bb9511a7eee662321417cc6c58b4097f84247e743", "postimage_blob": "4bd9a65f161ea6f0b3f39ee560e4d117b5350425", "postimage_sha256": "fdf1e4bc8916ed1b545804192f311c137e410e847b7cd777c1f9aac6b071a03b"}
+  ],
+  "feature_activation": {"feature": "director_agent", "database_path": "/home/ubuntu/content-api/feature_flags.db", "actor": "release:private-domain-video-v1", "target_enabled": true}
+}

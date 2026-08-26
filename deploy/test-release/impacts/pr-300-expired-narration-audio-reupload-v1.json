@@ -1,0 +1,22 @@
+{
+  "external_checks": [],
+  "health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "release_id": "pr-300-expired-narration-audio-reupload-v1",
+  "required_env": {},
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "runtime_changes": [
+    "server/content_domains/digital_human_v2.py",
+    "site/workbench/digital-human-oneclick.html"
+  ],
+  "schema_version": 1
+}

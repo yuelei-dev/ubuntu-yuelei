@@ -134,23 +134,19 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         cls.executor = load_executor()
         cls.executor_blob = git_blob(EXECUTOR.read_bytes())
         cls.executor_sha = sha256(EXECUTOR.read_bytes())
-        cls.source_workspace = tempfile.TemporaryDirectory(
-            prefix="unified-voice-v6-source-",
+        cls.locked_source_workspace = tempfile.TemporaryDirectory(
+            prefix="unified-v6-locked-source-",
         )
-        cls.addClassCleanup(cls.source_workspace.cleanup)
-        cls.source_root = pathlib.Path(cls.source_workspace.name)
-        checked_in = ROOT / "deploy/test-runtime" / MANIFEST_NAME
-        locked_manifest = json.loads(checked_in.read_text(encoding="utf-8"))
+        cls.addClassCleanup(cls.locked_source_workspace.cleanup)
+        cls.locked_source_root = pathlib.Path(cls.locked_source_workspace.name)
         locked_sources = {
-            item["repository_path"]: item["postimage_blob"]
-            for item in locked_manifest["files"]
+            repository_path: locks[2]
+            for repository_path, locks in LOCKS.items()
         }
-        release = locked_manifest["release_executor"]
-        locked_sources[release["repository_path"]] = release["git_blob"]
-        base = release["locked_base_executor"]
-        locked_sources[base["repository_path"]] = base["git_blob"]
+        locked_sources[EXECUTOR.relative_to(ROOT).as_posix()] = cls.executor_blob
+        locked_sources[cls.executor.BASE_EXECUTOR_PATH] = cls.executor.BASE_EXECUTOR_BLOB
         for repository_path, blob_id in locked_sources.items():
-            target = cls.source_root / repository_path
+            target = cls.locked_source_root / repository_path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(git_bytes(blob_id))
 
@@ -250,11 +246,31 @@ class UnifiedVoiceV6ReleaseTests(unittest.TestCase):
         return root, database
 
     def _execute(self, manifest_path, target, backup, hooks, checkpoint=None):
-        return self.executor.execute_locked_release(
-            manifest_path, self.source_root, target, backup, hooks=hooks,
-            verify_repository=False, reviewed_head="r" * 40,
-            merged_main="m" * 40, checkpoint=checkpoint,
-        )
+        manifest = json.loads(pathlib.Path(manifest_path).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as source_dir:
+            source = pathlib.Path(source_dir)
+            locked_paths = [
+                manifest["release_executor"]["repository_path"],
+                manifest["release_executor"]["locked_base_executor"]["repository_path"],
+            ]
+            for item in manifest["files"]:
+                locked_paths.append(item["repository_path"])
+            for relative in locked_paths:
+                destination = source / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if relative == manifest["release_executor"]["repository_path"]:
+                    data = EXECUTOR.read_bytes()
+                elif relative == manifest["release_executor"]["locked_base_executor"]["repository_path"]:
+                    data = git_bytes(manifest["release_executor"]["locked_base_executor"]["git_blob"])
+                else:
+                    item = next(entry for entry in manifest["files"] if entry["repository_path"] == relative)
+                    data = git_bytes(item["postimage_blob"])
+                destination.write_bytes(data)
+            return self.executor.execute_locked_release(
+                manifest_path, source, target, backup, hooks=hooks,
+                verify_repository=False, reviewed_head="r" * 40,
+                merged_main="m" * 40, checkpoint=checkpoint,
+            )
 
     def _assert_preimages(self, target, manifest):
         for item in manifest["files"]:

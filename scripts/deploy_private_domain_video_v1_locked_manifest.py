@@ -1,0 +1,868 @@
+#!/usr/bin/env python3
+"""Deploy the private-domain batch-video workflow as one locked test release.
+
+This successor deliberately leaves the historical PR #276 executor untouched.
+It backs up the changed runtime files and the current feature row before
+temporarily disabling the Agent.  Every failure after that point restores the
+files, feature state, service health, and a durable audit record.
+"""
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import pathlib
+import re
+import secrets
+import shutil
+import stat
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from contextlib import closing
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+MANIFEST = ROOT / "deploy/test-runtime/private-domain-video-v1-20260824.json"
+BASE_EXECUTOR = ROOT / "scripts/deploy_director_locked_manifest.py"
+CONTRACT = "private_domain_video_six_file_v2"
+AUTHORIZED_TARGET = "test@8.148.158.106"
+IDENTITY_FILE = "/etc/huangque/release-identity.json"
+REQUIRED_REPOSITORY_PATHS = {
+    "server/content_domains/director_agent.py",
+    "site/workbench/digital-human-oneclick.html",
+    "site/workbench/private-domain-video.html",
+    "site/workbench/script-agent.js",
+    "site/workbench/script.html",
+    "site/assets/bgm/private-domain-v1/manifest.json",
+}
+REQUIRED_RUNTIME_PATHS = {
+    "server/content_domains/director_agent.py":
+        "/home/ubuntu/content-api/content_domains/director_agent.py",
+    "site/workbench/digital-human-oneclick.html":
+        "/var/www/huangquechuanmei/workbench/digital-human-oneclick.html",
+    "site/workbench/private-domain-video.html":
+        "/var/www/huangquechuanmei/workbench/private-domain-video.html",
+    "site/workbench/script-agent.js":
+        "/var/www/huangquechuanmei/workbench/script-agent.js",
+    "site/workbench/script.html":
+        "/var/www/huangquechuanmei/workbench/script.html",
+    "site/assets/bgm/private-domain-v1/manifest.json":
+        "/var/www/huangquechuanmei/assets/bgm/private-domain-v1/manifest.json",
+}
+ALLOWED_REVIEW_DELTA = {
+    MANIFEST.relative_to(ROOT).as_posix(),
+}
+ACCEPTANCE_SENTINEL_VALUE = (
+    "验收哨兵一：仅验证从用户请求预填空白批量文案框。\n"
+    "验收哨兵二：不生成、不上传、不删除、不发布。"
+)
+ACCEPTANCE_PROMPT = (
+    "请把下面两条固定验收哨兵文案原样填入空白批量文案框，保留中间换行。"
+    "不要随机素材、不要生成、不要上传、不要删除或发布：\n"
+    + ACCEPTANCE_SENTINEL_VALUE
+)
+ACCEPTANCE_EXPECTED_ACTION = {
+    "type": "fill_field",
+    "field": "private_domain_copy",
+    "value": ACCEPTANCE_SENTINEL_VALUE,
+}
+
+
+def _load_base_executor():
+    specification = importlib.util.spec_from_file_location(
+        "director_agent_v2_release_base", BASE_EXECUTOR,
+    )
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+BASE = _load_base_executor()
+ReleaseError = BASE.ReleaseError
+
+
+def _sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _git_blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _mapped_symlink_node(root, absolute_path):
+    """Map a declared node without following its final path component."""
+    value = pathlib.PurePosixPath(str(absolute_path))
+    if (not value.is_absolute() or ".." in value.parts
+            or len(value.parts) < 2):
+        raise ReleaseError("manifest runtime path must be absolute and normalized")
+    root = pathlib.Path(root).resolve()
+    parent = root.joinpath(*value.parts[1:-1]).resolve()
+    if parent != root and root not in parent.parents:
+        raise ReleaseError("manifest runtime path escapes target root")
+    return parent / value.name
+
+
+def _require_lock(value, length, label):
+    if not isinstance(value, str) or len(value) != length:
+        raise ReleaseError("%s lock is invalid" % label)
+    try:
+        int(value, 16)
+    except ValueError as error:
+        raise ReleaseError("%s lock is invalid" % label) from error
+
+
+def _validate_bgm_manifest(data):
+    try:
+        catalog = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("BGM manifest must be valid UTF-8 JSON") from error
+    tracks = catalog.get("tracks") if isinstance(catalog, dict) else None
+    if not isinstance(tracks, list) or len(tracks) != 6:
+        raise ReleaseError("BGM manifest must contain exactly six tracks")
+    for track in tracks:
+        fields = (track.get("title"), track.get("source_video")) \
+            if isinstance(track, dict) else (None, None)
+        if (not all(isinstance(value, str) and value.strip() for value in fields)
+                or any("\ufffd" in value for value in fields)):
+            raise ReleaseError("BGM manifest contains missing or corrupt text")
+    return catalog
+
+
+def _validate_policy(policy):
+    required = {
+        "production_server_write_allowed": False,
+        "copy_environment_or_database": False,
+        "backup_all_targets_before_first_write": True,
+        "rollback_all_files_and_feature_state_as_one_unit": True,
+        "require_merged_main": True,
+    }
+    if not isinstance(policy, dict):
+        raise ReleaseError("deployment policy is missing")
+    for key, expected in required.items():
+        if policy.get(key) is not expected:
+            raise ReleaseError("deployment policy must set %s=%s" % (key, expected))
+
+
+def _validate_manifest(manifest):
+    if manifest.get("schema_version") != 1:
+        raise ReleaseError("unsupported manifest schema")
+    target = manifest.get("target", {})
+    if (target.get("role") != "test"
+            or target.get("host") != "8.148.158.106"
+            or target.get("host_id") != "yuelei-test-01"
+            or target.get("identity_file") != IDENTITY_FILE):
+        raise ReleaseError("locked release only permits the test target")
+    _validate_policy(manifest.get("deployment_policy"))
+    source_commit = manifest.get("source", {}).get("code_source_commit")
+    _require_lock(source_commit, 40, "code source commit")
+    feature_preimage = manifest.get("expected_preimage", {}).get("feature_flag")
+    if (not isinstance(feature_preimage, dict)
+            or feature_preimage.get("state") != "row"
+            or feature_preimage.get("enabled") is not True):
+        raise ReleaseError("expected enabled feature preimage is missing")
+
+    executor = manifest.get("release_executor")
+    if not isinstance(executor, dict) or executor.get("contract") != CONTRACT:
+        raise ReleaseError("private-domain release contract is invalid")
+    if executor.get("repository_path") != (
+            "scripts/deploy_private_domain_video_v1_locked_manifest.py"):
+        raise ReleaseError("release executor path is invalid")
+    _require_lock(executor.get("git_blob"), 40, "release executor blob")
+    _require_lock(executor.get("sha256"), 64, "release executor SHA-256")
+    if set(executor.get("required_repository_paths") or []) != REQUIRED_REPOSITORY_PATHS:
+        raise ReleaseError("release executor does not lock the six-file scope")
+
+    base_lock = executor.get("locked_base_executor")
+    if (not isinstance(base_lock, dict)
+            or base_lock.get("repository_path") !=
+            "scripts/deploy_director_locked_manifest.py"):
+        raise ReleaseError("historical base executor lock is missing")
+    _require_lock(base_lock.get("git_blob"), 40, "base executor blob")
+    _require_lock(base_lock.get("sha256"), 64, "base executor SHA-256")
+
+    files = manifest.get("files")
+    if not isinstance(files, list) or len(files) != 6:
+        raise ReleaseError("release must contain exactly six runtime files")
+    paths = {item.get("repository_path") for item in files}
+    if paths != REQUIRED_REPOSITORY_PATHS:
+        raise ReleaseError("release file scope is incomplete")
+    if len({item.get("runtime_path") for item in files}) != len(files):
+        raise ReleaseError("release contains duplicate runtime paths")
+    for item in files:
+        path = item["repository_path"]
+        if item.get("runtime_path") != REQUIRED_RUNTIME_PATHS[path]:
+            raise ReleaseError("runtime path does not match locked repository path")
+        state = item.get("target_preimage_state")
+        if state not in {"file", "absent"}:
+            raise ReleaseError("runtime preimage state is invalid")
+        if state == "file":
+            _require_lock(item.get("preimage_blob"), 40, path + " preimage")
+            _require_lock(item.get("preimage_sha256"), 64, path + " preimage")
+        elif item.get("preimage_blob") is not None or item.get("preimage_sha256") is not None:
+            raise ReleaseError("absent preimage must not have content locks")
+        if state == "absent" and item.get("install_mode", "0644") != "0644":
+            raise ReleaseError("absent preimage install mode is invalid")
+        _require_lock(item.get("postimage_blob"), 40, path + " postimage")
+        _require_lock(item.get("postimage_sha256"), 64, path + " postimage")
+
+    feature = manifest.get("feature_activation")
+    if (not isinstance(feature, dict)
+            or feature.get("feature") != "director_agent"
+            or feature.get("target_enabled") is not True
+            or feature.get("database_path") !=
+            "/home/ubuntu/content-api/feature_flags.db"):
+        raise ReleaseError("feature activation contract is invalid")
+
+    acceptance = executor.get("authenticated_acceptance")
+    request = acceptance.get("request") if isinstance(acceptance, dict) else None
+    context = request.get("page_context") if isinstance(request, dict) else None
+    if (not isinstance(context, dict)
+            or context.get("page") != "private_domain_video"
+            or context.get("copy_text") != ""
+            or context.get("copy_count") != 0
+            or request.get("source_page") != "private_domain_video"
+            or request.get("prompt") != ACCEPTANCE_PROMPT
+            or acceptance.get("expected_action")
+            != ACCEPTANCE_EXPECTED_ACTION):
+        raise ReleaseError("private-domain authenticated acceptance is missing")
+    revision = request.get("page_revision")
+    if (not isinstance(revision, str)
+            or BASE._DIRECTOR_REVISION_PATTERN.fullmatch(revision) is None):
+        raise ReleaseError("acceptance page revision is invalid")
+    for key, path in (("submit_url", "/api/gen/director_agent"),
+                      ("job_url_template", "/api/gen/job/1")):
+        value = str(acceptance.get(key) or "").replace("{job_id}", "1")
+        parsed = urllib.parse.urlsplit(value)
+        if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                or parsed.port != 8096 or parsed.path != path
+                or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            raise ReleaseError("authenticated acceptance must use locked loopback URLs")
+
+    markers = executor.get("html_required_markers")
+    if not isinstance(markers, list) or len(markers) != 1:
+        raise ReleaseError("locked HTML cache marker is missing")
+    checks = executor.get("installed_file_checks")
+    if (not isinstance(checks, list)
+            or {item.get("repository_path") for item in checks}
+            != REQUIRED_REPOSITORY_PATHS):
+        raise ReleaseError("release must locally verify every installed file")
+    for check in checks:
+        _require_lock(check.get("expected_sha256"), 64, "installed file SHA-256")
+        item = next(entry for entry in files
+                    if entry["repository_path"] == check["repository_path"])
+        if check["expected_sha256"] != item["postimage_sha256"]:
+            raise ReleaseError("installed file acceptance hash does not match postimage")
+    health = urllib.parse.urlsplit(str(executor.get("health_url") or ""))
+    if (health.scheme != "http" or health.hostname != "127.0.0.1"
+            or health.port != 8096 or health.path != "/api/gen/health"
+            or health.query or health.fragment or health.username or health.password):
+        raise ReleaseError("health acceptance must use the locked loopback endpoint")
+    assets = executor.get("external_assets")
+    if not isinstance(assets, list) or len(assets) != 6:
+        raise ReleaseError("release must lock exactly six BGM audio assets")
+    if len({asset.get("url") for asset in assets}) != len(assets):
+        raise ReleaseError("external asset URLs must be unique")
+    for asset in assets:
+        if not isinstance(asset.get("url"), str) or not asset["url"].startswith("https://"):
+            raise ReleaseError("external asset URL is invalid")
+        _require_lock(asset.get("sha256"), 64, "external asset SHA-256")
+    policy = executor.get("rollback_health_policy")
+    timeout = policy.get("timeout_seconds") if isinstance(policy, dict) else None
+    interval = policy.get("interval_seconds") if isinstance(policy, dict) else None
+    if (not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or timeout <= 0 or timeout > 120
+            or not isinstance(interval, (int, float)) or isinstance(interval, bool)
+            or interval <= 0 or interval > timeout):
+        raise ReleaseError("rollback health policy is invalid")
+    return manifest
+
+
+def _load_manifest(path):
+    path = pathlib.Path(os.path.abspath(path))
+    expected = pathlib.Path(os.path.abspath(MANIFEST))
+    if path != expected:
+        raise ReleaseError("locked executor rejects every other manifest path")
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ReleaseError("locked manifest path is unsafe")
+        raw = path.read_bytes()
+        parsed = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("locked manifest must be valid UTF-8 JSON") from error
+    manifest = _validate_manifest(parsed)
+    manifest["_loaded_manifest_path"] = str(path)
+    manifest["_loaded_manifest_bytes"] = raw
+    return manifest
+
+
+def _read_identity_file(target_root, runtime_path):
+    path = _mapped_symlink_node(target_root, runtime_path)
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError as error:
+        raise ReleaseError("trusted release identity file is missing") from error
+    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        raise ReleaseError("trusted release identity file is unsafe")
+    if os.name != "nt":
+        real_runtime = pathlib.Path(target_root).resolve() == pathlib.Path("/").resolve()
+        expected_uid = 0 if real_runtime else os.getuid()
+        if info.st_uid != expected_uid or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ReleaseError("trusted release identity file ownership or mode is invalid")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseError("trusted release identity file is invalid") from error
+
+
+def _read_machine_identity_value(target_root, runtime_path, encoding):
+    path = _mapped_symlink_node(target_root, runtime_path)
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise ReleaseError("local machine identity file is unsafe")
+        return path.read_text(encoding=encoding).strip()
+    except (OSError, UnicodeError) as error:
+        raise ReleaseError("local machine identity is unavailable") from error
+
+
+def _validate_target_identity(manifest, target_root, confirm_target):
+    if confirm_target != AUTHORIZED_TARGET:
+        raise ReleaseError("explicit --confirm-target does not match the test target")
+    target = manifest["target"]
+    identity = _read_identity_file(target_root, target["identity_file"])
+    machine_id = _read_machine_identity_value(
+        target_root, "/etc/machine-id", "ascii",
+    )
+    hostname = _read_machine_identity_value(
+        target_root, "/etc/hostname", "utf-8",
+    )
+    if re.fullmatch(r"[0-9a-f]{32}", machine_id) is None:
+        raise ReleaseError("local machine-id format is invalid")
+    if not hostname or len(hostname) > 253:
+        raise ReleaseError("local hostname is invalid")
+    expected = {
+        "schema_version": 1,
+        "environment": "test",
+        "host_id": target["host_id"],
+        "public_host": target["host"],
+        "hostname": hostname,
+        "machine_id_sha256": _sha256(machine_id.encode("ascii")),
+    }
+    if identity != expected:
+        raise ReleaseError("trusted identity does not match this test machine")
+    return identity
+
+
+def _lock_matches(path, lock):
+    data = pathlib.Path(path).read_bytes()
+    return _sha256(data) == lock.get("sha256") and _git_blob(data) == lock.get("git_blob")
+
+
+def _verify_checkout(source_root, manifest, reviewed_head, merged_main):
+    head = BASE._verify_director_checkout(
+        source_root, manifest, reviewed_head, merged_main,
+    )
+    parent = BASE._run(
+        ["git", "rev-parse", reviewed_head + "^"], cwd=source_root,
+    )
+    if parent != manifest["source"]["code_source_commit"]:
+        raise ReleaseError("reviewed Head parent is not the locked code source commit")
+    changed = set(filter(None, BASE._run(
+        ["git", "diff", "--name-only", parent, reviewed_head], cwd=source_root,
+    ).splitlines()))
+    if changed != ALLOWED_REVIEW_DELTA:
+        raise ReleaseError("reviewed Head is not the exact manifest-and-test lock commit")
+    repository_path = MANIFEST.relative_to(ROOT).as_posix()
+    expected_path = pathlib.Path(os.path.abspath(
+        pathlib.Path(source_root) / repository_path
+    ))
+    loaded_path = pathlib.Path(os.path.abspath(
+        manifest.get("_loaded_manifest_path", "")
+    ))
+    loaded_bytes = manifest.get("_loaded_manifest_bytes")
+    try:
+        loaded_stat = os.lstat(loaded_path)
+    except OSError as error:
+        raise ReleaseError("loaded manifest is unavailable") from error
+    if (loaded_path != expected_path or not isinstance(loaded_bytes, bytes)
+            or not stat.S_ISREG(loaded_stat.st_mode)
+            or stat.S_ISLNK(loaded_stat.st_mode)
+            or loaded_path.read_bytes() != loaded_bytes):
+        raise ReleaseError("loaded manifest is not the locked checkout bytes")
+    reviewed = subprocess.run(
+        ["git", "cat-file", "blob", reviewed_head + ":" + repository_path],
+        cwd=source_root, check=False, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if (reviewed.returncode != 0 or reviewed.stdout != loaded_bytes
+            or _git_blob(reviewed.stdout) != _git_blob(loaded_bytes)):
+        raise ReleaseError("loaded manifest does not match the reviewed Head blob")
+    return head
+
+
+def _validate_sources(source_root, target_root, manifest, hooks):
+    source_root = pathlib.Path(source_root).resolve()
+    executor = manifest["release_executor"]
+    executor_path = source_root / executor["repository_path"]
+    if not _lock_matches(executor_path, executor):
+        raise ReleaseError("release executor lock does not match source")
+    base_lock = executor["locked_base_executor"]
+    if not _lock_matches(source_root / base_lock["repository_path"], base_lock):
+        raise ReleaseError("historical base executor lock does not match source")
+
+    for item in manifest["files"]:
+        path = item["repository_path"]
+        source = (source_root / item["repository_path"]).resolve()
+        if source_root not in source.parents:
+            raise ReleaseError("repository path escapes source root")
+        data = source.read_bytes()
+        if (_sha256(data) != item["postimage_sha256"]
+                or _git_blob(data) != item["postimage_blob"]):
+            raise ReleaseError("candidate lock does not match source")
+        if path == "site/assets/bgm/private-domain-v1/manifest.json":
+            _validate_bgm_manifest(data)
+        if source.suffix == ".py":
+            try:
+                compile(data, str(source), "exec")
+            except SyntaxError as error:
+                raise ReleaseError("candidate Python compilation failed") from error
+        elif source.suffix == ".js":
+            hooks.validate_node(source)
+        elif source.suffix == ".html":
+            content = data.decode("utf-8")
+            for marker in executor["html_required_markers"]:
+                if marker not in content:
+                    raise ReleaseError("candidate HTML cache marker is missing")
+
+    runtime_python_root = BASE._mapped_path(
+        target_root, executor["runtime_python_root"],
+    )
+    runtime_package = runtime_python_root / "content_domains"
+    if not runtime_package.is_dir() or runtime_package.is_symlink():
+        raise ReleaseError("runtime content_domains package is missing or unsafe")
+    with tempfile.TemporaryDirectory(prefix="hq-dh-agent-import-") as directory:
+        validation_root = pathlib.Path(directory)
+        shutil.copytree(
+            runtime_package, validation_root / "content_domains",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.db", "*.log"),
+        )
+        shutil.copy2(
+            source_root / "server/content_domains/director_agent.py",
+            validation_root / "content_domains/director_agent.py",
+        )
+        hooks.validate_import(validation_root, executor["import_modules"])
+
+
+def _validate_private_domain_acceptance_result(specification, job):
+    result = job.get("result") if isinstance(job, dict) else None
+    plan = result.get("plan") if isinstance(result, dict) else None
+    actions = plan.get("actions") if isinstance(plan, dict) else None
+    expected = specification.get("expected_action")
+    if (not isinstance(result, dict)
+            or result.get("type") != "director_agent"
+            or not isinstance(actions, list)
+            or plan.get("page_revision") !=
+            specification["request"]["page_revision"]
+            or not isinstance(expected, dict)
+            or not any(
+                action.get("type") == expected.get("type")
+                and action.get("field") == expected.get("field")
+                and action.get("value") == expected.get("value")
+                for action in actions if isinstance(action, dict)
+            )):
+        raise ReleaseError("private-domain Agent acceptance result is invalid")
+
+
+class SystemHooks(BASE.SystemHooks):
+    """Use the historical system adapters with a v3-specific acceptance key."""
+
+    def acceptance(self, specification):
+        token_name = specification["token_environment"]
+        token = str(os.environ.get(token_name, "")).strip()
+        if not token:
+            raise ReleaseError("authenticated acceptance token is missing")
+        key = "release-dh-agent-v3-" + secrets.token_hex(16)
+        body = json.dumps(
+            specification["request"], ensure_ascii=False,
+        ).encode("utf-8")
+
+        def request_json(url, method="GET"):
+            request = urllib.request.Request(
+                url, data=body if method == "POST" else None,
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Content-Type": "application/json",
+                    "Idempotency-Key": key,
+                },
+                method=method,
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            try:
+                with opener.open(request, timeout=30) as response:
+                    data = response.read()
+                    if response.status != 200:
+                        raise ReleaseError(
+                            "authenticated acceptance returned HTTP %s: %s"
+                            % (response.status, BASE._http_error_detail(data))
+                        )
+                    return json.loads(data.decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                raise ReleaseError(
+                    "authenticated acceptance returned HTTP %s: %s"
+                    % (error.code, BASE._http_error_detail(error.read()))
+                ) from error
+
+        first = request_json(specification["submit_url"], "POST")
+        replay = request_json(specification["submit_url"], "POST")
+        if not first.get("job_id") or replay.get("job_id") != first["job_id"]:
+            raise ReleaseError("same-key acceptance did not replay the original job")
+        if int(first.get("cost") or 0) != 0 or int(replay.get("cost") or 0) != 0:
+            raise ReleaseError("Director Agent acceptance must remain zero-cost")
+        status_url = specification["job_url_template"].format(
+            job_id=int(first["job_id"]),
+        )
+        deadline = time.monotonic() + int(
+            specification.get("job_timeout_seconds", 120)
+        )
+        while True:
+            job = request_json(status_url)
+            if int(job.get("id") or job.get("job_id") or 0) != int(first["job_id"]):
+                raise ReleaseError("authenticated acceptance job is not queryable")
+            if job.get("kind") != "director_agent" or int(job.get("cost") or 0) != 0:
+                raise ReleaseError("authenticated acceptance returned the wrong job")
+            status = str(job.get("status") or "")
+            if status == "done":
+                _validate_private_domain_acceptance_result(specification, job)
+                return
+            if status in {"error", "failed"}:
+                raise ReleaseError("Director Agent acceptance job failed")
+            if status not in {"pending", "running"}:
+                raise ReleaseError("Director Agent acceptance status is invalid")
+            if time.monotonic() >= deadline:
+                raise ReleaseError("Director Agent acceptance job timed out")
+            time.sleep(1)
+
+    def probe_external_asset(self, specification):
+        request = urllib.request.Request(
+            specification["url"], headers={"Accept": "*/*"}, method="GET",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        digest = hashlib.sha256()
+        try:
+            with opener.open(request, timeout=30) as response:
+                if response.status != 200:
+                    raise ReleaseError(
+                        "external asset returned HTTP %s" % response.status)
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise ReleaseError("external asset is unavailable") from error
+        if digest.hexdigest() != specification["sha256"]:
+            raise ReleaseError("external asset hash mismatch")
+
+
+def _execute_manifest(
+    manifest, source_root, target_root, backup_root, *, hooks=None,
+    replace=os.replace, verify_repository=True, checkpoint=None,
+    reviewed_head=None, merged_main=None, confirm_target=None,
+):
+    manifest = _validate_manifest(manifest)
+    hooks = hooks or SystemHooks()
+    checkpoint = checkpoint or (lambda name: None)
+    source_root = pathlib.Path(source_root).resolve()
+    target_root = pathlib.Path(target_root).resolve()
+    backup_root = pathlib.Path(backup_root).resolve()
+    target_identity = _validate_target_identity(
+        manifest, target_root, confirm_target,
+    )
+    checkpoint("after_target_identity")
+    if verify_repository:
+        release_head = _verify_checkout(
+            source_root, manifest, reviewed_head, merged_main,
+        )
+    else:
+        release_head = merged_main or "test-double"
+        reviewed_head = reviewed_head or "reviewed-test-double"
+
+    for asset in manifest["release_executor"]["external_assets"]:
+        hooks.probe_external_asset(asset)
+    checkpoint("after_external_asset_preflight")
+    _validate_sources(source_root, target_root, manifest, hooks)
+    entries = []
+    for item in manifest["files"]:
+        source = source_root / item["repository_path"]
+        target = _mapped_symlink_node(target_root, item["runtime_path"])
+        state = item["target_preimage_state"]
+        if state == "file":
+            try:
+                target_stat = os.lstat(target)
+            except FileNotFoundError as error:
+                raise ReleaseError("expected regular runtime preimage") from error
+            if not stat.S_ISREG(target_stat.st_mode):
+                raise ReleaseError("expected regular runtime preimage")
+            old = target.read_bytes()
+            if (_sha256(old) != item["preimage_sha256"]
+                    or _git_blob(old) != item["preimage_blob"]):
+                raise ReleaseError("runtime preimage lock mismatch")
+            mode = target_stat.st_mode & 0o777
+            uid, gid = target_stat.st_uid, target_stat.st_gid
+        else:
+            try:
+                os.lstat(target)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ReleaseError("expected absent runtime preimage")
+            parent_stat = os.lstat(target.parent)
+            if not stat.S_ISDIR(parent_stat.st_mode):
+                raise ReleaseError("runtime parent is missing or unsafe")
+            mode = 0o644
+            uid, gid = parent_stat.st_uid, parent_stat.st_gid
+        entries.append((
+            item, source, target, mode, uid, gid,
+        ))
+
+    feature = manifest["feature_activation"]
+    feature_db = _mapped_symlink_node(target_root, feature["database_path"])
+    try:
+        feature_stat = os.lstat(feature_db)
+    except FileNotFoundError as error:
+        raise ReleaseError("feature database is missing") from error
+    if not stat.S_ISREG(feature_stat.st_mode) or stat.S_ISLNK(feature_stat.st_mode):
+        raise ReleaseError("feature database is unsafe")
+    feature_snapshot = BASE._capture_feature_row(feature_db, feature["feature"])
+    expected_feature = manifest["expected_preimage"]["feature_flag"]
+    if (feature_snapshot.get("state") != expected_feature["state"]
+            or bool(feature_snapshot.get("enabled")) is not
+            expected_feature["enabled"]):
+        raise ReleaseError("feature flag preimage does not match locked state")
+    service = manifest["target"]["service"]
+    if not hooks.service_active(service):
+        raise ReleaseError("target service is not active before release")
+
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup = pathlib.Path(tempfile.mkdtemp(
+        prefix="private-domain-video-%s-%s-" % (
+            str(release_head)[:12], time.strftime("%Y%m%d%H%M%S"),
+        ), dir=backup_root,
+    ))
+    os.chmod(backup, 0o700)
+    backups = []
+    executor = manifest["release_executor"]
+    executor_data = (source_root / executor["repository_path"]).read_bytes()
+    base_data = (source_root / executor["locked_base_executor"]["repository_path"]).read_bytes()
+    audit = {
+        "reviewed_head": reviewed_head, "merged_main": release_head,
+        "target_identity": target_identity,
+        "executor_sha256": _sha256(executor_data),
+        "executor_git_blob": _git_blob(executor_data),
+        "base_executor_sha256": _sha256(base_data),
+        "base_executor_git_blob": _git_blob(base_data),
+        "feature_preimage": feature_snapshot, "files": [],
+    }
+    for index, (item, _, target, mode, uid, gid) in enumerate(entries):
+        state = item["target_preimage_state"]
+        saved = None
+        record = {
+            "runtime_path": item["runtime_path"], "state": state,
+            "mode": mode, "uid": uid, "gid": gid,
+            "preimage_sha256": item["preimage_sha256"],
+            "postimage_sha256": item["postimage_sha256"],
+        }
+        if state == "file":
+            saved = backup / ("%02d-%s" % (index, target.name))
+            shutil.copy2(target, saved)
+            if os.name != "nt":
+                os.chown(saved, uid, gid)
+            saved_stat = saved.stat()
+            if (_sha256(saved.read_bytes()) != item["preimage_sha256"]
+                    or (saved_stat.st_mode & 0o777) != mode
+                    or (os.name != "nt" and (
+                        saved_stat.st_uid != uid or saved_stat.st_gid != gid
+                    ))):
+                raise ReleaseError("runtime backup verification failed")
+            record["backup_file"] = saved.name
+        backups.append(saved)
+        audit["files"].append(record)
+    BASE._write_audit(backup / "audit.json", audit)
+
+    try:
+        checkpoint("after_backup")
+        BASE._set_feature_row(
+            feature_db, feature["feature"], False,
+            feature["actor"] + ":preflight",
+        )
+        checkpoint("after_disable")
+        hooks.probe_feature(
+            executor["health_url"], executor["health_feature_field"], False,
+        )
+        checkpoint("after_health_disabled_before_install")
+        for index, (item, source, target, mode, uid, gid) in enumerate(entries):
+            BASE._atomic_install(source, target, mode, replace, uid, gid)
+            checkpoint("after_replace_%d" % index)
+        for item, _, target, _, _, _ in entries:
+            if (not target.is_file() or target.is_symlink()
+                    or _sha256(target.read_bytes()) != item["postimage_sha256"]):
+                raise ReleaseError("deployed postimage hash mismatch")
+        _validate_sources(source_root, target_root, manifest, hooks)
+        hooks.validate_import(
+            BASE._mapped_path(target_root, executor["runtime_python_root"]),
+            executor["import_modules"],
+        )
+        checkpoint("after_compile")
+        hooks.restart(service)
+        checkpoint("after_restart")
+        if not hooks.service_active(service):
+            raise ReleaseError("target service is not active after restart")
+        hooks.probe_feature(
+            executor["health_url"], executor["health_feature_field"], False,
+        )
+        checkpoint("after_health_disabled")
+        BASE._set_feature_row(
+            feature_db, feature["feature"], feature["target_enabled"],
+            feature["actor"],
+        )
+        checkpoint("after_activate")
+        hooks.probe_feature(
+            executor["health_url"], executor["health_feature_field"], True,
+        )
+        files_by_path = {
+            item["repository_path"]: target
+            for item, _, target, _, _, _ in entries
+        }
+        for check in executor["installed_file_checks"]:
+            target = files_by_path[check["repository_path"]]
+            if _sha256(target.read_bytes()) != check["expected_sha256"]:
+                raise ReleaseError("local installed file acceptance failed")
+        checkpoint("after_local_static")
+        hooks.acceptance(executor["authenticated_acceptance"])
+        checkpoint("after_acceptance")
+        audit["status"] = "deployed"
+        audit["feature_postimage"] = BASE._capture_feature_row(
+            feature_db, feature["feature"],
+        )
+        audit["final_files"] = [
+            {"runtime_path": item["runtime_path"], "state": "file",
+             "sha256": _sha256(target.read_bytes())}
+            for item, _, target, _, _, _ in entries
+        ]
+        BASE._write_audit(backup / "audit.json", audit)
+        checkpoint("after_final_audit")
+    except BaseException as forward_error:
+        rollback_errors = []
+        try:
+            BASE._set_feature_row(
+                feature_db, feature["feature"], False,
+                feature["actor"] + ":rollback",
+            )
+        except BaseException as error:
+            rollback_errors.append("disable:" + type(error).__name__)
+        for (item, _, target, mode, uid, gid), saved in zip(entries, backups):
+            try:
+                if item["target_preimage_state"] == "file":
+                    BASE._atomic_install(saved, target, mode, os.replace, uid, gid)
+                    if _sha256(target.read_bytes()) != item["preimage_sha256"]:
+                        raise ReleaseError("restored preimage hash mismatch")
+                else:
+                    try:
+                        target_stat = os.lstat(target)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if not stat.S_ISREG(target_stat.st_mode):
+                            raise ReleaseError("new runtime target became unsafe")
+                        target.unlink()
+            except BaseException as error:
+                rollback_errors.append("file:" + type(error).__name__)
+        try:
+            BASE._restore_feature_row(feature_db, feature_snapshot)
+        except BaseException as error:
+            rollback_errors.append("feature:" + type(error).__name__)
+        try:
+            hooks.restart(service)
+            BASE._wait_for_rollback_health(
+                hooks, service, executor["health_url"],
+                executor["rollback_health_policy"],
+            )
+            hooks.probe_feature(
+                executor["health_url"], executor["health_feature_field"],
+                bool(feature_snapshot.get("enabled")),
+            )
+        except BaseException as error:
+            rollback_errors.append("service:" + type(error).__name__)
+        audit["status"] = "rollback_failed" if rollback_errors else "rolled_back"
+        audit["forward_error"] = type(forward_error).__name__
+        audit["rollback_errors"] = rollback_errors
+        try:
+            audit["feature_final"] = BASE._capture_feature_row(
+                feature_db, feature["feature"],
+            )
+            audit["final_files"] = []
+            for item, _, target, _, _, _ in entries:
+                if item["target_preimage_state"] == "absent" and not target.exists():
+                    audit["final_files"].append({
+                        "runtime_path": item["runtime_path"], "state": "absent",
+                    })
+                else:
+                    audit["final_files"].append({
+                        "runtime_path": item["runtime_path"], "state": "file",
+                        "sha256": _sha256(target.read_bytes()),
+                    })
+            BASE._write_audit(backup / "audit.json", audit)
+        except BaseException as error:
+            rollback_errors.append("audit:" + type(error).__name__)
+        if rollback_errors:
+            raise ReleaseError(
+                "forward release failed and rollback failed: %s"
+                % ",".join(rollback_errors)
+            ) from forward_error
+        raise
+
+    return {"status": "deployed", "head": release_head, "backup": str(backup)}
+
+
+def execute_locked_release(
+    manifest_path, source_root, target_root, backup_root, *, hooks=None,
+    replace=os.replace, verify_repository=True, checkpoint=None,
+    reviewed_head=None, merged_main=None, confirm_target=None,
+):
+    return _execute_manifest(
+        _load_manifest(manifest_path), source_root, target_root, backup_root,
+        hooks=hooks, replace=replace, verify_repository=verify_repository,
+        checkpoint=checkpoint, reviewed_head=reviewed_head,
+        merged_main=merged_main, confirm_target=confirm_target,
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Execute the locked private-domain video test release.",
+    )
+    parser.add_argument("manifest", type=pathlib.Path)
+    parser.add_argument("--source-root", type=pathlib.Path, required=True)
+    parser.add_argument("--target-root", type=pathlib.Path, default=pathlib.Path("/"))
+    parser.add_argument("--backup-root", type=pathlib.Path, required=True)
+    parser.add_argument("--reviewed-head", required=True)
+    parser.add_argument("--merged-main", required=True)
+    parser.add_argument("--confirm-target", required=True)
+    args = parser.parse_args(argv)
+    result = execute_locked_release(
+        args.manifest, args.source_root, args.target_root, args.backup_root,
+        reviewed_head=args.reviewed_head, merged_main=args.merged_main,
+        confirm_target=args.confirm_target,
+    )
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

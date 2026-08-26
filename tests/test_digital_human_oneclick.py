@@ -1378,9 +1378,12 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "/api/gen/digital-human-v2/plan", "/api/gen/audio/clone-vip",
             "/api/gen/digital-human-v2/audio-upload",
             "/api/gen/digital-human-v2/material-resolve",
+            "/api/gen/digital-human-v2/history?limit=20",
             "/api/gen/script_to_video/material-upload",
             "reference_images:photoData?[photoData]:[]", "motion:'low'", "speed:1,pitch:0,volume:1", "delivery:'natural'", "resolution:'1080p'", "ratio:'9:16'", "subtitle:false",
-            "body.reference_upload_ids=[customerUploads[index].upload_id]",
+            "body.allow_ai_materials=allowAi",
+            "body.customer_upload_ids=uploadIds",
+            "fields.digital_human_customer_upload_ids=plan.customer_upload_ids||[]",
             "DigitalHumanMaterialState.restore(state.customerUploads,state.phase)",
             "DigitalHumanOneClickState.persistableMaterials(state,customerUploads,materialRecoveryValid)",
             "resume:DigitalHumanOneClickState.resumeJob",
@@ -1396,6 +1399,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
             "material_asset_ids", "/api/gen/digital-human-v2/consent",
             "digital_human_consent_token",
             "photo_sha256", "voice_sha256", "consent_version",
+            'id="historyList"', "loadDigitalHumanHistory()",
         ):
             self.assertIn(marker, page)
         self.assertIn("合成本身 0 点", page)
@@ -1403,11 +1407,13 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("分析并预览方案", page)
         self.assertIn("确认方案并生成", page)
         self.assertIn(
-            "客户参考图（最高） → 飞书素材库 → 全网公开可用素材 → AI 补缺",
+            "顾客上传素材（必须全部使用） → 测试服固定本地素材库 → AI 生成图片",
             page,
         )
-        self.assertIn("有参考图的镜头将优先按参考图生成，不再查询飞书或全网素材", page)
-        self.assertIn("不上传也可以继续", page)
+        self.assertIn("上传的每一张图片都会按顺序直接进入成片", page)
+        self.assertIn('id="allowAiMaterials" type="checkbox"', page)
+        self.assertNotIn('id="allowAiMaterials" type="checkbox" checked', page)
+        self.assertNotIn("全网公开可用素材", page)
         self.assertIn('id="voiceSource"', page)
         self.assertIn("已有声音无需再次复刻", page)
         self.assertIn("DigitalHumanVoiceState.resolveLoaded(before,data.items||[])", page)
@@ -1420,7 +1426,7 @@ class DigitalHumanOneClickUiTests(unittest.TestCase):
         self.assertIn("放弃上次任务并重新设置", page)
         self.assertIn("重新生成可能再次扣点", page)
         self.assertIn("声音来源和样音已随当前任务锁定", page)
-        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),phase||state.phase,state)", page)
+        self.assertIn("DigitalHumanSetupState.applyControls(setupNodes(),activePhase,state)", page)
         self.assertIn("DigitalHumanSetupState.restart(state,window.confirm", page)
         self.assertIn("DigitalHumanSubmit.withSecurityRetry", page)
         self.assertIn("DigitalHumanSubmit.withCapacityRetry", page)

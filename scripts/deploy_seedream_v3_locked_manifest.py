@@ -7,6 +7,7 @@ the first write, then treats file installation, preflight and service restart
 as one rollback unit.
 """
 import argparse
+import decimal
 import hashlib
 import json
 import os
@@ -22,6 +23,11 @@ import urllib.request
 import uuid
 from pathlib import Path, PurePosixPath
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - the real release runtime is Linux.
+    pwd = None
+
 import verify_content_whisper_deployment as manifest_verify
 
 
@@ -29,6 +35,76 @@ AUTHORIZED_TARGET = "test@8.148.158.106"
 DEFAULT_BACKUP_ROOT = "/opt/huangque-deploy-backups"
 MANIFEST_REPOSITORY_PATHS = {
     "deploy/test-runtime/digital-human-material-seedream-v3-20260821.json",
+    "docs/release-manifests/digital-human-material-feishu-priority-20260823.json",
+}
+HEALTH_PHASE_STATUS_FIELDS = {
+    "pre-deployment": "pre_status_by_disposition",
+    "post-deployment": "post_expected_status",
+    "rollback": "rollback_status_by_disposition",
+}
+DIGITAL_HUMAN_REPOSITORY_PATH = "server/content_domains/digital_human_v2.py"
+DIGITAL_HUMAN_RUNTIME_PATH = (
+    "/home/ubuntu/content-api/content_domains/digital_human_v2.py"
+)
+START_DISPOSITIONS = frozenset({
+    "needs_install", "already_installed", "unchanged",
+})
+APPROVED_HEALTH_CONTRACT = {
+    "http://127.0.0.1:8096/api/gen/health": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 200,
+            "already_installed": 200,
+            "unchanged": 200,
+        },
+        "post_expected_status": 200,
+        "rollback_status_by_disposition": {
+            "needs_install": 200,
+            "already_installed": 200,
+            "unchanged": 200,
+        },
+    },
+    "http://127.0.0.1:8096/api/gen/history": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 401,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+        "post_expected_status": 401,
+        "rollback_status_by_disposition": {
+            "needs_install": 401,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+    },
+    "http://127.0.0.1:8096/api/gen/digital-human-v2/history": {
+        "target_repository_path": DIGITAL_HUMAN_REPOSITORY_PATH,
+        "target_runtime_path": DIGITAL_HUMAN_RUNTIME_PATH,
+        "pre_status_by_disposition": {
+            "needs_install": 404,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+        "post_expected_status": 401,
+        "rollback_status_by_disposition": {
+            "needs_install": 404,
+            "already_installed": 401,
+            "unchanged": 401,
+        },
+    },
+}
+APPROVED_HEALTH_URLS = frozenset(APPROVED_HEALTH_CONTRACT)
+FEISHU_RETRY_POLICY = {
+    "retryable_http_statuses": [429, 500, 502, 503, 504],
+    "max_attempts": 4,
+    "max_retry_after_seconds": 15,
+    "total_deadline_seconds": 60,
+    "fallback_backoff_seconds": [1, 2, 4],
+    "json_request_timeout_seconds": 15,
+    "attachment_request_timeout_seconds": 30,
 }
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 ENV_ASSIGNMENT_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
@@ -250,7 +326,8 @@ class ContentWhisperRelease:
             *, runner=None, health_getter=None, checkpoint=None,
             git_runner=None, reviewed_source_commit=None,
             reviewed_main_commit=None, monotonic=None, sleeper=None,
-            deployment_tool_root=None):
+            deployment_tool_root=None, service_environment_getter=None,
+            feishu_json_getter=None, feishu_media_getter=None):
         self.manifest = manifest
         self.source_root = Path(os.path.abspath(source_root))
         self.runtime = RuntimeFiles(runtime_root)
@@ -262,6 +339,11 @@ class ContentWhisperRelease:
         self.health_getter = health_getter or self._http_status
         self.monotonic = monotonic or time.monotonic
         self.sleeper = sleeper or time.sleep
+        self.service_environment_getter = (
+            service_environment_getter or self._service_environment
+        )
+        self.feishu_json_getter = feishu_json_getter or self._read_feishu_json
+        self.feishu_media_getter = feishu_media_getter or self._read_feishu_media
         self.deployment_tool_root = Path(os.path.abspath(
             deployment_tool_root or os.sep
         ))
@@ -658,11 +740,129 @@ class ContentWhisperRelease:
             raise ReleaseError("health retry interval must be between 0.1 and 5 seconds")
         return timeout, interval
 
-    def _verify_health(self, prefix=""):
+    @staticmethod
+    def _status_value(value, label):
+        if type(value) is not int or not 100 <= value <= 599:
+            raise ReleaseError("%s must be an HTTP status integer" % label)
+        return value
+
+    def _validated_start_disposition(self, check, start_states):
+        if not isinstance(start_states, list):
+            raise ReleaseError("health start states must be an explicit list")
+        manifest_targets = {
+            (entry["repository_path"], entry["runtime_path"]): entry
+            for entry in self.manifest.get("files", [])
+        }
+        if len(manifest_targets) != len(self.manifest.get("files", [])):
+            raise ReleaseError("manifest runtime target mapping is duplicated")
+        actual_targets = {}
+        for record in start_states:
+            if not isinstance(record, dict):
+                raise ReleaseError("health start state record must be an object")
+            key = (record.get("repository_path"), record.get("runtime_path"))
+            if key not in manifest_targets:
+                raise ReleaseError("health start state has an unknown runtime mapping")
+            if key in actual_targets:
+                raise ReleaseError("health start state runtime mapping is duplicated")
+            disposition = record.get("disposition")
+            if disposition not in START_DISPOSITIONS:
+                raise ReleaseError("health start state disposition is unknown")
+            entry = manifest_targets[key]
+            if disposition == "needs_install":
+                expected = (
+                    entry["target_preimage_state"],
+                    entry["target_preimage_sha256"],
+                    entry.get("target_preimage_blob"),
+                )
+            elif disposition == "already_installed":
+                expected = (
+                    "file", entry["expected_postimage_sha256"],
+                    entry["expected_postimage_blob"],
+                )
+            else:
+                preimage = (
+                    entry["target_preimage_state"],
+                    entry["target_preimage_sha256"],
+                    entry.get("target_preimage_blob"),
+                )
+                postimage = (
+                    "file", entry["expected_postimage_sha256"],
+                    entry["expected_postimage_blob"],
+                )
+                if preimage != postimage:
+                    raise ReleaseError(
+                        "unchanged disposition conflicts with manifest file locks"
+                    )
+                expected = preimage
+            actual = (
+                record.get("state"), record.get("sha256"), record.get("blob"),
+            )
+            if actual != expected:
+                raise ReleaseError(
+                    "health start state does not match manifest file lock"
+                )
+            actual_targets[key] = record
+        if set(actual_targets) != set(manifest_targets):
+            raise ReleaseError("health start state runtime mapping is incomplete")
+        target_key = (
+            check["target_repository_path"], check["target_runtime_path"],
+        )
+        if target_key not in actual_targets:
+            raise ReleaseError("health check target runtime mapping is missing")
+        return actual_targets[target_key]["disposition"]
+
+    def _health_expected_status(self, check, phase, status_field, start_states):
+        if HEALTH_PHASE_STATUS_FIELDS.get(phase) != status_field:
+            raise ReleaseError("health phase and status field do not match")
+        if status_field == "post_expected_status":
+            if start_states is not None:
+                raise ReleaseError("post-deployment health must not use start states")
+            return self._status_value(
+                check.get(status_field), status_field,
+            )
+        disposition = self._validated_start_disposition(check, start_states)
+        statuses = check.get(status_field)
+        if not isinstance(statuses, dict) or set(statuses) != START_DISPOSITIONS:
+            raise ReleaseError(
+                "%s must lock every start disposition" % status_field
+            )
+        return self._status_value(statuses[disposition], status_field)
+
+    def _validate_health_contract(self):
+        checks = self.manifest.get("health_checks")
+        expected_fields = {
+            "url", "target_repository_path", "target_runtime_path",
+            "pre_status_by_disposition", "post_expected_status",
+            "rollback_status_by_disposition",
+        }
+        if (not isinstance(checks, list) or len(checks) != 3
+                or any(not isinstance(check, dict)
+                       or set(check) != expected_fields for check in checks)):
+            raise ReleaseError("health checks must use the exact phase-aware contract")
+        urls = [str(check["url"]) for check in checks]
+        if len(set(urls)) != len(urls) or set(urls) != APPROVED_HEALTH_URLS:
+            raise ReleaseError("health checks must lock the three approved local URLs")
+        actual_contract = {
+            check["url"]: {
+                key: value for key, value in check.items() if key != "url"
+            }
+            for check in checks
+        }
+        if actual_contract != APPROVED_HEALTH_CONTRACT:
+            raise ReleaseError("health phase statuses do not match the locked contract")
+        for check in checks:
+            self._health_expected_status(
+                check, "post-deployment", "post_expected_status", None,
+            )
+
+    def _verify_health(self, *, phase, status_field, start_states):
+        self._validate_health_contract()
         timeout, interval = self._health_probe_policy()
         deadline = self.monotonic() + timeout
         for check in self.manifest["health_checks"]:
-            expected = int(check["expected_status"])
+            expected = self._health_expected_status(
+                check, phase, status_field, start_states,
+            )
             last_status = None
             last_error = None
             while True:
@@ -681,17 +881,13 @@ class ContentWhisperRelease:
                         else "status %s" % last_status
                     )
                     raise ReleaseError(
-                        "%shealth readiness timeout for %s: expected %s, last %s" %
-                        (prefix, check["url"], expected, detail)
+                        "%s health readiness timeout for %s: expected %s, last %s" %
+                        (phase, check["url"], expected, detail)
                     )
                 self.sleeper(min(interval, remaining))
 
     def _http_status(self, url):
-        locked_urls = {
-            str(check.get("url") or "")
-            for check in self.manifest.get("health_checks", [])
-            if isinstance(check, dict)
-        }
+        locked_urls = APPROVED_HEALTH_URLS
         parsed = urllib.parse.urlsplit(url)
         if (url not in locked_urls
                 or parsed.scheme != "http"
@@ -701,7 +897,11 @@ class ContentWhisperRelease:
                 or parsed.password is not None
                 or parsed.query
                 or parsed.fragment
-                or parsed.path not in {"/api/gen/health", "/api/gen/history"}):
+                or parsed.path not in {
+                    "/api/gen/health",
+                    "/api/gen/history",
+                    "/api/gen/digital-human-v2/history",
+                }):
             raise ReleaseError("health probe URL is not an approved local endpoint")
         request = urllib.request.Request(url, headers={"User-Agent": "hq-release-probe"})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -710,6 +910,326 @@ class ContentWhisperRelease:
                 return int(response.status)
         except urllib.error.HTTPError as exc:
             return int(exc.code)
+
+    def _service_environment(self):
+        contract = self.manifest.get("configuration_requirements", {}).get(
+            "service_runtime", {}
+        )
+        service = str(self.manifest.get("target", {}).get("service") or "")
+        expected_user = str(contract.get("user") or "")
+        environment_file = str(contract.get("environment_file") or "")
+        if (service != "huangque-content.service" or expected_user != "ubuntu"
+                or environment_file != "/home/ubuntu/content-api/content.env"):
+            raise ReleaseError("locked service runtime contract is missing or invalid")
+
+        def show(property_name):
+            try:
+                result = subprocess.run(
+                    ["/usr/bin/systemctl", "show", service,
+                     "--property=" + property_name, "--value"],
+                    check=False, capture_output=True, text=True, timeout=30,
+                )
+            except OSError as exc:
+                raise ReleaseError(
+                    "could not inspect the locked service runtime"
+                ) from exc
+            if result.returncode:
+                raise ReleaseError(
+                    "could not inspect the locked service runtime: %s" % property_name
+                )
+            return result.stdout.strip()
+
+        if show("User") != expected_user:
+            raise ReleaseError("service runtime user does not match the locked contract")
+        if environment_file not in show("EnvironmentFiles"):
+            raise ReleaseError(
+                "service EnvironmentFile does not match the locked contract"
+            )
+        try:
+            pid = int(show("MainPID"))
+            if pwd is None:
+                raise ReleaseError("service identity inspection requires Linux")
+            account = pwd.getpwnam(expected_user)
+            process = Path("/proc") / str(pid)
+            if pid <= 0 or os.stat(process).st_uid != account.pw_uid:
+                raise ReleaseError(
+                    "service process identity does not match the locked runtime user"
+                )
+            raw = (process / "environ").read_bytes()
+        except (KeyError, OSError, ValueError) as exc:
+            raise ReleaseError(
+                "could not read the active service environment fail-closed"
+            ) from exc
+        if len(raw) > 1024 * 1024:
+            raise ReleaseError("active service environment is unexpectedly large")
+        environment = {}
+        for item in raw.split(b"\0"):
+            if not item:
+                continue
+            key, separator, value = item.partition(b"=")
+            if not separator:
+                continue
+            try:
+                environment[key.decode("utf-8")] = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ReleaseError(
+                    "active service environment contains invalid text"
+                ) from exc
+        return environment
+
+    @staticmethod
+    def _feishu_proxy_handler(environment):
+        proxies = {}
+        for scheme in ("http", "https"):
+            value = str(
+                environment.get(scheme + "_proxy")
+                or environment.get(scheme.upper() + "_PROXY") or ""
+            ).strip()
+            if value:
+                proxies[scheme] = value
+        return urllib.request.ProxyHandler(proxies)
+
+    @staticmethod
+    def _read_feishu_json(request, environment, timeout):
+        opener = urllib.request.build_opener(
+            ContentWhisperRelease._feishu_proxy_handler(environment)
+        )
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise ReleaseError(
+                "Feishu operational preflight connection failed: %s" %
+                type(exc).__name__
+            ) from exc
+        if len(raw) > 2 * 1024 * 1024:
+            raise ReleaseError("Feishu operational preflight response is too large")
+        try:
+            result = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReleaseError(
+                "Feishu operational preflight returned invalid JSON"
+            ) from exc
+        if not isinstance(result, dict):
+            raise ReleaseError("Feishu operational preflight returned invalid JSON")
+        return result
+
+    @staticmethod
+    def _read_feishu_media(request, environment, timeout):
+        allowed_mimes = {
+            "image/jpeg", "image/png", "image/webp", "video/mp4",
+            "video/webm", "video/quicktime",
+        }
+        opener = urllib.request.build_opener(
+            ContentWhisperRelease._feishu_proxy_handler(environment)
+        )
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                mime = str(response.headers.get("Content-Type") or "").split(
+                    ";", 1
+                )[0].lower()
+                raw = response.read(20 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            raise ReleaseError(
+                "Feishu attachment preflight connection failed: %s" %
+                type(exc).__name__
+            ) from exc
+        if not raw or len(raw) > 20 * 1024 * 1024:
+            raise ReleaseError("Feishu attachment is empty or exceeds 20MB")
+        if mime not in allowed_mimes:
+            raise ReleaseError("Feishu attachment MIME is not an approved material type")
+        return mime
+
+    def _validate_feishu_retry_policy(self):
+        policy = self.manifest.get("configuration_requirements", {}).get(
+            "feishu", {},
+        ).get("retry_policy")
+        if policy != FEISHU_RETRY_POLICY:
+            raise ReleaseError("Feishu retry policy does not match the locked contract")
+        return policy
+
+    @staticmethod
+    def _feishu_retry_delay(error, attempt, policy):
+        fallback = policy["fallback_backoff_seconds"][attempt - 1]
+        raw = None
+        if error.headers is not None:
+            raw = error.headers.get("Retry-After")
+        if raw is None:
+            return float(fallback)
+        try:
+            value = decimal.Decimal(str(raw).strip())
+        except (decimal.InvalidOperation, ValueError):
+            return float(fallback)
+        if not value.is_finite() or value < 0:
+            return float(fallback)
+        return min(float(value), float(policy["max_retry_after_seconds"]))
+
+    def _feishu_request_with_retry(
+            self, getter, request, environment, request_label,
+            request_timeout_cap, deadline=None):
+        policy = self._validate_feishu_retry_policy()
+        if deadline is None:
+            deadline = self.monotonic() + policy["total_deadline_seconds"]
+        retryable = set(policy["retryable_http_statuses"])
+        max_attempts = policy["max_attempts"]
+        for attempt in range(1, max_attempts + 1):
+            if self.monotonic() >= deadline:
+                raise ReleaseError(
+                    "Feishu %s retry deadline exhausted after %s attempts" %
+                    (request_label, attempt - 1)
+                )
+            try:
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt - 1)
+                    )
+                result = getter(
+                    request, environment,
+                    min(float(request_timeout_cap), remaining),
+                )
+                if self.monotonic() >= deadline:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt)
+                    )
+                return result
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                if status not in retryable or attempt == max_attempts:
+                    raise ReleaseError(
+                        "Feishu %s HTTP status %s after %s attempt%s" %
+                        (request_label, status, attempt,
+                         "" if attempt == 1 else "s")
+                    ) from None
+                delay = self._feishu_retry_delay(exc, attempt, policy)
+                remaining = deadline - self.monotonic()
+                if remaining <= 0:
+                    raise ReleaseError(
+                        "Feishu %s retry deadline exhausted after %s attempts" %
+                        (request_label, attempt)
+                    ) from None
+                self.sleeper(min(
+                    delay, float(policy["max_retry_after_seconds"]), remaining,
+                ))
+
+    @staticmethod
+    def _attachment_tokens(value, output):
+        if isinstance(value, dict):
+            token = str(value.get("file_token") or "").strip()
+            if token:
+                output.append(token)
+            for child in value.values():
+                ContentWhisperRelease._attachment_tokens(child, output)
+        elif isinstance(value, list):
+            for child in value:
+                ContentWhisperRelease._attachment_tokens(child, output)
+
+    def _verify_feishu_operational(self, phase):
+        requirements = self.manifest.get("configuration_requirements", {})
+        config = requirements.get("feishu", {})
+        if config.get("operational_probe_required") is not True:
+            raise ReleaseError("Feishu operational probe must be required")
+        retry_policy = self._validate_feishu_retry_policy()
+        retry_deadline = (
+            self.monotonic() + retry_policy["total_deadline_seconds"]
+        )
+        environment = self.service_environment_getter()
+        credential_names = config.get("secret_environment_names")
+        if credential_names != ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]:
+            raise ReleaseError("Feishu credential contract is invalid")
+        credentials = {
+            name: str(environment.get(name) or "").strip()
+            for name in credential_names
+        }
+        if any(not value for value in credentials.values()):
+            raise ReleaseError(
+                "%s Feishu credentials are missing from the service environment" % phase
+            )
+        app_token = str(environment.get(
+            config.get("app_token_environment_name"),
+            config.get("app_token_default") or "",
+        ) or "").strip()
+        table_id = str(environment.get(
+            config.get("table_environment_name"),
+            config.get("table_default") or "",
+        ) or "").strip()
+        view_id = str(environment.get(
+            config.get("view_environment_name"),
+            config.get("view_default") or "",
+        ) or "").strip()
+        if not app_token or not table_id or not view_id:
+            raise ReleaseError("%s Feishu app, table or view is missing" % phase)
+        token_result = self._feishu_request_with_retry(
+            self.feishu_json_getter, urllib.request.Request(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            data=json.dumps({
+                "app_id": credentials["FEISHU_APP_ID"],
+                "app_secret": credentials["FEISHU_APP_SECRET"],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+            ), environment, "token request",
+            retry_policy["json_request_timeout_seconds"], retry_deadline,
+        )
+        if int(token_result.get("code") or 0) != 0:
+            raise ReleaseError("%s Feishu credential verification failed" % phase)
+        tenant_token = str(token_result.get("tenant_access_token") or "").strip()
+        if not tenant_token:
+            raise ReleaseError("%s Feishu credential verification returned no token" % phase)
+        attachment_tokens = []
+        page_token = ""
+        for page_index in range(20):
+            query = {"page_size": 100, "view_id": view_id}
+            if page_token:
+                query["page_token"] = page_token
+            url = (
+                "https://open.feishu.cn/open-apis/bitable/v1/apps/%s/tables/%s/records?%s" %
+                (urllib.parse.quote(app_token, safe=""),
+                 urllib.parse.quote(table_id, safe=""),
+                 urllib.parse.urlencode(query))
+            )
+            result = self._feishu_request_with_retry(
+                self.feishu_json_getter, urllib.request.Request(
+                url, headers={"Authorization": "Bearer " + tenant_token},
+                ), environment, "records request",
+                retry_policy["json_request_timeout_seconds"], retry_deadline,
+            )
+            if int(result.get("code") or 0) != 0:
+                raise ReleaseError(
+                    "%s Feishu table or view permission verification failed" % phase
+                )
+            data = result.get("data") or {}
+            if not isinstance(data, dict) or not isinstance(data.get("items", []), list):
+                raise ReleaseError("%s Feishu records response is invalid" % phase)
+            for record in data.get("items", []):
+                self._attachment_tokens(record, attachment_tokens)
+            if not data.get("has_more"):
+                break
+            next_page = str(data.get("page_token") or "").strip()
+            if not next_page or next_page == page_token:
+                raise ReleaseError("%s Feishu pagination cursor is invalid" % phase)
+            page_token = next_page
+            if page_index == 19:
+                raise ReleaseError("%s Feishu pagination exceeds the safety limit" % phase)
+        if not attachment_tokens:
+            raise ReleaseError("%s Feishu view contains no downloadable attachment" % phase)
+        media_url = (
+            "https://open.feishu.cn/open-apis/drive/v1/medias/%s/download" %
+            urllib.parse.quote(attachment_tokens[0], safe="")
+        )
+        self._feishu_request_with_retry(
+            self.feishu_media_getter, urllib.request.Request(
+                media_url, headers={"Authorization": "Bearer " + tenant_token},
+            ), environment, "attachment request",
+            retry_policy["attachment_request_timeout_seconds"], retry_deadline,
+        )
+        self.checkpoint("%s_feishu_operational" % phase)
 
     def _restore_all(self):
         failures = []
@@ -765,7 +1285,11 @@ class ContentWhisperRelease:
             try:
                 self._run_stage("rollback_restart")
                 self._run_stage("rollback_service_active")
-                self._verify_health("rollback ")
+                self._verify_health(
+                    phase="rollback",
+                    status_field="rollback_status_by_disposition",
+                    start_states=self.start_states,
+                )
             except Exception as exc:
                 failures.append("rollback service: %s" % exc)
         if failures:
@@ -783,12 +1307,18 @@ class ContentWhisperRelease:
         self._preflight_release_commands()
         payloads = self._source_payloads()
         self._health_probe_policy()
+        self._validate_health_contract()
         self.start_states = manifest_verify.classify_start_states(
             self.manifest, self.runtime.root,
         )
         self.checkpoint("start_state_complete")
         self._run_stage("pre_service_active")
-        self._verify_health("pre-deployment ")
+        self._verify_health(
+            phase="pre-deployment",
+            status_field="pre_status_by_disposition",
+            start_states=self.start_states,
+        )
+        self._verify_feishu_operational("pre-deployment")
         self.checkpoint("pre_health")
         self._backup_all(self.start_states)
         if manifest_verify.classify_start_states(
@@ -805,7 +1335,12 @@ class ContentWhisperRelease:
                 self.restart_attempted = True
                 self._run_stage("restart")
                 self._run_stage("service_active")
-            self._verify_health()
+            self._verify_health(
+                phase="post-deployment",
+                status_field="post_expected_status",
+                start_states=None,
+            )
+            self._verify_feishu_operational("post-restart")
             self.checkpoint("health")
         except Exception as release_error:
             try:

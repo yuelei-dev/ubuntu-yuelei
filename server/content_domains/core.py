@@ -17,7 +17,7 @@ from contextlib import closing
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tikhub  # 同目录 TikHub 客户端（抖音/小红书/视频号 采集+获客）
-import mimetypes; from . import assets_store, jobs_store, startup_recovery, submission_idempotency, miniprogram_security, inspiration_likes, history, notifications, cli_gateway, cli_uploads, error_contract  # 领域存储模块均无反向依赖
+import mimetypes; from . import assets_store, jobs_store, startup_recovery, submission_idempotency, miniprogram_security, inspiration_likes, history, notifications, cli_gateway, cli_uploads, error_contract, private_domain_media  # 领域存储模块均无反向依赖
 try:
     from . import asset_batch, feature_flags, pricing
 except ImportError:  # Running core.py directly during local checks.
@@ -4143,6 +4143,25 @@ class H(BaseHTTPRequestHandler):
             try: offset = int((q.get("offset") or ["0"])[0])
             except Exception: offset = 0
             return self._send(200, {"items": video_domain.list_video_assets(user["username"], lim, offset)})
+        if p == "/api/gen/private-domain/materials":
+            user = verify(self._token())
+            if not user: return self._send(401, {"detail": "未登录"})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try: lim = int((q.get("limit") or ["300"])[0])
+            except Exception: lim = 300
+            items = private_domain_media.list_materials(lim)
+            return self._send(200, {"items": items, "available": bool(items)})
+        if p == "/api/gen/private-domain/material":
+            user = verify(self._token())
+            if not user: return self._send(401, {"detail": "未登录"})
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            fp = private_domain_media.resolve_material((q.get("path") or [""])[0])
+            if fp is None: return self._send(404, {"detail": "no file"})
+            try:
+                _send_out_file(self, fp, sensitive=True)
+            finally:
+                fp.close()
+            return
         if p == "/api/gen/audio/slots":
             user = verify(self._token())
             if not user: return self._send(401, {"detail": "\u672a\u767b\u5f55"})

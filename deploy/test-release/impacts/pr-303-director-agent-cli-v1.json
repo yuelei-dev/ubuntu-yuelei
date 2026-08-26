@@ -1,0 +1,20 @@
+{
+  "external_checks": [],
+  "health_checks": [
+    "content-health"
+  ],
+  "migrations": [],
+  "pre_health_checks": [
+    "content-health"
+  ],
+  "release_id": "pr-303-director-agent-cli-v1",
+  "required_env": {},
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "runtime_changes": [
+    "server/content_domains/director_agent.py",
+    "server/content_domains/director_cli.py"
+  ],
+  "schema_version": 1
+}

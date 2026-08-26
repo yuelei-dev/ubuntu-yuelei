@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 
 from .core import OUT_DIR, SMART_MONTAGE_MAX_RUNTIME, adb, closing, jdb
@@ -837,7 +838,8 @@ def dispatch_http(handler, method, verify_token, must_change_password):
                      digital_human_v2.PLAN_PATH,
                      digital_human_v2.CONSENT_PATH,
                      digital_human_v2.AUDIO_UPLOAD_PATH,
-                     digital_human_v2.MATERIAL_RESOLVE_PATH}:
+                     digital_human_v2.MATERIAL_RESOLVE_PATH,
+                     digital_human_v2.HISTORY_PATH}:
         return False
     user = verify_token(handler._token())
     if not user:
@@ -845,6 +847,22 @@ def dispatch_http(handler, method, verify_token, must_change_password):
         return True
     if must_change_password(user):
         handler._send(403, {"detail": "请先修改初始密码"})
+        return True
+    if path == digital_human_v2.HISTORY_PATH:
+        if method != "GET":
+            handler._method_not_allowed()
+            return True
+        try:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(handler.path).query)
+            handler._send(200, digital_human_v2.history_response(
+                user["username"],
+                (query.get("limit") or [20])[0],
+                (query.get("offset") or [0])[0],
+            ))
+        except digital_human_oneclick.DigitalHumanRequestError as exc:
+            handler._send(exc.status, {"detail": str(exc)[:220], "code": exc.code})
+        except ValueError as exc:
+            handler._send(400, {"detail": str(exc)[:220]})
         return True
     if path == digital_human_oneclick.PLAN_PATH:
         if method != "POST":
