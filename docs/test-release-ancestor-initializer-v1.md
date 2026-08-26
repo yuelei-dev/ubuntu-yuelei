@@ -32,7 +32,7 @@ administrator must install:
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
-  "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
+  "boundary_sha256": "5cc6fba20a5f575d955ebb861e8b25fd82a0b0639504c5219a6b836b5925b2e7",
   "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
   "boundary_contract_sha256": "98889991d7b2db6f151ff1671b17670e3e62a1b1bc5deee25d921f58aba79e19",
   "launcher": "/usr/local/sbin/huangque-release-test-initialize-ancestor-v1",
@@ -80,6 +80,13 @@ The reviewed contract binds the observed `/home/ubuntu` parent to exact mode
 The Hermes releases parent `/home/ubuntu/hermes-ip12-releases` is bound to
 root:root `0755`, while the selected release directory remains ubuntu:ubuntu
 `0775` and the `/home/ubuntu/hermes-web` link remains root:root `0777`.
+
+Mutable regular runtime data, including SQLite databases, is validated without
+reading its content: the boundary-aware engine locks the real parent chain and
+uses `lstat`, `open(O_NOFOLLOW)`, `fstat`, and a second path/parent inspection
+to require one stable regular-file identity, mode, owner, and group. Logical
+file size therefore does not determine initializer memory use. Managed code
+continues through the immutable phase-one full-content SHA-256 path.
 
 Upgrade order is boundary module, boundary JSON, initializer, launcher, then the
 private bootstrap in one root-controlled maintenance operation. Verify every

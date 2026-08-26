@@ -272,5 +272,137 @@ class ExternalBoundaryContractTests(unittest.TestCase):
         self.assertTrue(policy.governs_repository("server/hermes_ip12/app.py"))
 
 
+@unittest.skipUnless(os.name == "posix", "requires POSIX no-follow file semantics")
+class MutableRuntimeMetadataPosixTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.runtime_path = "/home/ubuntu/content-api/content_jobs.db"
+        self.target = self.root / self.runtime_path.lstrip("/")
+        self.target.parent.mkdir(parents=True)
+        self.target.touch()
+        self.target.chmod(0o640)
+        self.uid = os.geteuid()
+        self.gid = os.getegid()
+
+        class RuntimeCatalog:
+            @staticmethod
+            def mappings(_subject, repository_path, strict_candidate=True):
+                return [repository_path]
+
+        class ReleaseError(RuntimeError):
+            pass
+
+        class ReleaseEngine:
+            def __init__(subject, *, owner_resolver=None, group_resolver=None):
+                subject.runtime_root = self.root
+                subject.catalog = types.SimpleNamespace(runtime_data_contracts=[{
+                    "path": self.runtime_path,
+                    "kind": "sqlite_file",
+                    "owner": "ubuntu",
+                    "group": "ubuntu",
+                    "allowed_modes": frozenset({0o640}),
+                    "required": True,
+                }])
+                subject.owner_resolver = owner_resolver or (lambda _name: self.uid)
+                subject.group_resolver = group_resolver or (lambda _name: self.gid)
+
+            def _runtime_inventory(subject):
+                return set(), set()
+
+        phase = types.SimpleNamespace(
+            RuntimeCatalog=RuntimeCatalog, ReleaseEngine=ReleaseEngine,
+            ReleaseError=ReleaseError,
+            _mapped_path=lambda root, path: Path(root) / path.lstrip("/"),
+            _assert_real_parents=self._assert_real_parents,
+            collect_release_impact=lambda *_args, **_kwargs: {"ok": True},
+        )
+        catalog = types.SimpleNamespace(
+            rules=[], inventory_roots=(),
+            runtime_data_contracts=ReleaseEngine().catalog.runtime_data_contracts,
+        )
+        _catalog, self.engine_class, _policy = boundaries.install(
+            phase, catalog, {
+                "schema_version": 1,
+                "external_code_roots": [],
+                "shared_runtime_data_links": [],
+                "shared_link_defaults": CONTRACT["shared_link_defaults"],
+            }, runtime_root=self.root,
+            owner_resolver=lambda _name: self.uid,
+            group_resolver=lambda _name: self.gid,
+        )
+
+    @staticmethod
+    def _assert_real_parents(root, target, create=False):
+        root = Path(os.path.abspath(root))
+        current = root
+        for part in Path(target).parent.relative_to(root).parts:
+            current /= part
+            info = os.lstat(current)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                raise RuntimeError("runtime parent contains a symbolic link or non-directory")
+
+    def engine(self, *, owner_resolver=None, group_resolver=None):
+        return self.engine_class(
+            owner_resolver=owner_resolver, group_resolver=group_resolver,
+        )
+
+    def test_large_sparse_sqlite_is_metadata_only_and_does_not_read_content(self):
+        logical_size = 3 * 1024 * 1024 * 1024
+        with self.target.open("r+b") as stream:
+            stream.truncate(logical_size)
+        self.assertEqual(logical_size, self.target.stat().st_size)
+        with mock.patch.object(
+                boundaries.os, "read",
+                side_effect=AssertionError("mutable runtime data must not be read")) as reader:
+            self.assertEqual(set(), self.engine()._runtime_data_drift())
+        reader.assert_not_called()
+
+    def test_symlink_and_parent_symlink_fail_closed(self):
+        replacement = self.target.with_name("replacement.db")
+        replacement.touch()
+        replacement.chmod(0o640)
+        self.target.unlink()
+        self.target.symlink_to(replacement.name)
+        with self.assertRaisesRegex(RuntimeError, self.runtime_path):
+            self.engine()._runtime_data_drift()
+        self.target.unlink()
+        real_parent = self.target.parent.with_name("content-api-real")
+        self.target.parent.rename(real_parent)
+        self.target.parent.symlink_to(real_parent.name, target_is_directory=True)
+        with self.assertRaisesRegex(RuntimeError, "runtime parent"):
+            self.engine()._runtime_data_drift()
+
+    def test_inode_replacement_during_open_fails_closed(self):
+        real_fstat = boundaries.os.fstat
+        replaced = False
+
+        def replace_after_open(descriptor):
+            nonlocal replaced
+            info = real_fstat(descriptor)
+            if not replaced:
+                replaced = True
+                self.target.rename(self.target.with_name("old.db"))
+                self.target.touch()
+                self.target.chmod(0o640)
+            return info
+
+        with mock.patch.object(boundaries.os, "fstat", side_effect=replace_after_open), \
+                self.assertRaisesRegex(RuntimeError, "changed while it was inspected"):
+            self.engine()._runtime_data_drift()
+
+    def test_mode_owner_and_group_drift_are_reported(self):
+        self.target.chmod(0o600)
+        self.assertEqual({self.runtime_path}, self.engine()._runtime_data_drift())
+        self.target.chmod(0o640)
+        self.assertEqual({self.runtime_path}, self.engine(
+            owner_resolver=lambda _name: self.uid + 1,
+        )._runtime_data_drift())
+        self.assertEqual({self.runtime_path}, self.engine(
+            group_resolver=lambda _name: self.gid + 1,
+        )._runtime_data_drift())
+
+
 if __name__ == "__main__":
     unittest.main()

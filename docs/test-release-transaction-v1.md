@@ -28,7 +28,7 @@ must be root-owned, mode `0600`, and contain exactly:
   "phase_one_entrypoint": "/usr/local/libexec/huangque-release/release_test.py",
   "phase_one_sha256": "d740f5e1656caebf67a33ee52aa6c731433886290a7bf8badd8b307126492abb",
   "boundary_entrypoint": "/usr/local/libexec/huangque-release/test_release_external_boundaries_v1.py",
-  "boundary_sha256": "1d32acff0033ae256147b7641372f6ee0431cfcfdcbce52ba2d860828f56d855",
+  "boundary_sha256": "5cc6fba20a5f575d955ebb861e8b25fd82a0b0639504c5219a6b836b5925b2e7",
   "boundary_contract": "/usr/local/share/huangque-release/test_release_external_boundaries_v1.json",
   "boundary_contract_sha256": "98889991d7b2db6f151ff1671b17670e3e62a1b1bc5deee25d921f58aba79e19",
   "launcher": "/usr/local/sbin/huangque-release-test-transaction",
@@ -127,6 +127,12 @@ The observed `/home/ubuntu` parent is locked to exact mode `0751`; `0755`,
 The Hermes releases parent is separately locked to root:root `0755`; its
 selected release directory remains ubuntu:ubuntu `0775`, so parent ownership
 cannot be accidentally inferred from the child release ownership.
+
+The same boundary adapter validates mutable regular runtime data with metadata
+only. It snapshots every real parent, opens the final path with `O_NOFOLLOW`,
+compares `lstat`/`fstat` identity and permission metadata before and after the
+open, and never reads database contents. Managed transaction targets retain
+their existing complete byte hash and preimage/postimage checks.
 
 Upgrade the boundary module and JSON first, then transaction entrypoint and
 launcher, and finally atomically replace the private bootstrap. Do not run apply

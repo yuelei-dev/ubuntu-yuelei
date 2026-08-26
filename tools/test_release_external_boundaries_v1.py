@@ -59,6 +59,76 @@ def _identity(info, *, stable_object=True):
     return value
 
 
+def _stable_metadata(info):
+    return (
+        int(info.st_dev), int(info.st_ino), stat.S_IFMT(info.st_mode),
+        stat.S_IMODE(info.st_mode), int(info.st_uid), int(info.st_gid),
+    )
+
+
+def _real_parent_snapshot(phase_one, root, target):
+    root = Path(os.path.abspath(root))
+    phase_one._assert_real_parents(root, target)
+    root_info = os.lstat(root)
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise phase_one.ReleaseError("runtime root must be a real directory")
+    records = [(str(root), _stable_metadata(root_info))]
+    current = root
+    for part in Path(target).parent.relative_to(root).parts:
+        current /= part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise phase_one.ReleaseError(
+                "runtime parent contains a symbolic link or non-directory"
+            )
+        records.append((str(current), _stable_metadata(info)))
+    return tuple(records)
+
+
+def _read_mutable_regular_metadata(phase_one, root, runtime_path):
+    """Open and validate a mutable file without reading any content bytes."""
+    target = phase_one._mapped_path(root, runtime_path)
+    parents_before = _real_parent_snapshot(phase_one, root, target)
+    try:
+        before = os.lstat(target)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise phase_one.ReleaseError(
+            "runtime target is not a regular file: %s" % runtime_path
+        )
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
+             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        descriptor = os.open(target, flags)
+    except OSError as exc:
+        raise phase_one.ReleaseError(
+            "runtime target changed while it was opened: %s" % runtime_path
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        try:
+            after = os.lstat(target)
+            parents_after = _real_parent_snapshot(phase_one, root, target)
+        except OSError as exc:
+            raise phase_one.ReleaseError(
+                "runtime target changed while it was inspected: %s" % runtime_path
+            ) from exc
+        if (not stat.S_ISREG(opened.st_mode)
+                or _stable_metadata(before) != _stable_metadata(opened)
+                or _stable_metadata(after) != _stable_metadata(opened)
+                or parents_before is None or parents_after != parents_before):
+            raise phase_one.ReleaseError(
+                "runtime target changed while it was inspected: %s" % runtime_path
+            )
+        return opened
+    finally:
+        os.close(descriptor)
+
+
 class ExternalBoundaryPolicy:
     def __init__(self, data, *, runtime_root="/", owner_resolver=None, group_resolver=None):
         if (not isinstance(data, dict)
@@ -305,6 +375,38 @@ def install(phase_one, catalog, contract, *, runtime_root="/", owner_resolver=No
     phase_one.collect_release_impact = collect
 
     class BoundaryAwareEngine(phase_one.ReleaseEngine):
+        def _runtime_data_drift(self):
+            drift = set()
+            for contract in self.catalog.runtime_data_contracts:
+                runtime_path = contract["path"].rstrip("/")
+                target = phase_one._mapped_path(self.runtime_root, runtime_path)
+                expected_directory = contract["kind"] == "mutable_directory"
+                if expected_directory:
+                    phase_one._assert_real_parents(self.runtime_root, target)
+                    try:
+                        info = os.lstat(target)
+                    except FileNotFoundError:
+                        if contract["required"]:
+                            drift.add(runtime_path)
+                        continue
+                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                        drift.add(runtime_path)
+                        continue
+                else:
+                    info = _read_mutable_regular_metadata(
+                        phase_one, self.runtime_root, runtime_path,
+                    )
+                    if info is None:
+                        if contract["required"]:
+                            drift.add(runtime_path)
+                        continue
+                if os.name == "posix" and (
+                        stat.S_IMODE(info.st_mode) not in contract["allowed_modes"]
+                        or info.st_uid != self.owner_resolver(contract["owner"])
+                        or info.st_gid != self.group_resolver(contract["group"])):
+                    drift.add(runtime_path)
+            return drift
+
         def external_boundary_snapshot(self):
             try:
                 return policy.snapshot()
