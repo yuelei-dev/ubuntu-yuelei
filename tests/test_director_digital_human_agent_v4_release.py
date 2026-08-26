@@ -16,11 +16,11 @@ from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXECUTOR = (
-    ROOT / "scripts/deploy_director_digital_human_agent_v3_locked_manifest.py"
+    ROOT / "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py"
 )
 BASE_EXECUTOR = ROOT / "scripts/deploy_director_locked_manifest.py"
 MANIFEST = (
-    ROOT / "deploy/test-runtime/director-digital-human-agent-v3-20260823.json"
+    ROOT / "release-manifests/test-runtime/director-digital-human-agent-v4-20260826.json"
 )
 HISTORICAL_BASE_LOCK = {
     "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -83,6 +83,7 @@ class FakeHooks:
         self._record("acceptance")
         if specification.get("expected_action") != {
             "type": "fill_field", "field": "digital_human_script",
+            "value": "发布验收数字人口播",
         }:
             raise AssertionError("acceptance does not prove the digital-human fill")
 
@@ -167,7 +168,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
 
     def test_locked_manifest_covers_exact_four_file_delta_and_executors(self):
         self.assertEqual(
-            "director_digital_human_agent_four_file_v3",
+            "director_digital_human_agent_four_file_v4",
             self.base_manifest["release_executor"]["contract"],
         )
         self.assertEqual(
@@ -175,9 +176,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
             {item["repository_path"] for item in self.base_manifest["files"]},
         )
         self.assertEqual(4, len(self.base_manifest["files"]))
-        development_base = self.base_manifest["expected_preimage"][
-            "development_base_commit"
-        ]
+        development_base = self.base_manifest["expected_preimage"]["online_main_commit"]
         for item in self.base_manifest["files"]:
             data = (ROOT / item["repository_path"]).read_bytes()
             self.assertEqual(item["postimage_blob"], git_blob(data))
@@ -210,6 +209,10 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
         base_data = BASE_EXECUTOR.read_bytes()
         self.assertEqual(HISTORICAL_BASE_LOCK["git_blob"], git_blob(base_data))
         self.assertEqual(HISTORICAL_BASE_LOCK["sha256"], sha256(base_data))
+        for lock in self.base_manifest["release_contract_sources"]:
+            data = (ROOT / lock["repository_path"]).read_bytes()
+            self.assertEqual(lock["git_blob"], git_blob(data))
+            self.assertEqual(lock["sha256"], sha256(data))
 
     def test_public_entry_rejects_every_other_manifest_path(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -230,7 +233,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
             )
         feature = self._feature_row()
         self.assertEqual(1, feature[1])
-        self.assertEqual("release:director-dh-agent-v3", feature[2])
+        self.assertEqual("release:director-dh-agent-v4", feature[2])
         self.assertEqual(1, sum(call.startswith("restart:") for call in hooks.calls))
         self.assertEqual(3, sum(call.startswith("static:") for call in hooks.calls))
         self.assertIn("feature:director_agent_enabled:False", hooks.calls)
@@ -275,6 +278,21 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
                 self._execute(hooks=FakeHooks(fail_on=hook))
             self.assertEqual(self.original, self._snapshot())
             self.assertEqual(self.original_feature, self._feature_row())
+
+    def test_mixed_pre_and_postimage_start_rolls_back_exactly(self):
+        for item in self.manifest["files"][::2]:
+            postimage = (ROOT / item["repository_path"]).read_bytes()
+            self._target(item["runtime_path"]).write_bytes(postimage)
+            self.original[item["runtime_path"]] = postimage
+        with self.assertRaisesRegex(RuntimeError, "injected hook"):
+            self._execute(hooks=FakeHooks(fail_on="static:"))
+        self.assertEqual(self.original, self._snapshot())
+        audit_path = next(self.backups.glob("*/audit.json"))
+        audit = json.loads(audit_path.read_text("utf-8"))
+        self.assertEqual(
+            ["already_installed", "needs_install", "already_installed", "needs_install"],
+            [item["start_state"] for item in audit["files"]],
+        )
 
     def test_disabled_feature_preimage_aborts_before_backup_or_write(self):
         database = self._target(
@@ -357,7 +375,8 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
                  "type": "director_agent", "plan": {
                      "page_revision": revision,
                      "actions": [{"type": "fill_field",
-                                  "field": "digital_human_script"}],
+                                  "field": "digital_human_script",
+                                  "value": "发布验收数字人口播"}],
                  },
              }},
         ]
@@ -400,7 +419,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
         ])
         keys = [request.get_header("Idempotency-key") for request in requests]
         self.assertEqual(1, len(set(keys)))
-        self.assertEqual("release-dh-agent-v3-" + "a" * 32, keys[0])
+        self.assertEqual("release-dh-agent-v4-" + "a" * 32, keys[0])
 
     def test_authenticated_acceptance_rejects_done_job_without_fill_action(self):
         specification = copy.deepcopy(

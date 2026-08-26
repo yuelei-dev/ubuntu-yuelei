@@ -62,6 +62,7 @@ DAILY_LIMIT = _env_positive_int("DIRECTOR_AGENT_DAILY_LIMIT", 120)
 
 SCRIPT_MODES = {"write", "script_to_video", "breakdown"}
 DIGITAL_HUMAN_MODES = {"photo", "video"}
+DIGITAL_HUMAN_GUIDE_CONTRACT = "digital-human-oneclick-guide-v1"
 MODES = SCRIPT_MODES | DIGITAL_HUMAN_MODES
 BREAKDOWN_TOOLS = {"scenes", "reverse_prompt"}
 STAGES = {
@@ -451,7 +452,7 @@ def _script_page_context(value):
 
 def _digital_human_page_context(value):
     allowed = {
-        "page", "path", "mode", "narration_mode", "script_text",
+        "page", "path", "guide_contract", "mode", "narration_mode", "script_text",
         "script_length", "has_portrait", "has_video_source", "has_voice_source",
         "has_drive_audio", "customer_material_count", "consent_confirmed",
         "precision_template", "has_result", "active_job_status",
@@ -463,6 +464,8 @@ def _digital_human_page_context(value):
         "/workbench/digital-human-oneclick.html",
     }:
         raise ValueError("页面上下文不属于数字人一键生成")
+    if value.get("guide_contract") != DIGITAL_HUMAN_GUIDE_CONTRACT:
+        raise ValueError("数字人顾客引导合同版本无效")
     mode = _text(value.get("mode"), 16, "数字人模式")
     if mode not in DIGITAL_HUMAN_MODES:
         raise ValueError("数字人模式无效")
@@ -488,7 +491,8 @@ def _digital_human_page_context(value):
     if template and template not in OPTION_VALUES["precision_template"]:
         raise ValueError("Precision 模板无效")
     return {
-        "page": "digital_human_oneclick", "path": value["path"], "mode": mode,
+        "page": "digital_human_oneclick", "path": value["path"],
+        "guide_contract": DIGITAL_HUMAN_GUIDE_CONTRACT, "mode": mode,
         "narration_mode": narration_mode, "script_text": script_text,
         "script_length": len(script_text), "has_portrait": value["has_portrait"],
         "has_video_source": value["has_video_source"],

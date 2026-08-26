@@ -6,6 +6,7 @@
   'use strict';
   var STORAGE_KEY='hq_director_agent_v1';
   var DIGITAL_HUMAN_STORAGE_KEY='hq_director_agent_digital_human_v1';
+  var DIGITAL_HUMAN_GUIDE_CONTRACT='digital-human-oneclick-guide-v1';
   var PRIVATE_DOMAIN_STORAGE_KEY='hq_director_agent_private_domain_v1';
   var ROUTES={
     script:'/workbench/script.html',digital_human:'/workbench/digital-human-oneclick.html',
@@ -93,6 +94,8 @@
     return Math.max(0,Math.min(6,count));
   }
   function createDigitalHumanPageContext(doc){
+    var contract=String(doc.body&&doc.body.getAttribute('data-director-guide-contract')||'');
+    if(contract!==DIGITAL_HUMAN_GUIDE_CONTRACT) throw new Error('数字人顾客引导合同版本无效');
     var mode=digitalHumanMode(doc);
     var narration=doc.querySelector('input[name="narrationMode"]:checked');
     var narrationMode=String(narration&&narration.value||'text');
@@ -106,7 +109,7 @@
     var videoVoicePreview=doc.getElementById('dhVoicePreview');
     var activeTemplate=doc.querySelector('.precision-template.on');
     return {
-      page:'digital_human_oneclick',path:'/workbench/digital-human-oneclick.html',mode:mode,
+      page:'digital_human_oneclick',path:'/workbench/digital-human-oneclick.html',guide_contract:contract,mode:mode,
       narration_mode:narrationMode,script_text:scriptText,script_length:scriptText.length,
       has_portrait:hasFile(doc.getElementById('photo'))||hasClass(photoName,'file-ready'),
       has_video_source:hasFile(doc.getElementById('dhVideoFile'))||hasClass(videoName,'file-ready')||!!doc.querySelector('.precision-source.on'),

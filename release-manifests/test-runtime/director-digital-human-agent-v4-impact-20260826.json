@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "release_id": "pr-293-director-digital-human-agent-v4",
+  "runtime_changes": [
+    "server/content_domains/director_agent.py",
+    "site/workbench/digital-human-oneclick.html",
+    "site/workbench/script-agent.js",
+    "site/workbench/script.html"
+  ],
+  "restart_services": [
+    "huangque-content.service"
+  ],
+  "pre_health_checks": [
+    "content-health",
+    "site-loopback"
+  ],
+  "health_checks": [
+    "content-health",
+    "site-loopback",
+    "director-agent-authenticated-zero-cost"
+  ],
+  "required_env": {
+    "DIRECTOR_AGENT_RELEASE_TOKEN": "deployment-only bearer token; never committed"
+  },
+  "migrations": [],
+  "external_checks": []
+}

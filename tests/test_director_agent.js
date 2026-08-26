@@ -109,6 +109,7 @@ function digitalHumanFixture(mode, narrationMode) {
     '.precision-template': templates,
   };
   const doc = {
+    body: node('', {attributes: {'data-director-guide-contract': 'digital-human-oneclick-guide-v1'}}),
     defaultView: {Event: function Event() {}},
     getElementById(id) { const value = nodes[id] || null; if(value) value.ownerDocument = doc; return value; },
     querySelector(selector) { return options[selector] || null; },
@@ -190,6 +191,7 @@ function privateDomainFixture() {
   const {doc} = digitalHumanFixture('photo', 'text');
   const context = agent.createPageContext(doc);
   assert.equal(context.page, 'digital_human_oneclick');
+  assert.equal(context.guide_contract, 'digital-human-oneclick-guide-v1');
   assert.equal(context.mode, 'photo');
   assert.equal(context.narration_mode, 'text');
   assert.equal(context.script_text, '照片模式口播');
@@ -206,6 +208,11 @@ function privateDomainFixture() {
   });
   assert.equal(body.source_page, 'digital_human_oneclick');
   assert.equal(body.page_context.page, 'digital_human_oneclick');
+}
+{
+  const {doc} = digitalHumanFixture('photo', 'text');
+  doc.body.attributes['data-director-guide-contract'] = 'digital-human-oneclick-guide-v0';
+  assert.throws(() => agent.createPageContext(doc), /引导合同版本/);
 }
 {
   const {doc} = digitalHumanFixture('video', 'text');

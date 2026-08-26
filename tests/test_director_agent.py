@@ -49,6 +49,7 @@ def digital_human_payload(**overrides):
         "page_context": {
             "page": "digital_human_oneclick",
             "path": "/workbench/digital-human-oneclick.html",
+            "guide_contract": "digital-human-oneclick-guide-v1",
             "mode": "photo",
             "narration_mode": "text",
             "script_text": "产品讲解口播",
@@ -162,6 +163,16 @@ class DirectorAgentTests(unittest.TestCase):
             bad_path["page_context"], path="/workbench/assets.html")
         with self.assertRaisesRegex(ValueError, "不属于数字人"):
             director_agent.validate_payload(bad_path)
+        missing_contract = digital_human_payload()
+        missing_contract["page_context"] = dict(missing_contract["page_context"])
+        missing_contract["page_context"].pop("guide_contract")
+        with self.assertRaisesRegex(ValueError, "引导合同版本"):
+            director_agent.validate_payload(missing_contract)
+        stale_contract = digital_human_payload()
+        stale_contract["page_context"] = dict(
+            stale_contract["page_context"], guide_contract="digital-human-oneclick-guide-v0")
+        with self.assertRaisesRegex(ValueError, "引导合同版本"):
+            director_agent.validate_payload(stale_contract)
 
     def test_private_domain_context_is_strict_and_bgm_is_page_bound(self):
         cleaned = director_agent.validate_payload(private_domain_payload())

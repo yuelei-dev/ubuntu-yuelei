@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deploy the Director Agent digital-human extension as one locked test release.
+"""Deploy the Director Agent digital-human guide contract as one locked test release.
 
 This successor deliberately leaves the historical PR #276 executor untouched.
 It backs up the four changed runtime files and the current feature row before
@@ -22,10 +22,10 @@ import urllib.request
 from contextlib import closing
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "deploy/test-runtime/director-digital-human-agent-v3-20260823.json"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+MANIFEST = ROOT / "release-manifests/test-runtime/director-digital-human-agent-v4-20260826.json"
 BASE_EXECUTOR = ROOT / "scripts/deploy_director_locked_manifest.py"
-CONTRACT = "director_digital_human_agent_four_file_v3"
+CONTRACT = "director_digital_human_agent_four_file_v4"
 REQUIRED_REPOSITORY_PATHS = {
     "server/content_domains/director_agent.py",
     "site/workbench/digital-human-oneclick.html",
@@ -110,7 +110,7 @@ def _validate_manifest(manifest):
     if not isinstance(executor, dict) or executor.get("contract") != CONTRACT:
         raise ReleaseError("digital-human Agent release contract is invalid")
     if executor.get("repository_path") != (
-            "scripts/deploy_director_digital_human_agent_v3_locked_manifest.py"):
+            "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py"):
         raise ReleaseError("release executor path is invalid")
     _require_lock(executor.get("git_blob"), 40, "release executor blob")
     _require_lock(executor.get("sha256"), 64, "release executor SHA-256")
@@ -142,6 +142,20 @@ def _validate_manifest(manifest):
         for prefix in ("preimage", "postimage"):
             _require_lock(item.get(prefix + "_blob"), 40, path + " " + prefix)
             _require_lock(item.get(prefix + "_sha256"), 64, path + " " + prefix)
+
+    contract_sources = manifest.get("release_contract_sources")
+    if not isinstance(contract_sources, list) or len(contract_sources) != 3:
+        raise ReleaseError("release contract sources are incomplete")
+    expected_contract_paths = {
+        "release-manifests/test-runtime/director-digital-human-agent-v4-impact-20260826.json",
+        "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
+        "tests/test_director_digital_human_agent_v4_release.py",
+    }
+    if {item.get("repository_path") for item in contract_sources} != expected_contract_paths:
+        raise ReleaseError("release contract source scope is invalid")
+    for item in contract_sources:
+        _require_lock(item.get("git_blob"), 40, "contract source blob")
+        _require_lock(item.get("sha256"), 64, "contract source SHA-256")
 
     feature = manifest.get("feature_activation")
     if (not isinstance(feature, dict)
@@ -218,6 +232,9 @@ def _validate_sources(source_root, target_root, manifest, hooks):
     base_lock = executor["locked_base_executor"]
     if not _lock_matches(source_root / base_lock["repository_path"], base_lock):
         raise ReleaseError("historical base executor lock does not match source")
+    for lock in manifest["release_contract_sources"]:
+        if not _lock_matches(source_root / lock["repository_path"], lock):
+            raise ReleaseError("release contract source lock does not match source")
 
     for item in manifest["files"]:
         source = (source_root / item["repository_path"]).resolve()
@@ -260,14 +277,14 @@ def _validate_sources(source_root, target_root, manifest, hooks):
 
 
 class SystemHooks(BASE.SystemHooks):
-    """Use the historical system adapters with a v3-specific acceptance key."""
+    """Use the historical system adapters with a v4-specific acceptance key."""
 
     def acceptance(self, specification):
         token_name = specification["token_environment"]
         token = str(os.environ.get(token_name, "")).strip()
         if not token:
             raise ReleaseError("authenticated acceptance token is missing")
-        key = "release-dh-agent-v3-" + secrets.token_hex(16)
+        key = "release-dh-agent-v4-" + secrets.token_hex(16)
         body = json.dumps(
             specification["request"], ensure_ascii=False,
         ).encode("utf-8")
@@ -330,6 +347,7 @@ class SystemHooks(BASE.SystemHooks):
                         or not any(
                             action.get("type") == expected.get("type")
                             and action.get("field") == expected.get("field")
+                            and action.get("value") == expected.get("value")
                             for action in actions if isinstance(action, dict)
                         )):
                     raise ReleaseError("digital-human Agent acceptance result is invalid")
@@ -370,13 +388,20 @@ def _execute_manifest(
         if not target.is_file() or target.is_symlink():
             raise ReleaseError("expected regular runtime preimage")
         old = target.read_bytes()
-        if (_sha256(old) != item["preimage_sha256"]
-                or _git_blob(old) != item["preimage_blob"]):
+        if (_sha256(old) == item["preimage_sha256"]
+                and _git_blob(old) == item["preimage_blob"]):
+            start_state = "needs_install"
+            start_prefix = "preimage"
+        elif (_sha256(old) == item["postimage_sha256"]
+                and _git_blob(old) == item["postimage_blob"]):
+            start_state = "already_installed"
+            start_prefix = "postimage"
+        else:
             raise ReleaseError("runtime preimage lock mismatch")
         target_stat = target.stat()
         entries.append((
             item, source, target, target_stat.st_mode & 0o777,
-            target_stat.st_uid, target_stat.st_gid,
+            target_stat.st_uid, target_stat.st_gid, start_state, start_prefix,
         ))
 
     feature = manifest["feature_activation"]
@@ -410,13 +435,13 @@ def _execute_manifest(
         "base_executor_git_blob": _git_blob(base_data),
         "feature_preimage": feature_snapshot, "files": [],
     }
-    for index, (item, _, target, mode, uid, gid) in enumerate(entries):
+    for index, (item, _, target, mode, uid, gid, start_state, start_prefix) in enumerate(entries):
         saved = backup / ("%02d-%s" % (index, target.name))
         shutil.copy2(target, saved)
         if os.name != "nt":
             os.chown(saved, uid, gid)
         saved_stat = saved.stat()
-        if (_sha256(saved.read_bytes()) != item["preimage_sha256"]
+        if (_sha256(saved.read_bytes()) != item[start_prefix + "_sha256"]
                 or (saved_stat.st_mode & 0o777) != mode
                 or (os.name != "nt" and (
                     saved_stat.st_uid != uid or saved_stat.st_gid != gid
@@ -426,7 +451,8 @@ def _execute_manifest(
         audit["files"].append({
             "runtime_path": item["runtime_path"], "state": "file",
             "backup_file": saved.name, "mode": mode, "uid": uid, "gid": gid,
-            "preimage_sha256": item["preimage_sha256"],
+            "start_state": start_state,
+            "preimage_sha256": item[start_prefix + "_sha256"],
             "postimage_sha256": item["postimage_sha256"],
         })
     BASE._write_audit(backup / "audit.json", audit)
@@ -442,10 +468,10 @@ def _execute_manifest(
             executor["health_url"], executor["health_feature_field"], False,
         )
         checkpoint("after_health_disabled_before_install")
-        for index, (item, source, target, mode, uid, gid) in enumerate(entries):
+        for index, (item, source, target, mode, uid, gid, _, _) in enumerate(entries):
             BASE._atomic_install(source, target, mode, replace, uid, gid)
             checkpoint("after_replace_%d" % index)
-        for item, _, target, _, _, _ in entries:
+        for item, _, target, _, _, _, _, _ in entries:
             if _sha256(target.read_bytes()) != item["postimage_sha256"]:
                 raise ReleaseError("deployed postimage hash mismatch")
         _validate_sources(source_root, target_root, manifest, hooks)
@@ -485,7 +511,7 @@ def _execute_manifest(
         audit["final_files"] = [
             {"runtime_path": item["runtime_path"], "state": "file",
              "sha256": _sha256(target.read_bytes())}
-            for item, _, target, _, _, _ in entries
+            for item, _, target, _, _, _, _, _ in entries
         ]
         BASE._write_audit(backup / "audit.json", audit)
         checkpoint("after_final_audit")
@@ -498,10 +524,12 @@ def _execute_manifest(
             )
         except BaseException as error:
             rollback_errors.append("disable:" + type(error).__name__)
-        for (item, _, target, mode, uid, gid), saved in zip(entries, backups):
+        for (item, _, target, mode, uid, gid, _, start_prefix), saved in zip(entries, backups):
             try:
                 BASE._atomic_install(saved, target, mode, os.replace, uid, gid)
-                if _sha256(target.read_bytes()) != item["preimage_sha256"]:
+                restored = target.read_bytes()
+                if (_sha256(restored) != item[start_prefix + "_sha256"]
+                        or _git_blob(restored) != item[start_prefix + "_blob"]):
                     raise ReleaseError("restored preimage hash mismatch")
             except BaseException as error:
                 rollback_errors.append("file:" + type(error).__name__)
@@ -531,7 +559,7 @@ def _execute_manifest(
             audit["final_files"] = [
                 {"runtime_path": item["runtime_path"], "state": "file",
                  "sha256": _sha256(target.read_bytes())}
-                for item, _, target, _, _, _ in entries
+                for item, _, target, _, _, _, _, _ in entries
             ]
             BASE._write_audit(backup / "audit.json", audit)
         except BaseException as error:
@@ -561,7 +589,7 @@ def execute_locked_release(
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Execute the locked Director digital-human Agent test release.",
+        description="Execute the locked Director digital-human Agent v4 test release.",
     )
     parser.add_argument("manifest", type=pathlib.Path)
     parser.add_argument("--source-root", type=pathlib.Path, required=True)
