@@ -32,7 +32,8 @@ class TextVideoEntryTests(unittest.TestCase):
         self.assertIn("ACTIVE_VIDEO_JOB_KEY='hq_script_active_video_job'", SCRIPT)
         self.assertIn("if(refImages.length) payload.reference_images=refImages.slice();", SCRIPT)
         self.assertIn("options.endpoint||'/api/gen/script_to_video'", SCRIPT)
-        self.assertIn('id="scGenVideo"', SCRIPT)
+        self.assertIn('id="bdRemakeBtn"', SCRIPT)
+        self.assertNotIn('id="scGenVideo"', SCRIPT)
 
     def test_unauthenticated_submit_requests_login_without_dropping_recovery(self):
         submit = SCRIPT[SCRIPT.index("function _doGenerate("):]
