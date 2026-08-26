@@ -172,6 +172,12 @@ def _validate_manifest(manifest):
             or context.get("page") != "digital_human_oneclick"
             or request.get("source_page") != "digital_human_oneclick"):
         raise ReleaseError("digital-human authenticated acceptance is missing")
+    deployment_preflight = executor.get("deployment_preflight")
+    if deployment_preflight != {
+            "required_process_environment": ["DIRECTOR_AGENT_RELEASE_TOKEN"],
+            "persist_to_service_environment": False,
+    }:
+        raise ReleaseError("deployment-only token preflight is invalid")
     revision = request.get("page_revision")
     if (not isinstance(revision, str)
             or BASE._DIRECTOR_REVISION_PATTERN.fullmatch(revision) is None):
@@ -211,6 +217,16 @@ def _load_manifest(path):
 def _lock_matches(path, lock):
     data = pathlib.Path(path).read_bytes()
     return _sha256(data) == lock.get("sha256") and _git_blob(data) == lock.get("git_blob")
+
+
+def _verify_deployment_token(manifest, environment=None):
+    environment = os.environ if environment is None else environment
+    names = manifest["release_executor"]["deployment_preflight"][
+        "required_process_environment"
+    ]
+    for name in names:
+        if not str(environment.get(name, "")).strip():
+            raise ReleaseError("deployment-only acceptance token is missing")
 
 
 def _verify_checkout(source_root, manifest, reviewed_head, merged_main):
@@ -388,6 +404,7 @@ def _execute_manifest(
         release_head = merged_main or "test-double"
         reviewed_head = reviewed_head or "reviewed-test-double"
 
+    _verify_deployment_token(manifest)
     _validate_sources(source_root, target_root, manifest, hooks)
     entries = []
     for item in manifest["files"]:

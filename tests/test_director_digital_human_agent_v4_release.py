@@ -159,11 +159,14 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
 
     def _execute(self, checkpoint=None, hooks=None):
         hooks = hooks or FakeHooks()
-        result = self.module._execute_manifest(
-            self.manifest, ROOT, self.runtime, self.backups,
-            hooks=hooks, verify_repository=False, checkpoint=checkpoint,
-            reviewed_head="1" * 40, merged_main="2" * 40,
-        )
+        with mock.patch.dict(os.environ, {
+            "DIRECTOR_AGENT_RELEASE_TOKEN": "test-only-token",
+        }):
+            result = self.module._execute_manifest(
+                self.manifest, ROOT, self.runtime, self.backups,
+                hooks=hooks, verify_repository=False, checkpoint=checkpoint,
+                reviewed_head="1" * 40, merged_main="2" * 40,
+            )
         return result, hooks
 
     def test_locked_manifest_covers_exact_four_file_delta_and_executors(self):
@@ -238,6 +241,26 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
                 self.module.ReleaseError, "rejects every other",
             ):
                 self.module._load_manifest(copied)
+
+    def test_missing_deployment_token_fails_before_hooks_backup_or_writes(self):
+        before = self._snapshot()
+        feature_before = self._feature_row()
+        hooks = FakeHooks()
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(
+                self.module.ReleaseError, "deployment-only acceptance token",
+            ),
+        ):
+            self.module._execute_manifest(
+                self.manifest, ROOT, self.runtime, self.backups,
+                hooks=hooks, verify_repository=False,
+                reviewed_head="1" * 40, merged_main="2" * 40,
+            )
+        self.assertEqual([], hooks.calls)
+        self.assertFalse(self.backups.exists())
+        self.assertEqual(before, self._snapshot())
+        self.assertEqual(feature_before, self._feature_row())
 
     def test_success_backs_up_and_deploys_four_files_and_enabled_feature(self):
         result, hooks = self._execute()

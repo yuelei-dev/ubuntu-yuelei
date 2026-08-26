@@ -39,8 +39,8 @@
   "release_executor": {
     "contract": "director_digital_human_agent_four_file_v4",
     "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-    "git_blob": "2a1b06a6d90f5ef631303be4faab59cde98dcd99",
-    "sha256": "60afedf57bb9ae551a3e144c9bfdd82f78cd87f9876c5c7fc912d53d8960bb87",
+    "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
+    "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -124,6 +124,12 @@
         "provider": "openai_responses",
         "quoted_cost": 0
       }
+    },
+    "deployment_preflight": {
+      "required_process_environment": [
+        "DIRECTOR_AGENT_RELEASE_TOKEN"
+      ],
+      "persist_to_service_environment": false
     }
   },
   "release_contract_sources": [
@@ -134,13 +140,13 @@
     },
     {
       "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-      "git_blob": "2a1b06a6d90f5ef631303be4faab59cde98dcd99",
-      "sha256": "60afedf57bb9ae551a3e144c9bfdd82f78cd87f9876c5c7fc912d53d8960bb87"
+      "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
+      "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7"
     },
     {
       "repository_path": "tests/test_director_digital_human_agent_v4_release.py",
-      "git_blob": "431172e579c3fde7b6059f782ea02f05c72b3d98",
-      "sha256": "980c3846609e0587ba4fa7104d08ee6bb878d180f4bc1c432596d9c9be77f407"
+      "git_blob": "a075358f9fa006c9327b1e8607a6b9df7ea223ae",
+      "sha256": "005a5616a7d1fb468f604b0623f6677b545624d34f3b77b18e5d030005171043"
     }
   ],
   "files": [
