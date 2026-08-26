@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "d65d304b3db09e4b0a409fa29c5c271f38036238",
+    "code_source_commit": "b6834add99a1ea25ca50cbe7643b029add3970ca",
     "review_lock": "deploy only a merged main commit containing the exact independently reviewed PR Head; the reviewed Head parent must equal code_source_commit"
   },
   "expected_preimage": {
@@ -101,7 +101,7 @@
       "request": {
         "prompt": "把下面这段顾客文案原样填入当前照片数字人的口播文案字段：发布验收数字人口播。可以定位人物照片上传，但不要上传、不要勾选授权、不要分析或生成。",
         "session_id": "release_digital_human_agent_v4_acceptance",
-        "page_revision": "d65d304b3db09e4b",
+        "page_revision": "b6834add99a1ea25",
         "page_context": {
           "page": "digital_human_oneclick",
           "path": "/workbench/digital-human-oneclick.html",
