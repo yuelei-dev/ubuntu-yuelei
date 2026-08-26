@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "external_code_roots": [
+    {
+      "runtime_path": "/home/ubuntu/hermes-web",
+      "manager": "hermes-ip12-atomic-release",
+      "repository_prefixes": ["server/hermes_ip12/"],
+      "repository_paths": ["scripts/migrate_hermes_artifacts.py"],
+      "link_owner": "root",
+      "link_group": "root",
+      "link_mode": "0777",
+      "target_pattern": "^/home/ubuntu/hermes-ip12-releases/[0-9a-f]{40}$",
+      "target_kind": "directory",
+      "target_owner": "ubuntu",
+      "target_group": "ubuntu",
+      "target_modes": ["0775"],
+      "link_parent_contracts": [
+        {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
+        {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]}
+      ],
+      "parent_contracts": [
+        {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
+        {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]},
+        {"path": "/home/ubuntu/hermes-ip12-releases", "owner": "root", "group": "root", "modes": ["0755"]}
+      ],
+      "write_policy": "never_follow_never_write"
+    }
+  ],
+  "shared_runtime_data_links": [
+    {
+      "runtime_path": "/home/ubuntu/leadgen-A/discovered.json",
+      "target_path": "/home/ubuntu/leadgen-server/discovered.json",
+      "repository_paths": [], "target_kind": "file", "target_modes": ["0644"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-B/discovered.json",
+      "target_path": "/home/ubuntu/leadgen-server/discovered.json",
+      "repository_paths": [], "target_kind": "file", "target_modes": ["0644"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-A/files",
+      "target_path": "/home/ubuntu/leadgen-server/files",
+      "repository_paths": [], "target_kind": "directory", "target_modes": ["0775"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-B/files",
+      "target_path": "/home/ubuntu/leadgen-server/files",
+      "repository_paths": [], "target_kind": "directory", "target_modes": ["0775"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-A/jobs.db",
+      "target_path": "/home/ubuntu/leadgen-server/jobs.db",
+      "repository_paths": [], "target_kind": "file", "target_modes": ["0644"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-B/jobs.db",
+      "target_path": "/home/ubuntu/leadgen-server/jobs.db",
+      "repository_paths": [], "target_kind": "file", "target_modes": ["0644"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-A/keywords.json",
+      "target_path": "/home/ubuntu/leadgen-server/keywords.json",
+      "repository_paths": ["server/keywords.json"], "target_kind": "file", "target_modes": ["0644"]
+    },
+    {
+      "runtime_path": "/home/ubuntu/leadgen-B/keywords.json",
+      "target_path": "/home/ubuntu/leadgen-server/keywords.json",
+      "repository_paths": ["server/keywords.json"], "target_kind": "file", "target_modes": ["0644"]
+    }
+  ],
+  "shared_link_defaults": {
+    "manager": "leadgen-shared-runtime-data",
+    "link_owner": "ubuntu",
+    "link_group": "ubuntu",
+    "link_mode": "0777",
+    "target_owner": "ubuntu",
+    "target_group": "ubuntu",
+    "link_parent_contracts": {
+      "/home/ubuntu/leadgen-A": [
+        {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
+        {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]},
+        {"path": "/home/ubuntu/leadgen-A", "owner": "ubuntu", "group": "ubuntu", "modes": ["0775"]}
+      ],
+      "/home/ubuntu/leadgen-B": [
+        {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
+        {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]},
+        {"path": "/home/ubuntu/leadgen-B", "owner": "ubuntu", "group": "ubuntu", "modes": ["0775"]}
+      ]
+    },
+    "parent_contracts": [
+      {"path": "/home", "owner": "root", "group": "root", "modes": ["0755"]},
+      {"path": "/home/ubuntu", "owner": "ubuntu", "group": "ubuntu", "modes": ["0751"]},
+      {"path": "/home/ubuntu/leadgen-server", "owner": "ubuntu", "group": "ubuntu", "modes": ["0755"]}
+    ],
+    "write_policy": "never_follow_never_write"
+  }
+}
