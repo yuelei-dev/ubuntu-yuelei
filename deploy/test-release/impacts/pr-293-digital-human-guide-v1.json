@@ -14,14 +14,9 @@
   ],
   "health_checks": [
     "content-health",
-    "site-loopback",
-    "director-agent-authenticated-zero-cost"
+    "site-loopback"
   ],
-  "required_env": {
-    "huangque-content.service": [
-      "DIRECTOR_AGENT_RELEASE_TOKEN"
-    ]
-  },
+  "required_env": {},
   "migrations": [],
   "external_checks": []
 }
