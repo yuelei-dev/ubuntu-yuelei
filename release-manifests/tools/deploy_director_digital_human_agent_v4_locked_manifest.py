@@ -44,6 +44,8 @@ REQUIRED_RUNTIME_PATHS = {
 }
 ALLOWED_REVIEW_DELTA = {
     MANIFEST.relative_to(ROOT).as_posix(),
+    "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
+    "tests/test_director_digital_human_agent_v4_release.py",
 }
 
 

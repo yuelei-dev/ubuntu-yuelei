@@ -11,7 +11,7 @@
   },
   "source": {
     "repository": "yuelei-dev/ubuntu-yuelei",
-    "code_source_commit": "d14ac970ee081d96182b6bb3c1d2536d1d2def88",
+    "code_source_commit": "397dab6bc09491eefbf57ff6b8e141c0488d1b01",
     "review_lock": "deploy only a merged main commit containing the exact independently reviewed PR Head; the reviewed Head parent must equal code_source_commit"
   },
   "expected_preimage": {
@@ -39,8 +39,8 @@
   "release_executor": {
     "contract": "director_digital_human_agent_four_file_v4",
     "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-    "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
-    "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7",
+    "git_blob": "d8b01e1e1babf0a3cc03370e2cb0e2bac7bbdf00",
+    "sha256": "1c6a1474c744275d3b529ec8e37df064abfa0e241f319ccaca2f99612d494f04",
     "locked_base_executor": {
       "repository_path": "scripts/deploy_director_locked_manifest.py",
       "git_blob": "4805b8f79e0f650be3185b505253231520e74e63",
@@ -85,7 +85,7 @@
       {
         "url": "https://yuelei.huangquechuanmei.com/workbench/script.html",
         "expected_status": 200,
-        "expected_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
+        "expected_sha256": "38482393e4b9d77afa4259dc0b360048a4ae3ce2afb3284908f97cd47214c5d4"
       }
     ],
     "authenticated_acceptance": {
@@ -140,13 +140,13 @@
     },
     {
       "repository_path": "release-manifests/tools/deploy_director_digital_human_agent_v4_locked_manifest.py",
-      "git_blob": "3f468e7f0f7a28df02d3b435021c633dce41aabf",
-      "sha256": "06718cf310bd6fb7432271090d87b2eaa2cbd307fd9a7e5e64dc96cc465122d7"
+      "git_blob": "d8b01e1e1babf0a3cc03370e2cb0e2bac7bbdf00",
+      "sha256": "1c6a1474c744275d3b529ec8e37df064abfa0e241f319ccaca2f99612d494f04"
     },
     {
       "repository_path": "tests/test_director_digital_human_agent_v4_release.py",
-      "git_blob": "a075358f9fa006c9327b1e8607a6b9df7ea223ae",
-      "sha256": "005a5616a7d1fb468f604b0623f6677b545624d34f3b77b18e5d030005171043"
+      "git_blob": "0a76f7eb36c46258993d6af29b6874016a0306f8",
+      "sha256": "efbd008b9b29469327b1db3e5988c6d62af78c089b8447822e5fc0fd3e69cdb2"
     }
   ],
   "files": [
@@ -187,8 +187,8 @@
       "target_preimage_state": "file",
       "preimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
       "preimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507",
-      "postimage_blob": "282c34cfe239682ebd7741f2e92350f71313192a",
-      "postimage_sha256": "8f1340c40dcef525aebfdbadc7ae172e09cb4a81b5f71f5255244959df903507"
+      "postimage_blob": "920fa1566cc7264ec42dbeb1171a087748d7d03a",
+      "postimage_sha256": "38482393e4b9d77afa4259dc0b360048a4ae3ce2afb3284908f97cd47214c5d4"
     }
   ],
   "unified_backup": {

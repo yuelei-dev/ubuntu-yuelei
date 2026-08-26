@@ -329,7 +329,7 @@ class DirectorDigitalHumanAgentReleaseTests(unittest.TestCase):
         audit_path = next(self.backups.glob("*/audit.json"))
         audit = json.loads(audit_path.read_text("utf-8"))
         self.assertEqual(
-            ["already_installed", "needs_install", "unchanged", "unchanged"],
+            ["already_installed", "needs_install", "unchanged", "needs_install"],
             [item["start_state"] for item in audit["files"]],
         )
 
